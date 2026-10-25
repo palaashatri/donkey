@@ -1232,3 +1232,7 @@ These references document **candidate technology**, not automatic approvals. Pin
 ---
 
 **Final rule:** Donkey earns credibility with correct analysis, transparent limitations, useful native interactions, excellent tests, and reliable releases. Do not trade any of these for demos, task-count inflation, or unverified claims of feature parity.
+
+## Future SLOPOS, PARAMA and Raspberry Pi Zero 2 W portability direction
+
+This is a **proposed later portability/efficiency track, not implementation or M0 acceptance**. Linux/SLOPOS integration means a verified Dear ImGui/SDL3 desktop app with native file associations, scoped debugger permissions, keyboard/clipboard and packaging. PARAMA is a **distinct native source-port** requiring an actual C++ runtime, SDL3/SURYA display/input backend, files/processes/threads and capability-restricted debugging; no Linux ELF, GDB or debugger port is implied. On the real 512 MB Pi Zero 2 W, prioritize lazy disassembly, memory-mapped/streaming file access where safe, function/page-on-demand xrefs, incremental capped caches, cancellable decompiler jobs and bounded native memory. Test a real small ELF/PE corpus with exact architecture, crash and malformed-input cases; log CPU, peak RSS/PSS, UI input p95, allocation ceilings and recovery. Do not load every binary or debug index at startup or hide out-of-budget failures. Preserve the existing C++20/Dear ImGui/SDL3 design and release gates. Project remains **design-only**.
