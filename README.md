@@ -2,10 +2,23 @@
 
 A planned free, open-source, native binary reverse-engineering suite: disassembler, analysis graphs, decompiler and debugger, written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core that also runs from the command line.
 
-**Status: design only — there is no code yet.** Nothing here can be built or run today.
+**Status: early implementation.** The build system, foundation contracts (`Result`, diagnostics, checked arithmetic, IDs) and `donkey-cli --version` work on macOS arm64. Binary parsing, decoding, analysis and the GUI are not implemented yet. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)
+
+## Build
+
+Requires CMake ≥ 3.25, Ninja, and a C++20 compiler (AppleClang 16+ verified so far). Dependencies are fetched with `FetchContent` at pinned commits.
+
+```bash
+cmake --preset headless-macos
+cmake --build --preset headless-macos --parallel
+ctest --preset headless-macos --output-on-failure
+./build/headless-macos/apps/donkey-cli/donkey-cli --version
+```
+
+Linux and Windows presets exist but have not been validated.
 
 ## Roadmap
 
