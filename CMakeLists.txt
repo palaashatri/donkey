@@ -28,6 +28,7 @@ include(DonkeyDependencies)
 
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
+  src/foundation/sha256.cpp
   src/foundation/version.cpp
 )
 add_library(donkey::foundation ALIAS donkey_foundation)
@@ -38,6 +39,22 @@ target_include_directories(donkey_foundation
 target_compile_features(donkey_foundation PUBLIC cxx_std_20)
 target_compile_definitions(donkey_foundation PRIVATE DONKEY_VERSION="${PROJECT_VERSION}")
 donkey_apply_warnings(donkey_foundation)
+
+add_library(donkey_binary STATIC
+  src/binary/byte_reader.cpp
+  src/binary/elf.cpp
+  src/binary/image.cpp
+  src/binary/macho.cpp
+  src/binary/pe.cpp
+)
+add_library(donkey::binary ALIAS donkey_binary)
+target_include_directories(donkey_binary
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_binary PUBLIC donkey::foundation)
+target_compile_features(donkey_binary PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_binary)
 
 # ---------------------------------------------------------------------------
 # Executables

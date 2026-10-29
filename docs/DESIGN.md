@@ -1094,7 +1094,7 @@ No freehand `100%`, `production ready`, or `feature parity` without a test-groun
 | Milestone | State | Evidence | Blocker/next action |
 |---|---|---|---|
 | M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless preset configures/builds; 15/15 CTest pass; `donkey-cli 0.1.0`; clang-format clean. GUI shell and CI results outstanding. | Implement T004 SDL3/ImGui shell; obtain CI results |
-| M1 Import/UI | NOT_STARTED | None | M0 contracts and common UI |
+| M1 Import/UI | IN_PROGRESS | 2026-10-30 macOS arm64: ELF/PE/Mach-O (thin and fat) metadata + imports/exports, offset↔VA mapping, SHA-256, `donkey-cli info --json`; truncation sweep and header-mutation tests pass (34/34 CTest). No GUI import or project persistence yet. | Build UI workspace and project save/reopen |
 | M2 Disassembly | NOT_STARTED | None | Loaders + decoder + project |
 | M3 Analysis graphs | NOT_STARTED | None | M2 foundations |
 | M4 IR/isolation | NOT_STARTED | None | M3 graph + decoder semantics |

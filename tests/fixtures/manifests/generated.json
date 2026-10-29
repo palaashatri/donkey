@@ -1,0 +1,23 @@
+{
+  "fixtures": [
+    {
+      "name": "tiny-elf-x86_64",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "cb2f08393b7c54eb793cf315f56fe51e974372d1e1c9dba2a04af2d9991bcb43",
+      "size": 1152
+    },
+    {
+      "name": "tiny-pe-x86_64.exe",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "486ea4e73369d4c2f0ce16a23ee8e95a0a5ce22cbff2e225a7b29c45715760e2",
+      "size": 1536
+    },
+    {
+      "name": "tiny-macho-arm64",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "fc5e8b09d25a30cdd1abc9071d64abaf0429381be3989b7f642291003847490f",
+      "size": 4160
+    }
+  ],
+  "generator": "tools/make_fixtures.py"
+}
