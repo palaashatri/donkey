@@ -1093,7 +1093,7 @@ No freehand `100%`, `production ready`, or `feature parity` without a test-groun
 
 | Milestone | State | Evidence | Blocker/next action |
 |---|---|---|---|
-| M0 Foundation | NOT_STARTED | None | Implement T000–T004, obtain real CI results |
+| M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless preset configures/builds; 15/15 CTest pass; `donkey-cli 0.1.0`; clang-format clean. GUI shell and CI results outstanding. | Implement T004 SDL3/ImGui shell; obtain CI results |
 | M1 Import/UI | NOT_STARTED | None | M0 contracts and common UI |
 | M2 Disassembly | NOT_STARTED | None | Loaders + decoder + project |
 | M3 Analysis graphs | NOT_STARTED | None | M2 foundations |

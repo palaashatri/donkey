@@ -2,7 +2,7 @@
 
 Donkey is a planned free, open-source, native binary reverse-engineering suite (disassembler, analysis graphs, decompiler, debugger) written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core.
 
-**There is no code yet.** The repository contains only the design. Nothing below about builds or tests is true until the M0 tasks land; do not describe the project as working in READMEs, PRs or release notes.
+**Implementation started on 2026-10-30.** The build system, foundation contracts and CLI `--version` work on macOS arm64; binary parsing, decoding and the GUI are not implemented yet. Do not describe unverified platforms or unfinished milestones as working in READMEs, PRs or release notes. Check the truth table in `docs/DESIGN.md` §17.2 before claiming anything works.
 
 The full design — architecture, module rules, decompiler pipeline, debugger model, milestones M0–M12, acceptance tests and backlog — is in [`docs/DESIGN.md`](docs/DESIGN.md). This file is the short instruction sheet.
 
@@ -17,14 +17,21 @@ Implement the first-wave backlog in order (`docs/DESIGN.md` §16):
 
 Then T003 (checked binary reader), T005–T007, and the ELF/PE/Mach-O readers (T008–T010). A useful first milestone for a solo developer is **M2**: open an ELF/PE/Mach-O file, show sections, symbols, strings, hex and Capstone disassembly with xrefs, from both the GUI and `donkey-cli`. Do not start the decompiler or debugger before M2 is real.
 
-## Commands (target, once T000 exists)
+## Commands
+
+macOS arm64 is the currently validated host (CMake + Ninja + AppleClang):
 
 ```bash
-cmake --preset dev-linux
-cmake --build --preset dev-linux --parallel
-ctest --preset dev-linux --output-on-failure
+cmake --preset headless-macos       # core + CLI, no SDL/ImGui
+cmake --build --preset headless-macos --parallel
+ctest --preset headless-macos --output-on-failure
 
-cmake --preset headless-linux && cmake --build --preset headless-linux --parallel   # core + CLI without SDL/ImGui
+cmake --preset dev-macos            # core + CLI + desktop shell (once the shell lands)
+cmake --build --preset dev-macos --parallel
+
+# Linux/Windows presets exist but are not yet validated:
+cmake --preset headless-linux
+cmake --preset headless-windows
 ```
 
 When you add or change presets, update this section in the same PR so it always lists commands that actually work.
