@@ -1,5 +1,10 @@
 # Donkey
 
+<img src="assets/brand/app-icon.svg" alt="Donkey icon" width="96" align="right" />
+
+[Icon, wordmark, and brand assets](assets/brand/README.md)
+
+
 A planned free, open-source, native binary reverse-engineering suite: disassembler, analysis graphs, decompiler and debugger, written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core that also runs from the command line.
 
 **Status: design only — there is no code yet.** Nothing here can be built or run today.

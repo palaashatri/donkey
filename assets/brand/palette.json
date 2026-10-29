@@ -1,0 +1,13 @@
+{
+  "name": "Donkey",
+  "category": "Binary reverse engineering",
+  "background": [
+    "#4b4a55",
+    "#272a34"
+  ],
+  "accent": "#c5b7a0",
+  "highlight": "#eee6d9",
+  "typography": "Inter, Segoe UI, Arial",
+  "style": "muted-metal / enamel / soft-depth",
+  "license": "original project artwork"
+}
