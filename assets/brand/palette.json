@@ -1,0 +1,17 @@
+{
+  "name": "donkey",
+  "accent": "#C1B0F6",
+  "background": "#101720",
+  "foreground": "#F4F7FC",
+  "recommendedPngSizes": [
+    16,
+    24,
+    32,
+    48,
+    64,
+    128,
+    256,
+    512,
+    1024
+  ]
+}
