@@ -1,9 +1,11 @@
 {
-  "name": "donkey",
-  "accent": "#C1B0F6",
+  "app": "donkey",
+  "accent": "#A17954",
   "background": "#101720",
   "foreground": "#F4F7FC",
-  "recommendedPngSizes": [
+  "style": "dimensional ceramic and translucent glass",
+  "sourceCropPx": 248,
+  "exportedPngSizes": [
     16,
     24,
     32,
@@ -13,5 +15,6 @@
     256,
     512,
     1024
-  ]
+  ],
+  "largeExportNote": "512/1024 are upscaled from a generated contact-sheet crop; not original 1024px renders"
 }
