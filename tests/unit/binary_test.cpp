@@ -303,6 +303,42 @@ TEST(Binary, LoadsPeImportsAndExports) {
   EXPECT_EQ(offset.value(), 0x200U);
 }
 
+TEST(Binary, LoadsPe32ImportsAndExports) {
+  auto image = donkey::load_binary_file(fixture_path("tiny-pe-i386.exe"));
+  ASSERT_TRUE(image.has_value()) << image.diagnostic().message;
+  const auto& pe = image.value();
+  EXPECT_EQ(pe.format, donkey::BinaryFormat::Pe);
+  EXPECT_EQ(pe.architecture, donkey::Architecture::X86);
+  EXPECT_EQ(pe.bits, 32U);
+  EXPECT_EQ(pe.image_base, 0x10000000U);
+  EXPECT_EQ(pe.entry_point, 0x10001000U);
+  EXPECT_EQ(pe.format_detail, "PE32 (2 sections)");
+
+  ASSERT_EQ(pe.sections.size(), 2U);
+  EXPECT_EQ(pe.sections[0].name, ".text");
+  EXPECT_TRUE(pe.sections[0].executable);
+
+  bool found_import = false;
+  bool found_export = false;
+  for (const auto& symbol : pe.symbols) {
+    if (symbol.name == "ExitProcess") {
+      found_import = true;
+      EXPECT_EQ(symbol.kind, donkey::SymbolKind::Import);
+      EXPECT_EQ(symbol.module, "KERNEL32.dll");
+    }
+    if (symbol.name == "tiny_export") {
+      found_export = true;
+      EXPECT_EQ(symbol.kind, donkey::SymbolKind::Export);
+    }
+  }
+  EXPECT_TRUE(found_import);
+  EXPECT_TRUE(found_export);
+
+  auto offset = pe.va_to_file_offset(0x10001000);
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_EQ(offset.value(), 0x200U);
+}
+
 TEST(Binary, LoadsMachOMetadata) {
   auto image = donkey::load_binary_file(fixture_path("tiny-macho-arm64"));
   ASSERT_TRUE(image.has_value()) << image.diagnostic().message;
@@ -358,8 +394,8 @@ TEST(Binary, RawFallbackAndDeterministicHash) {
 }
 
 TEST(Binary, PublicFixturesMatchRecordedHash) {
-  for (const std::string name :
-       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-macho-arm64"}) {
+  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
+                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
     const auto bytes = read_fixture(name);
     auto image = donkey::parse_binary(bytes, name);
     ASSERT_TRUE(image.has_value()) << name << ": " << image.diagnostic().message;
@@ -369,8 +405,8 @@ TEST(Binary, PublicFixturesMatchRecordedHash) {
 }
 
 TEST(Binary, TruncatedFixturesNeverCrashOrHang) {
-  for (const std::string name :
-       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-macho-arm64"}) {
+  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
+                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
     const auto bytes = read_fixture(name);
     ASSERT_FALSE(bytes.empty());
     for (std::size_t length = 0; length <= bytes.size(); ++length) {
@@ -395,8 +431,8 @@ TEST(Binary, CorruptedHeadersAreRejectedDeterministically) {
     return state;
   };
 
-  for (const std::string name :
-       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-macho-arm64"}) {
+  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
+                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
     auto bytes = read_fixture(name);
     for (int iteration = 0; iteration < 256; ++iteration) {
       auto mutated = bytes;

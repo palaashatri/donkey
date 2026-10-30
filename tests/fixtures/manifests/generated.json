@@ -19,6 +19,12 @@
       "size": 1536
     },
     {
+      "name": "tiny-pe-i386.exe",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "13a396d1daa25e23a93208ad7e978ce85fabaf32d558cc28c0c66fbeb942e0ff",
+      "size": 1536
+    },
+    {
       "name": "tiny-macho-arm64",
       "provenance": "generated from first principles by tools/make_fixtures.py",
       "sha256": "fc5e8b09d25a30cdd1abc9071d64abaf0429381be3989b7f642291003847490f",

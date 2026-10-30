@@ -363,6 +363,112 @@ def build_pe() -> bytes:
     return bytes(buf)
 
 
+def build_pe_i386() -> bytes:
+    """A PE32 (i386) image with the same shape as build_pe()."""
+    text = (X86_32_TEXT + b"\xcc" * 0x200)[:0x200]
+    buf = bytearray(0x600)
+
+    buf[0:2] = b"MZ"
+    u16(buf, 0x02, 0x90)
+    u16(buf, 0x04, 0x03)
+    u16(buf, 0x18, 0x40)
+    u32(buf, 0x3C, 0x80)
+
+    pe = 0x80
+    buf[pe : pe + 4] = b"PE\x00\x00"
+    coff = pe + 4
+    u16(buf, coff, 0x014C)  # i386
+    u16(buf, coff + 2, 2)
+    u32(buf, coff + 4, 0x5F5E1000)
+    u32(buf, coff + 8, 0)
+    u32(buf, coff + 12, 0)
+    u16(buf, coff + 16, 0xE0)  # PE32 optional header size
+    u16(buf, coff + 18, 0x0022)
+
+    opt = coff + 20
+    u16(buf, opt, 0x10B)  # PE32
+    buf[opt + 2] = 1
+    u32(buf, opt + 4, 0x200)
+    u32(buf, opt + 8, 0x200)
+    u32(buf, opt + 16, 0x1000)  # entry RVA
+    u32(buf, opt + 20, 0x1000)  # base of code
+    u32(buf, opt + 24, 0x2000)  # base of data
+    u32(buf, opt + 28, 0x10000000)  # 32-bit image base
+    u32(buf, opt + 32, 0x1000)
+    u32(buf, opt + 36, 0x200)
+    u16(buf, opt + 40, 6)
+    u16(buf, opt + 48, 6)
+    u32(buf, opt + 56, 0x3000)  # size of image
+    u32(buf, opt + 60, 0x200)   # size of headers
+    u32(buf, opt + 64, 0)
+    u16(buf, opt + 68, 3)  # console subsystem
+    u16(buf, opt + 70, 0x8160)
+    u32(buf, opt + 72, 0x100000)
+    u32(buf, opt + 76, 0x1000)
+    u32(buf, opt + 80, 0x100000)
+    u32(buf, opt + 84, 0x1000)
+    u32(buf, opt + 88, 0)
+    u32(buf, opt + 92, 16)  # number of RVA/size pairs
+    dirs = opt + 96
+    u32(buf, dirs + 0 * 8, 0x2000)
+    u32(buf, dirs + 0 * 8 + 4, 0x100)
+    u32(buf, dirs + 1 * 8, 0x2100)
+    u32(buf, dirs + 1 * 8 + 4, 0x100)
+
+    sections = opt + 0xE0
+
+    def section(index, name, vsize, vaddr, raw_size, raw_ptr, characteristics):
+        base = sections + index * 40
+        encoded = name.encode("ascii")
+        buf[base : base + 8] = encoded + b"\x00" * (8 - len(encoded))
+        u32(buf, base + 8, vsize)
+        u32(buf, base + 12, vaddr)
+        u32(buf, base + 16, raw_size)
+        u32(buf, base + 20, raw_ptr)
+        u32(buf, base + 24, 0)
+        u32(buf, base + 28, 0)
+        u16(buf, base + 32, 0)
+        u16(buf, base + 34, 0)
+        u32(buf, base + 36, characteristics)
+
+    section(0, ".text", 0x100, 0x1000, 0x200, 0x200, 0x60000020)
+    section(1, ".rdata", 0x200, 0x2000, 0x200, 0x400, 0x40000040)
+
+    buf[0x200 : 0x200 + len(text)] = text
+
+    rdata = 0x400
+    export = rdata
+    u32(buf, export + 0, 0)
+    u32(buf, export + 4, 0x5F5E1000)
+    u16(buf, export + 8, 0)
+    u16(buf, export + 10, 0)
+    u32(buf, export + 12, 0x2080)  # dll name RVA
+    u32(buf, export + 16, 1)       # ordinal base
+    u32(buf, export + 20, 1)       # number of functions
+    u32(buf, export + 24, 1)       # number of names
+    u32(buf, export + 28, 0x2040)
+    u32(buf, export + 32, 0x2044)
+    u32(buf, export + 36, 0x2048)
+    u32(buf, rdata + 0x40, 0x1000)
+    u32(buf, rdata + 0x44, 0x2060)
+    u16(buf, rdata + 0x48, 0)
+    buf[rdata + 0x60 : rdata + 0x60 + 12] = b"tiny_export\x00"
+    buf[rdata + 0x80 : rdata + 0x80 + 9] = b"tiny.dll\x00"
+
+    imp = rdata + 0x100
+    u32(buf, imp + 0, 0x2140)
+    u32(buf, imp + 4, 0)
+    u32(buf, imp + 8, 0)
+    u32(buf, imp + 12, 0x2180)
+    u32(buf, imp + 16, 0x2160)
+    u32(buf, rdata + 0x140, 0x21A0)
+    u32(buf, rdata + 0x160, 0x21A0)
+    u16(buf, rdata + 0x1A0, 0)
+    buf[rdata + 0x1A2 : rdata + 0x1AE] = b"ExitProcess\x00"
+    buf[rdata + 0x180 : rdata + 0x180 + 13] = b"KERNEL32.dll\x00"
+    return bytes(buf)
+
+
 def build_macho() -> bytes:
     text = ARM64_TEXT
     command_bytes = 152 + 72 + 24 + 24
@@ -456,6 +562,7 @@ def main():
         "tiny-elf-x86_64": build_elf(),
         "tiny-elf-i386": build_elf_i386(),
         "tiny-pe-x86_64.exe": build_pe(),
+        "tiny-pe-i386.exe": build_pe_i386(),
         "tiny-macho-arm64": build_macho(),
     }
     manifest = {"generator": "tools/make_fixtures.py", "fixtures": []}
