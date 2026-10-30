@@ -299,7 +299,7 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
   return image;
 }
 
-Result<BinaryImage> load_binary_file(const std::string& path, const LoadOptions& options) {
+Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& options) {
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {
     return error(Status::InvalidInput, "io.open_failed", "could not open the file for reading");
@@ -323,7 +323,19 @@ Result<BinaryImage> load_binary_file(const std::string& path, const LoadOptions&
   if (!file || static_cast<std::uint64_t>(file.gcount()) != size) {
     return error(Status::InvalidInput, "io.read_failed", "could not read the whole file");
   }
-  return parse_binary(std::span<const std::byte>(data.data(), data.size()), path);
+  auto image = parse_binary(std::span<const std::byte>(data.data(), data.size()), path);
+  if (!image) {
+    return image.diagnostic();
+  }
+  return LoadedBinary{std::move(image.value()), std::move(data)};
+}
+
+Result<BinaryImage> load_binary_file(const std::string& path, const LoadOptions& options) {
+  auto loaded = load_binary(path, options);
+  if (!loaded) {
+    return loaded.diagnostic();
+  }
+  return std::move(loaded.value().image);
 }
 
 }  // namespace donkey

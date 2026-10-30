@@ -4,11 +4,13 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 
 **Status: early implementation.** On macOS arm64 the following work today:
 
-- `donkey-cli --version`, `--help` and `info <binary> [--json]`.
+- `donkey-cli --version`, `--help`, `info <binary> [--json]`, `disasm`, `strings`, `functions`, `xrefs` and `analyze` (all with `--json`).
 - Bounds-checked ELF64, PE32/PE32+ and 64-bit Mach-O (including fat slices) metadata import: format, architecture, segments, sections, entry point, SHA-256, imports and exports.
+- Capstone 5.0.9 decoding for x86, x86-64 and AArch64, call/jump/return classification, direct call targets and x86 RIP-relative data references.
+- Linear, deterministic analysis: instructions, call/data xrefs, ASCII and UTF-16LE strings, and function seeds from the entry point, exported symbols and call targets. This is not CFG or function-extent analysis.
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
 
-Not implemented yet: disassembly, analysis, projects, GUI. Anything not covered by the test suite should be treated as unverified.
+Not implemented yet: project persistence, GUI, control-flow/function-extent analysis, decompiler, debugger. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)

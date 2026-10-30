@@ -56,6 +56,30 @@ target_link_libraries(donkey_binary PUBLIC donkey::foundation)
 target_compile_features(donkey_binary PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_binary)
 
+add_library(donkey_decode STATIC
+  src/decode/decode.cpp
+)
+add_library(donkey::decode ALIAS donkey_decode)
+target_include_directories(donkey_decode
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_decode PUBLIC donkey::binary PRIVATE capstone_static)
+target_compile_features(donkey_decode PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_decode)
+
+add_library(donkey_analysis STATIC
+  src/analysis/analysis.cpp
+)
+add_library(donkey::analysis ALIAS donkey_analysis)
+target_include_directories(donkey_analysis
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_analysis PUBLIC donkey::decode)
+target_compile_features(donkey_analysis PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_analysis)
+
 # ---------------------------------------------------------------------------
 # Executables
 # ---------------------------------------------------------------------------
