@@ -14,10 +14,10 @@ struct LiftOptions {
   std::size_t max_blocks = 20'000;
 };
 
-/// Lift one function's basic blocks into IR. The lifter only models a
-/// documented x86-64 subset; every other instruction becomes an Unsupported
-/// statement and marks the function partial. It never executes code and never
-/// invents behaviour it did not decode.
+/// Lift one function's basic blocks into IR. The lifters model a documented
+/// x86-64 and AArch64 subset; every other instruction or architecture becomes
+/// an Unsupported statement/error and marks the function partial. They never
+/// execute code and never invent behaviour they did not decode.
 [[nodiscard]] Result<IrFunction> lift_function(const BinaryImage& image,
                                                const AnalysisResult& analysis,
                                                const Function& function,

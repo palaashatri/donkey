@@ -27,6 +27,10 @@ const char* instruction_class_name(InstructionClass value) noexcept;
 
 enum class OperandKind : std::uint8_t { Unknown = 0, Register, Immediate, Memory };
 
+/// AArch64 operand shift/extend applied to the operand value. x86 leaves
+/// `ShiftKind::None`. Only LSL/LSR/ASR are modelled by the lifter.
+enum class ShiftKind : std::uint8_t { None = 0, Lsl, Lsr, Asr, Ror };
+
 struct MemoryOperand {
   std::string base;
   std::string index;
@@ -34,6 +38,11 @@ struct MemoryOperand {
   std::int64_t displacement = 0;
   /// Access width in bytes (1, 2, 4 or 8). 0 when unknown.
   std::uint8_t size = 0;
+  /// AArch64 addressing writeback (`[sp, #-16]!` or `[sp], #16`). x86 leaves
+  /// these false. A lifter must model the base update or not lift the access.
+  bool writeback = false;
+  /// True for post-index writeback (`[sp], #16`), false for pre-index (`!`).
+  bool post_index = false;
 };
 
 struct Operand {
@@ -44,6 +53,9 @@ struct Operand {
   MemoryOperand memory;
   /// Operand width in bytes (1, 2, 4 or 8). 0 when unknown.
   std::uint8_t size = 0;
+  /// AArch64 shift/extend applied to this operand. Ignored on x86.
+  ShiftKind shift = ShiftKind::None;
+  std::uint8_t shift_amount = 0;
 };
 
 struct Instruction {

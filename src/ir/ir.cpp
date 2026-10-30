@@ -56,14 +56,15 @@ class Renderer {
     if (displacement != 0 || !wrote) {
       char buffer[32];
       if (displacement < 0) {
-        std::snprintf(buffer, sizeof(buffer), "-0x%llx",
+        std::snprintf(buffer, sizeof(buffer), "0x%llx",
                       static_cast<unsigned long long>(-displacement));
+        out += wrote ? " - " : "-";
       } else {
         std::snprintf(buffer, sizeof(buffer), "0x%llx",
                       static_cast<unsigned long long>(displacement));
-      }
-      if (wrote) {
-        out += " + ";
+        if (wrote) {
+          out += " + ";
+        }
       }
       out += buffer;
     }
@@ -112,14 +113,15 @@ class Renderer {
           char buffer[32];
           const auto displacement = static_cast<std::int64_t>(value.constant);
           if (displacement < 0) {
-            std::snprintf(buffer, sizeof(buffer), "-0x%llx",
+            std::snprintf(buffer, sizeof(buffer), "0x%llx",
                           static_cast<unsigned long long>(-displacement));
+            out += wrote ? " - " : "-";
           } else {
             std::snprintf(buffer, sizeof(buffer), "0x%llx",
                           static_cast<unsigned long long>(displacement));
-          }
-          if (wrote) {
-            out += " + ";
+            if (wrote) {
+              out += " + ";
+            }
           }
           out += buffer;
         }
@@ -209,13 +211,7 @@ class Renderer {
         std::string condition;
         if (previous != nullptr && previous->op == IrOp::Compare) {
           const char* op = ir_condition_operator(statement.condition);
-          if (statement.condition == IrCondition::Zero ||
-              statement.condition == IrCondition::NonZero) {
-            condition = std::string("(") + operand(previous->a) + " & " + operand(previous->b) +
-                        ") " + op + " 0";
-          } else {
-            condition = operand(previous->a) + " " + op + " " + operand(previous->b);
-          }
+          condition = operand(previous->a) + " " + op + " " + operand(previous->b);
         } else if (previous != nullptr && previous->op == IrOp::Test) {
           condition = std::string("(") + operand(previous->a) + " & " + operand(previous->b) +
                       ") " + ir_condition_operator(statement.condition) + " 0";
