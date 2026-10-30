@@ -229,6 +229,62 @@ IrFunction single_block_function() {
   return function;
 }
 
+/// Compare `reg` with zero, leaving the flags for a following conditional
+/// branch.
+IrStatement compare_zero_statement() {
+  IrStatement statement;
+  statement.op = IrOp::Compare;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::constant_value(0, 8);
+  statement.condition = IrCondition::Equal;
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement conditional_branch_statement(std::uint32_t target) {
+  IrStatement statement;
+  statement.op = IrOp::CondBranch;
+  statement.condition = IrCondition::Equal;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::block_ref(target);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement branch_statement(std::uint32_t target) {
+  IrStatement statement;
+  statement.op = IrOp::Branch;
+  statement.a = IrOperand::block_ref(target);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement assign_register_statement(const std::string& name, std::uint64_t value) {
+  IrStatement statement;
+  statement.op = IrOp::Assign;
+  statement.dest = IrOperand::register_ref(name, 8);
+  statement.a = IrOperand::constant_value(value, 8);
+  statement.width = 8;
+  return statement;
+}
+
+IrBlock make_block(std::uint64_t address) {
+  IrBlock block;
+  block.address = address;
+  return block;
+}
+
+IrFunction branch_function() {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "branchy";
+  function.blocks.push_back(make_block(0x1000));
+  function.blocks.push_back(make_block(0x1008));
+  function.blocks.push_back(make_block(0x100c));
+  function.blocks.push_back(make_block(0x1010));
+  return function;
+}
+
 const donkey::Function* function_at(const donkey::AnalysisResult& analysis, std::uint64_t address) {
   for (const donkey::Function& function : analysis.functions) {
     if (function.address == address) {
@@ -302,9 +358,120 @@ TEST(Ir, PseudocodePrinterRendersVerifiedFunction) {
   auto text = donkey::format_pseudocode(single_block_function());
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   EXPECT_NE(text.value().find("u64 test_function(void)"), std::string::npos);
-  EXPECT_NE(text.value().find("loc_1000:"), std::string::npos);
   EXPECT_NE(text.value().find("rax = 0x1;"), std::string::npos);
   EXPECT_NE(text.value().find("return rax;"), std::string::npos);
+  // A single straight-line block has no control flow, so it needs no labels.
+  EXPECT_EQ(text.value().find("loc_1000:"), std::string::npos);
+}
+
+TEST(Ir, StructuresIfThenElse) {
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("rdx", 2));
+  function.blocks[1].statements.push_back(branch_statement(3));
+  function.blocks[2].statements.push_back(assign_register_statement("rcx", 1));
+  function.blocks[2].statements.push_back(branch_statement(3));
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("if (rax == 0x0) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rcx = 0x1;"), std::string::npos) << code;
+  EXPECT_NE(code.find("} else {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rdx = 0x2;"), std::string::npos) << code;
+  EXPECT_NE(code.find("return rax;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+  EXPECT_EQ(code.find("loc_"), std::string::npos) << code;
+}
+
+TEST(Ir, StructuresIfThenWithoutElse) {
+  IrFunction function = branch_function();
+  function.blocks.resize(3);
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("rcx", 1));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  function.blocks[2].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  // Branch taken to the join means the fallthrough body runs when the
+  // condition is false, so the printed condition is the complement.
+  EXPECT_NE(code.find("if (rax != 0x0) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rcx = 0x1;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("} else {"), std::string::npos) << code;
+  EXPECT_NE(code.find("return rax;"), std::string::npos) << code;
+}
+
+TEST(Ir, StructuresWhileLoop) {
+  IrFunction function = branch_function();
+  function.blocks.resize(3);
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rax", 8);
+  decrement.a = IrOperand::register_ref("rax", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[1].statements.push_back(decrement);
+  function.blocks[1].statements.push_back(branch_statement(0));
+  function.blocks[2].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("while (rax != 0x0) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rax = rax - 0x1;"), std::string::npos) << code;
+  EXPECT_NE(code.find("return rax;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+TEST(Ir, StructuresDoWhileLoop) {
+  IrFunction function = branch_function();
+  function.blocks.resize(3);
+  IrStatement increment;
+  increment.op = IrOp::Add;
+  increment.dest = IrOperand::register_ref("rax", 8);
+  increment.a = IrOperand::register_ref("rax", 8);
+  increment.b = IrOperand::constant_value(1, 8);
+  increment.width = 8;
+  function.blocks[0].statements.push_back(increment);
+  function.blocks[0].statements.push_back(branch_statement(1));
+  function.blocks[1].statements.push_back(compare_zero_statement());
+  function.blocks[1].statements.back().condition = IrCondition::NotEqual;
+  function.blocks[1].statements.push_back(conditional_branch_statement(0));
+  function.blocks[1].statements.back().condition = IrCondition::NotEqual;
+  function.blocks[2].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("do {"), std::string::npos) << code;
+  EXPECT_NE(code.find("} while (rax != 0x0);"), std::string::npos) << code;
+  EXPECT_NE(code.find("rax = rax + 0x1;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(1));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  function.blocks[2].statements.push_back(compare_zero_statement());
+  function.blocks[2].statements.push_back(conditional_branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("control flow not fully structured"), std::string::npos) << code;
+  EXPECT_NE(code.find("goto loc_"), std::string::npos) << code;
+  EXPECT_NE(code.find("loc_1000:"), std::string::npos) << code;
 }
 
 TEST(Ir, VerifierRejectsBadExtendWidth) {
@@ -413,9 +580,14 @@ TEST(Ir, LiftsSyntheticBranchyX86Function) {
 
   auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
-  EXPECT_NE(text.value().find("(rax & rax) == 0"), std::string::npos);
-  EXPECT_NE(text.value().find("goto loc_100c;"), std::string::npos);
-  EXPECT_NE(text.value().find("return rax;"), std::string::npos);
+  const std::string& code = text.value();
+  // Both arms of `test rax, rax; je 0x100c` return, so the structurer emits an
+  // if/else instead of labels and gotos.
+  EXPECT_NE(code.find("if ((rax & rax) == 0) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("} else {"), std::string::npos) << code;
+  EXPECT_NE(code.find("eax = 0x1;"), std::string::npos) << code;
+  EXPECT_NE(code.find("return rax;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
 TEST(Ir, LiftsElfEntryPointIntoVerifiedIr) {
@@ -491,14 +663,16 @@ TEST(Ir, LiftsAArch64ControlFlowFunction) {
   auto text = donkey::format_pseudocode(lifted.value());
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   const std::string& code = text.value();
-  // cmp x0, #0 followed by b.eq becomes a zero-test conditional branch.
-  EXPECT_NE(code.find("x0 == 0"), std::string::npos) << code;
-  // cbz x1 emits a compare and a conditional branch.
-  EXPECT_NE(code.find("x1 == 0"), std::string::npos) << code;
+  // cmp x0, #0 followed by b.eq becomes a structured if/else.
+  EXPECT_NE(code.find("if (x0 == 0x0) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("} else {"), std::string::npos) << code;
+  // cbz x1 becomes a zero-test branch. The branch targets the join, so the
+  // printed condition is the complement (`x1 != 0x0`) of the tested equality.
+  EXPECT_NE(code.find("x1 != 0x0"), std::string::npos) << code;
   // tbz x1, #3 emits a bit test. Capstone reports the 32-bit form (w1) when
   // the tested bit is below 32, so match the mask rather than the register alias.
   EXPECT_NE(code.find("& 0x8)"), std::string::npos) << code;
-  EXPECT_NE(code.find("goto "), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
 TEST(Ir, LiftsMachOArm64EntryPoint) {

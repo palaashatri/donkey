@@ -5,6 +5,8 @@
 #include <string>
 #include <utility>
 
+#include "ir_internal.h"
+
 namespace donkey {
 namespace {
 
@@ -14,6 +16,30 @@ bool valid_width(std::uint8_t width) {
 
 bool is_terminator(IrOp op) {
   return op == IrOp::Branch || op == IrOp::CondBranch || op == IrOp::Return;
+}
+
+/// Exact logical complement of a condition, when one exists. Negative/Positive
+/// are deliberately excluded: `!sign` is `>= 0`, not `> 0`.
+const IrCondition* complement_of(IrCondition condition) {
+  static const std::pair<IrCondition, IrCondition> kComplements[] = {
+      {IrCondition::Equal, IrCondition::NotEqual},
+      {IrCondition::UnsignedLess, IrCondition::UnsignedGreaterEqual},
+      {IrCondition::UnsignedGreater, IrCondition::UnsignedLessEqual},
+      {IrCondition::SignedLess, IrCondition::SignedGreaterEqual},
+      {IrCondition::SignedGreater, IrCondition::SignedLessEqual},
+      {IrCondition::Zero, IrCondition::NonZero},
+      {IrCondition::Carry, IrCondition::NoCarry},
+      {IrCondition::Overflow, IrCondition::NoOverflow},
+  };
+  for (const auto& [first, second] : kComplements) {
+    if (condition == first) {
+      return &second;
+    }
+    if (condition == second) {
+      return &first;
+    }
+  }
+  return nullptr;
 }
 
 const char* width_type(std::uint8_t width) {
@@ -132,6 +158,39 @@ class Renderer {
     return "?";
   }
 
+  /// The condition of a conditional branch. A compare/test statement directly
+  /// before the branch supplies the operands; otherwise only the condition
+  /// kind is known. `negate` selects an exactly complementary condition when one
+  /// exists (`==` becomes `!=`); otherwise the whole condition is wrapped.
+  std::string condition(const IrStatement& statement, const IrStatement* previous,
+                        bool negate = false) const {
+    IrCondition condition_kind = statement.condition;
+    bool wrap = false;
+    if (negate) {
+      if (const IrCondition* complement = complement_of(condition_kind); complement != nullptr) {
+        condition_kind = *complement;
+      } else {
+        wrap = true;
+      }
+    }
+    std::string text;
+    if (previous != nullptr && previous->op == IrOp::Compare) {
+      text = operand(previous->a) + " " + ir_condition_operator(condition_kind) + " " +
+             operand(previous->b);
+    } else if (previous != nullptr && previous->op == IrOp::Test) {
+      text = "(" + operand(previous->a) + " & " + operand(previous->b) + ") " +
+             ir_condition_operator(condition_kind) + " 0";
+    } else if (condition_kind != IrCondition::None) {
+      text = "flags " + std::string(ir_condition_operator(condition_kind));
+    } else {
+      text = operand(statement.a);
+    }
+    if (wrap) {
+      text = "!(" + text + ")";
+    }
+    return text;
+  }
+
   std::string statement(const IrStatement& statement, const IrStatement* previous) const {
     switch (statement.op) {
       case IrOp::Nop:
@@ -207,21 +266,8 @@ class Renderer {
         return "return " + operand(statement.a) + ";";
       case IrOp::Branch:
         return "goto " + operand(statement.a) + ";";
-      case IrOp::CondBranch: {
-        std::string condition;
-        if (previous != nullptr && previous->op == IrOp::Compare) {
-          const char* op = ir_condition_operator(statement.condition);
-          condition = operand(previous->a) + " " + op + " " + operand(previous->b);
-        } else if (previous != nullptr && previous->op == IrOp::Test) {
-          condition = std::string("(") + operand(previous->a) + " & " + operand(previous->b) +
-                      ") " + ir_condition_operator(statement.condition) + " 0";
-        } else if (statement.condition != IrCondition::None) {
-          condition = "flags " + std::string(ir_condition_operator(statement.condition));
-        } else {
-          condition = operand(statement.a);
-        }
-        return "if (" + condition + ") goto " + operand(statement.b) + ";";
-      }
+      case IrOp::CondBranch:
+        return "if (" + condition(statement, previous) + ") goto " + operand(statement.b) + ";";
       case IrOp::Compare:
         return "/* flags = " + operand(statement.a) + " " +
                ir_condition_operator(statement.condition) + " " + operand(statement.b) + " */";
@@ -244,6 +290,20 @@ class Renderer {
 };
 
 }  // namespace
+
+namespace detail {
+
+std::string render_statement(const IrFunction& function, const IrStatement& statement,
+                             const IrStatement* previous) {
+  return Renderer(function).statement(statement, previous);
+}
+
+std::string render_condition(const IrFunction& function, const IrStatement& statement,
+                             const IrStatement* previous, bool negate) {
+  return Renderer(function).condition(statement, previous, negate);
+}
+
+}  // namespace detail
 
 const char* ir_op_name(IrOp op) noexcept {
   switch (op) {
@@ -575,6 +635,16 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
     }
   }
   out += "u64 " + (function.name.empty() ? std::string("sub") : function.name) + "(void) {\n";
+
+  // Prefer structured control flow. When the graph does not match a shape the
+  // structurer models, fall back to labeled blocks with explicit `goto`; the
+  // fallback is still verified IR, never guessed structure.
+  if (auto structured = detail::format_structured_body(function); structured.has_value()) {
+    out += structured.value();
+    out += "}\n";
+    return out;
+  }
+  out += "// note: control flow not fully structured; showing labeled blocks\n";
   for (std::size_t index = 0; index < function.blocks.size(); ++index) {
     const IrBlock& block = function.blocks[index];
     out += "loc_" + Renderer::hex(block.address) + ":\n";
