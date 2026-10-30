@@ -1,6 +1,9 @@
 #include "theme.h"
 
+#include <cstdio>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 #include "imgui.h"
 
@@ -14,11 +17,22 @@ bool load_monospace_font(float scale) {
       "/System/Library/Fonts/SFNSMono.ttf",
       "/System/Library/Fonts/Menlo.ttc",
       "/Library/Fonts/Menlo.ttc",
+      "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+      "C:\\Windows\\Fonts\\consola.ttf",
       "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
       "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+      "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+      "/usr/local/share/fonts/dejavu/DejaVuSansMono.ttf",
   };
   ImGuiIO& io = ImGui::GetIO();
   for (const char* path : kCandidates) {
+    // ImGui asserts on a missing file in debug builds, so probe first.
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+      continue;
+    }
     ImFont* font = io.Fonts->AddFontFromFileTTF(path, 15.0f);
     if (font != nullptr) {
       std::fprintf(stderr, "donkey: ui font %s\n", path);

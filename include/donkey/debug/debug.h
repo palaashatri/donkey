@@ -151,13 +151,21 @@ class DebugAdapter {
   [[nodiscard]] virtual Result<std::vector<StackFrame>> call_stack() = 0;
   [[nodiscard]] virtual Result<std::vector<DebugThread>> threads() = 0;
   [[nodiscard]] virtual Result<std::vector<DebugModule>> modules() = 0;
+  /// Non-blocking. While stopped, returns why the target is stopped; while
+  /// running, checks for a new stop or exit and returns reason `None` if
+  /// there is none yet.
   [[nodiscard]] virtual Result<StopInfo> poll_events() = 0;
+  /// Poll until the target stops or exits, or `timeout_ms` elapses (then the
+  /// result has reason `None` and the target keeps running).
+  [[nodiscard]] virtual Result<StopInfo> wait_for_event(int timeout_ms);
   [[nodiscard]] virtual SessionState state() const noexcept = 0;
   [[nodiscard]] virtual const AddressTranslator& address_translator() const noexcept = 0;
 };
 
-/// Create a debug adapter. When `mock` is true, returns a deterministic in-process
-/// simulation adapter suitable for automated CI and hermetic acceptance tests (A18, A19).
+/// Create a debug adapter. With `mock` false this is the native debugger for
+/// the host (see `capabilities()`: it reports nothing where native debugging
+/// is not implemented). With `mock` true it is a deterministic in-process
+/// simulation for hermetic tests of callers; it never runs a real target.
 [[nodiscard]] std::unique_ptr<DebugAdapter> create_debug_adapter(
     bool mock = false, std::uint64_t simulated_aslr_base = 0);
 

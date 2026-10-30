@@ -31,7 +31,7 @@ find_file(DONKEY_SQLITE_SOURCE sqlite3.c
   PATHS
     "${sqlite_amalgamation_SOURCE_DIR}"
     "${sqlite_amalgamation_SOURCE_DIR}/sqlite-amalgamation-3460100"
-  NO_DEFAULT_PATH REQUIRED
+  NO_DEFAULT_PATH NO_CMAKE_FIND_ROOT_PATH REQUIRED
 )
 get_filename_component(DONKEY_SQLITE_DIR "${DONKEY_SQLITE_SOURCE}" DIRECTORY)
 

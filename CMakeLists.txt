@@ -118,7 +118,9 @@ donkey_apply_warnings(donkey_project)
 add_library(donkey_debug STATIC
   src/debug/debug.cpp
   src/debug/mock_adapter.cpp
-  src/debug/local_adapter.cpp
+  src/debug/native_linux.cpp
+  src/debug/native_unsupported.cpp
+  src/debug/native_windows.cpp
 )
 add_library(donkey::debug ALIAS donkey_debug)
 target_include_directories(donkey_debug
@@ -127,6 +129,9 @@ target_include_directories(donkey_debug
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/debug>
 )
 target_link_libraries(donkey_debug PUBLIC donkey::foundation donkey::analysis)
+if(WIN32)
+  target_link_libraries(donkey_debug PRIVATE dbghelp psapi)
+endif()
 target_compile_features(donkey_debug PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_debug)
 

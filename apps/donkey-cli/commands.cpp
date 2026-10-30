@@ -714,14 +714,18 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project annotations <database> <image-id> [--json]\n"
                "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
                "  donkey-cli project restore <database> <backup> [--json]\n"
-               "  donkey-cli debug launch <binary> [--mock] [--json]\n"
+               "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--run]"
+               " [--mock] [--json]\n"
                "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
                "<hex>] --output <out> [--force] [--json]\n"
                "  donkey-cli plugin info <plugin-lib> [--json]\n"
                "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
                "<mask|name>] [--json]\n"
                "\n"
-               "All commands only read the file; nothing is executed.\n",
+               "Every command except `debug launch` only reads files and never executes them.\n"
+               "`debug launch` runs the program under the native debugger (it stops at the\n"
+               "entry point; --run continues through breakpoints and terminates the target\n"
+               "when done).\n",
                std::string(version()).c_str());
 }
 
@@ -1643,6 +1647,43 @@ int command_project(const std::vector<std::string_view>& arguments) {
       "backup or restore)");
 }
 
+namespace {
+
+/// One stop observed while running under `debug launch --run`.
+struct DebugStopRecord {
+  debug::StopInfo info;
+  std::uint64_t static_address = 0;
+  std::string function;
+};
+
+std::string json_stop(const DebugStopRecord& stop) {
+  return "{\"reason\": " + quote(debug::stop_reason_name(stop.info.reason)) +
+         ", \"address\": " + quote(hex(stop.info.address)) +
+         ", \"static_address\": " + quote(hex(stop.static_address)) +
+         ", \"function\": " + quote(stop.function) +
+         ", \"description\": " + quote(stop.info.description) + "}";
+}
+
+/// Resolve a breakpoint spec: a hex/decimal static address or a symbol name.
+bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out) {
+  if (parse_u64(spec, out)) {
+    return true;
+  }
+  if (image == nullptr) {
+    return false;
+  }
+  for (const Symbol& symbol : image->symbols) {
+    if (!symbol.imported && symbol.address != 0 &&
+        (symbol.name == spec || symbol.name == "_" + std::string(spec))) {
+      out = symbol.address;
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
 int command_debug(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
     return usage_error("debug needs a subcommand: launch");
@@ -1654,8 +1695,10 @@ int command_debug(const std::vector<std::string_view>& arguments) {
 
   bool json = false;
   bool mock = false;
+  bool run = false;
   std::string binary_path;
   std::vector<std::string> args;
+  std::vector<std::string> break_specs;
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -1663,12 +1706,14 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       json = true;
     } else if (arg == "--mock") {
       mock = true;
-    } else if (arg == "--arg") {
+    } else if (arg == "--run") {
+      run = true;
+    } else if (arg == "--arg" || arg == "--break") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
-        return usage_error("--arg needs a value");
+        return usage_error(arg == "--arg" ? "--arg needs a value" : "--break needs a value");
       }
-      args.emplace_back(val);
+      (arg == "--arg" ? args : break_specs).emplace_back(val);
     } else if (!arg.empty() && arg.front() == '-') {
       return usage_error("unknown option for debug launch");
     } else if (binary_path.empty()) {
@@ -1683,31 +1728,113 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   }
 
   auto adapter = debug::create_debug_adapter(mock);
+  if (!mock && !adapter->capabilities().can_launch) {
+    return fail(Diagnostic{Status::Unsupported, "debug.unsupported_platform",
+                           "native debugging is not implemented on this host; use --mock for "
+                           "the simulation adapter",
+                           std::nullopt});
+  }
+  auto static_image = load_binary_file(binary_path);
+  const BinaryImage* image = static_image ? &static_image.value() : nullptr;
+
+  std::vector<std::uint64_t> static_breaks;
+  for (const std::string& spec : break_specs) {
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, spec, address)) {
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_breakpoint",
+                             "no symbol or address '" + spec + "' in " + binary_path,
+                             std::nullopt});
+    }
+    static_breaks.push_back(address);
+  }
+
   debug::LaunchConfig config;
   config.binary_path = binary_path;
   config.arguments = args;
   config.stop_at_entry = true;
-
   auto res = adapter->launch(config);
   if (!res) {
     return fail(res.diagnostic());
   }
 
-  auto ev = adapter->poll_events();
+  const auto& translator = adapter->address_translator();
+  auto function_at = [&](std::uint64_t static_address) {
+    if (image == nullptr) {
+      return std::string();
+    }
+    const Symbol* symbol = image->symbol_at(static_address);
+    return symbol != nullptr ? symbol->name : std::string();
+  };
+  auto record = [&](const debug::StopInfo& info) {
+    DebugStopRecord stop;
+    stop.info = info;
+    stop.static_address = info.address != 0 ? translator.runtime_to_static(info.address) : 0;
+    stop.function = function_at(stop.static_address);
+    return stop;
+  };
+
+  auto entry_event = adapter->poll_events();
+  const DebugStopRecord entry =
+      record(entry_event.has_value() ? entry_event.value() : debug::StopInfo{});
   auto frames = adapter->call_stack();
   auto threads = adapter->threads();
+  auto registers = adapter->read_registers();
+
+  for (std::uint64_t address : static_breaks) {
+    auto bp = adapter->set_breakpoint(translator.static_to_runtime(address));
+    if (!bp) {
+      (void)adapter->terminate();
+      return fail(bp.diagnostic());
+    }
+  }
+
+  // Run to completion, recording each stop. Bounded so a breakpoint in a hot
+  // loop cannot make the command run forever.
+  constexpr std::size_t kMaxStops = 1000;
+  std::vector<DebugStopRecord> stops;
+  std::optional<int> exit_code;
+  if (run) {
+    while (stops.size() < kMaxStops) {
+      if (!adapter->resume()) {
+        break;
+      }
+      auto event = adapter->wait_for_event(30000);
+      if (!event || event.value().reason == debug::StopReason::None) {
+        break;  // timed out: still running
+      }
+      if (event.value().reason == debug::StopReason::Exited) {
+        exit_code = event.value().exit_code;
+        break;
+      }
+      stops.push_back(record(event.value()));
+    }
+  }
+  const std::string final_state = debug::session_state_name(adapter->state());
+  if (adapter->state() != debug::SessionState::Exited) {
+    (void)adapter->terminate();
+  }
 
   if (json) {
     std::string out;
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
     out += "  \"tool\": \"donkey-cli\",\n";
     out += "  \"tool_version\": " + quote(version()) + ",\n";
-    out += "  \"state\": " + quote(debug::session_state_name(adapter->state())) + ",\n";
-    out += "  \"stop_reason\": " +
-           quote(debug::stop_reason_name(ev.has_value() ? ev.value().reason
-                                                        : debug::StopReason::None)) +
-           ",\n";
-    out += "  \"entry_address\": " + quote(hex(ev.has_value() ? ev.value().address : 0)) + ",\n";
+    out += "  \"adapter\": " + quote(mock ? "mock" : "native") + ",\n";
+    out += "  \"state\": " + quote(final_state) + ",\n";
+    out += "  \"stop_reason\": " + quote(debug::stop_reason_name(entry.info.reason)) + ",\n";
+    out += "  \"entry_address\": " + quote(hex(entry.info.address)) + ",\n";
+    out += "  \"entry_static_address\": " + quote(hex(entry.static_address)) + ",\n";
+    out += "  \"runtime_base\": " + quote(hex(translator.runtime_base)) + ",\n";
+    out += "  \"static_base\": " + quote(hex(translator.static_base)) + ",\n";
+    out += "  \"registers\": [";
+    if (registers.has_value()) {
+      for (std::size_t i = 0; i < registers.value().size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"name\": " + quote(registers.value()[i].name) +
+               ", \"value\": " + quote(hex(registers.value()[i].value)) + "}";
+      }
+    }
+    out += (registers.has_value() && !registers.value().empty()) ? "\n  ],\n" : "],\n";
     out += "  \"threads\": [";
     if (threads.has_value()) {
       for (std::size_t i = 0; i < threads.value().size(); ++i) {
@@ -1729,22 +1856,44 @@ int command_debug(const std::vector<std::string_view>& arguments) {
                ", \"static_address\": " + quote(hex(frames.value()[i].static_address)) + "}";
       }
     }
-    out += (frames.has_value() && !frames.value().empty()) ? "\n  ]\n" : "]\n";
-    out += "}\n";
+    out += (frames.has_value() && !frames.value().empty()) ? "\n  ],\n" : "],\n";
+    out += "  \"stops\": [";
+    for (std::size_t i = 0; i < stops.size(); ++i) {
+      out += (i == 0 ? "\n    " : ",\n    ") + json_stop(stops[i]);
+    }
+    out += stops.empty() ? "],\n" : "\n  ],\n";
+    out += "  \"exit_code\": " + (exit_code ? std::to_string(*exit_code) : std::string("null")) +
+           "\n}\n";
     std::fwrite(out.data(), 1, out.size(), stdout);
     return kExitOk;
   }
 
-  std::printf("Debugger session state: %s (stopped at %s: %s)\n",
-              debug::session_state_name(adapter->state()),
-              debug::stop_reason_name(ev.has_value() ? ev.value().reason : debug::StopReason::None),
-              hex(ev.has_value() ? ev.value().address : 0).c_str());
+  std::printf("Debugger (%s adapter): stopped at %s %s (static %s%s%s)\n", mock ? "mock" : "native",
+              debug::stop_reason_name(entry.info.reason), hex(entry.info.address).c_str(),
+              hex(entry.static_address).c_str(), entry.function.empty() ? "" : ", ",
+              entry.function.c_str());
+  if (registers.has_value()) {
+    std::printf("Registers:\n");
+    for (const auto& reg : registers.value()) {
+      std::printf("  %-8s %s\n", reg.name.c_str(), hex(reg.value).c_str());
+    }
+  }
   if (frames.has_value()) {
     std::printf("Call stack:\n");
     for (const auto& f : frames.value()) {
       std::printf("  #%u  %s  %s (static %s)\n", f.index, hex(f.instruction_pointer).c_str(),
                   f.function_name.c_str(), hex(f.static_address).c_str());
     }
+  }
+  for (const auto& stop : stops) {
+    std::printf("Stop: %s at %s (static %s) %s\n", debug::stop_reason_name(stop.info.reason),
+                hex(stop.info.address).c_str(), hex(stop.static_address).c_str(),
+                stop.function.c_str());
+  }
+  if (exit_code) {
+    std::printf("Exited with code %d\n", *exit_code);
+  } else if (run) {
+    std::printf("Target did not exit; it was terminated (state was %s)\n", final_state.c_str());
   }
   return kExitOk;
 }

@@ -28,6 +28,15 @@ set_target_properties(
   PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON
 )
 
+# Native debugger target. Built unoptimised with frame pointers so the call
+# stack and step-out tests have a frame chain to follow.
+add_executable(donkey_test_debuggee fixtures/debuggee/debuggee.c)
+if(MSVC)
+  target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
+else()
+  target_compile_options(donkey_test_debuggee PRIVATE -O0 -fno-omit-frame-pointer)
+endif()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/binary_test.cpp
@@ -36,6 +45,7 @@ add_executable(donkey_unit_tests
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
+  unit/native_debug_test.cpp
   unit/patch_test.cpp
   unit/plugin_test.cpp
   unit/project_test.cpp
@@ -50,8 +60,9 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_HANG_PATH="$<TARGET_FILE:test_plugin_hang>"
   TEST_PLUGIN_CTOR_CRASH_PATH="$<TARGET_FILE:test_plugin_ctor_crash>"
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
+  DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
 )
-add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
+add_dependencies(donkey_unit_tests donkey_test_debuggee test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
@@ -338,7 +349,22 @@ set_tests_properties(cli.debug_launch_mock_json PROPERTIES
 add_test(NAME cli.debug_launch_human
          COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock)
 set_tests_properties(cli.debug_launch_human PROPERTIES
-  PASS_REGULAR_EXPRESSION "Debugger session state: Stopped.*Call stack:")
+  PASS_REGULAR_EXPRESSION "Debugger .mock adapter.: stopped at Entrypoint.*Call stack:")
+
+# Real native debugging through the CLI where the host has a backend.
+if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|aarch64|arm64")
+   OR (WIN32 AND CMAKE_SIZEOF_VOID_P EQUAL 8 AND NOT CMAKE_SYSTEM_PROCESSOR MATCHES "ARM64"))
+  add_test(NAME cli.debug_native_run_json
+           COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                   --break donkey_debuggee_tick --run --json)
+  set_tests_properties(cli.debug_native_run_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"adapter\": \"native\".*\"stop_reason\": \"Entrypoint\".*\"stops\": \\[.*\"Breakpoint\".*donkey_debuggee_tick.*\"Breakpoint\".*\"Breakpoint\".*\"exit_code\": 42")
+else()
+  add_test(NAME cli.debug_native_unsupported
+           COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>)
+  set_tests_properties(cli.debug_native_unsupported PROPERTIES
+    PASS_REGULAR_EXPRESSION "debug\\.unsupported_platform")
+endif()
 
 add_test(NAME cli.debug_rejects_unknown_subcommand
          COMMAND donkey-cli debug invalid-cmd)

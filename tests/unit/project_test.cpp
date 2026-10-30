@@ -722,7 +722,7 @@ using donkey::Annotation;
 using donkey::AnnotationKind;
 using donkey::ReplaceStage;
 
-std::uintmax_t file_size_or_zero(const std::string& path) {
+[[maybe_unused]] std::uintmax_t file_size_or_zero(const std::string& path) {
   std::error_code ec;
   const auto size = std::filesystem::file_size(path, ec);
   return ec ? 0 : size;

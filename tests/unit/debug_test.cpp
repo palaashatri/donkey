@@ -7,6 +7,10 @@
 
 #include "donkey/debug/debug.h"
 
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
 namespace {
 
 using donkey::debug::AddressTranslator;
@@ -135,9 +139,9 @@ TEST(Debug, RegisterAndMemoryAccess) {
   EXPECT_EQ(bad_read.diagnostic().code, "debug.invalid_address");
 }
 
-TEST(Debug, AcceptanceScenarioA18_LocalDebuggerLaunchAndCleanup) {
-  // Scenario A18: Launch controlled local fixture; stop at entry/breakpoint, step,
-  // inspect registers/stack/memory, continue and detach/exit; no orphaned target process.
+TEST(Debug, MockAdapterLaunchStepAndCleanupStateMachine) {
+  // Exercises the simulation adapter only. Real-process acceptance for A18
+  // lives in native_debug_test.cpp.
   auto adapter = donkey::debug::create_debug_adapter(/*mock=*/true);
   ASSERT_NE(adapter, nullptr);
 
@@ -172,8 +176,9 @@ TEST(Debug, AcceptanceScenarioA18_LocalDebuggerLaunchAndCleanup) {
   EXPECT_EQ(adapter->state(), SessionState::Detached);
 }
 
-TEST(Debug, AcceptanceScenarioA19_ASLREnabledAddressMapping) {
-  // Scenario A19: Runtime VA translates to correct static image region.
+TEST(Debug, MockAdapterAddressTranslation) {
+  // Translator arithmetic with a simulated slide. Real ASLR translation (A19)
+  // is checked against a live process in native_debug_test.cpp.
   // Static image base: 0x100000000
   // ASLR runtime base: 0x100040000 (+0x40000 slide)
   const std::uint64_t kStaticBase = 0x100000000;
@@ -207,44 +212,45 @@ TEST(Debug, AcceptanceScenarioA19_ASLREnabledAddressMapping) {
   EXPECT_EQ(frames.value()[0].static_address, kStaticBase + 0x1000);
 }
 
-TEST(Debug, PermissionDeniedAndSafetyInvariants) {
-  // Test that missing entitlements or security denial yields clean diagnostic
+TEST(Debug, NativeAdapterRejectsBadRequestsWithoutSideEffects) {
   auto adapter = donkey::debug::create_debug_adapter(/*mock=*/false);
   ASSERT_NE(adapter, nullptr);
+  const bool native = adapter->capabilities().can_launch;
+  auto expect_code = [&](const donkey::Diagnostic& diagnostic, const char* code) {
+    if (native) {
+      EXPECT_EQ(diagnostic.code, code) << diagnostic.message;
+    } else {
+      EXPECT_EQ(diagnostic.code, "debug.unsupported_platform") << diagnostic.message;
+    }
+  };
 
-#if !defined(__APPLE__)
-  auto attach_res = adapter->attach(1);
-  ASSERT_FALSE(attach_res.has_value());
-  EXPECT_TRUE(attach_res.diagnostic().code == "debug.permission_denied" ||
-              attach_res.diagnostic().code == "debug.unsupported_platform");
-#else
-  // Attaching to another pid without task_for_pid permissions yields graceful refusal
-  auto attach_res = adapter->attach(1);  // launchd
-  ASSERT_FALSE(attach_res.has_value());
-  EXPECT_EQ(attach_res.diagnostic().code, "debug.permission_denied");
-  EXPECT_NE(attach_res.diagnostic().message.find("get-task-allow"), std::string::npos);
-#endif
-
-  // Rejects empty binary path
   LaunchConfig cfg;
   cfg.binary_path = "";
   auto launch_res = adapter->launch(cfg);
   ASSERT_FALSE(launch_res.has_value());
-  EXPECT_TRUE(launch_res.diagnostic().code == "debug.invalid_path" ||
-              launch_res.diagnostic().code == "debug.unsupported_platform");
+  expect_code(launch_res.diagnostic(), "debug.invalid_path");
 
-  // Rejects removing nonexistent breakpoint
   auto rm_res = adapter->remove_breakpoint(0xdeadbeef);
-  EXPECT_FALSE(rm_res.has_value());
-  EXPECT_TRUE(rm_res.diagnostic().code == "debug.breakpoint_not_found" ||
-              rm_res.diagnostic().code == "debug.unsupported_platform");
+  ASSERT_FALSE(rm_res.has_value());
+  expect_code(rm_res.diagnostic(), "debug.breakpoint_not_found");
 
-#if defined(_WIN32)
-  auto caps = adapter->capabilities();
-  EXPECT_FALSE(caps.can_launch);
-  EXPECT_FALSE(caps.can_step);
-  EXPECT_FALSE(caps.can_read_memory);
+  auto attach_zero = adapter->attach(0);
+  ASSERT_FALSE(attach_zero.has_value());
+  expect_code(attach_zero.diagnostic(), "debug.invalid_pid");
+
+#if !defined(_WIN32)
+  // Attaching to init must be refused for an unprivileged user. Never try it
+  // as root: it would really stop pid 1.
+  if (::geteuid() != 0) {
+    auto attach_init = adapter->attach(1);
+    ASSERT_FALSE(attach_init.has_value());
+    expect_code(attach_init.diagnostic(), "debug.permission_denied");
+  }
 #endif
+
+  EXPECT_FALSE(adapter->read_memory(0x1000, 4).has_value());
+  EXPECT_FALSE(adapter->read_registers().has_value());
+  EXPECT_FALSE(adapter->step_into().has_value());
 }
 
 }  // namespace
