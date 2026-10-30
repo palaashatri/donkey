@@ -185,9 +185,14 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
       }
     } else if (impl_->architecture == Architecture::AArch64 && instruction->detail != nullptr &&
                instruction->detail->arm64.op_count > 0) {
-      const cs_arm64_op& operand = instruction->detail->arm64.operands[0];
-      if (operand.type == ARM64_OP_IMM) {
-        result.direct_target = static_cast<std::uint64_t>(operand.imm);
+      // Direct branch targets are the trailing immediate operand: `b.eq target`,
+      // `cbz x, target`, `tbz x, #bit, target`. Reading operands[0] would miss
+      // cbz/cbnz/tbz/tbnz, whose first operand is the tested register.
+      const int branch_operand_count = instruction->detail->arm64.op_count;
+      const cs_arm64_op& branch_operand =
+          instruction->detail->arm64.operands[branch_operand_count - 1];
+      if (branch_operand.type == ARM64_OP_IMM) {
+        result.direct_target = static_cast<std::uint64_t>(branch_operand.imm);
       }
     }
   }
@@ -243,6 +248,23 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
     for (int i = 0; i < instruction->detail->arm64.op_count; ++i) {
       const cs_arm64_op& operand = instruction->detail->arm64.operands[i];
       Operand parsed;
+      switch (operand.shift.type) {
+        case ARM64_SFT_LSL:
+          parsed.shift = ShiftKind::Lsl;
+          break;
+        case ARM64_SFT_LSR:
+          parsed.shift = ShiftKind::Lsr;
+          break;
+        case ARM64_SFT_ASR:
+          parsed.shift = ShiftKind::Asr;
+          break;
+        case ARM64_SFT_ROR:
+          parsed.shift = ShiftKind::Ror;
+          break;
+        default:
+          break;
+      }
+      parsed.shift_amount = static_cast<std::uint8_t>(operand.shift.value & 0xFFU);
       switch (operand.type) {
         case ARM64_OP_REG:
           parsed.kind = OperandKind::Register;
@@ -264,6 +286,8 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
           }
           parsed.memory.displacement = operand.mem.disp;
           parsed.memory.size = parsed.size;
+          parsed.memory.writeback = instruction->detail->arm64.writeback;
+          parsed.memory.post_index = instruction->detail->arm64.post_index;
           break;
         default:
           break;

@@ -116,6 +116,57 @@ std::vector<std::byte> pop_memory_function() {
   return out;
 }
 
+/// AArch64 straight-line function (assembled with clang for aarch64):
+///   stp x29, x30, [sp, #-0x10]!
+///   mov x29, sp
+///   movz x0, #0x1234
+///   movk x0, #0xabcd, lsl #16
+///   add x1, x0, #1
+///   sub x2, x1, x0
+///   lsl x3, x2, #2
+///   ldrb w4, [x0]
+///   ldrsw x5, [x0, #4]
+///   mul x6, x4, x5
+///   madd x7, x4, x5, x6
+///   ldp x29, x30, [sp], #0x10
+///   ret
+std::vector<std::byte> aarch64_straight_line_function() {
+  const std::uint8_t bytes[] = {
+      0xfd, 0x7b, 0xbf, 0xa9, 0xfd, 0x03, 0x00, 0x91, 0x80, 0x46, 0x82, 0xd2, 0xa0,
+      0x79, 0xb5, 0xf2, 0x01, 0x04, 0x00, 0x91, 0x22, 0x00, 0x00, 0xcb, 0x43, 0xf4,
+      0x7e, 0xd3, 0x04, 0x00, 0x40, 0x39, 0x05, 0x04, 0x80, 0xb9, 0x86, 0x7c, 0x05,
+      0x9b, 0x87, 0x18, 0x05, 0x9b, 0xfd, 0x7b, 0xc1, 0xa8, 0xc0, 0x03, 0x5f, 0xd6,
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+/// AArch64 control-flow function (assembled with clang for aarch64):
+///   cmp x0, #0
+///   b.eq 1f
+///   add x1, x0, #1
+///   b 2f
+/// 1: sub x1, x0, #1
+/// 2: cbz x1, 3f
+///   tbz x1, #3, 4f
+///   mov x2, x1
+/// 3: 4: ret
+std::vector<std::byte> aarch64_branchy_function() {
+  const std::uint8_t bytes[] = {
+      0x1f, 0x00, 0x00, 0xf1, 0x60, 0x00, 0x00, 0x54, 0x01, 0x04, 0x00, 0x91,
+      0x02, 0x00, 0x00, 0x14, 0x01, 0x04, 0x00, 0xd1, 0x61, 0x00, 0x00, 0xb4,
+      0x41, 0x00, 0x18, 0x36, 0xe2, 0x03, 0x01, 0xaa, 0xc0, 0x03, 0x5f, 0xd6,
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
 BinaryImage synthetic_image(std::size_t size) {
   BinaryImage image;
   image.path = "<synthetic>";
@@ -385,15 +436,101 @@ TEST(Ir, LiftsElfEntryPointIntoVerifiedIr) {
   EXPECT_NE(text.value().find("sub_400109();"), std::string::npos);
 }
 
-TEST(Ir, RefusesArchitecturesTheLifterDoesNotModel) {
-  auto loaded = donkey::load_binary(fixture_path("tiny-macho-arm64"));
-  ASSERT_TRUE(loaded.has_value());
-  auto analyzed = donkey::analyze(loaded.value().image, loaded.value().data);
-  ASSERT_TRUE(analyzed.has_value());
+TEST(Ir, LiftsAArch64StraightLineFunction) {
+  const auto data = aarch64_straight_line_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty()) << "no seeded function";
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+
+  auto text = donkey::format_pseudocode(lifted.value());
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  // Pre-index stp: store at [sp, #-0x10]!, then sp -= 0x10. Capstone reports
+  // x29/x30 by their ABI aliases fp/lr.
+  EXPECT_NE(code.find("*(u64 *)(sp - 0x10) = fp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("*(u64 *)(sp - 0x8) = lr;"), std::string::npos) << code;
+  EXPECT_NE(code.find("sp = sp - 0x10;"), std::string::npos) << code;
+  // mov x29, sp
+  EXPECT_NE(code.find("fp = sp;"), std::string::npos) << code;
+  // movz/movk: movz sets 0x1234, movk clears then merges 0xabcd into bits 16..31.
+  EXPECT_NE(code.find("x0 = 0x1234;"), std::string::npos) << code;
+  EXPECT_NE(code.find("x0 = x0 | 0xabcd0000;"), std::string::npos) << code;
+  // Post-index ldp: access [sp] and [sp + 0x8], then sp += 0x10.
+  EXPECT_NE(code.find("fp = *(u64 *)(sp);"), std::string::npos) << code;
+  EXPECT_NE(code.find("lr = *(u64 *)(sp + 0x8);"), std::string::npos) << code;
+  EXPECT_NE(code.find("sp = sp + 0x10;"), std::string::npos) << code;
+  // ldrsw sign-extends a 32-bit load into a 64-bit register.
+  EXPECT_NE(code.find("x5 = (s64)var_0;"), std::string::npos) << code;
+  // madd must produce a multiply plus an add, never a single bogus op.
+  EXPECT_NE(code.find("x6 = x4 * x5;"), std::string::npos) << code;
+  EXPECT_NE(code.find("x7 = var_1 + x6;"), std::string::npos) << code;
+}
+
+TEST(Ir, LiftsAArch64ControlFlowFunction) {
+  const auto data = aarch64_branchy_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
   ASSERT_FALSE(analyzed.value().functions.empty());
 
-  auto lifted = donkey::lift_function(loaded.value().image, analyzed.value(),
-                                      analyzed.value().functions.front());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+
+  auto text = donkey::format_pseudocode(lifted.value());
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  // cmp x0, #0 followed by b.eq becomes a zero-test conditional branch.
+  EXPECT_NE(code.find("x0 == 0"), std::string::npos) << code;
+  // cbz x1 emits a compare and a conditional branch.
+  EXPECT_NE(code.find("x1 == 0"), std::string::npos) << code;
+  // tbz x1, #3 emits a bit test. Capstone reports the 32-bit form (w1) when
+  // the tested bit is below 32, so match the mask rather than the register alias.
+  EXPECT_NE(code.find("& 0x8)"), std::string::npos) << code;
+  EXPECT_NE(code.find("goto "), std::string::npos) << code;
+}
+
+TEST(Ir, LiftsMachOArm64EntryPoint) {
+  auto loaded = donkey::load_binary(fixture_path("tiny-macho-arm64"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analyzed = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+
+  const donkey::Function* entry = function_at(analyzed.value(), 0x100000F00);
+  ASSERT_NE(entry, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analyzed.value(), *entry);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+
+  auto text = donkey::format_pseudocode(lifted.value());
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("return x0;"), std::string::npos) << text.value();
+}
+
+TEST(Ir, RefusesArchitecturesTheLifterDoesNotModel) {
+  // AArch64 is modelled now, so use an architecture that is still unsupported.
+  const auto data = pop_memory_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::RiscV64;
+  donkey::AnalysisResult analysis;
+  analysis.architecture = Architecture::RiscV64;
+  donkey::Function function;
+  function.address = 0x1000;
+
+  auto lifted = donkey::lift_function(image, analysis, function);
   ASSERT_FALSE(lifted.has_value());
   EXPECT_EQ(lifted.diagnostic().status, donkey::Status::Unsupported);
   EXPECT_EQ(lifted.diagnostic().code, "lift.unsupported_architecture");

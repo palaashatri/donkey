@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
+#include "lift_internal.h"
 
 namespace donkey {
 namespace {
@@ -513,10 +514,14 @@ struct Lifter {
 
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
+  if (image.architecture == Architecture::AArch64) {
+    return internal::lift_aarch64(image, analysis, function, options);
+  }
   if (image.architecture != Architecture::X86_64) {
     return make_error<IrFunction>(
         Status::Unsupported, "lift.unsupported_architecture",
-        "the lifter models x86-64 only; no pseudocode is produced for other architectures",
+        "the lifter models x86-64 and AArch64 only; no pseudocode is produced for other "
+        "architectures",
         function.address);
   }
 

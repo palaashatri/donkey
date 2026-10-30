@@ -118,10 +118,10 @@ add_test(NAME cli.decompile_rejects_unknown_function
                  --function 0x1234)
 set_tests_properties(cli.decompile_rejects_unknown_function PROPERTIES WILL_FAIL TRUE)
 
-add_test(NAME cli.decompile_macho_refuses
+add_test(NAME cli.decompile_macho_aarch64
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64 --json)
-set_tests_properties(cli.decompile_macho_refuses PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"status\": \"Unsupported\".*lift.unsupported_architecture")
+set_tests_properties(cli.decompile_macho_aarch64 PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"_main\".*\"pseudocode\":.*sp - 0x10")
 
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
