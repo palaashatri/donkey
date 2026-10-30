@@ -60,6 +60,9 @@ int main(int argc, char** argv) {
   if (command == "analyze") {
     return donkey::cli::command_analyze(rest);
   }
+  if (command == "project") {
+    return donkey::cli::command_project(rest);
+  }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),
                command.data());

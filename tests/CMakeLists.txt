@@ -6,8 +6,9 @@ add_executable(donkey_unit_tests
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
+  unit/project_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::ir donkey::analysis GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::project donkey::ir donkey::analysis donkey::sqlite GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
@@ -120,3 +121,34 @@ add_test(NAME cli.decompile_macho_refuses
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64 --json)
 set_tests_properties(cli.decompile_macho_refuses PROPERTIES
   PASS_REGULAR_EXPRESSION "\"status\": \"Unsupported\".*lift.unsupported_architecture")
+
+# ---------------------------------------------------------------------------
+# Project persistence CLI.
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_PROJECT_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-save.db")
+
+add_test(NAME cli.project_save_elf_json
+         COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.project_save_elf_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 1.*\"integrity\": true.*\"sha256\"")
+
+add_test(NAME cli.project_info_elf_json
+         COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
+set_tests_properties(cli.project_info_elf_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 1.*\"integrity\": true.*\"format\": \"ELF\""
+  DEPENDS cli.project_save_elf_json)
+
+add_test(NAME cli.project_info_rejects_non_database
+         COMMAND donkey-cli project info
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.project_info_rejects_non_database PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.project_info_rejects_missing
+         COMMAND donkey-cli project info ${CMAKE_CURRENT_BINARY_DIR}/does-not-exist.db)
+set_tests_properties(cli.project_info_rejects_missing PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.project_rejects_unknown_subcommand COMMAND donkey-cli project nope)
+
+set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
