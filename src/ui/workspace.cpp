@@ -16,6 +16,7 @@ constexpr const char* kSectionsWindow = "Sections";
 constexpr const char* kFunctionsWindow = "Functions";
 constexpr const char* kDisassemblyWindow = "Disassembly";
 constexpr const char* kDecompilerWindow = "Decompiler";
+constexpr const char* kGraphWindow = "Graph";
 constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
@@ -131,6 +132,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kFunctionsWindow, nullptr, &show_functions_);
     ImGui::MenuItem(kDisassemblyWindow, nullptr, &show_disassembly_);
     ImGui::MenuItem(kDecompilerWindow, nullptr, &show_decompiler_);
+    ImGui::MenuItem(kGraphWindow, nullptr, &show_graph_);
     ImGui::MenuItem(kHexWindow, nullptr, &show_hex_);
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
@@ -182,6 +184,7 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGuiID right_bottom = ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.55f, nullptr, &right);
 
   ImGui::DockBuilderDockWindow(kDisassemblyWindow, center);
+  ImGui::DockBuilderDockWindow(kGraphWindow, center);
   ImGui::DockBuilderDockWindow(kDecompilerWindow, decompiler);
   ImGui::DockBuilderDockWindow(kHexWindow, bottom);
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
@@ -258,6 +261,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDecompilerWindow, &show_decompiler_, panel_flags());
     if (document) {
       views::decompiler(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_graph_) {
+    ImGui::Begin(kGraphWindow, &show_graph_, panel_flags());
+    if (document) {
+      views::cfg_graph(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }
