@@ -1,9 +1,11 @@
 #include "donkey/project/project.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <sqlite3.h>
@@ -761,6 +763,189 @@ Result<bool> Project::check_integrity() const {
         storage_error(impl_->db, "project.integrity_failed", "foreign keys").message);
   }
   return !foreign_keys.step();
+}
+
+namespace {
+
+/// Copy the whole of `source` into `target` with SQLite's online backup API.
+/// Retries briefly on SQLITE_BUSY/LOCKED; every other failure is returned.
+Result<void> copy_database(sqlite3* source, sqlite3* target, const std::string& context) {
+  sqlite3_backup* handle = sqlite3_backup_init(target, "main", source, "main");
+  if (handle == nullptr) {
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            storage_error(target, "project.backup_failed", context).message);
+  }
+  int code = SQLITE_OK;
+  for (int attempt = 0; attempt < 1000; ++attempt) {
+    code = sqlite3_backup_step(handle, -1);
+    if (code != SQLITE_BUSY && code != SQLITE_LOCKED) {
+      break;
+    }
+    sqlite3_sleep(10);
+  }
+  const int finish = sqlite3_backup_finish(handle);
+  if (code != SQLITE_DONE || finish != SQLITE_OK) {
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            context + ": " + std::string(sqlite3_errstr(code)) + " / " +
+                                std::string(sqlite3_errstr(finish)));
+  }
+  return {};
+}
+
+void remove_sidecars(const std::string& database_path) {
+  std::error_code ignored;
+  std::filesystem::remove(database_path + "-wal", ignored);
+  std::filesystem::remove(database_path + "-shm", ignored);
+}
+
+/// Rename `from` onto `to`, replacing `to` when the platform allows it.
+Result<void> replace_file(const std::string& from, const std::string& to) {
+  std::error_code error;
+  std::filesystem::rename(from, to, error);
+  if (!error) {
+    return {};
+  }
+  std::error_code remove_error;
+  std::filesystem::remove(to, remove_error);
+  error.clear();
+  std::filesystem::rename(from, to, error);
+  if (error) {
+    return make_error<void>(Status::InternalError, "project.replace_failed",
+                            "could not replace '" + to + "': " + error.message());
+  }
+  return {};
+}
+
+}  // namespace
+
+Result<void> Project::backup(const std::string& destination, bool overwrite) const {
+  if (!is_open()) {
+    return make_error<void>(Status::InvalidInput, "project.not_open",
+                            "no project database is open");
+  }
+  std::error_code error;
+  if (!overwrite && std::filesystem::exists(destination, error)) {
+    return make_error<void>(Status::InvalidInput, "project.backup_exists",
+                            "backup destination already exists: '" + destination + "'");
+  }
+
+  const std::string temporary = destination + ".backup-tmp";
+  std::filesystem::remove(temporary, error);
+  sqlite3* target = nullptr;
+  const int opened = sqlite3_open_v2(temporary.c_str(), &target,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (opened != SQLITE_OK) {
+    const std::string message = target != nullptr ? sqlite3_errmsg(target) : "unknown error";
+    if (target != nullptr) {
+      sqlite3_close(target);
+    }
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            "could not create backup '" + temporary + "': " + message);
+  }
+
+  const auto copied = copy_database(impl_->db, target, "could not copy project");
+  sqlite3_close(target);
+  if (!copied) {
+    std::filesystem::remove(temporary, error);
+    return copied;
+  }
+
+  auto replaced = replace_file(temporary, destination);
+  if (!replaced) {
+    std::filesystem::remove(temporary, error);
+    return replaced;
+  }
+  return {};
+}
+
+Result<void> Project::restore(const std::string& database_path, const std::string& backup_path) {
+  std::error_code error;
+  if (!std::filesystem::exists(backup_path, error)) {
+    return make_error<void>(Status::InvalidInput, "project.backup_missing",
+                            "backup does not exist: '" + backup_path + "'");
+  }
+
+  sqlite3* source = nullptr;
+  if (sqlite3_open_v2(backup_path.c_str(), &source, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    const std::string message = source != nullptr ? sqlite3_errmsg(source) : "unknown error";
+    if (source != nullptr) {
+      sqlite3_close(source);
+    }
+    return make_error<void>(Status::CorruptProject, "project.backup_unreadable",
+                            "could not read backup '" + backup_path + "': " + message);
+  }
+
+  auto close_source = [&]() {
+    sqlite3_close(source);
+    source = nullptr;
+  };
+
+  auto version = read_schema_version(source);
+  if (!version) {
+    close_source();
+    return make_error<void>(version.diagnostic().status, version.diagnostic().code,
+                            version.diagnostic().message);
+  }
+  if (version.value() <= 0 || version.value() > kProjectSchemaVersion) {
+    close_source();
+    return make_error<void>(
+        version.value() > kProjectSchemaVersion ? Status::Unsupported : Status::CorruptProject,
+        "project.backup_schema",
+        "backup schema " + std::to_string(version.value()) + " is not a supported project schema");
+  }
+  {
+    Statement tables(source,
+                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='images'");
+    if (!tables.ok() || !tables.step() || tables.integer(0) != 1) {
+      close_source();
+      return make_error<void>(
+          Status::CorruptProject, "project.backup_invalid",
+          "backup is a database but not a Donkey project: '" + backup_path + "'");
+    }
+  }
+  {
+    Statement integrity(source, "PRAGMA integrity_check");
+    if (!integrity.ok() || !integrity.step() || integrity.text(0) != "ok") {
+      close_source();
+      return make_error<void>(Status::CorruptProject, "project.backup_integrity",
+                              "backup failed integrity_check: '" + backup_path + "'");
+    }
+  }
+
+  const std::string temporary = database_path + ".restore-tmp";
+  std::filesystem::remove(temporary, error);
+  sqlite3* target = nullptr;
+  const int opened = sqlite3_open_v2(temporary.c_str(), &target,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (opened != SQLITE_OK) {
+    const std::string message = target != nullptr ? sqlite3_errmsg(target) : "unknown error";
+    if (target != nullptr) {
+      sqlite3_close(target);
+    }
+    close_source();
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::InternalError, "project.restore_failed",
+                            "could not create restore target '" + temporary + "': " + message);
+  }
+
+  const auto copied = copy_database(source, target, "could not copy backup");
+  sqlite3_close(target);
+  close_source();
+  if (!copied) {
+    std::filesystem::remove(temporary, error);
+    return copied;
+  }
+
+  // Any stale WAL belonging to the old database must not be replayed over the
+  // restored file.
+  remove_sidecars(database_path);
+  auto replaced = replace_file(temporary, database_path);
+  if (!replaced) {
+    std::filesystem::remove(temporary, error);
+    return replaced;
+  }
+  return {};
 }
 
 }  // namespace donkey

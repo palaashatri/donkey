@@ -200,3 +200,46 @@ set_tests_properties(cli.project_annotation_missing_image PROPERTIES
 add_test(NAME cli.project_annotations_reject_bad_id
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} not-a-number)
 set_tests_properties(cli.project_annotations_reject_bad_id PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Project backup and restore.
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_BACKUP_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-backup.db")
+
+add_test(NAME cli.project_backup_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.project_backup_save PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 2"
+  DEPENDS cli.project_annotations_after_clear)
+
+add_test(NAME cli.project_backup_json
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
+                 --json)
+set_tests_properties(cli.project_backup_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 2.*\"integrity\": true"
+  DEPENDS cli.project_backup_save)
+
+add_test(NAME cli.project_backup_refuses_overwrite
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB})
+set_tests_properties(cli.project_backup_refuses_overwrite PROPERTIES
+  WILL_FAIL TRUE DEPENDS cli.project_backup_json)
+
+add_test(NAME cli.project_backup_force
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force --json)
+set_tests_properties(cli.project_backup_force PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"integrity\": true"
+  DEPENDS cli.project_backup_json)
+
+add_test(NAME cli.project_restore_json
+         COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
+set_tests_properties(cli.project_restore_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"images\": 1"
+  DEPENDS cli.project_backup_force)
+
+add_test(NAME cli.project_restore_rejects_non_database
+         COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.project_restore_rejects_non_database PROPERTIES
+  WILL_FAIL TRUE DEPENDS cli.project_restore_json)
