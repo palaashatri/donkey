@@ -24,8 +24,12 @@ Session::~Session() {
   if (worker_.joinable()) {
     worker_.join();
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  for (auto& t : retired_workers_) {
+  std::vector<std::thread> retired;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retired = std::move(retired_workers_);
+  }
+  for (auto& t : retired) {
     if (t.joinable()) {
       t.join();
     }
@@ -144,10 +148,11 @@ void Session::open_project(const std::string& path) {
     std::string failure_status;
     {
       auto project = Project::open(path);
-      if (generation_.load() != generation || token.is_cancelled()) {
-        if (token.is_cancelled()) {
-          fail("Operation cancelled", "Cancelled");
-        }
+      if (generation_.load() != generation) {
+        return;
+      }
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
         return;
       }
       if (!project) {
@@ -177,10 +182,11 @@ void Session::open_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!failure.empty()) {
@@ -425,6 +431,13 @@ void Session::restore_project(const std::string& backup_path) {
   }
   busy_.store(true);
   worker_ = std::thread([this, target_path, backup_path, generation, token]() {
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
+      return;
+    }
     auto restored = Project::restore(target_path, backup_path);
     if (generation_.load() != generation) {
       return;

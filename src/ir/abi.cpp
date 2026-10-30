@@ -72,7 +72,7 @@ AbiModel model_for(Architecture architecture, BinaryFormat format) {
       // `arguments` empty means infer_signature reports no parameters, which
       // is the honest reading rather than inventing stack slots.
       model.return_aliases = {{"eax", 4}, {"ax", 2}, {"al", 1}};
-      model.convention_name = "x86-32 cdecl ABI";
+      model.convention_name = "x86-32 ABI";
       break;
     default:
       break;

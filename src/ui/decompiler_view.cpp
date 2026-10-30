@@ -47,7 +47,7 @@ void refresh(UiState& state, const Document& document, const Function& function)
   if (state.async_decompile) {
     std::lock_guard<std::mutex> lock(state.async_decompile->mutex);
     if (state.async_decompile->ready && state.async_decompile->ready_address == function.address &&
-        state.pseudocode_document == &document) {
+        state.async_decompile->ready_name == name && state.pseudocode_document == &document) {
       state.pseudocode_status = std::move(state.async_decompile->ready_status);
       state.pseudocode_code = std::move(state.async_decompile->ready_code);
       state.pseudocode_text = std::move(state.async_decompile->ready_text);
@@ -93,9 +93,19 @@ void refresh(UiState& state, const Document& document, const Function& function)
     async_state->ready = false;
   }
 
-  std::thread([async_state, gen, image = document.loaded.image, analysis = document.analysis,
-               target]() {
-    auto lifted = lift_function(image, analysis, target);
+  auto doc = state.pseudocode_document_owner;
+  std::thread([async_state, gen, doc, target]() {
+    {
+      std::lock_guard<std::mutex> lock(async_state->mutex);
+      if (async_state->current_generation != gen) {
+        return;
+      }
+    }
+    if (!doc) {
+      return;
+    }
+
+    auto lifted = lift_function(doc->loaded.image, doc->analysis, target);
     std::string status;
     std::string code;
     std::string full_text;
@@ -125,6 +135,7 @@ void refresh(UiState& state, const Document& document, const Function& function)
       async_state->ready_text = std::move(full_text);
       async_state->ready_lines = std::move(lines);
       async_state->ready_address = target.address;
+      async_state->ready_name = target.name;
       async_state->ready = true;
     }
   }).detach();

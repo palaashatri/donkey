@@ -370,7 +370,8 @@ if(NOT WIN32)
 
   add_test(NAME cli.plugin_info_catches_ctor_crash
            COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_ctor_crash>)
-  set_tests_properties(cli.plugin_info_catches_ctor_crash PROPERTIES WILL_FAIL TRUE)
+  set_tests_properties(cli.plugin_info_catches_ctor_crash PROPERTIES
+    PASS_REGULAR_EXPRESSION "plugin\\.crashed")
 
   add_test(NAME cli.plugin_run_isolated_catches_crash
            COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_crash> --isolate --json)

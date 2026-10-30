@@ -423,6 +423,7 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
 
 void Workspace::draw_panels() {
   const auto document = session_.document();
+  state_.pseudocode_document_owner = document;
   // Keep the annotation snapshot alive for the whole frame; views only keep
   // the raw pointer in UiState.
   const auto annotations = session_.annotations();

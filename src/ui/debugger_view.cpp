@@ -31,20 +31,26 @@ void debugger(const Document& document, UiState& state) {
               ? "Complete"
               : (adapter->state() == debug::SessionState::Running ? "Partial" : "Unsupported")));
 
+  ImGui::PushTextWrapPos(0.0f);
   ImGui::TextDisabled(
       "Note: The Debugger view is currently connected to a mock architecture adapter. Native "
       "OS-level process debugging (Mach VM/ptrace/Win32) is not yet implemented.");
+  ImGui::PopTextWrapPos();
 
   ImGui::Spacing();
   if (adapter->state() == debug::SessionState::Disconnected ||
       adapter->state() == debug::SessionState::Exited) {
-    if (ImGui::Button("Launch Target")) {
+    if (ImGui::Button("Launch Simulation (Mock)")) {
       debug::LaunchConfig cfg;
       cfg.binary_path =
           !document.loaded.image.path.empty() ? document.loaded.image.path : "/bin/ls";
       cfg.stop_at_entry = true;
       (void)adapter->launch(cfg);
     }
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled(
+        "(Synthetic simulation; registers and call stack do not reflect loaded binary execution)");
+    ImGui::PopTextWrapPos();
   } else if (adapter->state() == debug::SessionState::Stopped) {
     if (ImGui::Button("Continue")) {
       (void)adapter->resume();

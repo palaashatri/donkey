@@ -431,22 +431,37 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   constexpr std::size_t kChunkSize = 65536;
   std::byte chunk[kChunkSize];
 
-  const int timeout_ms =
-      config.timeout_seconds > 0 ? static_cast<int>(config.timeout_seconds * 1000) : 5000;
+  const auto start_time = std::chrono::steady_clock::now();
+  const auto max_duration = std::chrono::milliseconds(
+      config.timeout_seconds > 0 ? static_cast<int>(config.timeout_seconds * 1000) : 5000);
 
   bool timed_out = false;
+  bool was_cancelled = false;
   while (true) {
+    if (options.cancellation_token.is_cancelled()) {
+      was_cancelled = true;
+      break;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    if (elapsed >= max_duration) {
+      timed_out = true;
+      break;
+    }
+    const int slice_ms = static_cast<int>(std::min<int64_t>(50, (max_duration - elapsed).count()));
+
     struct pollfd pfd{};
     pfd.fd = pipe_fds[0];
     pfd.events = POLLIN | POLLHUP;
 
-    const int poll_res = poll(&pfd, 1, timeout_ms);
+    const int poll_res = poll(&pfd, 1, slice_ms);
     if (poll_res == 0) {
-      // Timeout
-      timed_out = true;
-      break;
+      continue;
     }
     if (poll_res < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
       break;
     }
 
@@ -457,6 +472,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
     response_buffer.insert(response_buffer.end(), chunk, chunk + bytes_read);
   }
   close(pipe_fds[0]);
+
+  if (was_cancelled) {
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    return make_error<LoadedBinary>(Status::Cancelled, "io.cancelled", "file loading was cancelled",
+                                    0);
+  }
 
   if (timed_out) {
     kill(pid, SIGKILL);

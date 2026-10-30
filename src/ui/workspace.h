@@ -20,6 +20,7 @@ struct AsyncDecompileState {
   std::uint64_t current_generation = 0;
   bool ready = false;
   std::uint64_t ready_address = 0;
+  std::string ready_name;
   std::string ready_status;
   std::string ready_code;
   std::string ready_text;
@@ -53,6 +54,7 @@ struct UiState {
 
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded and executed asynchronously off the render thread.
+  std::shared_ptr<const Document> pseudocode_document_owner;
   const Document* pseudocode_document = nullptr;
   std::uint64_t pseudocode_address = 0;
   std::string pseudocode_function;

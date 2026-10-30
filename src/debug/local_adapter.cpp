@@ -14,7 +14,15 @@ LocalDebugAdapter::~LocalDebugAdapter() = default;
 void LocalDebugAdapter::clean_child() {}
 
 DebugCapabilities LocalDebugAdapter::capabilities() const noexcept {
-  return DebugCapabilities{};
+  DebugCapabilities caps;
+  caps.can_launch = false;
+  caps.can_attach = false;
+  caps.can_step = false;
+  caps.can_read_memory = false;
+  caps.can_write_memory = false;
+  caps.can_software_breakpoints = false;
+  caps.can_hardware_breakpoints = false;
+  return caps;
 }
 
 Result<bool> LocalDebugAdapter::launch(const LaunchConfig&) {
@@ -285,8 +293,14 @@ Result<Breakpoint> LocalDebugAdapter::set_breakpoint(std::uint64_t address) {
 }
 
 Result<bool> LocalDebugAdapter::remove_breakpoint(std::uint64_t id_or_address) {
-  breakpoints_.erase(id_or_address);
-  return true;
+  for (auto it = breakpoints_.begin(); it != breakpoints_.end(); ++it) {
+    if (it->second.id == id_or_address || it->first == id_or_address) {
+      breakpoints_.erase(it);
+      return true;
+    }
+  }
+  return make_error<bool>(Status::InvalidInput, "debug.breakpoint_not_found",
+                          "breakpoint does not exist");
 }
 
 Result<std::vector<std::byte>> LocalDebugAdapter::read_memory(std::uint64_t address,

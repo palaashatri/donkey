@@ -42,6 +42,9 @@ Result<uint64_t> PatchManager::stage_patch(uint64_t file_offset, std::span<const
   const uint64_t patch_start = file_offset;
   const uint64_t patch_end = file_offset + replacement.size();
   for (const auto& existing : history_) {
+    if (existing.reverted) {
+      continue;
+    }
     const uint64_t exist_start = existing.file_offset;
     const uint64_t exist_end = existing.file_offset + existing.replacement_bytes.size();
     if (patch_start < exist_end && exist_start < patch_end) {
@@ -67,6 +70,7 @@ Result<uint64_t> PatchManager::stage_patch(uint64_t file_offset, std::span<const
       .author = std::move(author),
       .timestamp = static_cast<uint64_t>(now),
       .applied = false,
+      .reverted = false,
   };
 
   if (!entry.virtual_address && image_) {
@@ -98,6 +102,13 @@ Result<void> PatchManager::apply_patch(uint64_t patch_id, std::span<uint8_t> fil
 
   if (it->applied) {
     return Result<void>{};
+  }
+
+  if (it->reverted) {
+    return Diagnostic::make(
+        Status::InvalidInput, "patch.retired",
+        "Patch ID " + std::to_string(patch_id) + " has been reverted and cannot be reapplied",
+        it->file_offset);
   }
 
   // Safe overflow and range check
@@ -153,6 +164,7 @@ Result<void> PatchManager::revert_patch(uint64_t patch_id, std::span<uint8_t> fi
   std::memcpy(file_bytes.data() + it->file_offset, it->original_bytes.data(),
               it->original_bytes.size());
   it->applied = false;
+  it->reverted = true;
 
   if (invalidation_callback_) {
     invalidation_callback_(it->file_offset, it->original_bytes.size());

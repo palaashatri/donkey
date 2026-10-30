@@ -191,9 +191,16 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& 
     // Child reported an inspection error
     int st_val = 0;
     std::string err_code, err_msg;
-    read_exact(pipe_fds[0], &st_val, sizeof(st_val), deadline);
-    read_string(pipe_fds[0], err_code, deadline);
-    read_string(pipe_fds[0], err_msg, deadline);
+    if (!read_exact(pipe_fds[0], &st_val, sizeof(st_val), deadline) ||
+        !read_string(pipe_fds[0], err_code, deadline) ||
+        !read_string(pipe_fds[0], err_msg, deadline)) {
+      kill(pid, SIGKILL);
+      close(pipe_fds[0]);
+      int status = 0;
+      waitpid(pid, &status, 0);
+      return Diagnostic::make(Status::InternalError, "plugin.ipc_error",
+                              "Failed to read error diagnostic from plugin worker");
+    }
     close(pipe_fds[0]);
     int status = 0;
     waitpid(pid, &status, 0);
@@ -202,14 +209,21 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& 
 
   // Child reported success
   PluginManifest m;
-  read_string(pipe_fds[0], m.id, deadline);
-  read_string(pipe_fds[0], m.name, deadline);
-  read_string(pipe_fds[0], m.version, deadline);
-  read_string(pipe_fds[0], m.author, deadline);
-  read_string(pipe_fds[0], m.description, deadline);
-  read_exact(pipe_fds[0], &m.abi_version_major, sizeof(m.abi_version_major), deadline);
-  read_exact(pipe_fds[0], &m.abi_version_minor, sizeof(m.abi_version_minor), deadline);
-  read_exact(pipe_fds[0], &m.requested_capabilities, sizeof(m.requested_capabilities), deadline);
+  if (!read_string(pipe_fds[0], m.id, deadline) || !read_string(pipe_fds[0], m.name, deadline) ||
+      !read_string(pipe_fds[0], m.version, deadline) ||
+      !read_string(pipe_fds[0], m.author, deadline) ||
+      !read_string(pipe_fds[0], m.description, deadline) ||
+      !read_exact(pipe_fds[0], &m.abi_version_major, sizeof(m.abi_version_major), deadline) ||
+      !read_exact(pipe_fds[0], &m.abi_version_minor, sizeof(m.abi_version_minor), deadline) ||
+      !read_exact(pipe_fds[0], &m.requested_capabilities, sizeof(m.requested_capabilities),
+                  deadline)) {
+    kill(pid, SIGKILL);
+    close(pipe_fds[0]);
+    int status = 0;
+    waitpid(pid, &status, 0);
+    return Diagnostic::make(Status::InternalError, "plugin.ipc_error",
+                            "Failed to read complete manifest from plugin worker");
+  }
 
   close(pipe_fds[0]);
   int status = 0;

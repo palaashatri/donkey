@@ -187,11 +187,52 @@ TEST(PatchTest, SafeOutOfBoundsCheckOnApplyAndRevert) {
   auto stage_res = manager.stage_patch(10, orig, repl);
   ASSERT_TRUE(stage_res.has_value());
 
-  // Buffer smaller than offset + size
+  // Buffer smaller than offset + size on apply
   std::vector<uint8_t> short_buffer = {0x90, 0x90, 0x90};
   auto apply_res = manager.apply_patch(stage_res.value(), short_buffer);
   EXPECT_FALSE(apply_res.has_value());
   EXPECT_EQ(apply_res.diagnostic().code, "patch.out_of_bounds");
+
+  // Apply to a sufficiently large buffer
+  std::vector<uint8_t> valid_buffer(20, 0x90);
+  auto valid_apply = manager.apply_patch(stage_res.value(), valid_buffer);
+  ASSERT_TRUE(valid_apply.has_value());
+
+  // Buffer smaller than offset + size on revert
+  auto revert_res = manager.revert_patch(stage_res.value(), short_buffer);
+  EXPECT_FALSE(revert_res.has_value());
+  EXPECT_EQ(revert_res.diagnostic().code, "patch.out_of_bounds");
+}
+
+TEST(PatchTest, ReplacedPatchAfterRevert) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl1[] = {0xAA, 0xAA};
+  const uint8_t repl2[] = {0xBB, 0xBB};
+
+  auto p1 = manager.stage_patch(5, orig, repl1);
+  ASSERT_TRUE(p1.has_value());
+
+  std::vector<uint8_t> buf(20, 0x90);
+  ASSERT_TRUE(manager.apply_patch(p1.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0xAA);
+
+  // Revert patch 1
+  ASSERT_TRUE(manager.revert_patch(p1.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0x90);
+
+  // Stage replacement patch 2 at the same offset succeeds without overlap error
+  auto p2 = manager.stage_patch(5, orig, repl2);
+  ASSERT_TRUE(p2.has_value());
+
+  // Apply patch 2 succeeds
+  ASSERT_TRUE(manager.apply_patch(p2.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0xBB);
+
+  // Re-applying reverted patch 1 is rejected as retired
+  auto reapply = manager.apply_patch(p1.value(), buf);
+  EXPECT_FALSE(reapply.has_value());
+  EXPECT_EQ(reapply.diagnostic().code, "patch.retired");
 }
 
 }  // namespace

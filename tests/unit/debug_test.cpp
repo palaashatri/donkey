@@ -232,6 +232,19 @@ TEST(Debug, PermissionDeniedAndSafetyInvariants) {
   ASSERT_FALSE(launch_res.has_value());
   EXPECT_TRUE(launch_res.diagnostic().code == "debug.invalid_path" ||
               launch_res.diagnostic().code == "debug.unsupported_platform");
+
+  // Rejects removing nonexistent breakpoint
+  auto rm_res = adapter->remove_breakpoint(0xdeadbeef);
+  EXPECT_FALSE(rm_res.has_value());
+  EXPECT_TRUE(rm_res.diagnostic().code == "debug.breakpoint_not_found" ||
+              rm_res.diagnostic().code == "debug.unsupported_platform");
+
+#if defined(_WIN32)
+  auto caps = adapter->capabilities();
+  EXPECT_FALSE(caps.can_launch);
+  EXPECT_FALSE(caps.can_step);
+  EXPECT_FALSE(caps.can_read_memory);
+#endif
 }
 
 }  // namespace
