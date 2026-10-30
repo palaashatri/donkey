@@ -1087,15 +1087,15 @@ Only these statuses are permitted:
 
 No freehand `100%`, `production ready`, or `feature parity` without a test-grounded scope. Subsystem score is **not** the average of impressions. The authoritative metric is `passed required criteria / applicable required criteria`, together with the coverage matrix and critical blockers; unimplemented criteria count as failures, not N/A.
 
-### 17.2 Current truth at authoring (2026-10-13)
+### 17.2 Current truth at authoring (2026-10-13, updated 2026-10-30)
 
-**Nothing has been verified.** This design does not imply code, CI, benchmarks, binaries, builds or tests exist.
+**M0–M2 are partially implemented on macOS arm64 only.** No CI result has been recorded yet and no other platform has been validated.
 
 | Milestone | State | Evidence | Blocker/next action |
 |---|---|---|---|
-| M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless preset configures/builds; 15/15 CTest pass; `donkey-cli 0.1.0`; clang-format clean. GUI shell and CI results outstanding. | Implement T004 SDL3/ImGui shell; obtain CI results |
-| M1 Import/UI | IN_PROGRESS | 2026-10-30 macOS arm64: ELF/PE/Mach-O (thin and fat) metadata + imports/exports, offset↔VA mapping, SHA-256, `donkey-cli info --json`; truncation sweep and header-mutation tests pass (34/34 CTest). No GUI import or project persistence yet. | Build UI workspace and project save/reopen |
-| M2 Disassembly | NOT_STARTED | None | Loaders + decoder + project |
+| M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless preset configures/builds; 51/51 CTest pass; `donkey-cli 0.1.0`; clang-format clean. GUI shell and CI results outstanding. | Implement T004 SDL3/ImGui shell; obtain CI results |
+| M1 Import/UI | IN_PROGRESS | 2026-10-30 macOS arm64: ELF/PE/Mach-O (thin and fat) metadata + imports/exports, offset↔VA mapping, SHA-256, `donkey-cli info --json`; truncation sweep and header-mutation tests pass. No GUI import or project persistence yet. | Build UI workspace and project save/reopen |
+| M2 Disassembly | IN_PROGRESS | 2026-10-30 macOS arm64: Capstone 5.0.9 decode for x86/x86-64/AArch64, call/jump/return classification, direct targets, x86 RIP-relative data refs; `disasm`, `strings`, `functions`, `xrefs`, `analyze` CLI commands with schema-versioned JSON; 51/51 CTest pass. Linear/seeded analysis only — no CFG, no function extents, no hex view, no navigable UI. | CFG + function extents, hex view, GUI workspace |
 | M3 Analysis graphs | NOT_STARTED | None | M2 foundations |
 | M4 IR/isolation | NOT_STARTED | None | M3 graph + decoder semantics |
 | M5 Decompiler | NOT_STARTED | None | Verified lifter and IR |

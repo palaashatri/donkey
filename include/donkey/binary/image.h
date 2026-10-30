@@ -115,7 +115,18 @@ struct LoadOptions {
   std::uint64_t max_file_bytes = 1ULL << 31;
 };
 
+/// A parsed image together with the bytes it was parsed from. Callers that
+/// decode or display hex keep one copy; the image never owns mutable state.
+struct LoadedBinary {
+  BinaryImage image;
+  std::vector<std::byte> data;
+};
+
 /// Read and parse a file from disk. Opening a binary never executes it.
+[[nodiscard]] Result<LoadedBinary> load_binary(const std::string& path,
+                                               const LoadOptions& options = {});
+
+/// Parse-only convenience wrapper for callers that do not need the bytes.
 [[nodiscard]] Result<BinaryImage> load_binary_file(const std::string& path,
                                                    const LoadOptions& options = {});
 
