@@ -18,6 +18,16 @@ target_include_directories(test_plugin_ctor_crash PRIVATE ${CMAKE_CURRENT_SOURCE
 add_library(test_plugin_non_terminated MODULE fixtures/plugins/non_terminated_plugin.c)
 target_include_directories(test_plugin_non_terminated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
+set_target_properties(
+  test_plugin_valid
+  test_plugin_bad_abi
+  test_plugin_crash
+  test_plugin_hang
+  test_plugin_ctor_crash
+  test_plugin_non_terminated
+  PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/binary_test.cpp

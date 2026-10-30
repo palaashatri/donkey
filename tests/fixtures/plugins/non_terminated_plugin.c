@@ -26,6 +26,6 @@ static const DonkeyPluginDescriptor kDescriptor = {
     no_null_term_execute,
 };
 
-const DonkeyPluginDescriptor* donkey_plugin_entry(void) {
+DONKEY_PLUGIN_EXPORT const DonkeyPluginDescriptor* donkey_plugin_entry(void) {
   return &kDescriptor;
 }

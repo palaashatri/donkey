@@ -645,6 +645,23 @@ TEST(Binary, IsolatedLoaderEnforcesTimeoutOnWorkerHang) {
   EXPECT_EQ(result.diagnostic().status, donkey::Status::ResourceLimit);
 }
 
+TEST(Binary, IsolatedLoaderHonorsCancellation) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+
+  donkey::LoadOptions options;
+  options.cancellation_token.cancel();
+  donkey::IsolationConfig config;
+  config.force_worker_hang = true;
+  config.timeout_seconds = 30;
+
+  auto result = donkey::load_binary_isolated(fixture_path("tiny-elf-x86_64"), options, config);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "io.cancelled");
+  EXPECT_EQ(result.diagnostic().status, donkey::Status::Cancelled);
+}
+
 TEST(Binary, IsolatedLoaderFailsClosedWhenIsolationUnavailable) {
   if (donkey::process_isolation_available()) {
     GTEST_SKIP() << "OS process isolation is supported on this platform";
