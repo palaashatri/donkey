@@ -7,6 +7,12 @@
       "size": 1152
     },
     {
+      "name": "tiny-elf-i386",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "12b48c5ce6669b9d2d98c438199bac760fd4d57d44c4d35f01ea04ad8c9e3659",
+      "size": 1008
+    },
+    {
       "name": "tiny-pe-x86_64.exe",
       "provenance": "generated from first principles by tools/make_fixtures.py",
       "sha256": "486ea4e73369d4c2f0ce16a23ee8e95a0a5ce22cbff2e225a7b29c45715760e2",

@@ -76,10 +76,11 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   const auto* bytes = ident.value().data();
   const auto elf_class = static_cast<std::uint8_t>(bytes[4]);
   const auto data_encoding = static_cast<std::uint8_t>(bytes[5]);
-  if (elf_class != 2) {
+  if (elf_class != 1 && elf_class != 2) {
     return elf_error(Status::Unsupported, "elf.unsupported_class",
-                     "only 64-bit ELF images are supported", 4);
+                     "only 32-bit and 64-bit ELF images are supported", 4);
   }
+  const bool is_64 = elf_class == 2;
   Endian endian = Endian::Little;
   if (data_encoding == 1) {
     endian = Endian::Little;
@@ -94,11 +95,28 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   }
 
   image.endian = endian;
-  image.bits = 64;
+  image.bits = is_64 ? 64 : 32;
 
   auto read16 = [&](std::uint64_t offset) { return reader.u16(offset, endian); };
   auto read32 = [&](std::uint64_t offset) { return reader.u32(offset, endian); };
   auto read64 = [&](std::uint64_t offset) { return reader.u64(offset, endian); };
+  // ELF32 stores every address/offset in 32 bits; widen into the 64-bit fields.
+  auto read_word = [&](std::uint64_t offset) -> Result<std::uint64_t> {
+    if (is_64) {
+      return read64(offset);
+    }
+    auto value = read32(offset);
+    if (!value) {
+      return value.diagnostic();
+    }
+    return static_cast<std::uint64_t>(value.value());
+  };
+
+  // e_entry, e_phoff, e_shoff and the entry-size/count pairs sit at different
+  // offsets in the two header layouts (e_phoff/e_shoff in 32-bit are u32).
+  const auto header_field = [&](std::uint64_t field_64, std::uint64_t field_32) {
+    return is_64 ? field_64 : field_32;
+  };
 
   auto type = read16(16);
   if (!type) return type.diagnostic();
@@ -106,21 +124,21 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   if (!machine) return machine.diagnostic();
   auto version = read32(20);
   if (!version) return version.diagnostic();
-  auto entry = read64(24);
+  auto entry = read_word(24);
   if (!entry) return entry.diagnostic();
-  auto program_offset = read64(32);
+  auto program_offset = read_word(header_field(32, 28));
   if (!program_offset) return program_offset.diagnostic();
-  auto section_offset = read64(40);
+  auto section_offset = read_word(header_field(40, 32));
   if (!section_offset) return section_offset.diagnostic();
-  auto program_entry_size = read16(54);
+  auto program_entry_size = read16(header_field(54, 42));
   if (!program_entry_size) return program_entry_size.diagnostic();
-  auto program_count = read16(56);
+  auto program_count = read16(header_field(56, 44));
   if (!program_count) return program_count.diagnostic();
-  auto section_entry_size = read16(58);
+  auto section_entry_size = read16(header_field(58, 46));
   if (!section_entry_size) return section_entry_size.diagnostic();
-  auto section_count = read16(60);
+  auto section_count = read16(header_field(60, 48));
   if (!section_count) return section_count.diagnostic();
-  auto shstr_index = read16(62);
+  auto shstr_index = read16(header_field(62, 50));
   if (!shstr_index) return shstr_index.diagnostic();
 
   if (version.value() != 1) {
@@ -130,39 +148,61 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
 
   image.architecture = machine_to_architecture(machine.value());
   image.entry_point = entry.value();
-  image.format_detail = std::string(elf_type_name(type.value())) + " ELF64";
+  image.format_detail = std::string(elf_type_name(type.value())) + (is_64 ? " ELF64" : " ELF32");
 
   // Program headers: mapped segments.
   std::uint64_t lowest_load = 0;
   bool have_load = false;
   const std::uint64_t ph_count = program_count.value();
   if (ph_count != 0) {
-    if (program_entry_size.value() < 56) {
+    const std::uint64_t program_header_size = is_64 ? 56 : 32;
+    if (program_entry_size.value() < program_header_size) {
       return elf_error(Status::InvalidInput, "elf.bad_program_header_size",
-                       "program header entry is too small", 54);
+                       "program header entry is too small", is_64 ? 54 : 42);
     }
     if (ph_count > kMaxSegments) {
       return elf_error(Status::ResourceLimit, "elf.too_many_segments",
-                       "program header count exceeds the limit", 56);
+                       "program header count exceeds the limit", is_64 ? 56 : 44);
     }
     for (std::uint64_t i = 0; i < ph_count; ++i) {
       std::uint64_t header_offset = 0;
       if (checked::add_overflow(program_offset.value(), i * program_entry_size.value(),
                                 header_offset)) {
         return elf_error(Status::InvalidInput, "elf.program_header_overflow",
-                         "program header table overflows", 32);
+                         "program header table overflows", is_64 ? 32 : 28);
       }
-      auto header = reader.slice(header_offset, 56);
+      auto header = reader.slice(header_offset, program_header_size);
       if (!header) {
         return header.diagnostic();
       }
       const ByteReader ph(header.value());
-      auto p_type = ph.u32(0, endian);
-      auto p_flags = ph.u32(4, endian);
-      auto p_offset = ph.u64(8, endian);
-      auto p_vaddr = ph.u64(16, endian);
-      auto p_filesz = ph.u64(32, endian);
-      auto p_memsz = ph.u64(40, endian);
+      Result<std::uint32_t> p_type = elf_error(Status::InternalError, "elf.program_header_read",
+                                               "internal program header read", header_offset);
+      Result<std::uint32_t> p_flags = p_type;
+      Result<std::uint64_t> p_offset = p_type.diagnostic();
+      Result<std::uint64_t> p_vaddr = p_offset;
+      Result<std::uint64_t> p_filesz = p_offset;
+      Result<std::uint64_t> p_memsz = p_offset;
+      if (is_64) {
+        p_type = ph.u32(0, endian);
+        p_flags = ph.u32(4, endian);
+        p_offset = ph.u64(8, endian);
+        p_vaddr = ph.u64(16, endian);
+        p_filesz = ph.u64(32, endian);
+        p_memsz = ph.u64(40, endian);
+      } else {
+        // Elf32_Phdr: type, offset, vaddr, paddr, filesz, memsz, flags, align.
+        p_type = ph.u32(0, endian);
+        auto offset32 = ph.u32(4, endian);
+        auto vaddr32 = ph.u32(8, endian);
+        auto filesz32 = ph.u32(16, endian);
+        auto memsz32 = ph.u32(20, endian);
+        p_flags = ph.u32(24, endian);
+        if (offset32) p_offset = static_cast<std::uint64_t>(offset32.value());
+        if (vaddr32) p_vaddr = static_cast<std::uint64_t>(vaddr32.value());
+        if (filesz32) p_filesz = static_cast<std::uint64_t>(filesz32.value());
+        if (memsz32) p_memsz = static_cast<std::uint64_t>(memsz32.value());
+      }
       if (!p_type || !p_flags || !p_offset || !p_vaddr || !p_filesz || !p_memsz) {
         return elf_error(Status::InternalError, "elf.program_header_read",
                          "failed to read a validated program header", header_offset);
@@ -197,25 +237,27 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   // table has been validated.
   std::uint64_t sh_count = section_count.value();
   if (sh_count == 0 && section_offset.value() != 0) {
+    // ELF reserves sh_size of section 0 for the real count when shnum is 0.
     std::uint64_t extended_offset = 0;
-    if (!checked::add_overflow(section_offset.value(), 32, extended_offset)) {
+    if (!checked::add_overflow(section_offset.value(), is_64 ? 32 : 20, extended_offset)) {
       return elf_error(Status::InvalidInput, "elf.section_header_overflow",
                        "section header table overflows", section_offset.value());
     }
-    auto extended = read64(extended_offset);
+    auto extended = read_word(extended_offset);
     if (!extended) {
       return extended.diagnostic();
     }
     sh_count = extended.value();
     if (sh_count > kMaxSections) {
       return elf_error(Status::ResourceLimit, "elf.too_many_sections",
-                       "extended section count exceeds the limit", 60);
+                       "extended section count exceeds the limit", is_64 ? 60 : 48);
     }
   }
   std::uint64_t shstr = shstr_index.value();
   if (shstr == 0xFFFFU && section_offset.value() != 0) {
+    // sh_link of section 0 holds the real string-table index.
     std::uint64_t extended_offset = 0;
-    if (!checked::add_overflow(section_offset.value(), 40, extended_offset)) {
+    if (!checked::add_overflow(section_offset.value(), is_64 ? 40 : 24, extended_offset)) {
       return elf_error(Status::InvalidInput, "elf.section_header_overflow",
                        "section header table overflows", section_offset.value());
     }
@@ -228,13 +270,14 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
 
   std::vector<RawSection> raw_sections;
   if (sh_count != 0) {
-    if (section_entry_size.value() < 64) {
+    const std::uint64_t section_header_size = is_64 ? 64 : 40;
+    if (section_entry_size.value() < section_header_size) {
       return elf_error(Status::InvalidInput, "elf.bad_section_header_size",
-                       "section header entry is too small", 58);
+                       "section header entry is too small", is_64 ? 58 : 46);
     }
     if (sh_count > kMaxSections) {
       return elf_error(Status::ResourceLimit, "elf.too_many_sections",
-                       "section count exceeds the limit", 60);
+                       "section count exceeds the limit", is_64 ? 60 : 48);
     }
     raw_sections.reserve(static_cast<std::size_t>(sh_count));
     for (std::uint64_t i = 0; i < sh_count; ++i) {
@@ -242,9 +285,9 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
       if (checked::add_overflow(section_offset.value(), i * section_entry_size.value(),
                                 header_offset)) {
         return elf_error(Status::InvalidInput, "elf.section_header_overflow",
-                         "section header table overflows", 40);
+                         "section header table overflows", is_64 ? 40 : 32);
       }
-      auto header = reader.slice(header_offset, 64);
+      auto header = reader.slice(header_offset, section_header_size);
       if (!header) {
         return header.diagnostic();
       }
@@ -252,27 +295,65 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
       RawSection raw;
       auto name_offset = sh.u32(0, endian);
       auto sh_type = sh.u32(4, endian);
-      auto flags = sh.u64(8, endian);
-      auto address = sh.u64(16, endian);
-      auto offset = sh.u64(24, endian);
-      auto size = sh.u64(32, endian);
-      auto link = sh.u32(40, endian);
-      auto alignment = sh.u64(48, endian);
-      auto entry_size = sh.u64(56, endian);
-      if (!name_offset || !sh_type || !flags || !address || !offset || !size || !link ||
-          !alignment || !entry_size) {
+      bool ok = name_offset.has_value() && sh_type.has_value();
+      std::uint64_t flags = 0;
+      std::uint64_t address = 0;
+      std::uint64_t offset = 0;
+      std::uint64_t size = 0;
+      std::uint32_t link = 0;
+      std::uint64_t alignment = 0;
+      std::uint64_t entry_size = 0;
+      if (is_64) {
+        auto f = sh.u64(8, endian);
+        auto a = sh.u64(16, endian);
+        auto o = sh.u64(24, endian);
+        auto s = sh.u64(32, endian);
+        auto l = sh.u32(40, endian);
+        auto al = sh.u64(48, endian);
+        auto es = sh.u64(56, endian);
+        ok = ok && f && a && o && s && l && al && es;
+        if (ok) {
+          flags = f.value();
+          address = a.value();
+          offset = o.value();
+          size = s.value();
+          link = l.value();
+          alignment = al.value();
+          entry_size = es.value();
+        }
+      } else {
+        // Elf32_Shdr: flags and addresses are 32-bit.
+        auto f = sh.u32(8, endian);
+        auto a = sh.u32(12, endian);
+        auto o = sh.u32(16, endian);
+        auto s = sh.u32(20, endian);
+        auto l = sh.u32(24, endian);
+        auto al = sh.u32(32, endian);
+        auto es = sh.u32(36, endian);
+        ok = ok && f && a && o && s && l && al && es;
+        if (ok) {
+          flags = f.value();
+          address = a.value();
+          offset = o.value();
+          size = s.value();
+          link = l.value();
+          alignment = al.value();
+          entry_size = es.value();
+        }
+      }
+      if (!ok) {
         return elf_error(Status::InternalError, "elf.section_header_read",
                          "failed to read a validated section header", header_offset);
       }
       raw.name_offset = name_offset.value();
       raw.type = sh_type.value();
-      raw.flags = flags.value();
-      raw.address = address.value();
-      raw.offset = offset.value();
-      raw.size = size.value();
-      raw.link = link.value();
-      raw.alignment = alignment.value();
-      raw.entry_size = entry_size.value();
+      raw.flags = flags;
+      raw.address = address;
+      raw.offset = offset;
+      raw.size = size;
+      raw.link = link;
+      raw.alignment = alignment;
+      raw.entry_size = entry_size;
       if (raw.type != 8 /* SHT_NOBITS */ &&
           !checked::in_range(raw.offset, raw.size, reader.size())) {
         return elf_error(Status::InvalidInput, "elf.section_out_of_bounds",
@@ -319,11 +400,12 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   using Key = std::tuple<std::string, std::uint64_t, std::uint8_t, bool>;
   std::set<Key> seen;
   std::size_t symbol_count = 0;
+  const std::uint64_t symbol_entry_size = is_64 ? 24 : 16;
   for (const RawSection& raw : raw_sections) {
     if (raw.type != 2 && raw.type != 11) {
       continue;
     }
-    if (raw.entry_size < 24 || raw.link >= raw_sections.size()) {
+    if (raw.entry_size < symbol_entry_size || raw.link >= raw_sections.size()) {
       continue;
     }
     const RawSection& strings = raw_sections[raw.link];
@@ -352,24 +434,53 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
         return elf_error(Status::InvalidInput, "elf.symbol_overflow", "symbol table overflows",
                          raw.offset);
       }
-      auto symbol_entry = reader.slice(entry_offset, 24);
+      auto symbol_entry = reader.slice(entry_offset, symbol_entry_size);
       if (!symbol_entry) {
         return symbol_entry.diagnostic();
       }
       const ByteReader sym(symbol_entry.value());
       auto name_offset = sym.u32(0, endian);
-      auto info = sym.u8(4);
-      auto other = sym.u8(5);
-      auto section_index = sym.u16(6, endian);
-      auto value = sym.u64(8, endian);
-      auto size = sym.u64(16, endian);
-      if (!name_offset || !info || !other || !section_index || !value || !size) {
+      bool ok = name_offset.has_value();
+      std::uint8_t info = 0;
+      std::uint16_t section_index = 0;
+      std::uint64_t value = 0;
+      std::uint64_t size = 0;
+      if (is_64) {
+        // Elf64_Sym: name, info, other, shndx, value, size.
+        auto info_byte = sym.u8(4);
+        auto other_byte = sym.u8(5);
+        auto shndx = sym.u16(6, endian);
+        auto v = sym.u64(8, endian);
+        auto s = sym.u64(16, endian);
+        ok = ok && info_byte && other_byte && shndx && v && s;
+        if (ok) {
+          info = info_byte.value();
+          section_index = shndx.value();
+          value = v.value();
+          size = s.value();
+        }
+      } else {
+        // Elf32_Sym: name, value, size, info, other, shndx.
+        auto v = sym.u32(4, endian);
+        auto s = sym.u32(8, endian);
+        auto info_byte = sym.u8(12);
+        auto other_byte = sym.u8(13);
+        auto shndx = sym.u16(14, endian);
+        ok = ok && v && s && info_byte && other_byte && shndx;
+        if (ok) {
+          info = info_byte.value();
+          section_index = shndx.value();
+          value = v.value();
+          size = s.value();
+        }
+      }
+      if (!ok) {
         return elf_error(Status::InternalError, "elf.symbol_read",
                          "failed to read a validated symbol", entry_offset);
       }
       ++symbol_count;
 
-      const std::uint8_t symbol_type = static_cast<std::uint8_t>(info.value() & 0x0FU);
+      const std::uint8_t symbol_type = static_cast<std::uint8_t>(info & 0x0FU);
       if (symbol_type == 3 || symbol_type == 4) {  // STT_SECTION, STT_FILE
         continue;
       }
@@ -390,10 +501,10 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
       }
       Symbol symbol;
       symbol.name = sanitize_name(raw_name.substr(0, terminator));
-      symbol.address = value.value();
-      symbol.size = size.value();
-      symbol.imported = section_index.value() == 0;
-      const std::uint8_t binding = static_cast<std::uint8_t>(info.value() >> 4U);
+      symbol.address = value;
+      symbol.size = size;
+      symbol.imported = section_index == 0;
+      const std::uint8_t binding = static_cast<std::uint8_t>(info >> 4U);
       symbol.binding = binding == 0   ? SymbolBinding::Local
                        : binding == 1 ? SymbolBinding::Global
                        : binding == 2 ? SymbolBinding::Weak

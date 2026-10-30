@@ -111,12 +111,17 @@ struct Scan {
   std::vector<std::uint8_t> argument_width;
   bool has_value_return = false;
   bool has_bare_return = false;
+  // Default to the width of the ABI's own return register (rax/x0: 8, eax: 4)
+  // so a function that never writes it still reports the right size.
   std::uint8_t current_return_width = 8;
   std::uint8_t widest_return_width = 0;
 };
 
 Scan scan(const IrFunction& function, const AbiModel& model) {
   Scan result;
+  if (!model.return_aliases.empty()) {
+    result.current_return_width = model.return_aliases.front().width;
+  }
   const std::size_t argument_count = model.arguments.size();
   result.argument_read.assign(argument_count, false);
   result.argument_written.assign(argument_count, false);
