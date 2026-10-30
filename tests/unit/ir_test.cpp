@@ -212,6 +212,25 @@ std::vector<std::byte> x86_written_argument_function() {
   return out;
 }
 
+/// x86-32 cdecl frame:
+///   push ebp; mov ebp, esp; mov eax, [ebp+8]; add eax, [ebp+12]; pop ebp; ret
+/// Arguments are stack-passed, so the signature is `u32 sub_1000(void)`.
+std::vector<std::byte> x86_32_frame_function() {
+  const std::uint8_t bytes[] = {
+      0x55,              // push ebp
+      0x89, 0xe5,        // mov ebp, esp
+      0x8b, 0x45, 0x08,  // mov eax, [ebp+8]
+      0x03, 0x45, 0x0c,  // add eax, [ebp+0xc]
+      0x5d,              // pop ebp
+      0xc3,              // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
 BinaryImage synthetic_image(std::size_t size) {
   BinaryImage image;
   image.path = "<synthetic>";
@@ -563,6 +582,36 @@ TEST(Ir, DoesNotInferAnArgumentRegisterThatIsWrittenFirst) {
   EXPECT_NE(text.value().find("u32 sub_1000(void)"), std::string::npos) << text.value();
 }
 
+TEST(Ir, LiftsX86_32FrameFunction) {
+  const auto data = x86_32_frame_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86;
+  image.bits = 32;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  // cdecl passes arguments on the stack, so no register parameters are claimed.
+  EXPECT_TRUE(function.parameters.empty());
+  EXPECT_EQ(function.return_width, 4);
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("u32 sub_1000(void)"), std::string::npos) << code;
+  EXPECT_NE(code.find("esp = esp - 0x4;"), std::string::npos) << code;
+  EXPECT_NE(code.find("*(u32 *)(esp) = ebp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("ebp = esp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("eax = *(u32 *)(ebp + 0x8);"), std::string::npos) << code;
+  EXPECT_NE(code.find("return eax;"), std::string::npos) << code;
+}
+
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {
   const auto data = aarch64_two_argument_function();
   auto image = synthetic_image(data.size());
@@ -621,7 +670,7 @@ TEST(Ir, InfersVoidSignatureAndMarksMixedReturnPaths) {
 TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
   IrFunction function = single_block_function();
   function.return_width = 0;
-  donkey::infer_signature(function, Architecture::X86);
+  donkey::infer_signature(function, Architecture::RiscV64);
   EXPECT_FALSE(function.signature_inferred);
   EXPECT_TRUE(function.parameters.empty());
   EXPECT_EQ(function.return_width, 0);
