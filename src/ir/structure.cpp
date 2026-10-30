@@ -10,62 +10,6 @@
 #include <vector>
 
 namespace donkey::detail {
-namespace {
-
-using BlockId = std::size_t;
-constexpr BlockId kNoBlock = static_cast<BlockId>(-1);
-
-/// Fixed-size bit set over block indices. Functions are bounded by the
-/// analysis limits, so a flat word vector is enough and avoids allocation per
-/// dominator iteration.
-class BitSet {
- public:
-  BitSet() = default;
-  explicit BitSet(std::size_t size) : size_(size), words_((size + 63) / 64, 0) {}
-
-  static BitSet full(std::size_t size) {
-    BitSet set(size);
-    for (std::uint64_t& word : set.words_) {
-      word = ~std::uint64_t{0};
-    }
-    set.mask();
-    return set;
-  }
-
-  [[nodiscard]] bool test(std::size_t index) const {
-    return (words_[index / 64] >> (index % 64)) & 1U;
-  }
-  void set(std::size_t index) { words_[index / 64] |= std::uint64_t{1} << (index % 64); }
-  void intersect(const BitSet& other) {
-    for (std::size_t i = 0; i < words_.size(); ++i) {
-      words_[i] &= other.words_[i];
-    }
-  }
-  [[nodiscard]] std::size_t count() const {
-    std::size_t total = 0;
-    for (const std::uint64_t word : words_) {
-      total += static_cast<std::size_t>(__builtin_popcountll(word));
-    }
-    return total;
-  }
-  [[nodiscard]] bool equals(const BitSet& other) const { return words_ == other.words_; }
-
- private:
-  void mask() {
-    if (!words_.empty() && size_ % 64 != 0) {
-      words_.back() &= (std::uint64_t{1} << (size_ % 64)) - 1;
-    }
-  }
-
-  std::size_t size_ = 0;
-  std::vector<std::uint64_t> words_;
-};
-
-struct Graph {
-  std::vector<std::vector<BlockId>> successors;
-  std::vector<std::vector<BlockId>> predecessors;
-  bool valid = true;
-};
 
 Graph build_graph(const IrFunction& function) {
   Graph graph;
@@ -117,6 +61,9 @@ Graph build_graph(const IrFunction& function) {
 std::vector<BitSet> compute_dominators(const Graph& graph) {
   const std::size_t count = graph.successors.size();
   std::vector<BitSet> dominators(count, BitSet::full(count));
+  if (count == 0) {
+    return dominators;
+  }
   dominators[0] = BitSet(count);
   dominators[0].set(0);
 
@@ -140,6 +87,8 @@ std::vector<BitSet> compute_dominators(const Graph& graph) {
   }
   return dominators;
 }
+
+namespace {
 
 /// Post-dominators over a virtual exit node. Every block without successors (a
 /// return) flows into the exit node.

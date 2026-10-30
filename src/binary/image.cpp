@@ -1,4 +1,5 @@
 #include "donkey/binary/image.h"
+#include "donkey/binary/isolation.h"
 
 #include <algorithm>
 #include <cstring>
@@ -358,6 +359,11 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
 }
 
 Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& options) {
+  if (options.isolate) {
+    LoadOptions inner_options = options;
+    inner_options.isolate = false;
+    return load_binary_isolated(path, inner_options);
+  }
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {
     return error(Status::InvalidInput, "io.open_failed", "could not open the file for reading");

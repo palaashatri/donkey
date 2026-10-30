@@ -125,6 +125,8 @@ struct LoadOptions {
   std::uint64_t raw_base_address = 0;
   std::uint64_t raw_entry_point = 0;
   bool has_raw_entry_point = false;
+  /// Treat the file as untrusted and parse within an isolated OS process boundary.
+  bool isolate = false;
 };
 
 /// A parsed image together with the bytes it was parsed from. Callers that

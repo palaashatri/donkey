@@ -31,6 +31,11 @@ add_test(NAME cli.info_elf_json
 set_tests_properties(cli.info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
 
+add_test(NAME cli.info_isolated_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --isolate --json)
+set_tests_properties(cli.info_isolated_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
+
 add_test(NAME cli.info_pe_human
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-pe-x86_64.exe)
 set_tests_properties(cli.info_pe_human PROPERTIES
