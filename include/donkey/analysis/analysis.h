@@ -7,6 +7,7 @@
 
 #include "donkey/analysis/cfg.h"
 #include "donkey/binary/image.h"
+#include "donkey/core/cancellation.h"
 #include "donkey/core/ids.h"
 #include "donkey/core/result.h"
 #include "donkey/decode/decode.h"
@@ -38,6 +39,10 @@ struct AnalysisOptions {
   /// Build basic blocks, CFG edges and per-function extents. Off gives the M2
   /// linear behaviour: decoded instructions and seeds only.
   bool build_control_flow = true;
+  /// Optional token to abort analysis cooperatively on request.
+  CancellationToken cancellation_token = CancellationToken::none();
+  /// Configured limits and budget.
+  ResourceBudget budget;
 };
 
 struct AnalysisResult {

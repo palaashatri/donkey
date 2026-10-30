@@ -308,7 +308,7 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
 
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 2);
+  EXPECT_EQ(reopened.value().schema_version(), 3);
   auto images = reopened.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -316,6 +316,70 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
   EXPECT_TRUE(reopened.value()
                   .set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "entry")
                   .has_value());
+}
+
+TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
+  TempPath path("migrate-v2-v3");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value());
+    image_id = imported.value();
+
+    auto rename =
+        project.value().set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "entry");
+    ASSERT_TRUE(rename.has_value());
+  }
+
+  // Downgrade table to v2 constraint and version:
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "ALTER TABLE annotations RENAME TO annotations_v3_temp", nullptr,
+                           nullptr, nullptr),
+              SQLITE_OK);
+    const char* v2_schema =
+        "CREATE TABLE annotations ("
+        "  image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+        "  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment')),"
+        "  address    INTEGER NOT NULL,"
+        "  text       TEXT    NOT NULL,"
+        "  updated_at TEXT    NOT NULL DEFAULT (datetime('now')),"
+        "  PRIMARY KEY (image_id, kind, address)"
+        ");";
+    ASSERT_EQ(sqlite3_exec(db, v2_schema, nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "INSERT INTO annotations SELECT * FROM annotations_v3_temp", nullptr,
+                           nullptr, nullptr),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations_v3_temp", nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(db);
+  }
+
+  // Opening must migrate from v2 to v3, preserve existing annotations, and allow Bookmark
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 3);
+  auto annotations = reopened.value().annotations(image_id);
+  ASSERT_TRUE(annotations.has_value());
+  ASSERT_EQ(annotations.value().size(), 1U);
+  EXPECT_EQ(annotations.value()[0].kind, donkey::AnnotationKind::Rename);
+  EXPECT_EQ(annotations.value()[0].text, "entry");
+
+  // Adding a bookmark must succeed now in v3:
+  auto bookmark = reopened.value().set_annotation(image_id, donkey::AnnotationKind::Bookmark,
+                                                  0x400100, "entry_mark");
+  ASSERT_TRUE(bookmark.has_value()) << bookmark.diagnostic().message;
+  auto annotations_after = reopened.value().annotations(image_id);
+  ASSERT_TRUE(annotations_after.has_value());
+  ASSERT_EQ(annotations_after.value().size(), 2U);
 }
 
 TEST(Project, FailedImportRollsBackEverything) {

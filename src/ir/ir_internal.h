@@ -20,10 +20,16 @@ std::string render_statement(const IrFunction& function, const IrStatement& stat
 std::string render_condition(const IrFunction& function, const IrStatement& statement,
                              const IrStatement* previous, bool negate = false);
 
+struct StructuredLine {
+  std::string text;
+  std::uint64_t source_address = 0;
+};
+
 /// Structured rendering of the function body, or `nullopt` when the control-flow
 /// graph does not match a shape this structurer models. Callers must fall back
 /// to labeled blocks with explicit `goto` when `nullopt` is returned; no guessed
 /// structure is ever emitted.
 std::optional<std::string> format_structured_body(const IrFunction& function);
+std::optional<std::vector<StructuredLine>> format_structured_body_lines(const IrFunction& function);
 
 }  // namespace donkey::detail

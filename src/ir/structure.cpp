@@ -234,11 +234,15 @@ struct Structurer {
     return out_;
   }
 
+  [[nodiscard]] const std::vector<StructuredLine>& lines() const noexcept { return lines_; }
+
  private:
-  void line(const std::string& text) {
-    out_.append(static_cast<std::size_t>(indent_) * 2, ' ');
-    out_ += text;
+  void line(const std::string& text, std::uint64_t source_address = 0) {
+    std::string indented(static_cast<std::size_t>(indent_) * 2, ' ');
+    indented += text;
+    out_ += indented;
     out_ += '\n';
+    lines_.push_back(StructuredLine{std::move(indented), source_address});
   }
 
   void emit_statements(BlockId block, bool include_terminator) {
@@ -250,7 +254,7 @@ struct Structurer {
       const IrStatement* previous = index == 0 ? nullptr : &body.statements[index - 1];
       const std::string text = render_statement(function_, body.statements[index], previous);
       if (!text.empty()) {
-        line(text);
+        line(text, body.statements[index].source_address);
       }
     }
   }
@@ -592,6 +596,7 @@ struct Structurer {
   std::vector<BlockId> immediate_post_dominator_;
   std::unordered_map<BlockId, Loop> loops_;
   std::string out_;
+  std::vector<StructuredLine> lines_;
   int indent_ = 1;
   bool ok_ = true;
 };
@@ -601,6 +606,15 @@ struct Structurer {
 std::optional<std::string> format_structured_body(const IrFunction& function) {
   Structurer structurer(function);
   return structurer.run();
+}
+
+std::optional<std::vector<StructuredLine>> format_structured_body_lines(
+    const IrFunction& function) {
+  Structurer structurer(function);
+  if (!structurer.run().has_value()) {
+    return std::nullopt;
+  }
+  return structurer.lines();
 }
 
 }  // namespace donkey::detail

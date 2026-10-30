@@ -20,6 +20,7 @@ constexpr const char* kGraphWindow = "Graph";
 constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
+constexpr const char* kBookmarksWindow = "Bookmarks";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
 
@@ -66,6 +67,30 @@ void Workspace::draw(bool& quit) {
   ImGui::End();
 
   draw_panels();
+
+  if (!ImGui::GetIO().WantTextInput) {
+    const bool cmd_or_ctrl = (ImGui::GetIO().KeyMods & ImGuiMod_Shortcut) != 0;
+    const bool alt = ImGui::GetIO().KeyAlt;
+    const bool shift = ImGui::GetIO().KeyShift;
+
+    if (cmd_or_ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+      if (shift) {
+        session_.redo();
+      } else {
+        session_.undo();
+      }
+    } else if (cmd_or_ctrl && ImGui::IsKeyPressed(ImGuiKey_B)) {
+      if (state_.selected_address != 0) {
+        session_.toggle_bookmark(state_.selected_address);
+      }
+    } else if (alt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+      state_.nav_back(session_.document().get());
+    } else if (alt && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+      state_.nav_forward(session_.document().get());
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Escape) && session_.busy()) {
+      session_.cancel();
+    }
+  }
 
   if (open_path_popup_) {
     ImGui::OpenPopup("Open binary");
@@ -186,9 +211,13 @@ void Workspace::draw(bool& quit) {
     state_.annotation_modal_requested = false;
   }
   if (ImGui::BeginPopupModal("Annotate", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-    const bool rename = state_.annotation_kind == AnnotationKind::Rename;
-    ImGui::Text("%s %s", rename ? "Rename at" : "Comment at",
-                components::format_address(state_.annotation_address).c_str());
+    const char* kind_label = "Rename at";
+    if (state_.annotation_kind == AnnotationKind::Comment) {
+      kind_label = "Comment at";
+    } else if (state_.annotation_kind == AnnotationKind::Bookmark) {
+      kind_label = "Bookmark at";
+    }
+    ImGui::Text("%s %s", kind_label, components::format_address(state_.annotation_address).c_str());
     ImGui::SetNextItemWidth(520.0f);
     const bool submitted =
         ImGui::InputText("##annotation", state_.annotation_buffer, sizeof(state_.annotation_buffer),
@@ -278,6 +307,37 @@ void Workspace::draw_menu_bar(bool& quit) {
     }
     ImGui::EndMenu();
   }
+  if (ImGui::BeginMenu("Edit")) {
+    if (ImGui::MenuItem("Undo", "Cmd+Z", false, session_.can_undo())) {
+      session_.undo();
+    }
+    if (ImGui::MenuItem("Redo", "Cmd+Shift+Z", false, session_.can_redo())) {
+      session_.redo();
+    }
+    ImGui::Separator();
+    const bool bookmarked =
+        state_.annotations != nullptr && state_.annotations->has_bookmark(state_.selected_address);
+    if (ImGui::MenuItem(bookmarked ? "Remove Bookmark" : "Toggle Bookmark", "Cmd+B", false,
+                        state_.selected_address != 0)) {
+      session_.toggle_bookmark(state_.selected_address);
+    }
+    if (session_.busy()) {
+      ImGui::Separator();
+      if (ImGui::MenuItem("Cancel Task", "Esc")) {
+        session_.cancel();
+      }
+    }
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("Navigate")) {
+    if (ImGui::MenuItem("Back", "Alt+Left", false, state_.can_nav_back())) {
+      state_.nav_back(session_.document().get());
+    }
+    if (ImGui::MenuItem("Forward", "Alt+Right", false, state_.can_nav_forward())) {
+      state_.nav_forward(session_.document().get());
+    }
+    ImGui::EndMenu();
+  }
   if (ImGui::BeginMenu("View")) {
     ImGui::MenuItem(kOverviewWindow, nullptr, &show_overview_);
     ImGui::MenuItem(kSectionsWindow, nullptr, &show_sections_);
@@ -288,6 +348,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kHexWindow, nullptr, &show_hex_);
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
+    ImGui::MenuItem(kBookmarksWindow, nullptr, &show_bookmarks_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::EndMenu();
   }
@@ -349,6 +410,7 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGui::DockBuilderDockWindow(kHexWindow, bottom);
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
   ImGui::DockBuilderDockWindow(kXrefsWindow, bottom);
+  ImGui::DockBuilderDockWindow(kBookmarksWindow, bottom);
   ImGui::DockBuilderDockWindow(kSectionsWindow, left);
   ImGui::DockBuilderDockWindow(kFunctionsWindow, left_bottom);
   ImGui::DockBuilderDockWindow(kOverviewWindow, right);
@@ -461,6 +523,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kXrefsWindow, &show_xrefs_, panel_flags());
     if (document) {
       views::xrefs(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_bookmarks_) {
+    ImGui::Begin(kBookmarksWindow, &show_bookmarks_, panel_flags());
+    if (document) {
+      views::bookmarks(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

@@ -142,6 +142,19 @@ struct IrFunction {
 /// a precise message; never throws.
 [[nodiscard]] Result<bool> verify_ir(const IrFunction& function);
 
+struct PseudocodeLine {
+  std::string text;
+  std::uint64_t source_address = 0;
+};
+
+struct Pseudocode {
+  std::string full_text;
+  std::vector<PseudocodeLine> lines;
+};
+
+/// Verified C-like rendering of an IR function broken into line records with source addresses.
+[[nodiscard]] Result<Pseudocode> format_pseudocode_lines(const IrFunction& function);
+
 /// Verified C-like rendering of an IR function. Returns the verifier's
 /// diagnostic if the IR is malformed; it never prints partial garbage.
 [[nodiscard]] Result<std::string> format_pseudocode(const IrFunction& function);

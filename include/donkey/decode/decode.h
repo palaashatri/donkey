@@ -67,7 +67,7 @@ struct Instruction {
   InstructionClass classification = InstructionClass::Unknown;
   std::optional<std::uint64_t> direct_target;
   /// Absolute addresses referenced through x86 RIP-relative or absolute memory
-  /// operands. AArch64 ADRP/ADD pairs are not folded yet.
+  /// operands, or folded AArch64 ADR/ADRP references.
   std::vector<std::uint64_t> data_references;
   /// Structured operands for the lifter. Empty when Capstone gave no detail.
   std::vector<Operand> structured_operands;

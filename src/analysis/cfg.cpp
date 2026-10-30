@@ -51,6 +51,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
                                                   std::span<const Instruction> instructions,
                                                   std::span<const Function> seeds,
                                                   const AnalysisOptions& options) {
+  if (options.cancellation_token.is_cancelled()) {
+    return make_error<ControlFlowGraph>(Status::Cancelled, "analysis.cancelled",
+                                        "control-flow analysis was cancelled");
+  }
   (void)image;
   ControlFlowGraph graph;
 
@@ -64,6 +68,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
   std::size_t decoded = 0;
 
   for (std::size_t seed_index = 0; seed_index < seeds.size(); ++seed_index) {
+    if (options.cancellation_token.is_cancelled()) {
+      return make_error<ControlFlowGraph>(Status::Cancelled, "analysis.cancelled",
+                                          "control-flow analysis was cancelled");
+    }
     Function function = seeds[seed_index];
     function.id = FunctionId{static_cast<std::uint64_t>(seed_index + 1)};
     function.block_count = 0;
@@ -79,6 +87,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
     bool truncated = false;
 
     while (!worklist.empty()) {
+      if (options.cancellation_token.is_cancelled()) {
+        return make_error<ControlFlowGraph>(Status::Cancelled, "analysis.cancelled",
+                                            "control-flow analysis was cancelled");
+      }
       std::uint64_t address = worklist.back();
       worklist.pop_back();
       while (true) {

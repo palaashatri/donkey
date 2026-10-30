@@ -101,11 +101,28 @@ void disassembly(const Document& document, UiState& state) {
 
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
-      const std::string address = components::format_address(instruction.address);
+      const bool bookmarked =
+          state.annotations != nullptr && state.annotations->has_bookmark(instruction.address);
+      const std::string address =
+          (bookmarked ? "[*] " : "") + components::format_address(instruction.address);
       if (ImGui::Selectable(address.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
-        state.selected_address = instruction.address;
+        state.navigate_to(instruction.address, &document);
+      }
+      if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+        if (instruction.direct_target.has_value()) {
+          state.navigate_to(instruction.direct_target.value(), &document);
+        } else if (!instruction.data_references.empty()) {
+          state.navigate_to(instruction.data_references.front(), &document);
+        }
       }
       if (ImGui::BeginPopupContextItem("##disasmcontext")) {
+        if (ImGui::MenuItem(bookmarked ? "Remove bookmark" : "Add bookmark")) {
+          state.annotation_kind = AnnotationKind::Bookmark;
+          state.annotation_address = instruction.address;
+          std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
+                        bookmarked ? "" : "Bookmark");
+          state.annotation_modal_requested = true;
+        }
         const std::string* comment = state.annotations != nullptr
                                          ? state.annotations->comment_at(instruction.address)
                                          : nullptr;

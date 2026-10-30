@@ -351,12 +351,24 @@ void cfg_graph(const Document& document, UiState& state) {
       if (mouse.x >= top_left.x && mouse.x <= bottom_right.x && mouse.y >= top_left.y &&
           mouse.y <= bottom_right.y) {
         clicked_address = node.block->address;
+        if (ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+          if (node.block->instruction_count > 0) {
+            const std::size_t last_idx =
+                node.block->first_instruction + node.block->instruction_count - 1;
+            if (last_idx < document.analysis.instructions.size()) {
+              const auto& last_ins = document.analysis.instructions[last_idx];
+              if (last_ins.direct_target.has_value()) {
+                clicked_address = last_ins.direct_target.value();
+              }
+            }
+          }
+        }
       }
     }
   }
 
   if (clicked_address != 0) {
-    state.selected_address = clicked_address;
+    state.navigate_to(clicked_address, &document);
   }
 
   draw->PopClipRect();

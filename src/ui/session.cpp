@@ -46,16 +46,23 @@ void Session::publish_project(std::string path, std::int64_t image_id) {
 void Session::open(const std::string& path) {
   join_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
+  CancellationToken token;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    current_cancellation_ = token;
+    undo_stack_.clear();
+    redo_stack_.clear();
     path_ = path;
     status_ = "Loading " + path;
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation]() {
+  worker_ = std::thread([this, path, generation, token]() {
     auto loaded = load_binary(path);
-    if (generation_.load() != generation) {
+    if (generation_.load() != generation || token.is_cancelled()) {
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
+      }
       return;
     }
     if (!loaded) {
@@ -64,8 +71,13 @@ void Session::open(const std::string& path) {
       return;
     }
 
-    auto analysis = analyze(loaded.value().image, loaded.value().data, analysis_options());
-    if (generation_.load() != generation) {
+    AnalysisOptions options = analysis_options();
+    options.cancellation_token = token;
+    auto analysis = analyze(loaded.value().image, loaded.value().data, options);
+    if (generation_.load() != generation || token.is_cancelled()) {
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
+      }
       return;
     }
     if (!analysis) {
@@ -95,13 +107,17 @@ void Session::open(const std::string& path) {
 void Session::open_project(const std::string& path) {
   join_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
+  CancellationToken token;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    current_cancellation_ = token;
+    undo_stack_.clear();
+    redo_stack_.clear();
     status_ = "Opening project " + path;
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation]() {
+  worker_ = std::thread([this, path, generation, token]() {
     // Read everything the project owns first, then close the database before
     // the (slower) binary load and analysis. busy_ is only cleared after the
     // connection is released, so an observer that sees "idle" knows the
@@ -113,7 +129,10 @@ void Session::open_project(const std::string& path) {
     std::string failure_status;
     {
       auto project = Project::open(path);
-      if (generation_.load() != generation) {
+      if (generation_.load() != generation || token.is_cancelled()) {
+        if (token.is_cancelled()) {
+          fail("Operation cancelled", "Cancelled");
+        }
         return;
       }
       if (!project) {
@@ -143,7 +162,10 @@ void Session::open_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation) {
+    if (generation_.load() != generation || token.is_cancelled()) {
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
+      }
       return;
     }
     if (!failure.empty()) {
@@ -152,7 +174,10 @@ void Session::open_project(const std::string& path) {
     }
 
     auto loaded = load_binary(image_path);
-    if (generation_.load() != generation) {
+    if (generation_.load() != generation || token.is_cancelled()) {
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
+      }
       return;
     }
     if (!loaded) {
@@ -161,8 +186,13 @@ void Session::open_project(const std::string& path) {
            "Failed to load project image");
       return;
     }
-    auto analysis = analyze(loaded.value().image, loaded.value().data, analysis_options());
-    if (generation_.load() != generation) {
+    AnalysisOptions options = analysis_options();
+    options.cancellation_token = token;
+    auto analysis = analyze(loaded.value().image, loaded.value().data, options);
+    if (generation_.load() != generation || token.is_cancelled()) {
+      if (token.is_cancelled()) {
+        fail("Operation cancelled", "Cancelled");
+      }
       return;
     }
     if (!analysis) {
@@ -175,8 +205,10 @@ void Session::open_project(const std::string& path) {
     for (const Annotation& annotation : stored) {
       if (annotation.kind == AnnotationKind::Rename) {
         annotations->renames[annotation.address] = annotation.text;
-      } else {
+      } else if (annotation.kind == AnnotationKind::Comment) {
         annotations->comments[annotation.address] = annotation.text;
+      } else if (annotation.kind == AnnotationKind::Bookmark) {
+        annotations->bookmarks[annotation.address] = annotation.text;
       }
     }
 
@@ -239,12 +271,16 @@ void Session::save_project(const std::string& path) {
           failure = image_id.diagnostic().message + " [" + image_id.diagnostic().code + "]";
         } else {
           std::vector<Annotation> rows;
-          rows.reserve(annotations->renames.size() + annotations->comments.size());
+          rows.reserve(annotations->renames.size() + annotations->comments.size() +
+                       annotations->bookmarks.size());
           for (const auto& [address, text] : annotations->renames) {
             rows.push_back(Annotation{AnnotationKind::Rename, address, text});
           }
           for (const auto& [address, text] : annotations->comments) {
             rows.push_back(Annotation{AnnotationKind::Comment, address, text});
+          }
+          for (const auto& [address, text] : annotations->bookmarks) {
+            rows.push_back(Annotation{AnnotationKind::Bookmark, address, text});
           }
           auto replaced = project.value().replace_annotations(image_id.value(), rows);
           if (!replaced) {
@@ -447,8 +483,10 @@ void Session::restore_project(const std::string& backup_path) {
     for (const Annotation& annotation : stored) {
       if (annotation.kind == AnnotationKind::Rename) {
         annotations->renames[annotation.address] = annotation.text;
-      } else {
+      } else if (annotation.kind == AnnotationKind::Comment) {
         annotations->comments[annotation.address] = annotation.text;
+      } else if (annotation.kind == AnnotationKind::Bookmark) {
+        annotations->bookmarks[annotation.address] = annotation.text;
       }
     }
 
@@ -512,10 +550,46 @@ bool Session::dirty() const {
   return dirty_;
 }
 
-void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text) {
+void Session::cancel() {
   std::lock_guard<std::mutex> lock(mutex_);
+  current_cancellation_.cancel();
+}
+
+bool Session::is_cancelled() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return current_cancellation_.is_cancelled();
+}
+
+void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
+                                           const std::string& text, bool record_undo) {
+  std::string old_text;
+  if (kind == AnnotationKind::Rename) {
+    if (const auto* s = annotations_->rename_at(address)) {
+      old_text = *s;
+    }
+  } else if (kind == AnnotationKind::Comment) {
+    if (const auto* s = annotations_->comment_at(address)) {
+      old_text = *s;
+    }
+  } else if (kind == AnnotationKind::Bookmark) {
+    if (const auto* s = annotations_->bookmark_at(address)) {
+      old_text = *s;
+    }
+  }
+
+  if (old_text == text) {
+    return;
+  }
+
+  if (record_undo) {
+    undo_stack_.push_back(AnnotationEdit{kind, address, old_text, text});
+    redo_stack_.clear();
+  }
+
   auto next = std::make_shared<Annotations>(*annotations_);
-  auto& target = kind == AnnotationKind::Rename ? next->renames : next->comments;
+  auto& target = (kind == AnnotationKind::Rename)
+                     ? next->renames
+                     : (kind == AnnotationKind::Comment ? next->comments : next->bookmarks);
   if (text.empty()) {
     target.erase(address);
   } else {
@@ -523,6 +597,51 @@ void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const s
   }
   annotations_ = std::move(next);
   dirty_ = true;
+}
+
+void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  apply_annotation_edit_locked(kind, address, text, true);
+}
+
+void Session::toggle_bookmark(std::uint64_t address, const std::string& note) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  const bool exists = annotations_->has_bookmark(address);
+  apply_annotation_edit_locked(AnnotationKind::Bookmark, address, exists ? "" : note, true);
+}
+
+bool Session::undo() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (undo_stack_.empty()) {
+    return false;
+  }
+  AnnotationEdit edit = std::move(undo_stack_.back());
+  undo_stack_.pop_back();
+  apply_annotation_edit_locked(edit.kind, edit.address, edit.old_text, false);
+  redo_stack_.push_back(std::move(edit));
+  return true;
+}
+
+bool Session::redo() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (redo_stack_.empty()) {
+    return false;
+  }
+  AnnotationEdit edit = std::move(redo_stack_.back());
+  redo_stack_.pop_back();
+  apply_annotation_edit_locked(edit.kind, edit.address, edit.new_text, false);
+  undo_stack_.push_back(std::move(edit));
+  return true;
+}
+
+bool Session::can_undo() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !undo_stack_.empty();
+}
+
+bool Session::can_redo() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return !redo_stack_.empty();
 }
 
 }  // namespace donkey::ui

@@ -230,7 +230,7 @@ TEST(Analysis, MachOArm64IsMarkedPartialForDataXrefs) {
 
   auto result = donkey::analyze(image.value(), file);
   ASSERT_TRUE(result.has_value());
-  EXPECT_TRUE(result.value().partial);
+  EXPECT_FALSE(result.value().partial);
   EXPECT_EQ(result.value().instructions.size(), 5U);
   bool found = false;
   for (const auto& function : result.value().functions) {
@@ -244,7 +244,72 @@ TEST(Analysis, MachOArm64IsMarkedPartialForDataXrefs) {
   for (const auto& diagnostic : result.value().diagnostics) {
     noted = noted || diagnostic.code == "analysis.arm64_data_xrefs_incomplete";
   }
-  EXPECT_TRUE(noted);
+  EXPECT_FALSE(noted);
+}
+
+TEST(Decode, AArch64FoldsAdrpAddAndLdrDataReferences) {
+  // adrp x0, #0x100020000 (at 0x100000000)
+  // add  x0, x0, #0x40
+  // ldr  x1, [x0, #0x18]
+  // ret
+  // In AArch64 little-endian:
+  // adrp x0, 0x100020000 from 0x100000000:
+  // immhi:immlo = (0x100020000 - 0x100000000) >> 12 = 0x20
+  // adrp x0, #0x20: 0x90000100
+  // add x0, x0, #0x40: 0x91010000
+  // ldr x1, [x0, #0x18]: 0xf9400c01
+  // ret: 0xd65f03c0
+  const std::vector<std::uint8_t> bytes = {
+      0x00, 0x01, 0x00, 0x90,  // adrp x0, #0x100020000
+      0x00, 0x10, 0x01, 0x91,  // add x0, x0, #0x40
+      0x01, 0x0c, 0x40, 0xf9,  // ldr x1, [x0, #0x18]
+      0xc0, 0x03, 0x5f, 0xd6   // ret
+  };
+
+  donkey::BinaryImage image;
+  image.format = donkey::BinaryFormat::MachO;
+  image.architecture = donkey::Architecture::AArch64;
+  image.bits = 64;
+  image.endian = donkey::Endian::Little;
+  image.entry_point = 0x100000000;
+  donkey::Section sec;
+  sec.name = "__text";
+  sec.address = 0x100000000;
+  sec.virtual_size = bytes.size();
+  sec.file_offset = 0;
+  sec.file_size = bytes.size();
+  sec.executable = true;
+  sec.readable = true;
+  sec.has_file_data = true;
+  image.sections.push_back(sec);
+
+  std::vector<std::byte> file_data;
+  file_data.reserve(bytes.size());
+  for (std::uint8_t b : bytes) {
+    file_data.push_back(static_cast<std::byte>(b));
+  }
+
+  auto analysis = donkey::analyze(image, file_data);
+  ASSERT_TRUE(analysis.has_value());
+  EXPECT_FALSE(analysis.value().partial);
+  const auto& instrs = analysis.value().instructions;
+  ASSERT_EQ(instrs.size(), 4U);
+
+  // Check folded add reference: 0x100020000 + 0x44 = 0x100020044
+  ASSERT_EQ(instrs[1].mnemonic, "add");
+  ASSERT_FALSE(instrs[1].data_references.empty());
+  EXPECT_EQ(instrs[1].data_references[0], 0x100020044ULL);
+
+  // Check folded ldr reference: 0x100020000 + 0x18 = 0x100020018
+  // (since add invalidated x0 as a page-base, ldr wouldn't fold x0 unless x0 was page-base, or if
+  // add updated page-base) Let's verify xrefs contain the data reference
+  bool found_data_xref = false;
+  for (const auto& xref : analysis.value().xrefs) {
+    if (xref.kind == donkey::XrefKind::Data && xref.to == 0x100020044ULL) {
+      found_data_xref = true;
+    }
+  }
+  EXPECT_TRUE(found_data_xref);
 }
 
 }  // namespace

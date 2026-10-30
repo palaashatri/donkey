@@ -157,12 +157,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
@@ -187,7 +187,7 @@ add_test(NAME cli.project_rejects_unknown_subcommand COMMAND donkey-cli project 
 set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
 
 # ---------------------------------------------------------------------------
-# Persisted annotations (schema v2).
+# Persisted annotations (schema v3).
 # ---------------------------------------------------------------------------
 
 set(DONKEY_CLI_ANN_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-annotations.db")
@@ -196,7 +196,7 @@ add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -206,16 +206,20 @@ add_test(NAME cli.project_comment
          COMMAND donkey-cli project comment ${DONKEY_CLI_ANN_DB} 1 0x400104 "calls the helper")
 set_tests_properties(cli.project_comment PROPERTIES DEPENDS cli.project_annotation_save)
 
+add_test(NAME cli.project_bookmark
+         COMMAND donkey-cli project bookmark ${DONKEY_CLI_ANN_DB} 1 0x400100 "important")
+set_tests_properties(cli.project_bookmark PROPERTIES DEPENDS cli.project_annotation_save)
+
 add_test(NAME cli.project_annotations_json
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
 set_tests_properties(cli.project_annotations_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"kind\": \"rename\".*\"address\": \"0x400100\".*\"text\": \"entry_point\".*\"kind\": \"comment\""
-  DEPENDS "cli.project_rename;cli.project_comment")
+  PASS_REGULAR_EXPRESSION "\"kind\": \"bookmark\".*\"address\": \"0x400100\".*\"kind\": \"rename\".*\"text\": \"entry_point\".*\"kind\": \"comment\""
+  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark")
 
 add_test(NAME cli.project_annotation_clear
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 --clear)
 set_tests_properties(cli.project_annotation_clear PROPERTIES
-  DEPENDS "cli.project_rename;cli.project_comment")
+  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark")
 
 add_test(NAME cli.project_annotations_after_clear
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
@@ -243,14 +247,14 @@ add_test(NAME cli.project_backup_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_backup_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 2"
+  PASS_REGULAR_EXPRESSION "\"schema\": 3"
   DEPENDS cli.project_annotations_after_clear)
 
 add_test(NAME cli.project_backup_json
          COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
                  --json)
 set_tests_properties(cli.project_backup_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 2.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 3.*\"integrity\": true"
   DEPENDS cli.project_backup_save)
 
 add_test(NAME cli.project_backup_refuses_overwrite
@@ -267,7 +271,7 @@ set_tests_properties(cli.project_backup_force PROPERTIES
 add_test(NAME cli.project_restore_json
          COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
 set_tests_properties(cli.project_restore_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"images\": 1"
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"images\": 1"
   DEPENDS cli.project_backup_force)
 
 add_test(NAME cli.project_restore_rejects_non_database
