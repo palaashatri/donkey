@@ -17,7 +17,7 @@ bool valid_width(std::uint8_t width) {
 }
 
 bool is_terminator(IrOp op) {
-  return op == IrOp::Branch || op == IrOp::CondBranch || op == IrOp::Return;
+  return op == IrOp::Branch || op == IrOp::CondBranch || op == IrOp::Return || op == IrOp::Switch;
 }
 
 /// Exact logical complement of a condition, when one exists. Negative/Positive
@@ -119,40 +119,24 @@ class Renderer {
         return buffer;
       }
       case IrOperandKind::Memory: {
+        if (!function_.local_variables.empty()) {
+          for (const auto& var : function_.local_variables) {
+            if (var.base_reg == value.reg &&
+                var.offset == static_cast<std::int64_t>(value.constant)) {
+              if (!value.index.empty()) {
+                return var.name + "[" + value.index + "]";
+              }
+              return var.name;
+            }
+          }
+        }
+        if (!value.reg.empty() && !value.index.empty() && value.constant == 0) {
+          return value.reg + "[" + value.index + "]";
+        }
         std::string out = "*(";
         out += width_type(value.width);
         out += " *)(";
-        bool wrote = false;
-        if (!value.reg.empty() && value.reg != "rip") {
-          out += value.reg;
-          wrote = true;
-        }
-        if (!value.index.empty()) {
-          if (wrote) {
-            out += " + ";
-          }
-          out += value.index;
-          if (value.scale != 1) {
-            out += " * " + std::to_string(value.scale);
-          }
-          wrote = true;
-        }
-        if (value.constant != 0 || !wrote) {
-          char buffer[32];
-          const auto displacement = static_cast<std::int64_t>(value.constant);
-          if (displacement < 0) {
-            std::snprintf(buffer, sizeof(buffer), "0x%llx",
-                          static_cast<unsigned long long>(-displacement));
-            out += wrote ? " - " : "-";
-          } else {
-            std::snprintf(buffer, sizeof(buffer), "0x%llx",
-                          static_cast<unsigned long long>(displacement));
-            if (wrote) {
-              out += " + ";
-            }
-          }
-          out += buffer;
-        }
+        out += address_expression(value);
         out += ")";
         return out;
       }
@@ -270,6 +254,30 @@ class Renderer {
         return "goto " + operand(statement.a) + ";";
       case IrOp::CondBranch:
         return "if (" + condition(statement, previous) + ") goto " + operand(statement.b) + ";";
+      case IrOp::Switch: {
+        std::string out = "switch (" + operand(statement.dest) + ") {";
+        for (const auto& sc : statement.switch_cases) {
+          char buffer[32];
+          std::snprintf(buffer, sizeof(buffer), "0x%llx",
+                        static_cast<unsigned long long>(sc.value));
+          const std::uint64_t address = sc.target_block < function_.blocks.size()
+                                            ? function_.blocks[sc.target_block].address
+                                            : 0;
+          char blk[32];
+          std::snprintf(blk, sizeof(blk), "loc_%llx", static_cast<unsigned long long>(address));
+          out += " case " + std::string(buffer) + ": goto " + std::string(blk) + ";";
+        }
+        if (statement.a.kind == IrOperandKind::Block) {
+          const std::uint64_t address = statement.a.block < function_.blocks.size()
+                                            ? function_.blocks[statement.a.block].address
+                                            : 0;
+          char blk[32];
+          std::snprintf(blk, sizeof(blk), "loc_%llx", static_cast<unsigned long long>(address));
+          out += " default: goto " + std::string(blk) + ";";
+        }
+        out += " }";
+        return out;
+      }
       case IrOp::Compare:
         return "/* flags = " + operand(statement.a) + " " +
                ir_condition_operator(statement.condition) + " " + operand(statement.b) + " */";
@@ -298,6 +306,10 @@ namespace detail {
 std::string render_statement(const IrFunction& function, const IrStatement& statement,
                              const IrStatement* previous) {
   return Renderer(function).statement(statement, previous);
+}
+
+std::string render_operand(const IrFunction& function, const IrOperand& operand) {
+  return Renderer(function).operand(operand);
 }
 
 std::string render_condition(const IrFunction& function, const IrStatement& statement,
@@ -349,6 +361,8 @@ const char* ir_op_name(IrOp op) noexcept {
       return "branch";
     case IrOp::CondBranch:
       return "cond_branch";
+    case IrOp::Switch:
+      return "switch";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -660,6 +674,14 @@ Result<bool> verify_ir(const IrFunction& function) {
                         "conditional branch needs a condition and a block target");
           }
           break;
+        case IrOp::Switch:
+          if (statement.dest.kind == IrOperandKind::None) {
+            return fail("ir.malformed_switch", "switch needs a selector operand");
+          }
+          if (statement.a.kind != IrOperandKind::Block) {
+            return fail("ir.malformed_switch", "switch needs a default block target");
+          }
+          break;
         case IrOp::Compare:
           if (statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
               statement.condition == IrCondition::None) {
@@ -725,6 +747,16 @@ Result<bool> verify_ir(const IrFunction& function) {
     if (last.op == IrOp::CondBranch && last.b.kind == IrOperandKind::Block &&
         last.b.block >= function.blocks.size()) {
       return fail("ir.bad_block_index", "conditional branch target is out of range");
+    }
+    if (last.op == IrOp::Switch) {
+      if (last.a.kind == IrOperandKind::Block && last.a.block >= function.blocks.size()) {
+        return fail("ir.bad_block_index", "switch default target is out of range");
+      }
+      for (const auto& sc : last.switch_cases) {
+        if (sc.target_block >= function.blocks.size()) {
+          return fail("ir.bad_block_index", "switch case target is out of range");
+        }
+      }
     }
   }
 
@@ -835,6 +867,11 @@ Result<bool> verify_ir(const IrFunction& function) {
         if (auto diag = check_use(stmt.b); diag.has_value()) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
+        if (stmt.op == IrOp::Switch) {
+          if (auto diag = check_use(stmt.dest); diag.has_value()) {
+            return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
+          }
+        }
       }
     }
   }
@@ -888,6 +925,12 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   signature += ") {";
   append_line(signature);
 
+  for (const auto& var : function.local_variables) {
+    if (!var.is_parameter) {
+      append_line("  " + std::string(width_type(var.width)) + " " + var.name + ";");
+    }
+  }
+
   // Prefer structured control flow. When the graph does not match a shape the
   // structurer models, fall back to labeled blocks with explicit `goto`; the
   // fallback is still verified IR, never guessed structure.
@@ -926,6 +969,81 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
                                    res.diagnostic().message, res.diagnostic().offset);
   }
   return res.value().full_text;
+}
+
+void recover_stack_variables(IrFunction& function) {
+  function.local_variables.clear();
+
+  auto is_frame_reg = [](std::string_view reg) {
+    return reg == "rbp" || reg == "ebp" || reg == "bp" || reg == "x29";
+  };
+  auto is_stack_reg = [](std::string_view reg) {
+    return reg == "rsp" || reg == "esp" || reg == "sp";
+  };
+
+  auto inspect_operand = [&](const IrOperand& op) {
+    if (op.kind != IrOperandKind::Memory) {
+      return;
+    }
+    const auto disp = static_cast<std::int64_t>(op.constant);
+    std::string name;
+    bool is_param = false;
+    if (is_frame_reg(op.reg)) {
+      if (disp > 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "arg_%llx", static_cast<unsigned long long>(disp));
+        name = buf;
+        is_param = true;
+      } else if (disp < 0) {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "local_%llx", static_cast<unsigned long long>(-disp));
+        name = buf;
+      } else {
+        name = "saved_fp";
+      }
+    } else if (is_stack_reg(op.reg)) {
+      char buf[32];
+      if (disp >= 0) {
+        std::snprintf(buf, sizeof(buf), "local_sp_%llx", static_cast<unsigned long long>(disp));
+      } else {
+        std::snprintf(buf, sizeof(buf), "local_sp_neg_%llx",
+                      static_cast<unsigned long long>(-disp));
+      }
+      name = buf;
+    } else {
+      return;
+    }
+
+    for (const auto& existing : function.local_variables) {
+      if (existing.base_reg == op.reg && existing.offset == disp) {
+        return;
+      }
+    }
+
+    IrLocalVariable var;
+    var.name = std::move(name);
+    var.width = op.width != 0 ? op.width : 4;
+    var.offset = disp;
+    var.base_reg = op.reg;
+    var.is_parameter = is_param;
+    function.local_variables.push_back(std::move(var));
+  };
+
+  for (const auto& block : function.blocks) {
+    for (const auto& stmt : block.statements) {
+      inspect_operand(stmt.dest);
+      inspect_operand(stmt.a);
+      inspect_operand(stmt.b);
+    }
+  }
+
+  std::sort(function.local_variables.begin(), function.local_variables.end(),
+            [](const IrLocalVariable& a, const IrLocalVariable& b) {
+              if (a.is_parameter != b.is_parameter) {
+                return a.is_parameter < b.is_parameter;
+              }
+              return a.offset < b.offset;
+            });
 }
 
 }  // namespace donkey

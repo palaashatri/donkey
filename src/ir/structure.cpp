@@ -46,6 +46,20 @@ Graph build_graph(const IrFunction& function) {
           graph.valid = false;
         }
         break;
+      case IrOp::Switch:
+        if (terminator.a.kind == IrOperandKind::Block && terminator.a.block < count) {
+          add_edge(index, terminator.a.block);
+        } else {
+          graph.valid = false;
+        }
+        for (const auto& sc : terminator.switch_cases) {
+          if (sc.target_block < count) {
+            add_edge(index, sc.target_block);
+          } else {
+            graph.valid = false;
+          }
+        }
+        break;
       default:
         graph.valid = false;
         break;
@@ -383,6 +397,57 @@ struct Structurer {
 
       const IrBlock& block = function_.blocks[index];
       const IrStatement& terminator = block.statements.back();
+      if (terminator.op == IrOp::Switch) {
+        const BlockId join = immediate_post_dominator_[index];
+        emit_statements(index, false);
+        line("switch (" + render_operand(function_, terminator.dest) + ") {");
+        ++indent_;
+        for (const auto& sc : terminator.switch_cases) {
+          char val_buf[32];
+          std::snprintf(val_buf, sizeof(val_buf), "0x%llx",
+                        static_cast<unsigned long long>(sc.value));
+          line("case " + std::string(val_buf) + ":");
+          ++indent_;
+          const bool ends_return =
+              sc.target_block < function_.blocks.size() &&
+              !function_.blocks[sc.target_block].statements.empty() &&
+              function_.blocks[sc.target_block].statements.back().op == IrOp::Return;
+          if (join != kNoBlock && sc.target_block < join) {
+            emit_range(sc.target_block, join, loop_header);
+          } else if (sc.target_block < function_.blocks.size()) {
+            emit_statements(sc.target_block, true);
+          }
+          if (!ends_return) {
+            line("break;");
+          }
+          --indent_;
+        }
+        if (terminator.a.kind == IrOperandKind::Block) {
+          line("default:");
+          ++indent_;
+          const bool ends_return =
+              terminator.a.block < function_.blocks.size() &&
+              !function_.blocks[terminator.a.block].statements.empty() &&
+              function_.blocks[terminator.a.block].statements.back().op == IrOp::Return;
+          if (join != kNoBlock && terminator.a.block < join) {
+            emit_range(terminator.a.block, join, loop_header);
+          } else if (terminator.a.block < function_.blocks.size()) {
+            emit_statements(terminator.a.block, true);
+          }
+          if (!ends_return) {
+            line("break;");
+          }
+          --indent_;
+        }
+        --indent_;
+        line("}");
+        if (join != kNoBlock && join <= last) {
+          index = join;
+        } else {
+          ++index;
+        }
+        continue;
+      }
       if (terminator.op != IrOp::CondBranch) {
         if (terminator.op == IrOp::Branch) {
           emit_statements(index, false);

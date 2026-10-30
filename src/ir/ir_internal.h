@@ -68,6 +68,9 @@ struct Graph {
 Graph build_graph(const IrFunction& function);
 std::vector<BitSet> compute_dominators(const Graph& graph);
 
+/// Render an operand into C-like expression text.
+std::string render_operand(const IrFunction& function, const IrOperand& operand);
+
 /// Render one non-control-flow statement (or a `return`) without indentation.
 /// `previous` is the statement before it in the same block; conditions on a
 /// compare/test depend on it.
