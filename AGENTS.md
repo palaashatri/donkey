@@ -29,6 +29,12 @@ ctest --preset headless-macos --output-on-failure
 cmake --preset dev-macos            # core + CLI + desktop shell (once the shell lands)
 cmake --build --preset dev-macos --parallel
 
+# libFuzzer targets (Homebrew LLVM; AppleClang has no libFuzzer runtime):
+cmake --preset fuzz-macos
+cmake --build build/fuzz-macos --parallel
+./build/fuzz-macos/fuzz_binary tests/fuzz/corpus/binary -max_total_time=60
+./build/fuzz-macos/fuzz_ir tests/fuzz/corpus/ir -max_total_time=60
+
 # Linux/Windows presets exist but are not yet validated:
 cmake --preset headless-linux
 cmake --preset headless-windows

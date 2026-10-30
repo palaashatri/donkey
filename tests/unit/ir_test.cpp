@@ -78,6 +78,44 @@ std::vector<std::byte> extension_function() {
   return out;
 }
 
+std::vector<std::byte> high_byte_register_function() {
+  const std::uint8_t bytes[] = {
+      0x00, 0x70, 0x6f,  // add byte ptr [rax + 0x6f], dh
+      0x55,              // push rbp
+      0xc3,              // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+std::vector<std::byte> tail_conditional_function() {
+  const std::uint8_t bytes[] = {
+      0x75,
+      0xfe,  // jne self (conditional branch with no fallthrough)
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+std::vector<std::byte> pop_memory_function() {
+  const std::uint8_t bytes[] = {
+      0x8f,
+      0x00,  // pop qword ptr [rax]
+      0xc3,  // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
 BinaryImage synthetic_image(std::size_t size) {
   BinaryImage image;
   image.path = "<synthetic>";
@@ -254,6 +292,50 @@ TEST(Ir, LiftsExtensionsLeaAndIndirectCall) {
   EXPECT_NE(code.find("rcx = (u64)(0x"), std::string::npos) << code;
   EXPECT_EQ(code.find("(u64)&*"), std::string::npos) << code;
   EXPECT_NE(code.find("((void (*)(void))rax)();"), std::string::npos) << code;
+}
+
+TEST(Ir, LiftsHighByteRegistersWithoutInvalidWidths) {
+  const auto data = high_byte_register_function();
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+}
+
+TEST(Ir, AddsExitBlockForTailConditionalBranch) {
+  const auto data = tail_conditional_function();
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+TEST(Ir, ModelsPopFromMemoryAsUnsupportedInsteadOfMalformedLoad) {
+  const auto data = pop_memory_function();
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
 }
 
 TEST(Ir, LiftsSyntheticBranchyX86Function) {

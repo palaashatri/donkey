@@ -544,9 +544,12 @@ Result<bool> verify_ir(const IrFunction& function) {
     if (!is_terminator(last.op)) {
       return fail("ir.missing_terminator", "block does not end in a branch or return");
     }
-    if (last.op == IrOp::CondBranch && last.b.kind == IrOperandKind::Block &&
-        last.b.block == block_index && block_index == function.blocks.size() - 1) {
-      return fail("ir.self_loop_tail", "block ends in a conditional self-loop with no exit");
+    // A conditional branch always falls through to the next block. In the last
+    // block there is no next block, so the false path would leave the function
+    // with no modelled exit and the printer could not render it honestly.
+    if (last.op == IrOp::CondBranch && block_index == function.blocks.size() - 1) {
+      return fail("ir.cond_branch_tail",
+                  "last block ends in a conditional branch with no fallthrough block");
     }
     if (last.op == IrOp::Branch && last.a.kind == IrOperandKind::Block &&
         last.a.block >= function.blocks.size()) {

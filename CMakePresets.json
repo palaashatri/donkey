@@ -127,12 +127,32 @@
         "lhs": "${hostSystemName}",
         "rhs": "Windows"
       }
+    },
+    {
+      "name": "fuzz-macos",
+      "inherits": "base",
+      "displayName": "macOS libFuzzer targets (Homebrew LLVM)",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "CMAKE_AR": "/usr/bin/ar",
+        "CMAKE_RANLIB": "/usr/bin/ranlib",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_TESTS": "OFF",
+        "DONKEY_BUILD_FUZZERS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
     }
   ],
   "buildPresets": [
     { "name": "dev-macos", "configurePreset": "dev-macos" },
     { "name": "release-macos", "configurePreset": "release-macos" },
     { "name": "headless-macos", "configurePreset": "headless-macos" },
+    { "name": "fuzz-macos", "configurePreset": "fuzz-macos" },
     { "name": "dev-linux", "configurePreset": "dev-linux" },
     { "name": "headless-linux", "configurePreset": "headless-linux" },
     { "name": "headless-windows", "configurePreset": "headless-windows" },
