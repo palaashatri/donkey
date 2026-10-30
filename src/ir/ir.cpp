@@ -629,25 +629,32 @@ Result<bool> verify_ir(const IrFunction& function) {
   return true;
 }
 
-Result<std::string> format_pseudocode(const IrFunction& function) {
+Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   auto verified = verify_ir(function);
   if (!verified) {
-    return make_error<std::string>(verified.diagnostic().status, verified.diagnostic().code,
-                                   verified.diagnostic().message, verified.diagnostic().offset);
+    return make_error<Pseudocode>(verified.diagnostic().status, verified.diagnostic().code,
+                                  verified.diagnostic().message, verified.diagnostic().offset);
   }
 
   const Renderer renderer(function);
-  std::string out;
-  out += "// " + (function.name.empty() ? std::string("sub_1000") : function.name);
+  Pseudocode out;
+  auto append_line = [&](const std::string& line, std::uint64_t source_address = 0) {
+    out.lines.push_back(PseudocodeLine{line, source_address});
+    out.full_text += line + "\n";
+  };
+
+  std::string header = "// " + (function.name.empty() ? std::string("sub_1000") : function.name);
   if (function.partial) {
-    out += "  [partial]";
+    header += "  [partial]";
   }
-  out += "\n";
+  append_line(header);
+
   if (!function.notes.empty()) {
     for (const std::string& note : function.notes) {
-      out += "// note: " + note + "\n";
+      append_line("// note: " + note);
     }
   }
+
   std::string signature;
   signature += function.return_width != 0 ? width_type(function.return_width) : "void";
   signature += " ";
@@ -665,21 +672,24 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
       signature += function.parameters[index].name;
     }
   }
-  signature += ") {\n";
-  out += signature;
+  signature += ") {";
+  append_line(signature);
 
   // Prefer structured control flow. When the graph does not match a shape the
   // structurer models, fall back to labeled blocks with explicit `goto`; the
   // fallback is still verified IR, never guessed structure.
-  if (auto structured = detail::format_structured_body(function); structured.has_value()) {
-    out += structured.value();
-    out += "}\n";
+  if (auto structured = detail::format_structured_body_lines(function); structured.has_value()) {
+    for (const auto& sline : structured.value()) {
+      append_line(sline.text, sline.source_address);
+    }
+    append_line("}");
     return out;
   }
-  out += "// note: control flow not fully structured; showing labeled blocks\n";
+
+  append_line("// note: control flow not fully structured; showing labeled blocks");
   for (std::size_t index = 0; index < function.blocks.size(); ++index) {
     const IrBlock& block = function.blocks[index];
-    out += "loc_" + Renderer::hex(block.address) + ":\n";
+    append_line("loc_" + Renderer::hex(block.address) + ":", block.address);
     for (std::size_t statement_index = 0; statement_index < block.statements.size();
          ++statement_index) {
       const IrStatement& statement = block.statements[statement_index];
@@ -689,11 +699,20 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
       if (line.empty()) {
         continue;
       }
-      out += "  " + line + "\n";
+      append_line("  " + line, statement.source_address);
     }
   }
-  out += "}\n";
+  append_line("}");
   return out;
+}
+
+Result<std::string> format_pseudocode(const IrFunction& function) {
+  auto res = format_pseudocode_lines(function);
+  if (!res) {
+    return make_error<std::string>(res.diagnostic().status, res.diagnostic().code,
+                                   res.diagnostic().message, res.diagnostic().offset);
+  }
+  return res.value().full_text;
 }
 
 }  // namespace donkey

@@ -259,6 +259,53 @@ void xrefs(const Document& document, UiState& state) {
   ImGui::EndTable();
 }
 
+void bookmarks(const Document& document, UiState& state) {
+  if (state.annotations == nullptr || state.annotations->bookmarks.empty()) {
+    ImGui::TextDisabled(
+        "No bookmarks set. Right-click an instruction or use Edit -> Toggle Bookmark to set one.");
+    return;
+  }
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+  if (!ImGui::BeginTable("##bookmarks", 3, flags)) {
+    return;
+  }
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("Label / Note", ImGuiTableColumnFlags_WidthStretch, 2.5f);
+  ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+  ImGui::TableHeadersRow();
+
+  std::vector<std::pair<std::uint64_t, std::string>> sorted_bookmarks(
+      state.annotations->bookmarks.begin(), state.annotations->bookmarks.end());
+  std::sort(sorted_bookmarks.begin(), sorted_bookmarks.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+
+  for (const auto& [address, note] : sorted_bookmarks) {
+    const std::string addr_str = components::format_address(address);
+    const bool selected = state.selected_address == address;
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    if (ImGui::Selectable(addr_str.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+      state.navigate_to(address, &document);
+    }
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(note.c_str());
+    ImGui::TableSetColumnIndex(2);
+    ImGui::PushID(static_cast<int>(address));
+    if (ImGui::SmallButton("Remove")) {
+      state.annotation_kind = AnnotationKind::Bookmark;
+      state.annotation_address = address;
+      state.annotation_buffer[0] = '\0';
+      state.annotation_modal_requested = true;
+    }
+    ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
 void diagnostics(const Document& document, UiState& state) {
   (void)state;
   const auto& diagnostics = document.analysis.diagnostics;

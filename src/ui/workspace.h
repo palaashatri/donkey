@@ -3,7 +3,10 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
+#include "donkey/core/navigation.h"
+#include "donkey/ir/ir.h"
 #include "imgui.h"
 #include "session.h"
 
@@ -43,6 +46,51 @@ struct UiState {
   std::string pseudocode_status;
   std::string pseudocode_code;
   std::string pseudocode_text;
+  std::vector<PseudocodeLine> pseudocode_lines;
+
+  // --- navigation history ---------------------------------------------------
+  NavigationHistory nav_history;
+
+  void navigate_to(std::uint64_t address, const Document* doc = nullptr) {
+    if (address == 0 || selected_address == address) {
+      return;
+    }
+    nav_history.navigate_to(address);
+    selected_address = address;
+    if (doc != nullptr) {
+      const Section* s = doc->loaded.image.section_for_va(address);
+      if (s != nullptr) {
+        selected_section = s->name;
+      }
+    }
+  }
+
+  [[nodiscard]] bool can_nav_back() const { return nav_history.can_nav_back(); }
+  [[nodiscard]] bool can_nav_forward() const { return nav_history.can_nav_forward(); }
+
+  void nav_back(const Document* doc = nullptr) {
+    if (auto target = nav_history.nav_back(); target.has_value()) {
+      selected_address = target.value();
+      if (doc != nullptr) {
+        const Section* s = doc->loaded.image.section_for_va(selected_address);
+        if (s != nullptr) {
+          selected_section = s->name;
+        }
+      }
+    }
+  }
+
+  void nav_forward(const Document* doc = nullptr) {
+    if (auto target = nav_history.nav_forward(); target.has_value()) {
+      selected_address = target.value();
+      if (doc != nullptr) {
+        const Section* s = doc->loaded.image.section_for_va(selected_address);
+        if (s != nullptr) {
+          selected_section = s->name;
+        }
+      }
+    }
+  }
 
   // --- CFG graph view -------------------------------------------------------
   // Pan/zoom is render-thread state. The layout is re-derived per frame from
@@ -90,6 +138,7 @@ class Workspace {
   bool show_hex_ = true;
   bool show_strings_ = true;
   bool show_xrefs_ = true;
+  bool show_bookmarks_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;
   char path_buffer_[1024] = {};

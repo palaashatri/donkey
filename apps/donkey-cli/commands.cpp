@@ -702,6 +702,7 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project info <database> [--json]\n"
                "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
                "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
+               "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
                "  donkey-cli project annotations <database> <image-id> [--json]\n"
                "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
                "  donkey-cli project restore <database> <backup> [--json]\n"
@@ -1412,18 +1413,18 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
-  if (subcommand == "rename" || subcommand == "comment") {
-    const bool is_rename = subcommand == "rename";
+  if (subcommand == "rename" || subcommand == "comment" || subcommand == "bookmark") {
+    const bool is_bookmark = subcommand == "bookmark";
+    const std::string sub_str(subcommand);
     if (clear) {
       if (positional.size() != 3) {
-        return usage_error(is_rename
-                               ? "project rename --clear needs a database, image id and address"
-                               : "project comment --clear needs a database, image id and address");
+        return usage_error(
+            ("project " + sub_str + " --clear needs a database, image id and address").c_str());
       }
-    } else if (positional.size() != 4) {
-      return usage_error(is_rename
-                             ? "project rename needs a database, image id, address and text"
-                             : "project comment needs a database, image id, address and text");
+    } else if (positional.size() != 4 && !(is_bookmark && positional.size() == 3)) {
+      return usage_error(("project " + sub_str + " needs a database, image id and address" +
+                          (is_bookmark ? " (and optional text)" : " and text"))
+                             .c_str());
     }
     const std::string database(positional[0]);
     std::uint64_t parsed_id = 0;
@@ -1439,12 +1440,19 @@ int command_project(const std::vector<std::string_view>& arguments) {
     if (!project) {
       return fail(project.diagnostic());
     }
-    const AnnotationKind kind = is_rename ? AnnotationKind::Rename : AnnotationKind::Comment;
-    Result<void> written =
-        clear
-            ? project.value().clear_annotation(static_cast<std::int64_t>(parsed_id), kind, address)
-            : project.value().set_annotation(static_cast<std::int64_t>(parsed_id), kind, address,
-                                             std::string(positional[3]));
+    AnnotationKind kind = AnnotationKind::Rename;
+    if (subcommand == "comment") {
+      kind = AnnotationKind::Comment;
+    } else if (subcommand == "bookmark") {
+      kind = AnnotationKind::Bookmark;
+    }
+    const std::string text = positional.size() >= 4 ? std::string(positional[3])
+                             : is_bookmark          ? "bookmark"
+                                                    : "";
+    Result<void> written = clear ? project.value().clear_annotation(
+                                       static_cast<std::int64_t>(parsed_id), kind, address)
+                                 : project.value().set_annotation(
+                                       static_cast<std::int64_t>(parsed_id), kind, address, text);
     if (!written) {
       return fail(written.diagnostic());
     }
@@ -1607,8 +1615,8 @@ int command_project(const std::vector<std::string_view>& arguments) {
   }
 
   return usage_error(
-      "unknown project subcommand (expected save, info, rename, comment, annotations, backup or "
-      "restore)");
+      "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
+      "backup or restore)");
 }
 
 }  // namespace donkey::cli

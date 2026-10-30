@@ -20,6 +20,8 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
       return "rename";
     case AnnotationKind::Comment:
       return "comment";
+    case AnnotationKind::Bookmark:
+      return "bookmark";
   }
   return "unknown";
 }
@@ -80,12 +82,11 @@ CREATE INDEX functions_by_image ON functions(image_id);
 CREATE INDEX analysis_runs_by_image ON analysis_runs(image_id);
 )sql";
 
-/// v2 adds user annotations. They are keyed by address inside an image so they
-/// survive re-import, which replaces only derived analysis rows.
-constexpr const char* kSchemaV2 = R"sql(
+/// v3 adds bookmark annotations.
+constexpr const char* kSchemaV3 = R"sql(
 CREATE TABLE annotations (
   image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment')),
+  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),
   address    INTEGER NOT NULL,
   text       TEXT    NOT NULL,
   updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -273,37 +274,65 @@ Result<Project> Project::open(const std::string& path) {
     if (schema == 0) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
-      const int rc_schema2 = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
+      const int rc_schema3 = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema2 != SQLITE_OK ||
+      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema3 != SQLITE_OK ||
           rc_version != SQLITE_OK || rc_commit != SQLITE_OK) {
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
                                    "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
                                        std::string(sqlite3_errstr(rc_schema)) + "/" +
-                                       std::string(sqlite3_errstr(rc_schema2)) + "/" +
+                                       std::string(sqlite3_errstr(rc_schema3)) + "/" +
                                        std::string(sqlite3_errstr(rc_version)) + "/" +
                                        std::string(sqlite3_errstr(rc_commit)) +
                                        " msg=" + sqlite3_errmsg(db));
       }
-      schema = 2;
+      schema = 3;
     } else if (schema == 1) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-      const int rc_schema = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
+      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_version != SQLITE_OK ||
           rc_commit != SQLITE_OK) {
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v1->v2: " + std::string(sqlite3_errstr(rc_begin)) +
+                                   "migrate v1->v3: " + std::string(sqlite3_errstr(rc_begin)) +
                                        "/" + std::string(sqlite3_errstr(rc_schema)) + "/" +
                                        std::string(sqlite3_errstr(rc_version)) + "/" +
                                        std::string(sqlite3_errstr(rc_commit)) +
                                        " msg=" + sqlite3_errmsg(db));
       }
-      schema = 2;
+      schema = 3;
+    } else if (schema == 2) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_rename = sqlite3_exec(db, "ALTER TABLE annotations RENAME TO annotations_v2_old",
+                                         nullptr, nullptr, nullptr);
+      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_copy =
+          sqlite3_exec(db,
+                       "INSERT INTO annotations (image_id, kind, address, text, updated_at) "
+                       "SELECT image_id, kind, address, text, updated_at FROM annotations_v2_old",
+                       nullptr, nullptr, nullptr);
+      const int rc_drop =
+          sqlite3_exec(db, "DROP TABLE annotations_v2_old", nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
+      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK || rc_rename != SQLITE_OK || rc_schema != SQLITE_OK ||
+          rc_copy != SQLITE_OK || rc_drop != SQLITE_OK || rc_version != SQLITE_OK ||
+          rc_commit != SQLITE_OK) {
+        execute(db, "ROLLBACK");
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "migrate v2->v3: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
+                std::string(sqlite3_errstr(rc_rename)) + "/" +
+                std::string(sqlite3_errstr(rc_schema)) + "/" +
+                std::string(sqlite3_errstr(rc_copy)) + "/" + std::string(sqlite3_errstr(rc_drop)) +
+                "/" + std::string(sqlite3_errstr(rc_version)) + "/" +
+                std::string(sqlite3_errstr(rc_commit)) + " msg=" + sqlite3_errmsg(db));
+      }
+      schema = 3;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -653,6 +682,8 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
       annotation.kind = AnnotationKind::Rename;
     } else if (kind == "comment") {
       annotation.kind = AnnotationKind::Comment;
+    } else if (kind == "bookmark") {
+      annotation.kind = AnnotationKind::Bookmark;
     } else {
       return make_error<std::vector<Annotation>>(
           Status::CorruptProject, "project.annotation_kind_invalid",

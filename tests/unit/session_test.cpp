@@ -9,6 +9,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/core/navigation.h"
 #include "donkey/project/project.h"
 #include "session.h"
 
@@ -326,6 +327,117 @@ TEST(Session, BackupAndRestoreRequireOpenProject) {
   const auto restore_error = session.take_error();
   ASSERT_TRUE(restore_error.has_value());
   EXPECT_NE(restore_error->find("project.not_open"), std::string::npos) << *restore_error;
+}
+
+TEST(Session, UndoAndRedoEdits) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.can_undo());
+  EXPECT_FALSE(session.can_redo());
+
+  // Set a rename
+  session.set_annotation(donkey::AnnotationKind::Rename, 0x400100, "my_main");
+  EXPECT_TRUE(session.can_undo());
+  EXPECT_FALSE(session.can_redo());
+  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+
+  // Set a comment
+  session.set_annotation(donkey::AnnotationKind::Comment, 0x400100, "first line");
+  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+
+  // Toggle bookmark
+  session.toggle_bookmark(0x400100, "entry");
+  EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
+  EXPECT_EQ(*session.annotations()->bookmark_at(0x400100), "entry");
+
+  // Undo bookmark
+  EXPECT_TRUE(session.undo());
+  EXPECT_FALSE(session.annotations()->has_bookmark(0x400100));
+  EXPECT_TRUE(session.can_redo());
+
+  // Redo bookmark
+  EXPECT_TRUE(session.redo());
+  EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
+
+  // Undo bookmark and comment
+  EXPECT_TRUE(session.undo());  // undo bookmark
+  EXPECT_TRUE(session.undo());  // undo comment
+  EXPECT_EQ(session.annotations()->comment_at(0x400100), nullptr);
+  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+
+  // Undo rename
+  EXPECT_TRUE(session.undo());
+  EXPECT_EQ(session.annotations()->rename_at(0x400100), nullptr);
+  EXPECT_FALSE(session.can_undo());
+
+  // Redo all three
+  EXPECT_TRUE(session.redo());
+  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_TRUE(session.redo());
+  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+  EXPECT_TRUE(session.redo());
+  EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
+  EXPECT_FALSE(session.can_redo());
+}
+
+TEST(Session, NavigationHistory) {
+  donkey::NavigationHistory nav;
+  EXPECT_FALSE(nav.can_nav_back());
+  EXPECT_FALSE(nav.can_nav_forward());
+
+  nav.navigate_to(0x1000);
+  EXPECT_EQ(nav.current_address(), 0x1000U);
+  EXPECT_FALSE(nav.can_nav_back());
+
+  nav.navigate_to(0x2000);
+  EXPECT_EQ(nav.current_address(), 0x2000U);
+  EXPECT_TRUE(nav.can_nav_back());
+  EXPECT_FALSE(nav.can_nav_forward());
+
+  nav.navigate_to(0x3000);
+  EXPECT_EQ(nav.current_address(), 0x3000U);
+  EXPECT_TRUE(nav.can_nav_back());
+
+  // Back to 0x2000
+  auto back1 = nav.nav_back();
+  ASSERT_TRUE(back1.has_value());
+  EXPECT_EQ(*back1, 0x2000U);
+  EXPECT_TRUE(nav.can_nav_back());
+  EXPECT_TRUE(nav.can_nav_forward());
+
+  // Back to 0x1000
+  auto back2 = nav.nav_back();
+  ASSERT_TRUE(back2.has_value());
+  EXPECT_EQ(*back2, 0x1000U);
+  EXPECT_FALSE(nav.can_nav_back());
+  EXPECT_TRUE(nav.can_nav_forward());
+
+  // Forward to 0x2000
+  auto fwd1 = nav.nav_forward();
+  ASSERT_TRUE(fwd1.has_value());
+  EXPECT_EQ(*fwd1, 0x2000U);
+
+  // New navigation branches off forward history
+  nav.navigate_to(0x4000);
+  EXPECT_EQ(nav.current_address(), 0x4000U);
+  EXPECT_FALSE(nav.can_nav_forward());
+  EXPECT_TRUE(nav.can_nav_back());
+
+  auto back3 = nav.nav_back();
+  ASSERT_TRUE(back3.has_value());
+  EXPECT_EQ(*back3, 0x2000U);
+}
+
+TEST(Session, CancellationStopsRunningTask) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  // Immediate cancel
+  session.cancel();
+  ASSERT_TRUE(wait_idle(session));
+  // Session must either finish or fail cleanly with Cancelled without crash or hung thread
+  EXPECT_FALSE(session.busy());
 }
 
 }  // namespace
