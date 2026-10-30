@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <limits>
 #include <optional>
 #include <span>
 #include <string>
@@ -600,6 +601,9 @@ void print_usage(std::FILE* out) {
                "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
                "  donkey-cli project save <database> <binary> [--json]\n"
                "  donkey-cli project info <database> [--json]\n"
+               "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
+               "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
+               "  donkey-cli project annotations <database> <image-id> [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1137,11 +1141,14 @@ int command_project(const std::vector<std::string_view>& arguments) {
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
+  bool clear = false;
   std::vector<std::string_view> positional;
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
     if (argument == "--json") {
       json = true;
+    } else if (argument == "--clear") {
+      clear = true;
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for project");
     } else {
@@ -1234,6 +1241,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
                ", \"file_size\": " + std::to_string(image.file_size) +
                ", \"sections\": " + std::to_string(image.sections) +
                ", \"functions\": " + std::to_string(image.functions) +
+               ", \"annotations\": " + std::to_string(image.annotations) +
                ", \"partial\": " + (image.analysis_partial ? "true" : "false") + "}";
       }
       out += images.value().empty() ? "]\n" : "\n  ]\n";
@@ -1254,7 +1262,115 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
-  return usage_error("unknown project subcommand (expected save or info)");
+  if (subcommand == "rename" || subcommand == "comment") {
+    const bool is_rename = subcommand == "rename";
+    if (clear) {
+      if (positional.size() != 3) {
+        return usage_error(is_rename
+                               ? "project rename --clear needs a database, image id and address"
+                               : "project comment --clear needs a database, image id and address");
+      }
+    } else if (positional.size() != 4) {
+      return usage_error(is_rename
+                             ? "project rename needs a database, image id, address and text"
+                             : "project comment needs a database, image id, address and text");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t address = 0;
+    if (!parse_u64(positional[2], address)) {
+      return usage_error("invalid address");
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    const AnnotationKind kind = is_rename ? AnnotationKind::Rename : AnnotationKind::Comment;
+    Result<void> written =
+        clear
+            ? project.value().clear_annotation(static_cast<std::int64_t>(parsed_id), kind, address)
+            : project.value().set_annotation(static_cast<std::int64_t>(parsed_id), kind, address,
+                                             std::string(positional[3]));
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"kind\": " + quote(annotation_kind_name(kind)) + ",\n";
+      out += "  \"address\": " + quote(hex(address)) + ",\n";
+      out += "  \"cleared\": " + std::string(clear ? "true" : "false") + ",\n";
+      out += "  \"text\": " + quote(clear ? std::string() : std::string(positional[3])) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else if (clear) {
+      std::printf("Cleared %s at %s in image %llu\n", annotation_kind_name(kind),
+                  hex(address).c_str(), static_cast<unsigned long long>(parsed_id));
+    } else {
+      std::printf("Set %s at %s in image %llu: %s\n", annotation_kind_name(kind),
+                  hex(address).c_str(), static_cast<unsigned long long>(parsed_id),
+                  std::string(positional[3]).c_str());
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "annotations") {
+    if (positional.size() != 2) {
+      return usage_error("project annotations needs a database and an image id");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto found = project.value().annotations(static_cast<std::int64_t>(parsed_id));
+    if (!found) {
+      return fail(found.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"annotations\": [";
+      for (std::size_t i = 0; i < found.value().size(); ++i) {
+        const Annotation& annotation = found.value()[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"kind\": " + quote(annotation_kind_name(annotation.kind)) +
+               ", \"address\": " + quote(hex(annotation.address)) +
+               ", \"text\": " + quote(annotation.text) + "}";
+      }
+      out += found.value().empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Image %llu: %zu annotations\n", static_cast<unsigned long long>(parsed_id),
+                  found.value().size());
+      for (const Annotation& annotation : found.value()) {
+        std::printf("  %-18s %-7s %s\n", hex(annotation.address).c_str(),
+                    annotation_kind_name(annotation.kind), annotation.text.c_str());
+      }
+    }
+    return kExitOk;
+  }
+
+  return usage_error(
+      "unknown project subcommand (expected save, info, rename, comment or annotations)");
 }
 
 }  // namespace donkey::cli

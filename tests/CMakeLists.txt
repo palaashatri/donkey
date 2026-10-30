@@ -132,12 +132,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 1.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 1.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 add_test(NAME cli.project_info_rejects_non_database
@@ -152,3 +152,50 @@ set_tests_properties(cli.project_info_rejects_missing PROPERTIES WILL_FAIL TRUE)
 add_test(NAME cli.project_rejects_unknown_subcommand COMMAND donkey-cli project nope)
 
 set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Persisted annotations (schema v2).
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_ANN_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-annotations.db")
+
+add_test(NAME cli.project_annotation_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.project_annotation_save PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"image_id\": 1")
+
+add_test(NAME cli.project_rename
+         COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
+set_tests_properties(cli.project_rename PROPERTIES DEPENDS cli.project_annotation_save)
+
+add_test(NAME cli.project_comment
+         COMMAND donkey-cli project comment ${DONKEY_CLI_ANN_DB} 1 0x400104 "calls the helper")
+set_tests_properties(cli.project_comment PROPERTIES DEPENDS cli.project_annotation_save)
+
+add_test(NAME cli.project_annotations_json
+         COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
+set_tests_properties(cli.project_annotations_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"kind\": \"rename\".*\"address\": \"0x400100\".*\"text\": \"entry_point\".*\"kind\": \"comment\""
+  DEPENDS "cli.project_rename;cli.project_comment")
+
+add_test(NAME cli.project_annotation_clear
+         COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 --clear)
+set_tests_properties(cli.project_annotation_clear PROPERTIES
+  DEPENDS "cli.project_rename;cli.project_comment")
+
+add_test(NAME cli.project_annotations_after_clear
+         COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
+set_tests_properties(cli.project_annotations_after_clear PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"kind\": \"comment\""
+  FAIL_REGULAR_EXPRESSION "entry_point"
+  DEPENDS cli.project_annotation_clear)
+
+add_test(NAME cli.project_annotation_missing_image
+         COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 99 0x400100 nope)
+set_tests_properties(cli.project_annotation_missing_image PROPERTIES
+  WILL_FAIL TRUE DEPENDS cli.project_annotation_save)
+
+add_test(NAME cli.project_annotations_reject_bad_id
+         COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} not-a-number)
+set_tests_properties(cli.project_annotations_reject_bad_id PROPERTIES WILL_FAIL TRUE)
