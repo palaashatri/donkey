@@ -469,6 +469,12 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
 
   if (WIFSIGNALED(wstatus)) {
     const int sig = WTERMSIG(wstatus);
+#ifdef SIGXCPU
+    if (sig == SIGXCPU) {
+      return make_error<LoadedBinary>(Status::ResourceLimit, "binary.worker_timeout",
+                                      "isolated parser worker exceeded CPU time limit", 0);
+    }
+#endif
     return make_error<LoadedBinary>(
         Status::InvalidInput, "binary.worker_crashed",
         "isolated parser worker crashed with signal " + std::to_string(sig), 0);

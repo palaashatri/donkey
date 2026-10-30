@@ -3,13 +3,14 @@ include(GoogleTest)
 add_executable(donkey_unit_tests
   unit/binary_test.cpp
   unit/cfg_test.cpp
+  unit/debug_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
   unit/project_test.cpp
   unit/session_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
@@ -284,3 +285,25 @@ add_test(NAME cli.project_restore_rejects_non_database
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
 set_tests_properties(cli.project_restore_rejects_non_database PROPERTIES
   WILL_FAIL TRUE DEPENDS cli.project_restore_json)
+
+# ---------------------------------------------------------------------------
+# Debugger CLI
+# ---------------------------------------------------------------------------
+
+add_test(NAME cli.debug_launch_mock_json
+         COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock --json)
+set_tests_properties(cli.debug_launch_mock_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"state\": \"Stopped\".*\"stop_reason\": \"Entrypoint\".*\"frames\":")
+
+add_test(NAME cli.debug_launch_human
+         COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock)
+set_tests_properties(cli.debug_launch_human PROPERTIES
+  PASS_REGULAR_EXPRESSION "Debugger session state: Stopped.*Call stack:")
+
+add_test(NAME cli.debug_rejects_unknown_subcommand
+         COMMAND donkey-cli debug invalid-cmd)
+set_tests_properties(cli.debug_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.debug_rejects_missing_file
+         COMMAND donkey-cli debug launch)
+set_tests_properties(cli.debug_rejects_missing_file PROPERTIES WILL_FAIL TRUE)

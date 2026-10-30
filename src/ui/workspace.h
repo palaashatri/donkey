@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "donkey/core/navigation.h"
+#include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
 #include "imgui.h"
 #include "session.h"
@@ -101,6 +102,9 @@ struct UiState {
   bool graph_user_adjusted = false;
   const Document* graph_document = nullptr;
   std::uint64_t graph_function = 0;
+
+  // --- Debugger state -------------------------------------------------------
+  std::unique_ptr<debug::DebugAdapter> debug_adapter;
 };
 
 class Workspace {
@@ -139,6 +143,7 @@ class Workspace {
   bool show_strings_ = true;
   bool show_xrefs_ = true;
   bool show_bookmarks_ = true;
+  bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;
   char path_buffer_[1024] = {};

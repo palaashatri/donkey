@@ -17,6 +17,7 @@
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
+#include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/lift.h"
 #include "donkey/project/project.h"
@@ -710,6 +711,7 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project annotations <database> <image-id> [--json]\n"
                "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
                "  donkey-cli project restore <database> <backup> [--json]\n"
+               "  donkey-cli debug launch <binary> [--mock] [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1631,6 +1633,112 @@ int command_project(const std::vector<std::string_view>& arguments) {
   return usage_error(
       "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
       "backup or restore)");
+}
+
+int command_debug(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("debug needs a subcommand: launch");
+  }
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "launch") {
+    return usage_error("unknown debug subcommand; supported: launch");
+  }
+
+  bool json = false;
+  bool mock = false;
+  std::string binary_path;
+  std::vector<std::string> args;
+
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--mock") {
+      mock = true;
+    } else if (arg == "--arg") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--arg needs a value");
+      }
+      args.emplace_back(val);
+    } else if (!arg.empty() && arg.front() == '-') {
+      return usage_error("unknown option for debug launch");
+    } else if (binary_path.empty()) {
+      binary_path = std::string(arg);
+    } else {
+      return usage_error("debug launch accepts exactly one binary file");
+    }
+  }
+
+  if (binary_path.empty()) {
+    return usage_error("debug launch needs a binary file path");
+  }
+
+  auto adapter = debug::create_debug_adapter(mock);
+  debug::LaunchConfig config;
+  config.binary_path = binary_path;
+  config.arguments = args;
+  config.stop_at_entry = true;
+
+  auto res = adapter->launch(config);
+  if (!res) {
+    return fail(res.diagnostic());
+  }
+
+  auto ev = adapter->poll_events();
+  auto frames = adapter->call_stack();
+  auto threads = adapter->threads();
+
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"state\": " + quote(debug::session_state_name(adapter->state())) + ",\n";
+    out += "  \"stop_reason\": " +
+           quote(debug::stop_reason_name(ev.has_value() ? ev.value().reason
+                                                        : debug::StopReason::None)) +
+           ",\n";
+    out += "  \"entry_address\": " + quote(hex(ev.has_value() ? ev.value().address : 0)) + ",\n";
+    out += "  \"threads\": [";
+    if (threads.has_value()) {
+      for (std::size_t i = 0; i < threads.value().size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"id\": " + std::to_string(threads.value()[i].id) +
+               ", \"name\": " + quote(threads.value()[i].name) +
+               ", \"current\": " + (threads.value()[i].is_current ? "true" : "false") + "}";
+      }
+    }
+    out += (threads.has_value() && !threads.value().empty()) ? "\n  ],\n" : "],\n";
+    out += "  \"frames\": [";
+    if (frames.has_value()) {
+      for (std::size_t i = 0; i < frames.value().size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"index\": " + std::to_string(frames.value()[i].index) +
+               ", \"ip\": " + quote(hex(frames.value()[i].instruction_pointer)) +
+               ", \"sp\": " + quote(hex(frames.value()[i].stack_pointer)) +
+               ", \"function\": " + quote(frames.value()[i].function_name) +
+               ", \"static_address\": " + quote(hex(frames.value()[i].static_address)) + "}";
+      }
+    }
+    out += (frames.has_value() && !frames.value().empty()) ? "\n  ]\n" : "]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  std::printf("Debugger session state: %s (stopped at %s: %s)\n",
+              debug::session_state_name(adapter->state()),
+              debug::stop_reason_name(ev.has_value() ? ev.value().reason : debug::StopReason::None),
+              hex(ev.has_value() ? ev.value().address : 0).c_str());
+  if (frames.has_value()) {
+    std::printf("Call stack:\n");
+    for (const auto& f : frames.value()) {
+      std::printf("  #%u  %s  %s (static %s)\n", f.index, hex(f.instruction_pointer).c_str(),
+                  f.function_name.c_str(), hex(f.static_address).c_str());
+    }
+  }
+  return kExitOk;
 }
 
 }  // namespace donkey::cli
