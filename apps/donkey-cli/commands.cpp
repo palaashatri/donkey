@@ -110,6 +110,10 @@ struct AnalysisRequest {
 bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::size_t& index,
                          LoadOptions& options, const char*& error_message) {
   const std::string_view argument = arguments[index];
+  if (argument == "--isolate") {
+    options.isolate = true;
+    return true;
+  }
   if (argument == "--raw") {
     options.force_raw = true;
     return true;

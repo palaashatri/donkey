@@ -47,6 +47,7 @@ add_library(donkey_binary STATIC
   src/binary/byte_reader.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
+  src/binary/isolation.cpp
   src/binary/macho.cpp
   src/binary/pe.cpp
 )

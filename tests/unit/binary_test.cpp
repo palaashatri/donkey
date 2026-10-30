@@ -11,6 +11,7 @@
 
 #include "donkey/binary/byte_reader.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/isolation.h"
 #include "donkey/core/result.h"
 #include "donkey/core/sha256.h"
 
@@ -566,6 +567,62 @@ TEST(Binary, EnforcesFileSizeLimit) {
   auto image = donkey::load_binary_file(fixture_path("tiny-elf-x86_64"), options);
   EXPECT_FALSE(image.has_value());
   EXPECT_EQ(image.diagnostic().code, "io.file_too_large");
+}
+
+TEST(Binary, IsolatedLoaderParsesValidBinariesIdentically) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+
+  const std::string path = fixture_path("tiny-elf-x86_64");
+  auto direct = donkey::load_binary(path);
+  ASSERT_TRUE(direct.has_value()) << direct.diagnostic().message;
+
+  auto isolated = donkey::load_binary_isolated(path);
+  ASSERT_TRUE(isolated.has_value()) << isolated.diagnostic().message;
+
+  const auto& img_direct = direct.value().image;
+  const auto& img_iso = isolated.value().image;
+  EXPECT_EQ(img_iso.format, img_direct.format);
+  EXPECT_EQ(img_iso.architecture, img_direct.architecture);
+  EXPECT_EQ(img_iso.entry_point, img_direct.entry_point);
+  EXPECT_EQ(img_iso.sha256, img_direct.sha256);
+  EXPECT_EQ(img_iso.sections.size(), img_direct.sections.size());
+  EXPECT_EQ(img_iso.symbols.size(), img_direct.symbols.size());
+  EXPECT_EQ(isolated.value().data.size(), direct.value().data.size());
+}
+
+TEST(Binary, IsolatedLoaderCapturesWorkerCrashCleanly) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+
+  const std::string path = fixture_path("tiny-elf-x86_64");
+  donkey::IsolationConfig config;
+  config.force_worker_crash = true;
+
+  // The child process will crash with SIGSEGV, but the parent supervisor must survive!
+  auto result = donkey::load_binary_isolated(path, {}, config);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "binary.worker_crashed");
+  EXPECT_NE(result.diagnostic().message.find("signal"), std::string::npos);
+}
+
+TEST(Binary, IsolatedLoaderEnforcesTimeoutOnWorkerHang) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+
+  const std::string path = fixture_path("tiny-elf-x86_64");
+  donkey::IsolationConfig config;
+  config.force_worker_hang = true;
+  config.timeout_seconds = 1;
+
+  // Supervisor must kill the hanging child after 1s timeout and report ResourceLimit
+  auto result = donkey::load_binary_isolated(path, {}, config);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "binary.worker_timeout");
+  EXPECT_EQ(result.diagnostic().status, donkey::Status::ResourceLimit);
 }
 
 }  // namespace
