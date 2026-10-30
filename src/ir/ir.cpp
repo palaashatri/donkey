@@ -1,5 +1,6 @@
 #include "donkey/ir/ir.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <optional>
 #include <string>
