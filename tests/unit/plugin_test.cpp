@@ -2,6 +2,10 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
+#include <string>
+#include <vector>
+
 namespace donkey {
 namespace {
 
