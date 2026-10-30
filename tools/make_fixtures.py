@@ -555,6 +555,112 @@ def build_macho() -> bytes:
     return bytes(buf)
 
 
+def build_macho_i386() -> bytes:
+    """A 32-bit Mach-O executable (i386) with LC_SEGMENT, LC_MAIN and 12-byte nlist."""
+    text = X86_32_TEXT
+    command_bytes = 124 + 56 + 24 + 24
+    buf = bytearray(0x1040)
+
+    u32(buf, 0, 0xFEEDFACE)  # MH_MAGIC (32-bit)
+    u32(buf, 4, 7)           # CPU_TYPE_X86
+    u32(buf, 8, 3)           # CPU_SUBTYPE_I386_ALL
+    u32(buf, 12, 2)          # MH_EXECUTE
+    u32(buf, 16, 4)          # ncmds
+    u32(buf, 20, command_bytes)
+    u32(buf, 24, 0)          # flags
+
+    command = 28
+    # LC_SEGMENT (__TEXT) = 56 + 68 = 124 bytes
+    u32(buf, command, 0x1)
+    u32(buf, command + 4, 124)
+    buf[command + 8 : command + 24] = b"__TEXT\x00" + b"\x00" * 9
+    u32(buf, command + 24, 0x00001000)  # vmaddr
+    u32(buf, command + 28, 0x1000)      # vmsize
+    u32(buf, command + 32, 0)           # fileoff
+    u32(buf, command + 36, 0x1000)      # filesize
+    i32(buf, command + 40, 7)           # maxprot
+    i32(buf, command + 44, 5)           # initprot
+    u32(buf, command + 48, 1)           # nsects
+    u32(buf, command + 52, 0)           # flags
+
+    section = command + 56
+    buf[section : section + 16] = b"__text\x00" + b"\x00" * 9
+    buf[section + 16 : section + 32] = b"__TEXT\x00" + b"\x00" * 9
+    u32(buf, section + 32, 0x00001F00)  # addr
+    u32(buf, section + 36, len(text))   # size
+    u32(buf, section + 40, 0xF00)       # offset
+    u32(buf, section + 44, 4)           # align
+    u32(buf, section + 48, 0)           # reloff
+    u32(buf, section + 52, 0)           # nreloc
+    u32(buf, section + 56, 0x80000400)  # flags
+    u32(buf, section + 60, 0)           # reserved1
+    u32(buf, section + 64, 0)           # reserved2
+
+    command += 124
+    # LC_SEGMENT (__LINKEDIT) = 56 bytes
+    u32(buf, command, 0x1)
+    u32(buf, command + 4, 56)
+    buf[command + 8 : command + 24] = b"__LINKEDIT\x00" + b"\x00" * 5
+    u32(buf, command + 24, 0x00002000)
+    u32(buf, command + 28, 0x1000)
+    u32(buf, command + 32, 0x1000)
+    u32(buf, command + 36, 0x40)
+    i32(buf, command + 40, 7)
+    i32(buf, command + 44, 1)
+    u32(buf, command + 48, 0)
+    u32(buf, command + 52, 0)
+
+    command += 56
+    # LC_MAIN
+    u32(buf, command, 0x80000028)
+    u32(buf, command + 4, 24)
+    u64(buf, command + 8, 0xF00)
+    u64(buf, command + 16, 0)
+
+    command += 24
+    # LC_SYMTAB
+    u32(buf, command, 2)
+    u32(buf, command + 4, 24)
+    u32(buf, command + 8, 0x1000)
+    u32(buf, command + 12, 2)
+    u32(buf, command + 16, 0x1020)
+    u32(buf, command + 20, 0x10)
+
+    buf[0xF00 : 0xF00 + len(text)] = text
+
+    def nlist32(offset, strx, n_type, sect, value):
+        u32(buf, offset, strx)
+        buf[offset + 4] = n_type
+        buf[offset + 5] = sect
+        u16(buf, offset + 6, 0)
+        u32(buf, offset + 8, value)
+
+    nlist32(0x1000, 1, 0x0F, 1, 0x00001F00)  # _main
+    nlist32(0x100C, 7, 0x01, 0, 0)           # _puts (undefined)
+    buf[0x1020 : 0x102D] = b"\x00_main\x00_puts\x00"
+    return bytes(buf)
+
+
+def build_macho_fat() -> bytes:
+    """A two-slice fat Mach-O containing i386 (32-bit) and arm64 (64-bit) slices."""
+    slice_i386 = build_macho_i386()
+    slice_arm64 = build_macho()
+    off_i386 = 0x1000
+    off_arm64 = 0x3000
+    buf = bytearray(off_arm64 + len(slice_arm64))
+
+    # Big-endian fat_header (0xCAFEBABE, nfat_arch=2)
+    struct.pack_into(">II", buf, 0, 0xCAFEBABE, 2)
+    # Slice 0: i386 (cputype=7, cpusubtype=3, offset, size, align=12)
+    struct.pack_into(">IIIII", buf, 8, 7, 3, off_i386, len(slice_i386), 12)
+    # Slice 1: arm64 (cputype=0x0100000C, cpusubtype=0, offset, size, align=12)
+    struct.pack_into(">IIIII", buf, 28, 0x0100000C, 0, off_arm64, len(slice_arm64), 12)
+
+    buf[off_i386 : off_i386 + len(slice_i386)] = slice_i386
+    buf[off_arm64 : off_arm64 + len(slice_arm64)] = slice_arm64
+    return bytes(buf)
+
+
 def main():
     OUT.mkdir(parents=True, exist_ok=True)
     MANIFESTS.mkdir(parents=True, exist_ok=True)
@@ -564,6 +670,8 @@ def main():
         "tiny-pe-x86_64.exe": build_pe(),
         "tiny-pe-i386.exe": build_pe_i386(),
         "tiny-macho-arm64": build_macho(),
+        "tiny-macho-i386": build_macho_i386(),
+        "tiny-macho-fat": build_macho_fat(),
     }
     manifest = {"generator": "tools/make_fixtures.py", "fixtures": []}
     for name, data in fixtures.items():

@@ -41,6 +41,24 @@ add_test(NAME cli.info_macho_json
 set_tests_properties(cli.info_macho_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"architecture\": \"aarch64\"")
 
+add_test(NAME cli.info_macho_i386_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-i386 --json)
+set_tests_properties(cli.info_macho_i386_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"format_detail\": \"Mach-O 32 \\(MH_EXECUTE\\)\".*\"architecture\": \"x86\"")
+
+add_test(NAME cli.info_macho_fat_x86_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-fat
+                 --arch x86 --json)
+set_tests_properties(cli.info_macho_fat_x86_json PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"architecture\": \"x86\".*\"fat_architectures\": \\[\"x86\", \"aarch64\"\\]")
+
+add_test(NAME cli.disasm_raw_x86_64_json
+         COMMAND donkey-cli disasm ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --raw --arch x86_64 --base 0x1000 --address 0x1100 --count 3 --json)
+set_tests_properties(cli.disasm_raw_x86_64_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"start\": \"0x1100\".*\"mnemonic\": \"push\"")
+
 add_test(NAME cli.info_missing_file COMMAND donkey-cli info /definitely/not/here)
 set_tests_properties(cli.info_missing_file PROPERTIES WILL_FAIL TRUE)
 
