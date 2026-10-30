@@ -4,14 +4,15 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 
 **Status: early implementation.** On macOS arm64 the following work today:
 
-- `donkey-cli --version`, `--help`, `info <binary> [--json]`, `disasm`, `strings`, `functions`, `cfg`, `xrefs` and `analyze` (all with `--json`).
+- `donkey-cli --version`, `--help`, `info <binary> [--json]`, `disasm`, `strings`, `functions`, `cfg`, `decompile`, `xrefs` and `analyze` (all with `--json`).
 - Bounds-checked ELF64, PE32/PE32+ and 64-bit Mach-O (including fat slices) metadata import: format, architecture, segments, sections, entry point, SHA-256, imports and exports.
 - Capstone 5.0.9 decoding for x86, x86-64 and AArch64, call/jump/return classification, direct call targets and x86 RIP-relative data references.
 - Deterministic analysis: instructions, call/data xrefs, ASCII and UTF-16LE strings, seeded functions, and a bounded control-flow graph with basic blocks, branch edges and estimated per-function extents. Indirect branches mark results `Partial`/`estimated`.
-- A SDL3 + Dear ImGui desktop shell (`donkey [binary]`) with a docked workspace: overview, sections, functions, disassembly, hex, strings, xrefs and diagnostics panels. Loading and analysis run on a worker thread so the UI stays responsive.
+- IR-based decompiler for a documented x86-64 subset: instructions are lifted into typed IR that a verifier checks (operand widths, block targets, terminators, statement shape) before a C-like printer runs. Unsupported instructions and architectures return explicit `Unsupported`/`Partial` results, never guessed pseudocode. Other architectures are not lifted yet.
+- A SDL3 + Dear ImGui desktop shell (`donkey [binary]`) with a docked workspace: overview, sections, functions, disassembly, decompiler, hex, strings, xrefs and diagnostics panels. Loading and analysis run on a worker thread so the UI stays responsive.
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
 
-Not implemented yet: project persistence, graph rendering, decompiler, debugger. Anything not covered by the test suite should be treated as unverified.
+Not implemented yet: project persistence, graph rendering, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)

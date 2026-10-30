@@ -16,7 +16,7 @@ bool printable(std::byte value) {
 
 std::string row_address(std::uint64_t address) {
   char buffer[32];
-  std::snprintf(buffer, sizeof(buffer), "%llx", static_cast<unsigned long long>(address));
+  std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(address));
   return buffer;
 }
 

@@ -51,6 +51,9 @@ int main(int argc, char** argv) {
   if (command == "cfg") {
     return donkey::cli::command_cfg(rest);
   }
+  if (command == "decompile") {
+    return donkey::cli::command_decompile(rest);
+  }
   if (command == "xrefs") {
     return donkey::cli::command_xrefs(rest);
   }

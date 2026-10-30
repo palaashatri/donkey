@@ -82,6 +82,19 @@ target_link_libraries(donkey_analysis PUBLIC donkey::decode)
 target_compile_features(donkey_analysis PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_analysis)
 
+add_library(donkey_ir STATIC
+  src/ir/ir.cpp
+  src/ir/lift.cpp
+)
+add_library(donkey::ir ALIAS donkey_ir)
+target_include_directories(donkey_ir
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_ir PUBLIC donkey::analysis)
+target_compile_features(donkey_ir PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_ir)
+
 # ---------------------------------------------------------------------------
 # Executables
 # ---------------------------------------------------------------------------
@@ -98,6 +111,7 @@ if(DONKEY_BUILD_UI)
   add_library(donkey_ui STATIC
     src/ui/application.cpp
     src/ui/components.cpp
+    src/ui/decompiler_view.cpp
     src/ui/disasm_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
@@ -112,7 +126,7 @@ if(DONKEY_BUILD_UI)
   )
   target_link_libraries(donkey_ui
     PUBLIC donkey::analysis
-    PRIVATE donkey_imgui
+    PRIVATE donkey::ir donkey_imgui
   )
   target_compile_features(donkey_ui PUBLIC cxx_std_20)
   donkey_apply_warnings(donkey_ui)

@@ -5,8 +5,9 @@ add_executable(donkey_unit_tests
   unit/cfg_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
+  unit/ir_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::analysis GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::ir donkey::analysis GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )
@@ -93,3 +94,29 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   add_test(NAME ui.smoke_rejects_unknown_option COMMAND donkey --nope)
   set_tests_properties(ui.smoke_rejects_unknown_option PROPERTIES WILL_FAIL TRUE)
 endif()
+
+add_test(NAME cli.cfg_elf_json
+         COMMAND donkey-cli cfg ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.cfg_elf_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"address\": \"0x400100\".*\"kind\": \"call\"")
+
+add_test(NAME cli.decompile_elf_json
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.decompile_elf_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Complete\".*u64 _start")
+
+add_test(NAME cli.decompile_elf_function_filter
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --function 0x400100 --json)
+set_tests_properties(cli.decompile_elf_function_filter PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"pseudocode\"")
+
+add_test(NAME cli.decompile_rejects_unknown_function
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --function 0x1234)
+set_tests_properties(cli.decompile_rejects_unknown_function PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.decompile_macho_refuses
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64 --json)
+set_tests_properties(cli.decompile_macho_refuses PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status\": \"Unsupported\".*lift.unsupported_architecture")

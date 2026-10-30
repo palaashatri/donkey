@@ -21,6 +21,16 @@ struct UiState {
   std::string disassembly_filter;
   bool show_hex_bytes = true;
   bool follow_selection = true;
+
+  /// Cached decompilation for the currently selected function. Lifting is
+  /// bounded but still pure CPU work, so the render thread never redoes it
+  /// every frame. The document pointer is the cache key: a reload invalidates.
+  const Document* pseudocode_document = nullptr;
+  std::uint64_t pseudocode_address = 0;
+  std::string pseudocode_function;
+  std::string pseudocode_status;
+  std::string pseudocode_code;
+  std::string pseudocode_text;
 };
 
 class Workspace {
@@ -53,6 +63,7 @@ class Workspace {
   bool show_sections_ = true;
   bool show_functions_ = true;
   bool show_disassembly_ = true;
+  bool show_decompiler_ = true;
   bool show_hex_ = true;
   bool show_strings_ = true;
   bool show_xrefs_ = true;
