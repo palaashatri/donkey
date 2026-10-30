@@ -13,6 +13,7 @@ add_library(test_plugin_hang MODULE fixtures/plugins/hang_plugin.c)
 target_include_directories(test_plugin_hang PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
 add_executable(donkey_unit_tests
+  unit/acceptance_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
   unit/debug_test.cpp
