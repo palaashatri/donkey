@@ -30,6 +30,7 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string&,
 #include <chrono>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace donkey {
@@ -92,6 +93,36 @@ bool read_string(int fd, std::string& out, const std::chrono::steady_clock::time
   out.resize(len);
   if (len == 0) return true;
   return read_exact(fd, out.data(), len, deadline);
+}
+
+bool reap_child_bounded(pid_t pid, const std::chrono::steady_clock::time_point& deadline,
+                        int* out_status) {
+  while (true) {
+    int wstatus = 0;
+    pid_t res = waitpid(pid, &wstatus, WNOHANG);
+    if (res == pid) {
+      if (out_status != nullptr) {
+        *out_status = wstatus;
+      }
+      return true;
+    }
+    if (res < 0) {
+      if (errno == ECHILD) {
+        return true;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(pid, SIGKILL);
+      waitpid(pid, out_status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
 }
 
 }  // namespace
@@ -203,7 +234,10 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& 
     }
     close(pipe_fds[0]);
     int status = 0;
-    waitpid(pid, &status, 0);
+    if (!reap_child_bounded(pid, deadline, &status)) {
+      return Diagnostic::make(Status::ResourceLimit, "plugin.timeout",
+                              "Plugin worker exceeded timeout while exiting");
+    }
     return Diagnostic::make(static_cast<Status>(st_val), err_code, err_msg);
   }
 
@@ -227,7 +261,10 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& 
 
   close(pipe_fds[0]);
   int status = 0;
-  waitpid(pid, &status, 0);
+  if (!reap_child_bounded(pid, deadline, &status)) {
+    return Diagnostic::make(Status::ResourceLimit, "plugin.timeout",
+                            "Plugin worker exceeded timeout while exiting");
+  }
 
   return m;
 }
@@ -423,9 +460,17 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
   close(pipe_fds[0]);
 
   int wstatus = 0;
-  waitpid(pid, &wstatus, 0);
+  bool reaped = reap_child_bounded(pid, deadline, &wstatus);
 
   PluginExecutionResult res;
+  if (!reaped) {
+    res.timed_out = true;
+    res.success = false;
+    res.error_code = "plugin.timeout";
+    res.error_message = "Plugin worker exceeded execution timeout (" +
+                        std::to_string(timeout_seconds) + " seconds)";
+    return res;
+  }
 
   if (WIFSIGNALED(wstatus)) {
     int sig = WTERMSIG(wstatus);

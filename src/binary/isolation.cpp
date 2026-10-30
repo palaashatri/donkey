@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -15,6 +16,36 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #define DONKEY_HAS_POSIX_ISOLATION 1
+
+static bool reap_child_bounded(pid_t pid, const std::chrono::steady_clock::time_point& deadline,
+                               int* out_status) {
+  while (true) {
+    int wstatus = 0;
+    pid_t res = waitpid(pid, &wstatus, WNOHANG);
+    if (res == pid) {
+      if (out_status != nullptr) {
+        *out_status = wstatus;
+      }
+      return true;
+    }
+    if (res < 0) {
+      if (errno == ECHILD) {
+        return true;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(pid, SIGKILL);
+      waitpid(pid, out_status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
 #else
 #define DONKEY_HAS_POSIX_ISOLATION 0
 #endif
@@ -489,7 +520,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   }
 
   int wstatus = 0;
-  waitpid(pid, &wstatus, 0);
+  const auto deadline = start_time + max_duration;
+  bool reaped = reap_child_bounded(pid, deadline, &wstatus);
+  if (!reaped) {
+    return make_error<LoadedBinary>(Status::ResourceLimit, "binary.worker_timeout",
+                                    "isolated parser worker exceeded resource limit or timed out",
+                                    0);
+  }
 
   if (WIFSIGNALED(wstatus)) {
     const int sig = WTERMSIG(wstatus);
@@ -512,15 +549,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
 
   return deserialize_result(response_buffer);
 #else
-  // Non-POSIX platforms degrade safely to in-process checked loading
+  // Non-POSIX platforms fail closed to prevent loading untrusted input in the host process
+  (void)path;
+  (void)options;
   (void)config;
-  auto loaded = load_binary(path, options);
-  if (loaded) {
-    loaded.value().image.add_diagnostic(
-        Status::Unsupported, "binary.isolation_unavailable",
-        "real OS process isolation is not supported on this host platform");
-  }
-  return loaded;
+  return make_error<LoadedBinary>(
+      Status::Unsupported, "binary.isolation_unavailable",
+      "real OS process isolation is not supported on this host platform", 0);
 #endif
 }
 

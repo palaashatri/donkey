@@ -119,7 +119,7 @@ class Session {
 
  private:
   void retire_worker();
-  void fail(const std::string& message, const std::string& status);
+  void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
                                     const std::string& text, bool record_undo);

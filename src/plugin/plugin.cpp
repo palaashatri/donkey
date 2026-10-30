@@ -1,5 +1,6 @@
 #include "donkey/plugin/plugin.h"
 
+#include <cstring>
 #include <vector>
 
 #if defined(_WIN32)
@@ -184,7 +185,11 @@ Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& lib
   res.exit_code = exec_rc;
   if (exec_rc == 0) {
     res.success = true;
-    res.output_json = out_buf.data();
+    const void* nul = std::memchr(out_buf.data(), '\0', out_buf.size());
+    const std::size_t len =
+        nul != nullptr ? static_cast<std::size_t>(static_cast<const char*>(nul) - out_buf.data())
+                       : out_buf.size();
+    res.output_json.assign(out_buf.data(), len);
   } else {
     res.success = false;
     res.error_code = "plugin.execution_failed";

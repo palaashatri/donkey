@@ -1,10 +1,12 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "donkey/core/navigation.h"
@@ -16,8 +18,25 @@
 namespace donkey::ui {
 
 struct AsyncDecompileState {
+  AsyncDecompileState();
+  ~AsyncDecompileState();
+
+  AsyncDecompileState(const AsyncDecompileState&) = delete;
+  AsyncDecompileState& operator=(const AsyncDecompileState&) = delete;
+
+  void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, Function target);
+
   std::mutex mutex;
+  std::condition_variable cv;
+  bool stop = false;
+  std::thread worker;
+
   std::uint64_t current_generation = 0;
+  std::shared_ptr<const Document> pending_doc;
+  Function pending_target;
+  std::uint64_t pending_gen = 0;
+  bool has_pending = false;
+
   bool ready = false;
   std::uint64_t ready_address = 0;
   std::string ready_name;

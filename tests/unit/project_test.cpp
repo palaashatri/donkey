@@ -587,4 +587,39 @@ TEST(Project, RestoreRejectsInvalidBackups) {
   EXPECT_EQ(too_new.diagnostic().code, "project.backup_schema");
 }
 
+TEST(Project, RestoreHonorsCancellationBeforeReplacingDatabase) {
+  TempPath source("restore-cancel-source");
+  TempPath destination("restore-cancel-destination");
+  TempPath backup("restore-cancel-backup");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  {
+    auto project = Project::create(source.str());
+    ASSERT_TRUE(project.has_value());
+    ASSERT_TRUE(project.value().import(loaded, analysis.value()).has_value());
+    ASSERT_TRUE(project.value().backup(backup.str()).has_value());
+  }
+
+  {
+    std::ofstream file(destination.str(), std::ios::binary | std::ios::trunc);
+    file << "original destination content";
+  }
+
+  donkey::CancellationToken token;
+  token.cancel();
+
+  auto restored = Project::restore(destination.str(), backup.str(), token);
+  ASSERT_FALSE(restored.has_value());
+  EXPECT_EQ(restored.diagnostic().code, "io.cancelled");
+
+  std::ifstream check(destination.str());
+  std::string content;
+  std::getline(check, content);
+  EXPECT_EQ(content, "original destination content");
+
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
+}
+
 }  // namespace

@@ -7,7 +7,109 @@
 #include "imgui.h"
 #include "views.h"
 
+namespace donkey::ui {
+
+AsyncDecompileState::AsyncDecompileState() {
+  worker = std::thread([this]() {
+    while (true) {
+      std::shared_ptr<const Document> doc;
+      Function target;
+      std::uint64_t gen = 0;
+
+      {
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this]() { return stop || has_pending; });
+        if (stop) {
+          break;
+        }
+        doc = std::move(pending_doc);
+        target = std::move(pending_target);
+        gen = pending_gen;
+        has_pending = false;
+      }
+
+      if (!doc) {
+        continue;
+      }
+
+      // Check if generation superseded before starting CPU-heavy lifting
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (current_generation != gen || stop) {
+          continue;
+        }
+      }
+
+      auto lifted = lift_function(doc->loaded.image, doc->analysis, target);
+      std::string status;
+      std::string code;
+      std::string full_text;
+      std::vector<PseudocodeLine> lines;
+
+      if (!lifted) {
+        status = "Unsupported";
+        code = lifted.diagnostic().code;
+        full_text = lifted.diagnostic().message;
+      } else {
+        auto text = format_pseudocode_lines(lifted.value());
+        if (!text) {
+          status = "InvalidIR";
+          code = text.diagnostic().code;
+          full_text = text.diagnostic().code + ": " + text.diagnostic().message;
+        } else {
+          status = lifted.value().partial ? "Partial" : "Complete";
+          full_text = std::move(text.value().full_text);
+          lines = std::move(text.value().lines);
+        }
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (current_generation == gen && !stop) {
+          ready_status = std::move(status);
+          ready_code = std::move(code);
+          ready_text = std::move(full_text);
+          ready_lines = std::move(lines);
+          ready_address = target.address;
+          ready_name = target.name;
+          ready = true;
+        }
+      }
+    }
+  });
+}
+
+AsyncDecompileState::~AsyncDecompileState() {
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    stop = true;
+    has_pending = false;
+    pending_doc.reset();
+  }
+  cv.notify_one();
+  if (worker.joinable()) {
+    worker.join();
+  }
+}
+
+void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc,
+                                       Function target) {
+  {
+    std::lock_guard<std::mutex> lock(mutex);
+    current_generation = gen;
+    pending_gen = gen;
+    pending_doc = std::move(doc);
+    pending_target = std::move(target);
+    has_pending = true;
+    ready = false;
+  }
+  cv.notify_one();
+}
+
+}  // namespace donkey::ui
+
 namespace donkey::ui::views {
+
 namespace {
 
 const Function* selected_function(const Document& document, std::uint64_t address) {
@@ -85,60 +187,13 @@ void refresh(UiState& state, const Document& document, const Function& function)
     target.name = *renamed;
   }
 
-  std::shared_ptr<AsyncDecompileState> async_state = state.async_decompile;
   std::uint64_t gen = 0;
   {
-    std::lock_guard<std::mutex> lock(async_state->mutex);
-    gen = ++async_state->current_generation;
-    async_state->ready = false;
+    std::lock_guard<std::mutex> lock(state.async_decompile->mutex);
+    gen = ++state.async_decompile->current_generation;
   }
 
-  auto doc = state.pseudocode_document_owner;
-  std::thread([async_state, gen, doc, target]() {
-    {
-      std::lock_guard<std::mutex> lock(async_state->mutex);
-      if (async_state->current_generation != gen) {
-        return;
-      }
-    }
-    if (!doc) {
-      return;
-    }
-
-    auto lifted = lift_function(doc->loaded.image, doc->analysis, target);
-    std::string status;
-    std::string code;
-    std::string full_text;
-    std::vector<PseudocodeLine> lines;
-
-    if (!lifted) {
-      status = "Unsupported";
-      code = lifted.diagnostic().code;
-      full_text = lifted.diagnostic().message;
-    } else {
-      auto text = format_pseudocode_lines(lifted.value());
-      if (!text) {
-        status = "InvalidIR";
-        code = text.diagnostic().code;
-        full_text = text.diagnostic().code + ": " + text.diagnostic().message;
-      } else {
-        status = lifted.value().partial ? "Partial" : "Complete";
-        full_text = std::move(text.value().full_text);
-        lines = std::move(text.value().lines);
-      }
-    }
-
-    std::lock_guard<std::mutex> lock(async_state->mutex);
-    if (async_state->current_generation == gen) {
-      async_state->ready_status = std::move(status);
-      async_state->ready_code = std::move(code);
-      async_state->ready_text = std::move(full_text);
-      async_state->ready_lines = std::move(lines);
-      async_state->ready_address = target.address;
-      async_state->ready_name = target.name;
-      async_state->ready = true;
-    }
-  }).detach();
+  state.async_decompile->request_lift(gen, state.pseudocode_document_owner, std::move(target));
 }
 
 }  // namespace

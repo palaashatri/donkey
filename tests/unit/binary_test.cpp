@@ -645,4 +645,16 @@ TEST(Binary, IsolatedLoaderEnforcesTimeoutOnWorkerHang) {
   EXPECT_EQ(result.diagnostic().status, donkey::Status::ResourceLimit);
 }
 
+TEST(Binary, IsolatedLoaderFailsClosedWhenIsolationUnavailable) {
+  if (donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation is supported on this platform";
+  }
+
+  const std::string path = fixture_path("tiny-elf-x86_64");
+  auto result = donkey::load_binary_isolated(path);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "binary.isolation_unavailable");
+  EXPECT_EQ(result.diagnostic().status, donkey::Status::Unsupported);
+}
+
 }  // namespace

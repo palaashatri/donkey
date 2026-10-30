@@ -440,4 +440,34 @@ TEST(Session, CancellationStopsRunningTask) {
   EXPECT_FALSE(session.busy());
 }
 
+TEST(Session, SupersededWorkerDoesNotPublishFailure) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  session.cancel();
+  session.open(fixture_path("tiny-pe-x86_64.exe"));
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
+TEST(Session, RapidInterleavedOpenCancelOpenMaintainsConsistentState) {
+  Session session;
+  for (int i = 0; i < 20; ++i) {
+    session.open(fixture_path("tiny-elf-x86_64"));
+    session.cancel();
+    session.open(fixture_path("tiny-pe-x86_64.exe"));
+  }
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
 }  // namespace

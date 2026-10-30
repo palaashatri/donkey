@@ -1965,12 +1965,10 @@ int command_plugin(const std::vector<std::string_view>& arguments) {
   }
 
   if (subcommand == "info") {
-    // Safely inspect manifest in isolated process so hostile constructors never run in host;
-    // fall back to trusted inspection only if process isolation is unavailable on host platform.
+    // Safely inspect manifest in isolated process so hostile constructors never run in host
+    // process. Fails closed on platforms lacking process isolation (Windows) to prevent unvetted
+    // static init.
     auto manifest_res = PluginHost::inspect_manifest_isolated(lib_path);
-    if (!manifest_res && manifest_res.diagnostic().code == "plugin.isolation_unavailable") {
-      manifest_res = PluginHost::inspect_manifest(lib_path);
-    }
     if (!manifest_res) {
       return fail(manifest_res.diagnostic());
     }

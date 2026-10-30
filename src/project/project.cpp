@@ -890,7 +890,8 @@ Result<void> Project::backup(const std::string& destination, bool overwrite) con
   return {};
 }
 
-Result<void> Project::restore(const std::string& database_path, const std::string& backup_path) {
+Result<void> Project::restore(const std::string& database_path, const std::string& backup_path,
+                              const CancellationToken& cancellation_token) {
   std::error_code error;
   if (!std::filesystem::exists(backup_path, error)) {
     return make_error<void>(Status::InvalidInput, "project.backup_missing",
@@ -966,6 +967,12 @@ Result<void> Project::restore(const std::string& database_path, const std::strin
   if (!copied) {
     std::filesystem::remove(temporary, error);
     return copied;
+  }
+
+  if (cancellation_token.is_cancelled()) {
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::Cancelled, "io.cancelled",
+                            "restore was cancelled before replacing database");
   }
 
   // Any stale WAL belonging to the old database must not be replayed over the

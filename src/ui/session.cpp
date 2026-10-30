@@ -44,8 +44,12 @@ void Session::retire_worker() {
   }
 }
 
-void Session::fail(const std::string& message, const std::string& status) {
+void Session::fail(std::uint64_t generation, const std::string& message,
+                   const std::string& status) {
   std::lock_guard<std::mutex> lock(mutex_);
+  if (generation != generation_.load()) {
+    return;
+  }
   error_ = message;
   status_ = status;
   busy_.store(false);
@@ -80,11 +84,11 @@ void Session::open(const std::string& path) {
       return;
     }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail(loaded.diagnostic().message + " [" + loaded.diagnostic().code + "]",
+      fail(generation, loaded.diagnostic().message + " [" + loaded.diagnostic().code + "]",
            "Failed to load " + path);
       return;
     }
@@ -92,15 +96,12 @@ void Session::open(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse " + path);
       return;
     }
@@ -148,11 +149,8 @@ void Session::open_project(const std::string& path) {
     std::string failure_status;
     {
       auto project = Project::open(path);
-      if (generation_.load() != generation) {
-        return;
-      }
       if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
+        fail(generation, "Operation cancelled", "Cancelled");
         return;
       }
       if (!project) {
@@ -182,30 +180,25 @@ void Session::open_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!failure.empty()) {
-      fail(failure, failure_status);
+      fail(generation, failure, failure_status);
       return;
     }
 
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
     auto loaded = load_binary(image_path, load_opts);
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail("could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
+      fail(generation,
+           "could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
                loaded.diagnostic().code + "]",
            "Failed to load project image");
       return;
@@ -213,15 +206,12 @@ void Session::open_project(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse project image");
       return;
     }
@@ -323,11 +313,8 @@ void Session::save_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation) {
-      return;
-    }
     if (!failure.empty()) {
-      fail(failure, "Failed to save project " + path);
+      fail(generation, failure, "Failed to save project " + path);
       return;
     }
 
@@ -385,11 +372,8 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
         }
       }
     }
-    if (generation_.load() != generation) {
-      return;
-    }
     if (!failure.empty()) {
-      fail(failure, "Failed to back up project to " + destination);
+      fail(generation, failure, "Failed to back up project to " + destination);
       return;
     }
 
@@ -435,15 +419,12 @@ void Session::restore_project(const std::string& backup_path) {
       return;
     }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
-    auto restored = Project::restore(target_path, backup_path);
-    if (generation_.load() != generation) {
-      return;
-    }
+    auto restored = Project::restore(target_path, backup_path, token);
     if (!restored) {
-      fail(restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
+      fail(generation, restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
            "Failed to restore project from " + backup_path);
       return;
     }
@@ -455,9 +436,6 @@ void Session::restore_project(const std::string& backup_path) {
     std::string failure_status;
     {
       auto project = Project::open(target_path);
-      if (generation_.load() != generation) {
-        return;
-      }
       if (!project) {
         failure = project.diagnostic().message + " [" + project.diagnostic().code + "]";
         failure_status = "Failed to open restored project " + target_path;
@@ -485,26 +463,25 @@ void Session::restore_project(const std::string& backup_path) {
         }
       }
     }
-    if (generation_.load() != generation) {
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!failure.empty()) {
-      fail(failure, failure_status);
+      fail(generation, failure, failure_status);
       return;
     }
 
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
     auto loaded = load_binary(image_path, load_opts);
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail("could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
+      fail(generation,
+           "could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
                loaded.diagnostic().code + "]",
            "Failed to load restored project image");
       return;
@@ -512,15 +489,12 @@ void Session::restore_project(const std::string& backup_path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation) {
-      return;
-    }
     if (token.is_cancelled()) {
-      fail("Operation cancelled", "Cancelled");
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse restored project image");
       return;
     }

@@ -7,6 +7,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/core/cancellation.h"
 #include "donkey/core/result.h"
 
 namespace donkey {
@@ -104,7 +105,8 @@ class Project {
   /// and renamed into place. The destination must not have an active SQLite
   /// connection open while it is replaced.
   [[nodiscard]] static Result<void> restore(const std::string& database_path,
-                                            const std::string& backup_path);
+                                            const std::string& backup_path,
+                                            const CancellationToken& cancellation_token = {});
 
  private:
   struct Impl;
