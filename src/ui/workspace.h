@@ -94,9 +94,12 @@ class Workspace {
   bool show_about_ = false;
   char path_buffer_[1024] = {};
   char project_path_buffer_[1024] = {};
+  char backup_path_buffer_[1024] = {};
   bool open_path_popup_ = false;
   bool open_project_popup_ = false;
   bool save_project_popup_ = false;
+  bool backup_project_popup_ = false;
+  bool restore_project_popup_ = false;
   std::function<void()> open_file_handler_;
 };
 

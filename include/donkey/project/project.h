@@ -101,8 +101,8 @@ class Project {
   /// Replace `database_path` with `backup_path` after validating that the
   /// backup is a readable project with a supported schema and passing
   /// `PRAGMA integrity_check`. The replacement is written to a temporary file
-  /// and renamed into place. The destination must not be open in another
-  /// process; the CLI is the supported entry point today.
+  /// and renamed into place. The destination must not have an active SQLite
+  /// connection open while it is replaced.
   [[nodiscard]] static Result<void> restore(const std::string& database_path,
                                             const std::string& backup_path);
 

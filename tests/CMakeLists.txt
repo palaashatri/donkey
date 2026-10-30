@@ -147,6 +147,14 @@ set_tests_properties(cli.project_info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
+if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
+  add_test(NAME ui.smoke_loads_project
+           COMMAND donkey --project ${DONKEY_CLI_PROJECT_DB} --exit-after-frames 20)
+  set_tests_properties(ui.smoke_loads_project PROPERTIES
+    TIMEOUT 120
+    DEPENDS cli.project_save_elf_json)
+endif()
+
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)

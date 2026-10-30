@@ -63,6 +63,15 @@ class Session {
   /// image's annotations with the current in-memory snapshot.
   void save_project(const std::string& path);
 
+  /// Write a self-contained SQLite backup of the currently open project to
+  /// `destination` on the worker thread.
+  void backup_project(const std::string& destination, bool overwrite = true);
+
+  /// Replace the currently open project database with `backup_path` after
+  /// validating the backup, then reload the restored document and annotations
+  /// on the worker thread.
+  void restore_project(const std::string& backup_path);
+
   [[nodiscard]] bool busy() const noexcept { return busy_.load(); }
   [[nodiscard]] std::optional<std::string> take_error();
   [[nodiscard]] std::shared_ptr<const Document> document() const;
