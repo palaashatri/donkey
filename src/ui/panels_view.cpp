@@ -125,7 +125,10 @@ void functions(const Document& document, UiState& state) {
   ImGui::TableHeadersRow();
 
   for (const Function& function : document.analysis.functions) {
-    if (!matches(function.name, state.function_filter)) {
+    const std::string* renamed =
+        state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
+    const std::string display = renamed != nullptr ? *renamed : function.name;
+    if (!matches(display, state.function_filter)) {
       continue;
     }
     ImGui::TableNextRow();
@@ -135,8 +138,31 @@ void functions(const Document& document, UiState& state) {
                           ImGuiSelectableFlags_SpanAllColumns)) {
       state.selected_address = function.address;
     }
+    if (ImGui::BeginPopupContextItem("##functioncontext")) {
+      if (ImGui::MenuItem("Rename…")) {
+        state.annotation_kind = AnnotationKind::Rename;
+        state.annotation_address = function.address;
+        std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
+                      display.c_str());
+        state.annotation_modal_requested = true;
+      }
+      const std::string* comment =
+          state.annotations != nullptr ? state.annotations->comment_at(function.address) : nullptr;
+      if (ImGui::MenuItem(comment != nullptr ? "Edit comment…" : "Add comment…")) {
+        state.annotation_kind = AnnotationKind::Comment;
+        state.annotation_address = function.address;
+        std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
+                      comment != nullptr ? comment->c_str() : "");
+        state.annotation_modal_requested = true;
+      }
+      ImGui::EndPopup();
+    }
     ImGui::TableSetColumnIndex(1);
-    ImGui::TextUnformatted(function.name.c_str());
+    ImGui::TextUnformatted(display.c_str());
+    if (renamed != nullptr) {
+      ImGui::SameLine();
+      components::badge("user", components::status_color("Success"));
+    }
     if (function.exported) {
       ImGui::SameLine();
       components::badge("export", components::status_color("Success"));

@@ -185,6 +185,80 @@ TEST(Project, AnnotationsSurviveReimportAndCanBeCleared) {
                   .has_value());
 }
 
+TEST(Project, ReplaceAnnotationsRewritesSnapshotAtomically) {
+  TempPath path("annotations-replace");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  auto imported = project.value().import(loaded, analysis.value());
+  ASSERT_TRUE(imported.has_value());
+  const std::int64_t image_id = imported.value();
+
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "old")
+                  .has_value());
+
+  std::vector<donkey::Annotation> rows;
+  rows.push_back(donkey::Annotation{donkey::AnnotationKind::Rename, 0x400109, "helper"});
+  rows.push_back(donkey::Annotation{donkey::AnnotationKind::Comment, 0x400104, "called once"});
+  ASSERT_TRUE(project.value().replace_annotations(image_id, rows).has_value());
+
+  auto after = project.value().annotations(image_id);
+  ASSERT_TRUE(after.has_value());
+  ASSERT_EQ(after.value().size(), 2U);
+  // Ordered by address, so the comment at 0x400104 comes before the rename.
+  EXPECT_EQ(after.value()[0].kind, donkey::AnnotationKind::Comment);
+  EXPECT_EQ(after.value()[0].address, 0x400104U);
+  EXPECT_EQ(after.value()[1].address, 0x400109U);
+  EXPECT_EQ(after.value()[1].text, "helper");
+
+  // An empty snapshot clears every annotation.
+  ASSERT_TRUE(project.value().replace_annotations(image_id, {}).has_value());
+  auto emptied = project.value().annotations(image_id);
+  ASSERT_TRUE(emptied.has_value());
+  EXPECT_TRUE(emptied.value().empty());
+}
+
+TEST(Project, ReplaceAnnotationsRejectsMissingImageAndOverlongText) {
+  TempPath path("annotations-replace-invalid");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+
+  std::vector<donkey::Annotation> rows;
+  rows.push_back(donkey::Annotation{donkey::AnnotationKind::Rename, 0x1000, "x"});
+  auto missing = project.value().replace_annotations(7, rows);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.diagnostic().code, "project.image_not_found");
+
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+  auto imported = project.value().import(loaded, analysis.value());
+  ASSERT_TRUE(imported.has_value());
+
+  std::vector<donkey::Annotation> too_long_rows;
+  too_long_rows.push_back(
+      donkey::Annotation{donkey::AnnotationKind::Comment, 0x400100, std::string(5000, 'x')});
+  auto overlong = project.value().replace_annotations(imported.value(), too_long_rows);
+  ASSERT_FALSE(overlong.has_value());
+  EXPECT_EQ(overlong.diagnostic().code, "project.annotation_too_long");
+
+  // The rejected call must not have cleared the existing snapshot.
+  ASSERT_TRUE(
+      project.value()
+          .set_annotation(imported.value(), donkey::AnnotationKind::Rename, 0x400100, "entry")
+          .has_value());
+  auto rejected = project.value().replace_annotations(imported.value(), too_long_rows);
+  ASSERT_FALSE(rejected.has_value());
+  auto kept = project.value().annotations(imported.value());
+  ASSERT_TRUE(kept.has_value());
+  ASSERT_EQ(kept.value().size(), 1U);
+  EXPECT_EQ(kept.value().front().text, "entry");
+}
+
 TEST(Project, RejectsAnnotationsForMissingImageAndOverlongText) {
   TempPath path("annotations-invalid");
   auto project = Project::create(path.str());

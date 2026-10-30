@@ -83,6 +83,11 @@ class Project {
   /// Persisted annotations for one image, ordered by address then kind.
   [[nodiscard]] Result<std::vector<Annotation>> annotations(std::int64_t image_id) const;
 
+  /// Replace every annotation for one image in a single transaction. Used by
+  /// the desktop shell to flush its in-memory annotation snapshot.
+  [[nodiscard]] Result<void> replace_annotations(std::int64_t image_id,
+                                                 const std::vector<Annotation>& annotations);
+
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;
 

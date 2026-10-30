@@ -81,7 +81,7 @@ void disassembly(const Document& document, UiState& state) {
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
-  if (!ImGui::BeginTable("##disasm", 4, flags)) {
+  if (!ImGui::BeginTable("##disasm", 5, flags)) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
@@ -89,6 +89,7 @@ void disassembly(const Document& document, UiState& state) {
   ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthStretch, 1.0f);
   ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthStretch, 2.6f);
   ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+  ImGui::TableSetupColumn("Comment", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableHeadersRow();
 
   ImGuiListClipper clipper;
@@ -103,6 +104,31 @@ void disassembly(const Document& document, UiState& state) {
       const std::string address = components::format_address(instruction.address);
       if (ImGui::Selectable(address.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
         state.selected_address = instruction.address;
+      }
+      if (ImGui::BeginPopupContextItem("##disasmcontext")) {
+        const std::string* comment = state.annotations != nullptr
+                                         ? state.annotations->comment_at(instruction.address)
+                                         : nullptr;
+        if (ImGui::MenuItem(comment != nullptr ? "Edit comment…" : "Add comment…")) {
+          state.annotation_kind = AnnotationKind::Comment;
+          state.annotation_address = instruction.address;
+          std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
+                        comment != nullptr ? comment->c_str() : "");
+          state.annotation_modal_requested = true;
+        }
+        if (instruction.direct_target.has_value()) {
+          const std::uint64_t target = instruction.direct_target.value();
+          const std::string* rename =
+              state.annotations != nullptr ? state.annotations->rename_at(target) : nullptr;
+          if (ImGui::MenuItem("Rename target…")) {
+            state.annotation_kind = AnnotationKind::Rename;
+            state.annotation_address = target;
+            std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
+                          rename != nullptr ? rename->c_str() : "");
+            state.annotation_modal_requested = true;
+          }
+        }
+        ImGui::EndPopup();
       }
 
       ImGui::TableSetColumnIndex(1);
@@ -131,6 +157,15 @@ void disassembly(const Document& document, UiState& state) {
         ImGui::TextUnformatted(
             components::format_address(instruction.direct_target.value()).c_str());
         ImGui::PopStyleColor();
+      }
+
+      ImGui::TableSetColumnIndex(4);
+      if (state.annotations != nullptr) {
+        if (const std::string* comment = state.annotations->comment_at(instruction.address)) {
+          ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.85f, 0.78f, 0.55f, 1.0f));
+          ImGui::TextUnformatted(comment->c_str());
+          ImGui::PopStyleColor();
+        }
       }
     }
   }

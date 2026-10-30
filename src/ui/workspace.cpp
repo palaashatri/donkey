@@ -90,6 +90,81 @@ void Workspace::draw(bool& quit) {
     ImGui::EndPopup();
   }
 
+  if (open_project_popup_) {
+    ImGui::OpenPopup("Open project");
+    open_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Open project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Path to a project database");
+    ImGui::SetNextItemWidth(520.0f);
+    if (ImGui::InputText("##projectpath", project_path_buffer_, sizeof(project_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue) &&
+        project_path_buffer_[0] != '\0') {
+      session_.open_project(project_path_buffer_);
+      ImGui::CloseCurrentPopup();
+    }
+    if (ImGui::Button("Open") && project_path_buffer_[0] != '\0') {
+      session_.open_project(project_path_buffer_);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  if (save_project_popup_) {
+    ImGui::OpenPopup("Save project");
+    save_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Save project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Database path for this project");
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##saveprojectpath", project_path_buffer_, sizeof(project_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((submitted || ImGui::Button("Save")) && project_path_buffer_[0] != '\0') {
+      session_.save_project(project_path_buffer_);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  if (state_.annotation_modal_requested) {
+    ImGui::OpenPopup("Annotate");
+    state_.annotation_modal_requested = false;
+  }
+  if (ImGui::BeginPopupModal("Annotate", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    const bool rename = state_.annotation_kind == AnnotationKind::Rename;
+    ImGui::Text("%s %s", rename ? "Rename at" : "Comment at",
+                components::format_address(state_.annotation_address).c_str());
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##annotation", state_.annotation_buffer, sizeof(state_.annotation_buffer),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool save = (submitted || ImGui::Button("Save")) && !session_.busy();
+    if (save) {
+      session_.set_annotation(state_.annotation_kind, state_.annotation_address,
+                              state_.annotation_buffer);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Remove")) {
+      session_.set_annotation(state_.annotation_kind, state_.annotation_address, "");
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
   if (show_about_) {
     ImGui::Begin("About Donkey", &show_about_, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::TextUnformatted("Donkey — native binary reverse-engineering suite");
@@ -98,8 +173,9 @@ void Workspace::draw(bool& quit) {
         "Early implementation. The headless core parses ELF, PE and Mach-O, "
         "decodes x86, x86-64 and AArch64 with Capstone, builds a bounded CFG "
         "with estimated function extents, and lifts x86-64 functions into "
-        "verified IR before printing pseudocode. Project persistence, graph "
-        "rendering, a debugger and non-x86-64 lifting are not implemented.");
+        "verified IR before printing pseudocode. Projects save and reopen "
+        "address-keyed renames and comments. The debugger and non-x86-64 "
+        "lifting are not implemented.");
     ImGui::Spacing();
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
@@ -116,6 +192,20 @@ void Workspace::draw_menu_bar(bool& quit) {
     }
     if (ImGui::MenuItem("Open path…")) {
       open_path_popup_ = true;
+    }
+    if (ImGui::MenuItem("Open Project…", nullptr, false, !session_.busy())) {
+      open_project_popup_ = true;
+    }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Save Project", "Cmd+S", false,
+                        session_.has_project() && !session_.busy())) {
+      session_.save_project(session_.project_path());
+    }
+    if (ImGui::MenuItem("Save Project As…", nullptr, false,
+                        session_.document() != nullptr && !session_.busy())) {
+      const std::string existing = session_.project_path();
+      std::snprintf(project_path_buffer_, sizeof(project_path_buffer_), "%s", existing.c_str());
+      save_project_popup_ = true;
     }
     if (ImGui::MenuItem("Reload", nullptr, false, !session_.path().empty() && !session_.busy())) {
       session_.open(session_.path());
@@ -150,13 +240,21 @@ void Workspace::draw_menu_bar(bool& quit) {
   // Right-aligned document name and status. The window title already shows the
   // path, so cap the width here instead of letting it push badges off-screen.
   const float badge_width = session_.busy() ? 190.0f : 110.0f;
-  const float max_name_width = ImGui::GetWindowWidth() - badge_width - 260.0f;
+  const float max_name_width = ImGui::GetWindowWidth() - badge_width - 320.0f;
   ImGui::SameLine(max_name_width > 140.0f ? max_name_width : 140.0f);
   char short_name[96];
   const char* base = std::strrchr(document_name.c_str(), '/');
   std::snprintf(short_name, sizeof(short_name), "%s",
                 base != nullptr ? base + 1 : document_name.c_str());
   ImGui::TextDisabled("%s", short_name);
+  if (session_.has_project()) {
+    const std::string project = session_.project_path();
+    const char* project_base = std::strrchr(project.c_str(), '/');
+    ImGui::SameLine();
+    ImGui::TextDisabled("· project %s%s",
+                        project_base != nullptr ? project_base + 1 : project.c_str(),
+                        session_.dirty() ? " *" : "");
+  }
   ImGui::SameLine();
   if (session_.busy()) {
     components::badge("Loading", components::status_color("Partial"));
@@ -198,6 +296,10 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
 
 void Workspace::draw_panels() {
   const auto document = session_.document();
+  // Keep the annotation snapshot alive for the whole frame; views only keep
+  // the raw pointer in UiState.
+  const auto annotations = session_.annotations();
+  state_.annotations = annotations.get();
 
   if (document && document.get() != last_document_) {
     last_document_ = document.get();

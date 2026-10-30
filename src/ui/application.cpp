@@ -133,7 +133,9 @@ int run(const AppOptions& options) {
   AppState state;
   state.window = window;
   state.workspace.set_open_file_handler([&state]() { open_file_dialog(state); });
-  if (!options.initial_path.empty()) {
+  if (!options.initial_project.empty()) {
+    state.session.open_project(options.initial_project);
+  } else if (!options.initial_path.empty()) {
     state.session.open(options.initial_path);
   }
 

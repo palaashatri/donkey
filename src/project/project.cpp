@@ -668,6 +668,77 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
   return out;
 }
 
+Result<void> Project::replace_annotations(std::int64_t image_id,
+                                          const std::vector<Annotation>& annotations) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  for (const Annotation& annotation : annotations) {
+    if (!fits_storage(annotation.address)) {
+      return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                             "annotation address does not fit the storage integer range",
+                             annotation.address);
+    }
+    constexpr std::size_t kMaxAnnotationLength = 4096;
+    if (annotation.text.size() > kMaxAnnotationLength) {
+      return make_void_error(Status::InvalidInput, "project.annotation_too_long",
+                             "annotation text exceeds 4096 bytes");
+    }
+  }
+  {
+    Statement check(db, "SELECT 1 FROM images WHERE id = ?1");
+    check.bind(1, image_id);
+    if (!check.ok() || !check.step()) {
+      if (!check.done()) {
+        return make_void_error(
+            Status::InternalError, "project.query_failed",
+            storage_error(db, "project.query_failed", "lookup image for annotations").message);
+      }
+      return make_void_error(Status::InvalidInput, "project.image_not_found",
+                             "no image with id " + std::to_string(image_id));
+    }
+  }
+
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(
+        Status::InternalError, "project.transaction_failed",
+        storage_error(db, "project.transaction_failed", "begin annotations").message);
+  }
+  auto fail = [&](std::string code, const std::string& context) {
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, std::move(code),
+                           storage_error(db, code, context).message);
+  };
+
+  {
+    Statement remove(db, "DELETE FROM annotations WHERE image_id = ?1");
+    remove.bind(1, image_id);
+    if (!remove.execute_statement()) {
+      return fail("project.annotation_delete_failed", "clear annotations");
+    }
+  }
+  for (const Annotation& annotation : annotations) {
+    Statement insert(db,
+                     "INSERT INTO annotations(image_id, kind, address, text) "
+                     "VALUES(?1, ?2, ?3, ?4)");
+    insert.bind(1, image_id);
+    insert.bind(2, std::string(annotation_kind_name(annotation.kind)));
+    insert.bind(3, static_cast<std::int64_t>(annotation.address));
+    insert.bind(4, annotation.text);
+    if (!insert.execute_statement()) {
+      return fail("project.annotation_write_failed", "insert annotation");
+    }
+  }
+  if (!execute(db, "COMMIT")) {
+    const std::string message =
+        storage_error(db, "project.commit_failed", "commit annotations").message;
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, "project.commit_failed", message);
+  }
+  return Result<void>();
+}
+
 Result<bool> Project::check_integrity() const {
   if (!is_open()) {
     return make_error<bool>(Status::InvalidInput, "project.not_open",

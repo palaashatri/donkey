@@ -1,14 +1,17 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/project/project.h"
 
 namespace donkey::ui {
 
@@ -19,8 +22,24 @@ struct Document {
   AnalysisResult analysis;
 };
 
-/// Loads and analyses files on a worker thread. The render thread never reads
-/// a file or runs analysis itself.
+/// Address-keyed user annotations. Snapshots are immutable and swapped under
+/// the session lock, so the render thread never sees a half-applied edit.
+struct Annotations {
+  std::unordered_map<std::uint64_t, std::string> renames;
+  std::unordered_map<std::uint64_t, std::string> comments;
+
+  [[nodiscard]] const std::string* rename_at(std::uint64_t address) const {
+    const auto it = renames.find(address);
+    return it == renames.end() ? nullptr : &it->second;
+  }
+  [[nodiscard]] const std::string* comment_at(std::uint64_t address) const {
+    const auto it = comments.find(address);
+    return it == comments.end() ? nullptr : &it->second;
+  }
+};
+
+/// Loads, analyses and persists files on a worker thread. The render thread
+/// never reads a file, runs analysis or writes SQL itself.
 class Session {
  public:
   Session() = default;
@@ -29,24 +48,50 @@ class Session {
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  /// Start loading `path`. Any in-flight load keeps running and its result is
-  /// discarded if a newer request has replaced it.
+  /// Start loading `path`. The previous worker (if any) is joined first, so
+  /// re-entrant calls block the caller rather than running two loads at once.
+  /// Callers must not invoke this while `busy()` (the desktop shell disables
+  /// its menu items accordingly).
   void open(const std::string& path);
+
+  /// Open a project database, load the single image it references and its
+  /// persisted annotations. Projects with zero or several images are rejected
+  /// because the workspace shows one document at a time.
+  void open_project(const std::string& path);
+
+  /// Import the current document into a project database and replace that
+  /// image's annotations with the current in-memory snapshot.
+  void save_project(const std::string& path);
 
   [[nodiscard]] bool busy() const noexcept { return busy_.load(); }
   [[nodiscard]] std::optional<std::string> take_error();
   [[nodiscard]] std::shared_ptr<const Document> document() const;
+  [[nodiscard]] std::shared_ptr<const Annotations> annotations() const;
   [[nodiscard]] std::string path() const;
   [[nodiscard]] std::string status() const;
 
+  [[nodiscard]] bool has_project() const;
+  [[nodiscard]] std::string project_path() const;
+  [[nodiscard]] bool dirty() const;
+
+  /// Replace or clear one annotation in memory and mark the project dirty.
+  /// Persistence happens on the next explicit save.
+  void set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text);
+
  private:
   void join_worker();
+  void fail(const std::string& message, const std::string& status);
+  void publish_project(std::string path, std::int64_t image_id);
 
   mutable std::mutex mutex_;
   std::shared_ptr<const Document> document_;
+  std::shared_ptr<const Annotations> annotations_ = std::make_shared<Annotations>();
   std::optional<std::string> error_;
   std::string path_;
   std::string status_ = "No file open";
+  std::string project_path_;
+  std::int64_t image_id_ = 0;
+  bool dirty_ = false;
   std::atomic<bool> busy_{false};
   std::thread worker_;
   std::atomic<std::uint64_t> generation_{0};
