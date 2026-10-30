@@ -362,10 +362,12 @@ add_test(NAME cli.plugin_info_json
 set_tests_properties(cli.plugin_info_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"id\": \"org.donkey.test.valid\".*\"abi_version\": \\{\"major\": 1, \"minor\": 0\\}")
 
-add_test(NAME cli.plugin_run_isolated_json
-         COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
-set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+if(NOT WIN32)
+  add_test(NAME cli.plugin_run_isolated_json
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+endif()
 
 add_test(NAME cli.plugin_rejects_bad_abi
          COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_bad_abi>)

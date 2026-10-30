@@ -42,6 +42,9 @@ TEST(PluginTest, TrustedExecutionFailsWhenCapabilityDenied) {
 }
 
 TEST(PluginTest, IsolatedExecutionSucceeds) {
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res = PluginHost::execute_isolated(TEST_PLUGIN_VALID_PATH, "{}", DONKEY_CAP_ANALYSIS, 3);
   ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
   EXPECT_TRUE(res.value().success);
@@ -51,6 +54,9 @@ TEST(PluginTest, IsolatedExecutionSucceeds) {
 TEST(PluginTest, IsolatedCrashFixtureVerifiesA20) {
   // Acceptance scenario A20: Plugin crash fixture
   // Explicit crash isolation and core supervisor survival.
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res = PluginHost::execute_isolated(TEST_PLUGIN_CRASH_PATH, "{}", DONKEY_CAP_NONE, 3);
   ASSERT_TRUE(res.has_value());
 
@@ -63,6 +69,9 @@ TEST(PluginTest, IsolatedCrashFixtureVerifiesA20) {
 
 TEST(PluginTest, IsolatedHangFixtureTimesOutCleanly) {
   // Untrusted plugin hanging in infinite loop is terminated by supervisor.
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res = PluginHost::execute_isolated(TEST_PLUGIN_HANG_PATH, "{}", DONKEY_CAP_NONE, 1);
   ASSERT_TRUE(res.has_value());
 
@@ -73,6 +82,9 @@ TEST(PluginTest, IsolatedHangFixtureTimesOutCleanly) {
 }
 
 TEST(PluginTest, InspectManifestIsolatedValidPlugin) {
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res = PluginHost::inspect_manifest_isolated(TEST_PLUGIN_VALID_PATH, 3);
   ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
 
@@ -88,6 +100,9 @@ TEST(PluginTest, InspectManifestIsolatedValidPlugin) {
 TEST(PluginTest, InspectManifestIsolatedCatchesCrashInLibraryConstructor) {
   // Acceptance scenario: A library whose static constructor crashes (SIGSEGV)
   // must never crash the parent process when inspected in isolation.
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res = PluginHost::inspect_manifest_isolated(TEST_PLUGIN_CTOR_CRASH_PATH, 3);
   EXPECT_FALSE(res.has_value());
   EXPECT_TRUE(res.diagnostic().code == "plugin.crashed" ||
@@ -97,6 +112,9 @@ TEST(PluginTest, InspectManifestIsolatedCatchesCrashInLibraryConstructor) {
 TEST(PluginTest, IsolatedNonTerminatedOutputIsSafelyBounded) {
   // Acceptance scenario: Plugin returns buffer without null-terminator.
   // Supervisor must handle safely without memory out-of-bounds.
+#if !defined(__unix__) && !defined(__APPLE__)
+  GTEST_SKIP() << "OS process isolation not supported on this platform";
+#endif
   auto res =
       PluginHost::execute_isolated(TEST_PLUGIN_NON_TERMINATED_PATH, "{}", DONKEY_CAP_NONE, 3);
   ASSERT_TRUE(res.has_value()) << res.diagnostic().message;

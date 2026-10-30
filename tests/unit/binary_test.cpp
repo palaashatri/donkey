@@ -547,7 +547,13 @@ TEST(Binary, CorruptedHeadersAreRejectedDeterministically) {
 }
 
 TEST(Binary, RejectsEmptyAndMissingFiles) {
-  auto empty = donkey::load_binary_file("/dev/null");
+  const auto empty_path = (std::filesystem::temp_directory_path() / "test_empty_bin").string();
+  {
+    std::ofstream ofs(empty_path, std::ios::binary | std::ios::trunc);
+  }
+  auto empty = donkey::load_binary_file(empty_path);
+  std::error_code ec;
+  std::filesystem::remove(empty_path, ec);
   EXPECT_FALSE(empty.has_value());
   EXPECT_EQ(empty.diagnostic().code, "image.empty_file");
 
