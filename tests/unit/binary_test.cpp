@@ -17,6 +17,10 @@
 #include "donkey/core/result.h"
 #include "donkey/core/sha256.h"
 
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#endif
+
 namespace {
 
 using donkey::ByteReader;
@@ -672,6 +676,26 @@ TEST(Binary, IsolatedLoaderFailsClosedWhenIsolationUnavailable) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.diagnostic().code, "binary.isolation_unavailable");
   EXPECT_EQ(result.diagnostic().status, donkey::Status::Unsupported);
+}
+
+TEST(Binary, LoaderRefusesPipesAndDirectoriesWithoutBlocking) {
+  auto directory = donkey::load_binary_file(std::filesystem::temp_directory_path().string());
+  ASSERT_FALSE(directory.has_value());
+  EXPECT_EQ(directory.diagnostic().code, "io.not_regular_file");
+#if !defined(_WIN32)
+  // Nothing ever writes to this FIFO, so reading it would block forever.
+  const std::string fifo =
+      (std::filesystem::temp_directory_path() /
+       ("donkey-fifo-" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count())))
+          .string();
+  ASSERT_EQ(::mkfifo(fifo.c_str(), 0600), 0);
+  auto piped = donkey::load_binary_file(fifo);
+  std::error_code ec;
+  std::filesystem::remove(fifo, ec);
+  ASSERT_FALSE(piped.has_value());
+  EXPECT_EQ(piped.diagnostic().code, "io.not_regular_file");
+#endif
 }
 
 }  // namespace

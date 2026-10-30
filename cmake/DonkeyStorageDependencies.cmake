@@ -1,6 +1,21 @@
 # Pinned SQLite amalgamation for project storage. SQLite is public domain; the
 # amalgamation is compiled as its own target so project code never sees a
 # system SQLite version drift. Loading extensions is disabled.
+#
+# DONKEY_USE_SYSTEM_SQLITE links the platform SQLite instead. It exists for
+# distribution packagers (Debian, Fedora, FreeBSD ports) whose policy forbids
+# bundled copies, and for hosts that cannot reach sqlite.org. Release
+# artefacts built by CI keep the pinned amalgamation.
+option(DONKEY_USE_SYSTEM_SQLITE "Link the system SQLite instead of the pinned amalgamation" OFF)
+
+if(DONKEY_USE_SYSTEM_SQLITE)
+  find_package(SQLite3 3.35 REQUIRED)
+  add_library(donkey_sqlite INTERFACE)
+  add_library(donkey::sqlite ALIAS donkey_sqlite)
+  target_link_libraries(donkey_sqlite INTERFACE SQLite::SQLite3)
+  return()
+endif()
+
 include(FetchContent)
 
 FetchContent_Declare(sqlite_amalgamation

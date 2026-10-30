@@ -1,7 +1,9 @@
 #include "donkey/project/project.h"
 
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <string>
@@ -17,7 +19,12 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #endif
 
 #include <sqlite3.h>
@@ -837,105 +844,213 @@ Result<void> copy_database(sqlite3* source, sqlite3* target, const std::string& 
 
 }  // namespace
 
-Result<void> Project::replace_file_atomically(const std::string& from, const std::string& to) {
+namespace {
+
+ReplaceFaultHook& replace_fault_hook() {
+  static ReplaceFaultHook hook;
+  return hook;
+}
+
+/// True when the test fault hook asks the replacement to stop at `stage`,
+/// simulating a process that dies there: nothing after the stage runs and no
+/// cleanup happens.
+bool fault_at(ReplaceStage stage) {
+  const ReplaceFaultHook& hook = replace_fault_hook();
+  return hook && hook(stage);
+}
+
+Result<void> replace_error(const std::string& code, const std::string& message) {
+  return make_error<void>(Status::InternalError, code, message);
+}
+
+bool has_sqlite_header(const std::string& path) {
+  static constexpr char kMagic[16] = {'S', 'Q', 'L', 'i', 't', 'e', ' ', 'f',
+                                      'o', 'r', 'm', 'a', 't', ' ', '3', '\0'};
+  std::ifstream in(path, std::ios::binary);
+  char header[16] = {};
+  in.read(header, sizeof(header));
+  return in.gcount() == static_cast<std::streamsize>(sizeof(header)) &&
+         std::memcmp(header, kMagic, sizeof(header)) == 0;
+}
+
+/// Make `path` self-contained before it is replaced: fold any committed WAL
+/// frames into the main file and drop the WAL. Switching the journal mode
+/// away from WAL needs exclusive access, so this also proves that no other
+/// connection (in this or another process) still has the database open; if
+/// one does, replacing the file would let that connection keep writing into a
+/// WAL that SQLite would later replay onto the new file.
+Result<void> quiesce_database(const std::string& path) {
+  const std::string wal = path + "-wal";
+  const std::string shm = path + "-shm";
   std::error_code ec;
-  if (!std::filesystem::exists(to, ec)) {
-    std::filesystem::rename(from, to, ec);
-    if (ec) {
-      return make_error<void>(Status::InternalError, "project.replace_failed",
-                              "could not move file to '" + to + "': " + ec.message());
-    }
-    return {};
-  }
-
-  const std::string old_db = to + ".restore-old-db";
-  const std::string old_wal = to + ".restore-old-wal";
-  const std::string old_shm = to + ".restore-old-shm";
-  const std::string wal = to + "-wal";
-  const std::string shm = to + "-shm";
-
   const bool had_wal = std::filesystem::exists(wal, ec);
-  const bool had_shm = std::filesystem::exists(shm, ec);
 
-  // Clean any stale staging files
-  std::filesystem::remove(old_db, ec);
-  std::filesystem::remove(old_wal, ec);
-  std::filesystem::remove(old_shm, ec);
-
-  // Stage sidecars aside first before replacing main database file
-  if (had_wal) {
-    std::filesystem::rename(wal, old_wal, ec);
-    if (ec) {
-      return make_error<void>(Status::InternalError, "project.replace_failed",
-                              "could not stage wal sidecar: " + ec.message());
+  // Do not let SQLite open (and possibly rewrite the sidecars of) a file
+  // that is not a database at all.
+  if (!has_sqlite_header(path)) {
+    if (had_wal) {
+      return make_error<void>(Status::InvalidInput, "project.replace_failed",
+                              "'" + path +
+                                  "' is not a SQLite database but has a write-ahead log; "
+                                  "refusing to replace it");
     }
-  }
-  if (had_shm) {
-    std::filesystem::rename(shm, old_shm, ec);
-    if (ec) {
-      if (had_wal) std::filesystem::rename(old_wal, wal, ec);
-      return make_error<void>(Status::InternalError, "project.replace_failed",
-                              "could not stage shm sidecar: " + ec.message());
-    }
+    return {};  // An arbitrary file the caller chose to overwrite.
   }
 
-  bool replaced_ok = false;
+  sqlite3* db = nullptr;
+  if (sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr) != SQLITE_OK) {
+    if (db != nullptr) {
+      sqlite3_close(db);
+    }
+    if (had_wal) {
+      return replace_error("project.replace_failed",
+                           "could not open '" + path + "' to fold its write-ahead log");
+    }
+    return {};  // Not a database we can open and no WAL to lose.
+  }
+  std::string mode;
+  int code = SQLITE_OK;
+  {
+    Statement journal(db, "PRAGMA journal_mode=DELETE");
+    if (journal.ok() && journal.step()) {
+      mode = journal.text(0);
+    }
+    code = sqlite3_extended_errcode(db) & 0xFF;
+  }
+  sqlite3_close(db);
+
+  if (mode != "delete") {
+    if (code == SQLITE_NOTADB && !had_wal) {
+      return {};
+    }
+    return make_error<void>(Status::InvalidInput, "project.replace_busy",
+                            "'" + path +
+                                "' is still open by another connection; close it before "
+                                "replacing the database");
+  }
+  if (std::filesystem::exists(wal, ec)) {
+    return make_error<void>(Status::InvalidInput, "project.replace_busy",
+                            "'" + wal + "' remained after folding the write-ahead log");
+  }
+  // With the WAL gone the shared-memory index describes nothing; a stale one
+  // must not be paired with the replacement file.
+  std::filesystem::remove(shm, ec);
+  return {};
+}
+
+#if !defined(_WIN32)
+bool fsync_path(const std::string& path, bool directory) {
+  const int fd = ::open(path.c_str(), directory ? O_RDONLY | O_DIRECTORY : O_RDWR);
+  if (fd < 0) {
+    return false;
+  }
+  const bool ok = ::fsync(fd) == 0;
+  ::close(fd);
+  return ok;
+}
+#endif
+
+}  // namespace
+
+void Project::set_replace_fault_hook_for_testing(ReplaceFaultHook hook) {
+  replace_fault_hook() = std::move(hook);
+}
+
+Result<void> Project::replace_file_atomically(const std::string& from, const std::string& to) {
+  // Protocol, chosen so that an interruption at any point leaves either the
+  // complete old database or the complete new one at `to`:
+  //   1. quiesce `to` (fold and remove its WAL, prove exclusive access);
+  //   2. flush `from` to stable storage;
+  //   3. one atomic same-volume rename of `from` over `to`;
+  //   4. flush the directory entry.
+  // There is deliberately no two-step rename fallback and no staging of
+  // sidecar files: either would open a window in which `to` is missing or is
+  // separated from committed WAL content.
+  std::error_code ec;
+  if (std::filesystem::exists(to, ec)) {
+    auto quiesced = quiesce_database(to);
+    if (!quiesced) {
+      return quiesced;
+    }
+  }
+  if (fault_at(ReplaceStage::Quiesced)) {
+    return replace_error("project.replace_interrupted", "fault injected after quiesce");
+  }
+
 #if defined(_WIN32)
-  int from_len = MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, nullptr, 0);
-  int to_len = MultiByteToWideChar(CP_UTF8, 0, to.c_str(), -1, nullptr, 0);
-  if (from_len > 0 && to_len > 0) {
+  {
+    const int from_len = MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, nullptr, 0);
+    const int to_len = MultiByteToWideChar(CP_UTF8, 0, to.c_str(), -1, nullptr, 0);
+    if (from_len <= 0 || to_len <= 0) {
+      return replace_error("project.replace_failed", "path is not valid UTF-8");
+    }
     std::wstring from_w(static_cast<size_t>(from_len), L'\0');
     std::wstring to_w(static_cast<size_t>(to_len), L'\0');
     MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, from_w.data(), from_len);
     MultiByteToWideChar(CP_UTF8, 0, to.c_str(), -1, to_w.data(), to_len);
-    if (MoveFileExW(from_w.c_str(), to_w.c_str(),
-                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-      replaced_ok = true;
+    HANDLE handle = CreateFileW(from_w.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+                                FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (handle == INVALID_HANDLE_VALUE) {
+      return replace_error("project.replace_failed", "could not open '" + from + "' to flush");
     }
-  }
-  if (!replaced_ok) {
-    std::filesystem::rename(to, old_db, ec);
-    if (!ec) {
-      std::filesystem::rename(from, to, ec);
-      if (!ec) {
-        replaced_ok = true;
-      } else {
-        std::error_code rb_ec;
-        std::filesystem::rename(old_db, to, rb_ec);
-      }
+    const BOOL flushed = FlushFileBuffers(handle);
+    CloseHandle(handle);
+    if (!flushed) {
+      return replace_error("project.replace_failed", "could not flush '" + from + "'");
+    }
+    if (fault_at(ReplaceStage::Synced)) {
+      return replace_error("project.replace_interrupted", "fault injected before rename");
+    }
+    if (!MoveFileExW(from_w.c_str(), to_w.c_str(),
+                     MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      return replace_error("project.replace_failed", "could not replace '" + to + "' (error " +
+                                                         std::to_string(GetLastError()) +
+                                                         "); it was left unchanged");
+    }
+    if (fault_at(ReplaceStage::Renamed)) {
+      return replace_error("project.replace_interrupted", "fault injected after rename");
     }
   }
 #else
-  if (::rename(from.c_str(), to.c_str()) == 0) {
-    replaced_ok = true;
-  } else {
-    std::filesystem::rename(to, old_db, ec);
-    if (!ec) {
-      std::filesystem::rename(from, to, ec);
-      if (!ec) {
-        replaced_ok = true;
-      } else {
-        std::error_code rb_ec;
-        std::filesystem::rename(old_db, to, rb_ec);
-      }
-    }
+  if (!fsync_path(from, false)) {
+    return replace_error("project.replace_failed", "could not flush '" + from + "'");
   }
+  if (fault_at(ReplaceStage::Synced)) {
+    return replace_error("project.replace_interrupted", "fault injected before rename");
+  }
+  if (::rename(from.c_str(), to.c_str()) != 0) {
+    return replace_error(
+        "project.replace_failed",
+        "could not replace '" + to + "': " + std::strerror(errno) + "; it was left unchanged");
+  }
+  if (fault_at(ReplaceStage::Renamed)) {
+    return replace_error("project.replace_interrupted", "fault injected after rename");
+  }
+  std::filesystem::path parent = std::filesystem::path(to).parent_path();
+  if (parent.empty()) {
+    parent = ".";
+  }
+  // The rename itself is complete; a failed directory flush only weakens
+  // durability across power loss, so it is not reported as a failed replace.
+  (void)fsync_path(parent.string(), true);
 #endif
-
-  if (!replaced_ok) {
-    // Replacement failed: rollback sidecars so existing database remains intact!
-    if (had_wal) std::filesystem::rename(old_wal, wal, ec);
-    if (had_shm) std::filesystem::rename(old_shm, shm, ec);
-    return make_error<void>(Status::InternalError, "project.replace_failed",
-                            "could not atomically replace '" + to + "'");
-  }
-
-  // Commit succeeded: clean up staged old files
-  std::filesystem::remove(old_db, ec);
-  std::filesystem::remove(old_wal, ec);
-  std::filesystem::remove(old_shm, ec);
   return {};
 }
+
+namespace {
+
+/// True when `a` and `b` name the same file, including through symlinks,
+/// hard links and `..` components. A path that does not exist cannot alias.
+bool same_file(const std::string& a, const std::string& b) {
+  std::error_code ec;
+  if (!std::filesystem::exists(a, ec) || !std::filesystem::exists(b, ec)) {
+    return false;
+  }
+  const bool equivalent = std::filesystem::equivalent(a, b, ec);
+  return !ec && equivalent;
+}
+
+}  // namespace
 
 Result<void> Project::backup(const std::string& destination, bool overwrite) const {
   if (!is_open()) {
@@ -943,6 +1058,15 @@ Result<void> Project::backup(const std::string& destination, bool overwrite) con
                             "no project database is open");
   }
   std::error_code error;
+  // Never back a project up over itself or its sidecars: the destination is
+  // replaced while the source connection is open, regardless of `overwrite`.
+  for (const char* suffix : {"", "-wal", "-shm", "-journal"}) {
+    if (same_file(destination, impl_->path + suffix)) {
+      return make_error<void>(
+          Status::InvalidInput, "project.backup_is_source",
+          "backup destination '" + destination + "' is the open project database");
+    }
+  }
   if (!overwrite && std::filesystem::exists(destination, error)) {
     return make_error<void>(Status::InvalidInput, "project.backup_exists",
                             "backup destination already exists: '" + destination + "'");
@@ -1032,6 +1156,12 @@ Result<void> Project::restore(const std::string& database_path, const std::strin
       return make_error<void>(Status::CorruptProject, "project.backup_integrity",
                               "backup failed integrity_check: '" + backup_path + "'");
     }
+  }
+
+  if (cancellation_token.is_cancelled()) {
+    close_source();
+    return make_error<void>(Status::Cancelled, "io.cancelled",
+                            "restore was cancelled before replacing database");
   }
 
   const std::string temporary = database_path + ".restore-tmp";

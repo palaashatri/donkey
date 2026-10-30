@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <tuple>
@@ -366,6 +367,21 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
     LoadOptions inner_options = options;
     inner_options.isolate = false;
     return load_binary_isolated(path, inner_options);
+  }
+  // Only regular files are read in-process. A FIFO, socket or character
+  // device can block a read forever, where no between-chunk cancellation
+  // check would ever run. (A hung network mount can also stall a read in the
+  // kernel; `LoadOptions::isolate` bounds that case with a worker deadline.)
+  {
+    std::error_code ec;
+    const auto status = std::filesystem::status(path, ec);
+    if (ec || !std::filesystem::exists(status)) {
+      return error(Status::InvalidInput, "io.open_failed", "could not open the file for reading");
+    }
+    if (!std::filesystem::is_regular_file(status)) {
+      return error(Status::InvalidInput, "io.not_regular_file",
+                   "only regular files can be loaded (not a pipe, socket or device)");
+    }
   }
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {

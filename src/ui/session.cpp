@@ -1,5 +1,6 @@
 #include "session.h"
 
+#include <chrono>
 #include <cstdint>
 #include <utility>
 #include <vector>
@@ -476,96 +477,75 @@ void Session::restore_project(const std::string& backup_path) {
       fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
+    // Earlier workers were cancelled but may still hold the project open; the
+    // replacement needs exclusive access, so wait for them to finish.
+    if (!wait_for_retired_workers(token)) {
+      if (token.is_cancelled()) {
+        fail(generation, "Operation cancelled", "Cancelled");
+      } else {
+        fail(generation, "a previous project operation is still running [project.replace_busy]",
+             "Failed to restore project from " + backup_path);
+      }
+      return;
+    }
 
     auto commit_hook = [this, generation](const std::string& temp,
                                           const std::string& dest) -> Result<void> {
+      // Holding the lock makes "not superseded, not cancelled" and the rename
+      // one step: cancel() and new operations wait until the commit is done.
       std::lock_guard<std::mutex> lock(mutex_);
       if (generation != generation_.load() || current_cancellation_.is_cancelled()) {
         return make_error<void>(Status::Cancelled, "io.cancelled",
                                 "restore was superseded or cancelled before commit");
       }
-      auto replaced = Project::replace_file_atomically(temp, dest);
-      if (replaced) {
-        committed_generation_ = generation;
-      }
-      return replaced;
+      return Project::replace_file_atomically(temp, dest);
     };
 
     auto restored = Project::restore(target_path, backup_path, token, commit_hook);
     if (!restored) {
-      fail(generation, restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
-           "Failed to restore project from " + backup_path);
+      if (restored.diagnostic().status == Status::Cancelled) {
+        fail(generation, "Operation cancelled", "Cancelled");
+      } else {
+        fail(generation, restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
+             "Failed to restore project from " + backup_path);
+      }
       return;
     }
+
+    // Point of no return: the database on disk now holds the backup. From here
+    // on the outcome is reported as a completed restore, whatever happens to
+    // the cancellation token. Only the image reload below is cancellable.
+    if (restore_post_commit_hook_) {
+      restore_post_commit_hook_();
+    }
+    const std::string restored_status = "Restored project from " + backup_path;
 
     std::string image_path;
     std::int64_t image_id = 0;
     std::vector<Annotation> stored;
     std::string failure;
-    std::string failure_status;
     {
       auto project = Project::open(target_path);
       if (!project) {
         failure = project.diagnostic().message + " [" + project.diagnostic().code + "]";
-        failure_status = "Failed to open restored project " + target_path;
       } else {
         auto images = project.value().images();
         if (!images) {
           failure = images.diagnostic().message + " [" + images.diagnostic().code + "]";
-          failure_status = "Failed to read restored project " + target_path;
         } else if (images.value().size() != 1) {
-          failure =
-              "project.multi_image_unsupported: the workspace shows one image at a time, "
-              "this project has " +
-              std::to_string(images.value().size());
-          failure_status = "Failed to open restored project " + target_path;
+          failure = "the workspace shows one image at a time, this project has " +
+                    std::to_string(images.value().size()) + " [project.multi_image_unsupported]";
         } else {
           image_path = images.value().front().path;
           image_id = images.value().front().id;
           auto annotations = project.value().annotations(image_id);
           if (!annotations) {
             failure = annotations.diagnostic().message + " [" + annotations.diagnostic().code + "]";
-            failure_status = "Failed to read restored annotations";
           } else {
             stored = std::move(annotations.value());
           }
         }
       }
-    }
-    if (token.is_cancelled()) {
-      fail(generation, "Operation cancelled", "Cancelled");
-      return;
-    }
-    if (!failure.empty()) {
-      fail(generation, failure, failure_status);
-      return;
-    }
-
-    LoadOptions load_opts;
-    load_opts.cancellation_token = token;
-    auto loaded = load_binary(image_path, load_opts);
-    if (token.is_cancelled()) {
-      fail(generation, "Operation cancelled", "Cancelled");
-      return;
-    }
-    if (!loaded) {
-      fail(generation,
-           "could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
-               loaded.diagnostic().code + "]",
-           "Failed to load restored project image");
-      return;
-    }
-    AnalysisOptions options = analysis_options();
-    options.cancellation_token = token;
-    auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (token.is_cancelled()) {
-      fail(generation, "Operation cancelled", "Cancelled");
-      return;
-    }
-    if (!analysis) {
-      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
-           "Failed to analyse restored project image");
-      return;
     }
 
     auto annotations = std::make_shared<Annotations>();
@@ -579,22 +559,108 @@ void Session::restore_project(const std::string& backup_path) {
       }
     }
 
-    auto document = std::make_shared<Document>();
-    document->loaded = std::move(loaded.value());
-    document->analysis = std::move(analysis.value());
+    {
+      // A newer operation started after the commit owns the workspace; it
+      // decides what is shown. The restore itself is complete on disk.
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (generation_.load() != generation) {
+        return;
+      }
+      project_path_ = target_path;
+      dirty_ = false;
+      undo_stack_.clear();
+      redo_stack_.clear();
+      if (!failure.empty()) {
+        // The in-memory annotations belong to the replaced database; showing
+        // them as the restored project's would be wrong.
+        annotations_ = std::make_shared<Annotations>();
+        image_id_ = 0;
+        error_ = "the project was restored, but reading it back failed: " + failure;
+        status_ = restored_status + "; reading it back failed";
+        busy_.store(false);
+        return;
+      }
+      annotations_ = annotations;
+      image_id_ = image_id;
+      status_ = restored_status + "; reloading " + image_path;
+    }
+
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(image_path, load_opts);
+    std::optional<AnalysisResult> analysis;
+    std::string load_failure;
+    if (!token.is_cancelled()) {
+      if (!loaded) {
+        load_failure = "could not load '" + image_path + "': " + loaded.diagnostic().message +
+                       " [" + loaded.diagnostic().code + "]";
+      } else {
+        AnalysisOptions options = analysis_options();
+        options.cancellation_token = token;
+        auto analysed = analyze(loaded.value().image, loaded.value().data, options);
+        if (analysed) {
+          analysis = std::move(analysed.value());
+        } else if (!token.is_cancelled()) {
+          load_failure = analysed.diagnostic().message + " [" + analysed.diagnostic().code + "]";
+        }
+      }
+    }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (generation_.load() == generation) {
-      document_ = std::move(document);
-      annotations_ = std::move(annotations);
-      path_ = image_path;
-      project_path_ = target_path;
-      image_id_ = image_id;
-      dirty_ = false;
-      status_ = "Restored project from " + backup_path;
-      busy_.store(false);
+    if (generation_.load() != generation) {
+      return;
     }
+    if (analysis.has_value()) {
+      auto document = std::make_shared<Document>();
+      document->loaded = std::move(loaded.value());
+      document->analysis = std::move(*analysis);
+      document_ = std::move(document);
+      path_ = image_path;
+      status_ = restored_status;
+    } else {
+      // Keep the open document only if it is the restored project's image.
+      if (path_ != image_path) {
+        document_.reset();
+        path_ = image_path;
+      }
+      if (load_failure.empty()) {
+        status_ = restored_status + "; image reload cancelled";
+      } else {
+        error_ = "the project was restored, but its image could not be reloaded: " + load_failure;
+        status_ = restored_status + "; image reload failed";
+      }
+    }
+    busy_.store(false);
   });
+}
+
+bool Session::wait_for_retired_workers(const CancellationToken& token) {
+  using namespace std::chrono_literals;
+  const auto deadline = std::chrono::steady_clock::now() + 10s;
+  while (std::chrono::steady_clock::now() < deadline) {
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      bool all_done = true;
+      for (const RetiredWorker& retired : retired_workers_) {
+        if (retired.done && !retired.done->load()) {
+          all_done = false;
+          break;
+        }
+      }
+      if (all_done) {
+        return true;
+      }
+    }
+    if (token.is_cancelled()) {
+      return false;
+    }
+    std::this_thread::sleep_for(5ms);
+  }
+  return false;
+}
+
+void Session::set_restore_post_commit_hook_for_testing(std::function<void()> hook) {
+  restore_post_commit_hook_ = std::move(hook);
 }
 
 std::optional<std::string> Session::take_error() {

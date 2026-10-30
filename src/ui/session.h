@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -65,10 +66,10 @@ class Session {
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  /// Start loading `path`. The previous worker (if any) is joined first, so
-  /// re-entrant calls block the caller rather than running two loads at once.
-  /// Callers must not invoke this while `busy()` (the desktop shell disables
-  /// its menu items accordingly).
+  /// Start loading `path`. The previous worker (if any) is cancelled and
+  /// retired while the new one starts; it may finish asynchronously, and its
+  /// results are discarded because its generation is obsolete. The desktop
+  /// shell still disables its menu items while `busy()`.
   void open(const std::string& path);
 
   /// Open a project database, load the single image it references and its
@@ -86,8 +87,14 @@ class Session {
 
   /// Replace the currently open project database with `backup_path` after
   /// validating the backup, then reload the restored document and annotations
-  /// on the worker thread.
+  /// on the worker thread. Cancellation is honoured up to the atomic database
+  /// replacement; after it the restore is reported as completed, and a later
+  /// cancel only stops the image reload.
   void restore_project(const std::string& backup_path);
+
+  /// Test-only: runs on the restore worker immediately after the database
+  /// replacement has committed.
+  void set_restore_post_commit_hook_for_testing(std::function<void()> hook);
 
   /// Request cooperative cancellation of any running worker task.
   void cancel();
@@ -125,6 +132,7 @@ class Session {
 
   void retire_worker();
   void reap_retired_workers();
+  bool wait_for_retired_workers(const CancellationToken& token);
   void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
@@ -144,7 +152,7 @@ class Session {
   std::shared_ptr<std::atomic<bool>> current_worker_done_;
   std::vector<RetiredWorker> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
-  std::uint64_t committed_generation_ = 0;
+  std::function<void()> restore_post_commit_hook_;
 
   CancellationToken current_cancellation_;
   std::vector<AnnotationEdit> undo_stack_;

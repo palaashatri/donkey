@@ -265,7 +265,7 @@ set_tests_properties(cli.project_annotations_json PROPERTIES
 add_test(NAME cli.project_annotation_clear
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 --clear)
 set_tests_properties(cli.project_annotation_clear PROPERTIES
-  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark")
+  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark;cli.project_annotations_json")
 
 add_test(NAME cli.project_annotations_after_clear
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
@@ -420,3 +420,12 @@ add_test(NAME cli.plugin_run_trusted_non_terminated
          COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_non_terminated> --json)
 set_tests_properties(cli.plugin_run_trusted_non_terminated PROPERTIES
   PASS_REGULAR_EXPRESSION "\"success\": true")
+
+# Every CLI project test reads or writes the same database files; CTest must
+# never run two of them at once (`ctest -j`).
+get_property(_donkey_all_tests DIRECTORY PROPERTY TESTS)
+foreach(_donkey_test IN LISTS _donkey_all_tests)
+  if(_donkey_test MATCHES "^cli\\.project_")
+    set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_cli_project_db)
+  endif()
+endforeach()

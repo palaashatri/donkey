@@ -2,7 +2,21 @@
 
 #include "donkey/plugin/plugin_abi.h"
 
-#if defined(__GNUC__) || defined(__clang__)
+#if defined(_WIN32)
+#include <windows.h>
+
+/* Loading this DLL into any process ends that process with exit code 86, so
+ * a host that loads it in-process instead of failing closed cannot print the
+ * diagnostic its test expects. */
+BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
+  (void)instance;
+  (void)reserved;
+  if (reason == DLL_PROCESS_ATTACH) {
+    ExitProcess(86);
+  }
+  return TRUE;
+}
+#elif defined(__GNUC__) || defined(__clang__)
 __attribute__((constructor)) static void crash_on_load(void) {
   volatile int* p = NULL;
   *p = 99;

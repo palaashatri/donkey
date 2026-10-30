@@ -13,6 +13,18 @@
 #include "donkey/project/project.h"
 #include "session.h"
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace {
 
 using donkey::Project;
@@ -22,13 +34,25 @@ std::string fixture_path(const std::string& name) {
   return std::string(DONKEY_FIXTURE_DIR) + "/binaries/" + name;
 }
 
+std::uint64_t current_process_id() {
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+  return static_cast<std::uint64_t>(getpid());
+#endif
+}
+
 /// Unique database path that removes itself and its SQLite sidecars.
 class TempPath {
  public:
   explicit TempPath(const std::string& name) {
+    // CTest runs each test in its own process, possibly in parallel, so the
+    // name must be unique across processes, not only within one.
     static std::uint64_t counter = 0;
+    const auto unique = std::to_string(current_process_id()) + "-" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     path_ = std::filesystem::temp_directory_path() /
-            ("donkey-session-" + name + "-" + std::to_string(++counter) + ".db");
+            ("donkey-session-" + name + "-" + unique + "-" + std::to_string(++counter) + ".db");
   }
   ~TempPath() { remove(); }
   TempPath(const TempPath&) = delete;
@@ -543,6 +567,78 @@ TEST(Session, ReapsCompletedRetiredWorkersDuringNormalOperation) {
   auto doc = session.document();
   ASSERT_NE(doc, nullptr);
   EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
+TEST(Session, CancelAfterRestoreCommitReportsCompletedRestore) {
+  TempPath db_path("session-post-commit");
+  TempPath backup_path("session-post-commit-backup");
+
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  const auto document = session.document();
+  ASSERT_NE(document, nullptr);
+  const std::uint64_t address = document->loaded.image.entry_point;
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "from_backup");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "after_backup");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+
+  // Cancel deterministically in the window after the database replacement
+  // has committed but before the image is reloaded.
+  bool hook_ran = false;
+  session.set_restore_post_commit_hook_for_testing([&]() {
+    hook_ran = true;
+    session.cancel();
+  });
+  session.restore_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.set_restore_post_commit_hook_for_testing({});
+
+  ASSERT_TRUE(hook_ran);
+  const auto error = session.take_error();
+  EXPECT_FALSE(error.has_value()) << *error;
+  EXPECT_NE(session.status().find("Restored project from"), std::string::npos) << session.status();
+  EXPECT_EQ(session.status().find("Operation cancelled"), std::string::npos);
+  EXPECT_TRUE(session.has_project());
+  EXPECT_FALSE(session.dirty());
+  const auto annotations = session.annotations();
+  ASSERT_NE(annotations->rename_at(address), nullptr);
+  EXPECT_EQ(*annotations->rename_at(address), "from_backup");
+  // The open document is the restored project's image, so it stays.
+  ASSERT_NE(session.document(), nullptr);
+  EXPECT_EQ(session.path(), fixture_path("tiny-elf-x86_64"));
+
+  // And the database on disk really holds the backup.
+  auto project = Project::open(db_path.str());
+  ASSERT_TRUE(project.has_value());
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  auto stored = project.value().annotations(images.value().front().id);
+  ASSERT_TRUE(stored.has_value());
+  ASSERT_EQ(stored.value().size(), 1U);
+  EXPECT_EQ(stored.value().front().text, "from_backup");
+}
+
+TEST(Session, BackupOverOpenProjectIsRejected) {
+  TempPath db_path("session-backup-self");
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(db_path.str(), true);
+  ASSERT_TRUE(wait_idle(session));
+  const auto error = session.take_error();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("project.backup_is_source"), std::string::npos) << *error;
+  EXPECT_TRUE(Project::open(db_path.str()).has_value());
 }
 
 }  // namespace
