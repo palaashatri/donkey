@@ -155,6 +155,9 @@ void disassembly(const Document& document, UiState& state) {
 
       ImGui::TableSetColumnIndex(2);
       const std::string text = instruction.mnemonic + " " + instruction.operands;
+      // Unknown and Interrupt instructions keep the default colour, so pop
+      // only what was pushed.
+      bool coloured = true;
       if (instruction.classification == InstructionClass::Call) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 0.62f, 1.0f));
       } else if (instruction.classification == InstructionClass::Return) {
@@ -162,9 +165,11 @@ void disassembly(const Document& document, UiState& state) {
       } else if (instruction.classification == InstructionClass::Jump ||
                  instruction.classification == InstructionClass::ConditionalJump) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.80f, 0.50f, 1.0f));
+      } else {
+        coloured = false;
       }
       ImGui::TextUnformatted(text.c_str());
-      if (instruction.classification != InstructionClass::Other) {
+      if (coloured) {
         ImGui::PopStyleColor();
       }
 

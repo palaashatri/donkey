@@ -146,59 +146,260 @@
         "lhs": "${hostSystemName}",
         "rhs": "Darwin"
       }
+    },
+    {
+      "name": "headless-freebsd",
+      "inherits": "base",
+      "displayName": "FreeBSD headless core + CLI (Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "OFF",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "FreeBSD"
+      }
+    },
+    {
+      "name": "package-linux",
+      "inherits": "base",
+      "displayName": "Linux release packages (DEB, RPM, TGZ)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_STATIC_RUNTIME": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON",
+        "DONKEY_UI_SMOKE_TEST": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "package-macos",
+      "inherits": "base",
+      "displayName": "macOS universal release packages (DMG, ZIP)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_STATIC_RUNTIME": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON",
+        "DONKEY_UI_SMOKE_TEST": "ON",
+        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "package-windows",
+      "inherits": "base",
+      "displayName": "Windows release packages (NSIS setup, ZIP)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_STATIC_RUNTIME": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON",
+        "DONKEY_UI_SMOKE_TEST": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "package-freebsd",
+      "inherits": "base",
+      "displayName": "FreeBSD release packages (pkg, TGZ)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_STATIC_RUNTIME": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON",
+        "DONKEY_UI_SMOKE_TEST": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "FreeBSD"
+      }
     }
   ],
   "buildPresets": [
-    { "name": "dev-macos", "configurePreset": "dev-macos" },
-    { "name": "release-macos", "configurePreset": "release-macos" },
-    { "name": "headless-macos", "configurePreset": "headless-macos" },
-    { "name": "fuzz-macos", "configurePreset": "fuzz-macos" },
-    { "name": "dev-linux", "configurePreset": "dev-linux" },
-    { "name": "headless-linux", "configurePreset": "headless-linux" },
-    { "name": "headless-windows", "configurePreset": "headless-windows" },
-    { "name": "asan-linux", "configurePreset": "asan-linux" },
-    { "name": "dev-windows", "configurePreset": "dev-windows" }
+    {
+      "name": "dev-macos",
+      "configurePreset": "dev-macos"
+    },
+    {
+      "name": "release-macos",
+      "configurePreset": "release-macos"
+    },
+    {
+      "name": "headless-macos",
+      "configurePreset": "headless-macos"
+    },
+    {
+      "name": "fuzz-macos",
+      "configurePreset": "fuzz-macos"
+    },
+    {
+      "name": "dev-linux",
+      "configurePreset": "dev-linux"
+    },
+    {
+      "name": "headless-linux",
+      "configurePreset": "headless-linux"
+    },
+    {
+      "name": "headless-windows",
+      "configurePreset": "headless-windows"
+    },
+    {
+      "name": "asan-linux",
+      "configurePreset": "asan-linux"
+    },
+    {
+      "name": "dev-windows",
+      "configurePreset": "dev-windows"
+    },
+    {
+      "name": "headless-freebsd",
+      "configurePreset": "headless-freebsd"
+    },
+    {
+      "name": "package-linux",
+      "configurePreset": "package-linux"
+    },
+    {
+      "name": "package-macos",
+      "configurePreset": "package-macos"
+    },
+    {
+      "name": "package-windows",
+      "configurePreset": "package-windows"
+    },
+    {
+      "name": "package-freebsd",
+      "configurePreset": "package-freebsd"
+    }
   ],
   "testPresets": [
     {
       "name": "dev-macos",
       "configurePreset": "dev-macos",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "release-macos",
       "configurePreset": "release-macos",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "headless-macos",
       "configurePreset": "headless-macos",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "dev-linux",
       "configurePreset": "dev-linux",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "headless-linux",
       "configurePreset": "headless-linux",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "headless-windows",
       "configurePreset": "headless-windows",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "asan-linux",
       "configurePreset": "asan-linux",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
     },
     {
       "name": "dev-windows",
       "configurePreset": "dev-windows",
-      "output": { "outputOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "headless-freebsd",
+      "configurePreset": "headless-freebsd",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "package-linux",
+      "configurePreset": "package-linux",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "package-macos",
+      "configurePreset": "package-macos",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "package-windows",
+      "configurePreset": "package-windows",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "package-freebsd",
+      "configurePreset": "package-freebsd",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ],
+  "packagePresets": [
+    {
+      "name": "package-linux",
+      "configurePreset": "package-linux"
+    },
+    {
+      "name": "package-macos",
+      "configurePreset": "package-macos"
+    },
+    {
+      "name": "package-windows",
+      "configurePreset": "package-windows"
+    },
+    {
+      "name": "package-freebsd",
+      "configurePreset": "package-freebsd"
     }
   ]
 }

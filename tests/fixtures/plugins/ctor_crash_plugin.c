@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stddef.h>
 
 #include "donkey/plugin/plugin_abi.h"
@@ -18,8 +19,8 @@ BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID reserved) {
 }
 #elif defined(__GNUC__) || defined(__clang__)
 __attribute__((constructor)) static void crash_on_load(void) {
-  volatile int* p = NULL;
-  *p = 99;
+  /* A real SIGSEGV; a null store is undefined behaviour that optimisers may drop. */
+  raise(SIGSEGV);
 }
 #endif
 

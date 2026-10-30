@@ -13,6 +13,8 @@ struct AppOptions {
   /// Exit automatically after this many rendered frames (0 = run until closed).
   /// Used by the smoke test and screenshot tooling.
   int exit_after_frames = 0;
+  /// "auto" (SDL_GPU, else SDL_Renderer), "gpu" or "software".
+  std::string renderer = "auto";
 };
 
 /// Run the desktop shell. Returns a process exit code. The headless core is

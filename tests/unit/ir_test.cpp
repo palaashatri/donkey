@@ -12,6 +12,7 @@
 #include "donkey/ir/abi.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "test_io.h"
 
 namespace {
 
@@ -36,8 +37,7 @@ std::string fixture_path(const std::string& name) {
 
 std::vector<std::byte> read_bytes(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
-  const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
+  const auto chars = donkey_test::read_stream<std::vector<char>>(file);
   std::vector<std::byte> out(chars.size());
   for (std::size_t i = 0; i < chars.size(); ++i) {
     out[i] = static_cast<std::byte>(static_cast<unsigned char>(chars[i]));

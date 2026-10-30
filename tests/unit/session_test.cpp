@@ -12,6 +12,7 @@
 #include "donkey/core/navigation.h"
 #include "donkey/project/project.h"
 #include "session.h"
+#include "test_io.h"
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -77,6 +78,12 @@ donkey::LoadedBinary load_fixture(const std::string& name) {
   return loaded.has_value() ? std::move(loaded.value()) : donkey::LoadedBinary{};
 }
 
+/// Annotation text, or a marker when the annotation is missing, so a failing
+/// expectation reports a value instead of dereferencing null.
+std::string text_of(const std::string* text) {
+  return text != nullptr ? *text : std::string("<missing>");
+}
+
 /// Spins until the session's worker thread reports idle. The worker owns all
 /// file and database I/O, so tests must never read its results before it
 /// publishes them.
@@ -129,9 +136,9 @@ TEST(Session, OpenProjectPublishesDocumentAndAnnotations) {
   const auto annotations = session.annotations();
   ASSERT_NE(annotations, nullptr);
   ASSERT_NE(annotations->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*annotations->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(annotations->rename_at(0x400100)), "entry_point");
   ASSERT_NE(annotations->comment_at(0x400104), nullptr);
-  EXPECT_EQ(*annotations->comment_at(0x400104), "calls helper");
+  EXPECT_EQ(text_of(annotations->comment_at(0x400104)), "calls helper");
 
   EXPECT_TRUE(session.has_project());
   EXPECT_EQ(session.project_path(), path.str());
@@ -151,7 +158,7 @@ TEST(Session, SaveProjectPersistsInMemoryAnnotationEdits) {
   session.set_annotation(donkey::AnnotationKind::Comment, 0x400104, "edited in the shell");
   session.set_annotation(donkey::AnnotationKind::Rename, 0x400109, "helper");
   EXPECT_TRUE(session.dirty());
-  EXPECT_EQ(*session.annotations()->comment_at(0x400104), "edited in the shell");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400104)), "edited in the shell");
 
   session.save_project(path.str());
   ASSERT_TRUE(wait_idle(session));
@@ -205,8 +212,8 @@ TEST(Session, SaveThenReopenSeesTheSameAnnotations) {
   ASSERT_TRUE(wait_idle(session));
   ASSERT_FALSE(session.take_error().has_value());
   ASSERT_NE(session.annotations()->comment_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "entry comment");
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "entry comment");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "entry_point");
 }
 
 TEST(Session, OpenProjectReportsMissingImageFile) {
@@ -291,7 +298,7 @@ TEST(Session, BackupAndRestoreProjectRoundTripsAnnotationsAndClearsDirtyState) {
   ASSERT_TRUE(wait_idle(session));
   ASSERT_FALSE(session.take_error().has_value());
   ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "mutated_entry");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "mutated_entry");
   EXPECT_EQ(session.annotations()->comment_at(0x400104), nullptr);
 
   // Also stage an unsaved in-memory edit before restoring.
@@ -306,9 +313,9 @@ TEST(Session, BackupAndRestoreProjectRoundTripsAnnotationsAndClearsDirtyState) {
   const auto restored = session.annotations();
   ASSERT_NE(restored, nullptr);
   ASSERT_NE(restored->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*restored->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(restored->rename_at(0x400100)), "entry_point");
   ASSERT_NE(restored->comment_at(0x400104), nullptr);
-  EXPECT_EQ(*restored->comment_at(0x400104), "calls helper");
+  EXPECT_EQ(text_of(restored->comment_at(0x400104)), "calls helper");
   EXPECT_EQ(restored->comment_at(0x400109), nullptr);
 }
 
@@ -335,7 +342,7 @@ TEST(Session, RestoreProjectRejectsCorruptBackupAndPreservesLiveSession) {
   // The live document and annotations must remain intact after a rejected restore.
   ASSERT_NE(session.document(), nullptr);
   ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "entry_point");
 }
 
 TEST(Session, BackupAndRestoreRequireOpenProject) {
@@ -365,16 +372,16 @@ TEST(Session, UndoAndRedoEdits) {
   session.set_annotation(donkey::AnnotationKind::Rename, 0x400100, "my_main");
   EXPECT_TRUE(session.can_undo());
   EXPECT_FALSE(session.can_redo());
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
 
   // Set a comment
   session.set_annotation(donkey::AnnotationKind::Comment, 0x400100, "first line");
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "first line");
 
   // Toggle bookmark
   session.toggle_bookmark(0x400100, "entry");
   EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
-  EXPECT_EQ(*session.annotations()->bookmark_at(0x400100), "entry");
+  EXPECT_EQ(text_of(session.annotations()->bookmark_at(0x400100)), "entry");
 
   // Undo bookmark
   EXPECT_TRUE(session.undo());
@@ -389,7 +396,7 @@ TEST(Session, UndoAndRedoEdits) {
   EXPECT_TRUE(session.undo());  // undo bookmark
   EXPECT_TRUE(session.undo());  // undo comment
   EXPECT_EQ(session.annotations()->comment_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
 
   // Undo rename
   EXPECT_TRUE(session.undo());
@@ -398,9 +405,9 @@ TEST(Session, UndoAndRedoEdits) {
 
   // Redo all three
   EXPECT_TRUE(session.redo());
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
   EXPECT_TRUE(session.redo());
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "first line");
   EXPECT_TRUE(session.redo());
   EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
   EXPECT_FALSE(session.can_redo());
@@ -522,8 +529,7 @@ TEST(Session, SupersededRestoreAtCommitBoundaryDoesNotMutateDatabase) {
   std::string orig_db_content;
   {
     std::ifstream in(db_path.str(), std::ios::binary);
-    orig_db_content =
-        std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    orig_db_content = donkey_test::read_stream<std::string>(in);
   }
 
   Session session;
@@ -544,8 +550,7 @@ TEST(Session, SupersededRestoreAtCommitBoundaryDoesNotMutateDatabase) {
   // Verify that on-disk db_path was not mutated by the superseded restore
   {
     std::ifstream in(db_path.str(), std::ios::binary);
-    std::string current_content((std::istreambuf_iterator<char>(in)),
-                                std::istreambuf_iterator<char>());
+    const std::string current_content = donkey_test::read_stream<std::string>(in);
     EXPECT_EQ(current_content, orig_db_content);
   }
 }
@@ -609,7 +614,7 @@ TEST(Session, CancelAfterRestoreCommitReportsCompletedRestore) {
   EXPECT_FALSE(session.dirty());
   const auto annotations = session.annotations();
   ASSERT_NE(annotations->rename_at(address), nullptr);
-  EXPECT_EQ(*annotations->rename_at(address), "from_backup");
+  EXPECT_EQ(text_of(annotations->rename_at(address)), "from_backup");
   // The open document is the restored project's image, so it stays.
   ASSERT_NE(session.document(), nullptr);
   EXPECT_EQ(session.path(), fixture_path("tiny-elf-x86_64"));

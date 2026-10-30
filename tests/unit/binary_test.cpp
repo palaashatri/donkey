@@ -16,6 +16,7 @@
 #include "donkey/binary/isolation.h"
 #include "donkey/core/result.h"
 #include "donkey/core/sha256.h"
+#include "test_io.h"
 
 #if !defined(_WIN32)
 #include <sys/stat.h>
@@ -33,8 +34,7 @@ std::string fixture_path(const std::string& name) {
 std::vector<std::byte> read_file(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
   EXPECT_TRUE(file.good()) << path;
-  const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
+  const auto chars = donkey_test::read_stream<std::vector<char>>(file);
   std::vector<std::byte> bytes(chars.size());
   std::memcpy(bytes.data(), chars.data(), chars.size());
   return bytes;

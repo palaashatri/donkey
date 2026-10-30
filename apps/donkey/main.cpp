@@ -2,8 +2,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "donkey/core/version.h"
 #include "donkey/ui/application.h"
 
 namespace {
@@ -13,7 +15,8 @@ void print_usage() {
                "donkey - desktop binary workbench (early implementation)\n"
                "\n"
                "Usage:\n"
-               "  donkey [<binary>] [--project <database>] [--exit-after-frames N]\n"
+               "  donkey [<binary>] [--project <database>] [--renderer auto|gpu|software]\n"
+               "         [--exit-after-frames N] [--version]\n"
                "\n"
                "Opening a file or project only reads it; nothing is executed.\n");
 }
@@ -27,6 +30,27 @@ int main(int argc, char** argv) {
     if (argument == "--help" || argument == "-h") {
       print_usage();
       return 0;
+    }
+    if (argument == "--version") {
+      std::fprintf(stdout, "donkey %s\n", std::string(donkey::version()).c_str());
+      return 0;
+    }
+    // Finder on older macOS releases passes a process serial number.
+    if (argument.rfind("-psn_", 0) == 0) {
+      continue;
+    }
+    if (argument == "--renderer") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "donkey: --renderer needs auto, gpu or software\n");
+        return 2;
+      }
+      options.renderer = std::string(argv[++i]);
+      if (options.renderer != "auto" && options.renderer != "gpu" &&
+          options.renderer != "software") {
+        std::fprintf(stderr, "donkey: --renderer needs auto, gpu or software\n");
+        return 2;
+      }
+      continue;
     }
     if (argument == "--project") {
       if (i + 1 >= argc) {

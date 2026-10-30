@@ -10,6 +10,7 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/decode/decode.h"
+#include "test_io.h"
 
 namespace {
 
@@ -20,8 +21,7 @@ std::string fixture_path(const std::string& name) {
 std::vector<std::byte> read_fixture(const std::string& name) {
   std::ifstream file(fixture_path(name), std::ios::binary);
   EXPECT_TRUE(file.good()) << name;
-  const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
+  const auto chars = donkey_test::read_stream<std::vector<char>>(file);
   std::vector<std::byte> bytes(chars.size());
   std::memcpy(bytes.data(), chars.data(), chars.size());
   return bytes;

@@ -17,6 +17,21 @@ option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
 option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
+option(DONKEY_STATIC_RUNTIME
+       "Link the C/C++ runtime statically (self-contained release executables)" OFF)
+
+if(DONKEY_STATIC_RUNTIME)
+  if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  elseif(MINGW)
+    # Fully static: no libstdc++, libgcc or libwinpthread DLLs to ship.
+    add_link_options(-static)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # glibc stays dynamic (it cannot be linked statically in a portable way);
+    # libstdc++ and libgcc travel with the executable.
+    add_link_options(-static-libstdc++ -static-libgcc)
+  endif()
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -238,6 +253,12 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
+
+# ---------------------------------------------------------------------------
+# Install rules and release packaging (CPack)
+# ---------------------------------------------------------------------------
+
+include(DonkeyPackaging)
 
 # ---------------------------------------------------------------------------
 # Tests

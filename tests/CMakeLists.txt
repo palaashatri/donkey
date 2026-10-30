@@ -168,6 +168,21 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
                    --exit-after-frames 20)
   set_tests_properties(ui.smoke_loads_elf PROPERTIES TIMEOUT 120)
 
+  # Each format exercises different views (PE code has instruction classes
+  # the ELF fixture lacks); debug builds turn ImGui misuse into assertions.
+  add_test(NAME ui.smoke_loads_pe
+           COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-pe-x86_64.exe
+                   --exit-after-frames 20)
+  add_test(NAME ui.smoke_loads_macho
+           COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
+                   --exit-after-frames 20)
+  add_test(NAME ui.smoke_software_renderer
+           COMMAND donkey --renderer software
+                   ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                   --exit-after-frames 20)
+  set_tests_properties(ui.smoke_loads_pe ui.smoke_loads_macho ui.smoke_software_renderer
+                       PROPERTIES TIMEOUT 120)
+
   add_test(NAME ui.smoke_rejects_unknown_option COMMAND donkey --nope)
   set_tests_properties(ui.smoke_rejects_unknown_option PROPERTIES WILL_FAIL TRUE)
 endif()

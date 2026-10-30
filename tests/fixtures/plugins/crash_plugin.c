@@ -1,3 +1,4 @@
+#include <signal.h>
 #include <stddef.h>
 
 #include "donkey/plugin/plugin_abi.h"
@@ -7,8 +8,8 @@ static int crash_execute(const char* input_json, char* output_buf, size_t output
   (void)output_buf;
   (void)output_buf_len;
   // Deliberately trigger a crash (SIGSEGV)
-  volatile int* p = NULL;
-  *p = 42;
+  /* A real SIGSEGV; a null store is undefined behaviour that optimisers may drop. */
+  raise(SIGSEGV);
   return 0;
 }
 

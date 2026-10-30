@@ -2,10 +2,17 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
+  # Windows uses the MinGW-w64 GCC on the runner's PATH here; the release
+  # packages (package.yml) are built with MSVC, so both toolchains are covered.
   build:
     name: ${{ matrix.os }} headless
     runs-on: ${{ matrix.os }}
@@ -25,7 +32,35 @@ jobs:
       - name: Build
         run: cmake --build --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel
       - name: Test
-        run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }}
+        run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel 4
+
+  gui-linux:
+    name: ubuntu-24.04 desktop shell (Xvfb)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake, Ninja and SDL3 build dependencies
+        run: |
+          python -m pip install --upgrade cmake ninja
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libvulkan-dev libdbus-1-dev libudev-dev \
+            xvfb mesa-vulkan-drivers fonts-dejavu-core
+      - name: Configure
+        run: cmake --preset dev-linux -DDONKEY_UI_SMOKE_TEST=ON
+      - name: Build
+        run: cmake --build --preset dev-linux --parallel
+      - name: Test (UI smoke tests on Xvfb with Mesa lavapipe)
+        env:
+          XDG_RUNTIME_DIR: /tmp/xdg-runtime
+        run: |
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset dev-linux --parallel 4
 
   format:
     name: clang-format

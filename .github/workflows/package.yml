@@ -1,0 +1,299 @@
+name: package
+
+# Builds, tests and packages the desktop app and CLI on every supported OS,
+# verifies each package by installing and running it, and attaches the
+# packages to a GitHub Release when a v* tag is pushed.
+#
+#   Linux    .deb, .rpm, .tar.gz  (built on Ubuntu 22.04: glibc >= 2.35)
+#   macOS    .dmg, .zip           (universal arm64 + x86_64, macOS >= 11)
+#   Windows  setup .exe (NSIS), portable .zip (x64, MinGW-w64, fully static)
+#   FreeBSD  .pkg, .tar.gz        (amd64)
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux packages
+    runs-on: ubuntu-24.04
+    container:
+      image: ubuntu:22.04
+      # ptrace for the native debugger tests.
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    env:
+      CC: gcc-12
+      CXX: g++-12
+      DEBIAN_FRONTEND: noninteractive
+      XDG_RUNTIME_DIR: /tmp/xdg-runtime
+    steps:
+      - name: Install toolchain and SDL3 build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential gcc-12 g++-12 python3-pip ninja-build \
+            pkg-config file rpm dpkg-dev xvfb xauth mesa-vulkan-drivers fonts-dejavu-core \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libvulkan-dev libdbus-1-dev libudev-dev
+          python3 -m pip install --upgrade "cmake>=3.28" ninja
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset package-linux
+      - name: Build
+        run: cmake --build --preset package-linux --parallel
+      - name: Test (including UI smoke tests on Xvfb)
+        run: |
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4
+      - name: Package
+        working-directory: build/package-linux
+        run: |
+          cpack
+          mkdir -p ../../dist
+          cp donkey-*.deb donkey-*.rpm donkey-*.tar.gz donkey-*.sha256 ../../dist/
+          ls -l ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-linux
+          path: dist/*
+          if-no-files-found: error
+
+  linux-verify:
+    name: Install on ${{ matrix.image }}
+    needs: linux
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: ubuntu:22.04
+            kind: deb
+          - image: ubuntu:24.04
+            kind: deb
+          - image: debian:12
+            kind: deb
+          - image: fedora:41
+            kind: rpm
+          - image: archlinux:latest
+            kind: tgz
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      XDG_RUNTIME_DIR: /tmp/xdg-runtime
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: donkey-linux
+          path: dist
+      - name: Install the package and an X server
+        run: |
+          set -e
+          case "${{ matrix.kind }}" in
+            deb)
+              apt-get update
+              apt-get install -y --no-install-recommends xvfb xauth fonts-dejavu-core
+              apt-get install -y ./dist/donkey-*.deb ;;
+            rpm)
+              dnf install -y xorg-x11-server-Xvfb xorg-x11-xauth dejavu-sans-mono-fonts which
+              dnf install -y ./dist/donkey-*.rpm ;;
+            tgz)
+              pacman -Sy --noconfirm xorg-server-xvfb xorg-xauth ttf-dejavu which
+              tar -xzf dist/donkey-*.tar.gz -C /tmp
+              cp -r /tmp/donkey-*/* /usr/ ;;
+          esac
+      - name: Run the installed programs
+        run: |
+          set -e
+          command -v donkey donkey-cli
+          donkey --version
+          donkey-cli --version
+          donkey-cli info "$(command -v donkey-cli)"
+          donkey-cli functions "$(command -v donkey-cli)" | head -5
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          sleep 2
+          DISPLAY=:99 donkey --renderer software "$(command -v donkey-cli)" --exit-after-frames 30
+
+  macos:
+    name: macOS packages (universal)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake and Ninja
+        run: python -m pip install --upgrade "cmake>=3.28" ninja
+      - name: Configure
+        run: cmake --preset package-macos
+      - name: Build
+        run: cmake --build --preset package-macos --parallel
+      - name: Test
+        run: ctest --preset package-macos --parallel 4
+      - name: Package
+        working-directory: build/package-macos
+        env:
+          DONKEY_CODESIGN_IDENTITY: ${{ secrets.DONKEY_CODESIGN_IDENTITY }}
+        run: |
+          cpack
+          mkdir -p ../../dist
+          cp donkey-*.dmg donkey-*.zip donkey-*.sha256 ../../dist/
+          ls -l ../../dist
+      - name: Verify the disk image
+        run: |
+          set -e
+          mount=$(mktemp -d)
+          hdiutil attach dist/donkey-*.dmg -mountpoint "$mount" -nobrowse -readonly
+          app="$mount/Donkey.app"
+          lipo -archs "$app/Contents/MacOS/Donkey" | grep -q arm64
+          lipo -archs "$app/Contents/MacOS/Donkey" | grep -q x86_64
+          lipo -archs "$app/Contents/MacOS/donkey-cli" | grep -q x86_64
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/Donkey" --version
+          "$app/Contents/MacOS/donkey-cli" --version
+          "$app/Contents/MacOS/donkey-cli" info "$app/Contents/MacOS/Donkey" | head -8
+          "$app/Contents/MacOS/Donkey" "$app/Contents/MacOS/donkey-cli" --exit-after-frames 30
+          hdiutil detach "$mount"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-macos
+          path: dist/*
+          if-no-files-found: error
+
+  windows:
+    name: Windows packages (x64)
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake and Ninja
+        run: python -m pip install --upgrade "cmake>=3.28" ninja
+      - name: Ensure NSIS is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+          $nsis = "${env:ProgramFiles(x86)}\NSIS"
+          if (Test-Path $nsis) { Add-Content $env:GITHUB_PATH $nsis }
+      # MinGW-w64 GCC from the runner image (the same toolchain as the ci.yml
+      # Windows job), linked fully statically: the .exe files need no DLLs
+      # beyond Windows itself.
+      - name: Configure
+        run: cmake --preset package-windows -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+      - name: Build
+        run: cmake --build --preset package-windows --parallel
+      - name: Test
+        run: ctest --preset package-windows --parallel 4
+      - name: Package
+        working-directory: build/package-windows
+        shell: pwsh
+        run: |
+          cpack
+          New-Item -ItemType Directory -Force ../../dist | Out-Null
+          Copy-Item donkey-*.exe, donkey-*.zip, donkey-*.sha256 ../../dist/
+          Get-ChildItem ../../dist
+      - name: Verify the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem dist/donkey-*.exe | Select-Object -First 1
+          $target = 'C:\DonkeyVerify'
+          Start-Process $setup.FullName -ArgumentList '/S', "/D=$target" -Wait
+          if (-not (Test-Path "$target\donkey.exe")) { throw 'donkey.exe was not installed' }
+          if (-not (Test-Path "$target\donkey-cli.exe")) { throw 'donkey-cli.exe was not installed' }
+          & "$target\donkey-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'donkey-cli failed' }
+          & "$target\donkey-cli.exe" info "$target\donkey.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'donkey-cli info failed' }
+          $p = Start-Process "$target\donkey.exe" -ArgumentList '--version' -Wait -PassThru `
+                 -RedirectStandardOutput version.txt
+          Get-Content version.txt
+          if ($p.ExitCode -ne 0) { throw 'donkey.exe --version failed' }
+          $p = Start-Process "$target\donkey.exe" `
+                 -ArgumentList "`"$target\donkey-cli.exe`"", '--exit-after-frames', '30' `
+                 -Wait -PassThru -RedirectStandardError gui.txt
+          Get-Content gui.txt
+          if ($p.ExitCode -ne 0) { throw 'the desktop app did not start' }
+          Start-Process "$target\Uninstall.exe" -ArgumentList '/S' -Wait
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-windows
+          path: dist/*
+          if-no-files-found: error
+
+  freebsd:
+    name: FreeBSD packages (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and package in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          usesh: true
+          prepare: |
+            pkg install -y cmake ninja git pkgconf python3 xorg-vfbserver xauth dejavu
+            for p in libX11 libXext libXrandr libXcursor libXi libXScrnSaver libXfixes \
+                     libXtst libxkbcommon wayland wayland-protocols vulkan-headers \
+                     vulkan-loader evdev-proto libinotify; do
+              pkg install -y "$p" || echo "optional package $p unavailable"
+            done
+          run: |
+            set -e
+            git config --global --add safe.directory '*'
+            cmake --preset package-freebsd
+            cmake --build --preset package-freebsd --parallel
+            Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+            sleep 2
+            DISPLAY=:99 ctest --preset package-freebsd --parallel 2
+            (cd build/package-freebsd && cpack)
+            mkdir -p dist
+            cp build/package-freebsd/donkey-*.tar.gz build/package-freebsd/donkey-*.sha256 dist/
+            sh packaging/freebsd/make-pkg.sh build/package-freebsd dist
+            pkg add dist/donkey-*.pkg
+            donkey --version
+            donkey-cli --version
+            donkey-cli info /usr/local/bin/donkey-cli | head -6
+            DISPLAY=:99 donkey --renderer software /usr/local/bin/donkey-cli --exit-after-frames 30
+            (cd dist && for f in *.pkg; do sha256 -q "$f" > "$f.sha256"; done)
+            ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-freebsd
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, linux-verify, macos, windows, freebsd]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: true
+          generate_release_notes: true
