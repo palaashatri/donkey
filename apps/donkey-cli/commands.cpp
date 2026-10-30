@@ -452,7 +452,13 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
         out += i == 0 ? "\n" : ",\n";
         out += "    {\"id\": " + std::to_string(function.id.value()) +
                ", \"name\": " + quote(display_name(function.name)) +
-               ", \"address\": " + quote(hex(function.address)) +
+               ", \"address\": " + quote(hex(function.address)) + ", \"end_address\": " +
+               (function.has_extent ? quote(hex(function.end_address)) : std::string("null")) +
+               ", \"size\": " +
+               (function.has_extent ? std::to_string(function.end_address - function.address)
+                                    : std::string("null")) +
+               ", \"blocks\": " + std::to_string(function.block_count) +
+               ", \"estimated\": " + (function.estimated ? "true" : "false") +
                ", \"exported\": " + (function.exported ? "true" : "false") +
                ", \"from_symbol\": " + (function.from_symbol ? "true" : "false") + "}";
       }
@@ -461,10 +467,14 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
       std::fwrite(out.data(), 1, out.size(), stdout);
     } else {
       for (const auto& function : analysis.functions) {
-        std::printf("%-18s %s%s\n", hex(function.address).c_str(),
-                    display_name(function.name).c_str(), function.exported ? " [export]" : "");
+        const std::string size =
+            function.has_extent ? std::to_string(function.end_address - function.address) + " B"
+                                : std::string("? B");
+        std::printf("%-18s %-10s %3u blocks  %s%s%s\n", hex(function.address).c_str(), size.c_str(),
+                    function.block_count, display_name(function.name).c_str(),
+                    function.exported ? " [export]" : "", function.estimated ? " [estimated]" : "");
       }
-      std::printf("(%zu function seeds)\n", analysis.functions.size());
+      std::printf("(%zu functions)\n", analysis.functions.size());
     }
     return kExitOk;
   }
@@ -518,13 +528,18 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
     out += "  \"counts\": {\"instructions\": " + std::to_string(analysis.instructions.size()) +
            ", \"functions\": " + std::to_string(analysis.functions.size()) +
            ", \"xrefs\": " + std::to_string(analysis.xrefs.size()) +
-           ", \"strings\": " + std::to_string(analysis.strings.size()) + "},\n";
+           ", \"strings\": " + std::to_string(analysis.strings.size()) +
+           ", \"blocks\": " + std::to_string(analysis.cfg.blocks.size()) +
+           ", \"edges\": " + std::to_string(analysis.cfg.edges.size()) + "},\n";
     out += "  \"functions\": [";
     for (std::size_t i = 0; i < analysis.functions.size(); ++i) {
       const auto& function = analysis.functions[i];
       out += i == 0 ? "\n" : ",\n";
       out += "    {\"name\": " + quote(display_name(function.name)) +
-             ", \"address\": " + quote(hex(function.address)) +
+             ", \"address\": " + quote(hex(function.address)) + ", \"end_address\": " +
+             (function.has_extent ? quote(hex(function.end_address)) : std::string("null")) +
+             ", \"blocks\": " + std::to_string(function.block_count) +
+             ", \"estimated\": " + (function.estimated ? "true" : "false") +
              ", \"exported\": " + (function.exported ? "true" : "false") + "}";
     }
     out += analysis.functions.empty() ? "],\n" : "\n  ],\n";
@@ -543,7 +558,9 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
     std::printf("Status:       %s\n", analysis.partial ? "Partial" : "Complete");
     std::printf("Architecture: %s\n", architecture_name(analysis.architecture));
     std::printf("Instructions: %zu\n", analysis.instructions.size());
-    std::printf("Functions:    %zu seeds\n", analysis.functions.size());
+    std::printf("Functions:    %zu\n", analysis.functions.size());
+    std::printf("Blocks:       %zu\n", analysis.cfg.blocks.size());
+    std::printf("CFG edges:    %zu\n", analysis.cfg.edges.size());
     std::printf("Xrefs:        %zu\n", analysis.xrefs.size());
     std::printf("Strings:      %zu\n", analysis.strings.size());
     for (const auto& function : analysis.functions) {
@@ -575,6 +592,7 @@ void print_usage(std::FILE* out) {
                "  donkey-cli strings <binary> [--json] [--min-length N]"
                " [--max-strings N]\n"
                "  donkey-cli functions <binary> [--json] [--max-instructions N]\n"
+               "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli xrefs <binary> [--json] [--address A]\n"
                "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
                "\n"
@@ -816,6 +834,162 @@ int command_analyze(const std::vector<std::string_view>& arguments) {
     return usage_error("analyze needs a file path");
   }
   return command_analysis(request, "analyze");
+}
+
+int command_cfg(const std::vector<std::string_view>& arguments) {
+  AnalysisRequest request;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    if (argument == "--json") {
+      request.json = true;
+    } else if (argument == "--function") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--function needs an address");
+      }
+      std::uint64_t parsed = 0;
+      if (!parse_u64(value, parsed)) {
+        return usage_error("invalid --function address");
+      }
+      request.address = parsed;
+    } else if (argument == "--max-instructions") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--max-instructions needs a value");
+      }
+      std::uint64_t parsed = 0;
+      if (!parse_u64(value, parsed) || parsed == 0) {
+        return usage_error("invalid --max-instructions value");
+      }
+      request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for cfg");
+    } else if (request.path.empty()) {
+      request.path = std::string(argument);
+    } else {
+      return usage_error("cfg accepts exactly one file");
+    }
+  }
+  if (request.path.empty()) {
+    return usage_error("cfg needs a file path");
+  }
+
+  LoadedBinary loaded;
+  if (!load(request.path, loaded)) {
+    return kExitFailure;
+  }
+  AnalysisOptions options;
+  options.max_instructions = request.max_instructions;
+  auto result = analyze(loaded.image, loaded.data, options);
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const AnalysisResult& analysis = result.value();
+
+  const Function* function = nullptr;
+  if (request.address.has_value()) {
+    for (const Function& candidate : analysis.functions) {
+      if (candidate.address == request.address.value()) {
+        function = &candidate;
+        break;
+      }
+    }
+    if (function == nullptr) {
+      return fail(Diagnostic::make(Status::InvalidInput, "cli.unknown_function",
+                                   "no function starts at the requested address",
+                                   request.address.value()));
+    }
+  }
+
+  auto function_of_block = [&](const BasicBlock& block) -> const Function* {
+    for (const Function& candidate : analysis.functions) {
+      if (candidate.id == block.function) {
+        return &candidate;
+      }
+    }
+    return nullptr;
+  };
+
+  if (request.json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"status\": " + quote(analysis.cfg.partial ? "Partial" : "Complete") + ",\n";
+    out += "  \"blocks\": [";
+    std::size_t written = 0;
+    for (const BasicBlock& block : analysis.cfg.blocks) {
+      if (function != nullptr && block.function != function->id) {
+        continue;
+      }
+      const Function* owner = function_of_block(block);
+      out += written == 0 ? "\n" : ",\n";
+      out += "    {\"address\": " + quote(hex(block.address)) +
+             ", \"end_address\": " + quote(hex(block.end_address)) +
+             ", \"function\": " + quote(hex(owner != nullptr ? owner->address : 0)) +
+             ", \"instructions\": " + std::to_string(block.instruction_count) + "}";
+      ++written;
+    }
+    out += written == 0 ? "],\n" : "\n  ],\n";
+    out += "  \"edges\": [";
+    written = 0;
+    for (const CfgEdge& edge : analysis.cfg.edges) {
+      if (function != nullptr) {
+        const BasicBlock* owner = nullptr;
+        for (const BasicBlock& block : analysis.cfg.blocks) {
+          if (edge.from >= block.address && edge.from < block.end_address) {
+            owner = &block;
+            break;
+          }
+        }
+        if (owner == nullptr || owner->function != function->id) {
+          continue;
+        }
+      }
+      out += written == 0 ? "\n" : ",\n";
+      out += "    {\"from\": " + quote(hex(edge.from)) +
+             ", \"to\": " + (edge.to == 0 ? std::string("null") : quote(hex(edge.to))) +
+             ", \"kind\": " + quote(cfg_edge_kind_name(edge.kind)) + "}";
+      ++written;
+    }
+    out += written == 0 ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  for (const Function& candidate : analysis.functions) {
+    if (function != nullptr && candidate.id != function->id) {
+      continue;
+    }
+    std::printf("%s  %s  blocks=%u  %s\n", hex(candidate.address).c_str(),
+                display_name(candidate.name).c_str(), candidate.block_count,
+                candidate.estimated ? "[estimated]" : "[complete]");
+    for (const BasicBlock& block : analysis.cfg.blocks) {
+      if (block.function != candidate.id) {
+        continue;
+      }
+      std::printf("  block %s..%s (%u instructions)\n", hex(block.address).c_str(),
+                  hex(block.end_address).c_str(), block.instruction_count);
+    }
+    for (const CfgEdge& edge : analysis.cfg.edges) {
+      bool owned = false;
+      for (const BasicBlock& block : analysis.cfg.blocks) {
+        if (block.function == candidate.id && edge.from >= block.address &&
+            edge.from < block.end_address) {
+          owned = true;
+          break;
+        }
+      }
+      if (!owned) {
+        continue;
+      }
+      std::printf("  %s -> %s  %s\n", hex(edge.from).c_str(),
+                  edge.to == 0 ? "<indirect>" : hex(edge.to).c_str(),
+                  cfg_edge_kind_name(edge.kind));
+    }
+  }
+  return kExitOk;
 }
 
 }  // namespace donkey::cli

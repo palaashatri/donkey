@@ -114,15 +114,17 @@ void functions(const Document& document, UiState& state) {
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
-  if (!ImGui::BeginTable("##functions", 2, flags)) {
+  if (!ImGui::BeginTable("##functions", 4, flags)) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
   ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
   ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+  ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthStretch, 0.7f);
+  ImGui::TableSetupColumn("Blocks", ImGuiTableColumnFlags_WidthStretch, 0.6f);
   ImGui::TableHeadersRow();
 
-  for (const FunctionSeed& function : document.analysis.functions) {
+  for (const Function& function : document.analysis.functions) {
     if (!matches(function.name, state.function_filter)) {
       continue;
     }
@@ -139,6 +141,22 @@ void functions(const Document& document, UiState& state) {
       ImGui::SameLine();
       components::badge("export", components::status_color("Success"));
     }
+    if (function.estimated) {
+      ImGui::SameLine();
+      components::badge("~", components::status_color("Partial"));
+      if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Extent is a lower bound: indirect branch, overlap or limit");
+      }
+    }
+    ImGui::TableSetColumnIndex(2);
+    if (function.has_extent) {
+      ImGui::TextUnformatted(
+          components::format_size(function.end_address - function.address).c_str());
+    } else {
+      ImGui::TextDisabled("unknown");
+    }
+    ImGui::TableSetColumnIndex(3);
+    ImGui::Text("%u", function.block_count);
   }
   ImGui::EndTable();
 }

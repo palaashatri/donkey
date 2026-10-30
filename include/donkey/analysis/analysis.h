@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 
+#include "donkey/analysis/cfg.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/ids.h"
 #include "donkey/core/result.h"
@@ -21,14 +22,6 @@ struct Xref {
   XrefKind kind = XrefKind::Unknown;
 };
 
-struct FunctionSeed {
-  FunctionId id;
-  std::string name;
-  std::uint64_t address = 0;
-  bool exported = false;
-  bool from_symbol = false;
-};
-
 struct StringLiteral {
   std::uint64_t file_offset = 0;
   std::uint64_t address = 0;
@@ -42,12 +35,18 @@ struct AnalysisOptions {
   std::size_t max_strings = 100'000;
   std::size_t min_string_length = 4;
   std::size_t max_string_length = 256;
+  /// Build basic blocks, CFG edges and per-function extents. Off gives the M2
+  /// linear behaviour: decoded instructions and seeds only.
+  bool build_control_flow = true;
 };
 
 struct AnalysisResult {
   Architecture architecture = Architecture::Unknown;
   std::vector<Instruction> instructions;
-  std::vector<FunctionSeed> functions;
+  /// Seeded functions with estimated extents and block counts when
+  /// `build_control_flow` is enabled.
+  std::vector<Function> functions;
+  ControlFlowGraph cfg;
   std::vector<Xref> xrefs;
   std::vector<StringLiteral> strings;
   bool partial = false;
@@ -59,10 +58,16 @@ struct AnalysisResult {
 [[nodiscard]] Result<std::vector<StringLiteral>> extract_strings(
     const BinaryImage& image, std::span<const std::byte> file, const AnalysisOptions& options = {});
 
-/// Linear, deterministic analysis for M2: disassembles executable sections,
-/// records branch/data references, and builds function seeds from entry points,
-/// exported symbols and call targets. It does not build a CFG or claim
-/// function extents.
+/// Bounded, deterministic control-flow reconstruction over an existing
+/// instruction stream. Follows direct branches from every seed and never runs
+/// code. Indirect jumps end a path and mark the result partial/estimated.
+[[nodiscard]] Result<ControlFlowGraph> build_control_flow_graph(
+    const BinaryImage& image, std::span<const Instruction> instructions,
+    std::span<const Function> seeds, const AnalysisOptions& options = {});
+
+/// Linear disassembly of executable sections plus seeded function discovery.
+/// When `build_control_flow` is set, basic blocks, CFG edges and estimated
+/// function extents are derived from the decoded instructions.
 [[nodiscard]] Result<AnalysisResult> analyze(const BinaryImage& image,
                                              std::span<const std::byte> file,
                                              const AnalysisOptions& options = {});

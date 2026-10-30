@@ -2,6 +2,7 @@ include(GoogleTest)
 
 add_executable(donkey_unit_tests
   unit/binary_test.cpp
+  unit/cfg_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
 )
