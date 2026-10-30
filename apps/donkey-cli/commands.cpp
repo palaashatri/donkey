@@ -17,8 +17,11 @@
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
+#include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/lift.h"
+#include "donkey/patch/patch.h"
+#include "donkey/plugin/plugin.h"
 #include "donkey/project/project.h"
 #include "json.h"
 
@@ -84,6 +87,7 @@ struct InfoOptions {
   std::string path;
   bool json = false;
   std::size_t max_symbols = 10000;
+  LoadOptions load_options;
 };
 
 struct DisasmOptions {
@@ -92,6 +96,7 @@ struct DisasmOptions {
   bool json = false;
   std::optional<std::uint64_t> address;
   std::size_t count = 64;
+  LoadOptions load_options;
 };
 
 struct AnalysisRequest {
@@ -102,7 +107,94 @@ struct AnalysisRequest {
   std::size_t max_strings = 100000;
   std::size_t min_string_length = 4;
   std::size_t max_items = 1000;
+  LoadOptions load_options;
 };
+
+bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::size_t& index,
+                         LoadOptions& options, const char*& error_message) {
+  const std::string_view argument = arguments[index];
+  if (argument == "--isolate") {
+    options.isolate = true;
+    return true;
+  }
+  if (argument == "--raw") {
+    options.force_raw = true;
+    return true;
+  }
+  if (argument == "--arch") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--arch needs an architecture name (x86, x86_64, arm, aarch64, riscv64)";
+      return true;
+    }
+    const auto arch = parse_architecture(value);
+    if (!arch.has_value()) {
+      error_message = "invalid --arch value";
+      return true;
+    }
+    options.preferred_architecture = arch.value();
+    return true;
+  }
+  if (argument == "--base") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--base needs an address";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed)) {
+      error_message = "invalid --base address";
+      return true;
+    }
+    options.raw_base_address = parsed;
+    return true;
+  }
+  if (argument == "--entry") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--entry needs an address";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed)) {
+      error_message = "invalid --entry address";
+      return true;
+    }
+    options.raw_entry_point = parsed;
+    options.has_raw_entry_point = true;
+    return true;
+  }
+  if (argument == "--bits") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--bits needs 32 or 64";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed) || (parsed != 32 && parsed != 64)) {
+      error_message = "invalid --bits value (expected 32 or 64)";
+      return true;
+    }
+    options.raw_bits = static_cast<unsigned>(parsed);
+    return true;
+  }
+  if (argument == "--endian") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--endian needs little or big";
+      return true;
+    }
+    if (value == "little") {
+      options.raw_endian = Endian::Little;
+    } else if (value == "big") {
+      options.raw_endian = Endian::Big;
+    } else {
+      error_message = "invalid --endian value (expected little or big)";
+    }
+    return true;
+  }
+  return false;
+}
 
 void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("File:      %s\n", image.path.c_str());
@@ -111,6 +203,13 @@ void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("Format:    %s (%s), %s-endian, %u-bit\n", format_name(image.format),
               image.format_detail.c_str(), endian_name(image.endian), image.bits);
   std::printf("Arch:      %s\n", architecture_name(image.architecture));
+  if (!image.fat_architectures.empty()) {
+    std::printf("Slices:    ");
+    for (std::size_t i = 0; i < image.fat_architectures.size(); ++i) {
+      std::printf("%s%s", i == 0 ? "" : ", ", architecture_name(image.fat_architectures[i]));
+    }
+    std::printf("\n");
+  }
   std::printf("Base:      %s\n", hex(image.image_base).c_str());
   if (image.has_entry_point()) {
     std::printf("Entry:     %s\n", hex(image.entry_point).c_str());
@@ -187,6 +286,13 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
   out += "    \"bits\": " + std::to_string(image.bits) + ",\n";
   out += "    \"endian\": " + quote(endian_name(image.endian)) + ",\n";
   out += "    \"architecture\": " + quote(architecture_name(image.architecture)) + ",\n";
+  if (!image.fat_architectures.empty()) {
+    out += "    \"fat_architectures\": [";
+    for (std::size_t i = 0; i < image.fat_architectures.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(architecture_name(image.fat_architectures[i]));
+    }
+    out += "],\n";
+  }
   out += "    \"image_base\": " + quote(hex(image.image_base)) + ",\n";
   out += "    \"entry_point\": " +
          (image.has_entry_point() ? quote(hex(image.entry_point)) : std::string("null")) + "\n";
@@ -265,8 +371,8 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
   return out;
 }
 
-bool load(const std::string& path, LoadedBinary& loaded) {
-  auto result = load_binary(path);
+bool load(const std::string& path, LoadedBinary& loaded, const LoadOptions& options = {}) {
+  auto result = load_binary(path, options);
   if (!result) {
     fail(result.diagnostic());
     return false;
@@ -292,7 +398,7 @@ std::string instruction_json(const Instruction& instruction) {
 
 int command_disasm_run(const DisasmOptions& options) {
   LoadedBinary loaded;
-  if (!load(options.path, loaded)) {
+  if (!load(options.path, loaded, options.load_options)) {
     return kExitFailure;
   }
   const BinaryImage& image = loaded.image;
@@ -394,7 +500,7 @@ int command_disasm_run(const DisasmOptions& options) {
 
 int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -603,7 +709,15 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project info <database> [--json]\n"
                "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
                "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
+               "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
                "  donkey-cli project annotations <database> <image-id> [--json]\n"
+               "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
+               "  donkey-cli project restore <database> <backup> [--json]\n"
+               "  donkey-cli debug launch <binary> [--mock] [--json]\n"
+               "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
+               "<hex>] --output <out> [--force] [--json]\n"
+               "  donkey-cli plugin info <plugin-lib> [--json]\n"
+               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -613,6 +727,7 @@ int command_info(const std::vector<std::string_view>& arguments) {
   InfoOptions options;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       options.json = true;
     } else if (argument == "--max-symbols") {
@@ -625,6 +740,10 @@ int command_info(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-symbols value");
       }
       options.max_symbols = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, options.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for info");
     } else if (options.path.empty()) {
@@ -637,7 +756,7 @@ int command_info(const std::vector<std::string_view>& arguments) {
     return usage_error("info needs a file path");
   }
   LoadedBinary loaded;
-  if (!load(options.path, loaded)) {
+  if (!load(options.path, loaded, options.load_options)) {
     return kExitFailure;
   }
   if (options.json) {
@@ -653,6 +772,7 @@ int command_disasm(const std::vector<std::string_view>& arguments) {
   DisasmOptions options;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       options.json = true;
     } else if (argument == "--address") {
@@ -681,6 +801,10 @@ int command_disasm(const std::vector<std::string_view>& arguments) {
         return usage_error("--section needs a value");
       }
       options.section = std::string(value);
+    } else if (try_parse_load_flag(arguments, i, options.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for disasm");
     } else if (options.path.empty()) {
@@ -699,6 +823,7 @@ int command_strings(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--min-length") {
@@ -731,6 +856,10 @@ int command_strings(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for strings");
     } else if (request.path.empty()) {
@@ -749,6 +878,7 @@ int command_functions(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--max-instructions") {
@@ -761,6 +891,10 @@ int command_functions(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for functions");
     } else if (request.path.empty()) {
@@ -779,6 +913,7 @@ int command_xrefs(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--address") {
@@ -801,6 +936,10 @@ int command_xrefs(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for xrefs");
     } else if (request.path.empty()) {
@@ -819,6 +958,7 @@ int command_analyze(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--max-instructions") {
@@ -831,6 +971,10 @@ int command_analyze(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for analyze");
     } else if (request.path.empty()) {
@@ -849,6 +993,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--function") {
@@ -871,6 +1016,10 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for cfg");
     } else if (request.path.empty()) {
@@ -884,7 +1033,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   }
 
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -1005,6 +1154,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--function") {
@@ -1027,6 +1177,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for decompile");
     } else if (request.path.empty()) {
@@ -1040,7 +1194,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   }
 
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -1090,20 +1244,30 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         ++written;
         continue;
       }
-      auto text = format_pseudocode(lifted.value());
-      if (!text) {
+      auto pseudo_res = format_pseudocode_lines(lifted.value());
+      if (!pseudo_res) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
-               ", \"status\": \"InvalidIR\", \"code\": " + quote(text.diagnostic().code) +
+               ", \"status\": \"InvalidIR\", \"code\": " + quote(pseudo_res.diagnostic().code) +
                ", \"pseudocode\": null}";
         ++written;
         continue;
       }
+      const Pseudocode& pc = pseudo_res.value();
       out += "    {\"address\": " + quote(hex(function->address)) +
              ", \"name\": " + quote(display_name(function->name)) +
              ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
              ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
-             ", \"pseudocode\": " + quote(text.value()) + "}";
+             ", \"pseudocode\": " + quote(pc.full_text) + ", \"source_map\": [";
+      for (std::size_t li = 0; li < pc.lines.size(); ++li) {
+        out += li == 0 ? "\n" : ",\n";
+        out +=
+            "        {\"line\": " + std::to_string(li + 1) +
+            ", \"text\": " + quote(pc.lines[li].text) + ", \"source_address\": " +
+            (pc.lines[li].source_address != 0 ? quote(hex(pc.lines[li].source_address)) : "null") +
+            "}";
+      }
+      out += pc.lines.empty() ? "]}" : "\n      ]}";
       ++written;
     }
     out += written == 0 ? "]\n" : "\n  ]\n";
@@ -1142,13 +1306,22 @@ int command_project(const std::vector<std::string_view>& arguments) {
   const std::string_view subcommand = arguments[0];
   bool json = false;
   bool clear = false;
+  bool force = false;
+  LoadOptions load_options;
   std::vector<std::string_view> positional;
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       json = true;
     } else if (argument == "--clear") {
       clear = true;
+    } else if (argument == "--force") {
+      force = true;
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for project");
     } else {
@@ -1163,7 +1336,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
     const std::string database(positional[0]);
     const std::string binary(positional[1]);
     LoadedBinary loaded;
-    if (!load(binary, loaded)) {
+    if (!load(binary, loaded, load_options)) {
       return kExitFailure;
     }
     auto analysis = analyze(loaded.image, loaded.data);
@@ -1262,18 +1435,18 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
-  if (subcommand == "rename" || subcommand == "comment") {
-    const bool is_rename = subcommand == "rename";
+  if (subcommand == "rename" || subcommand == "comment" || subcommand == "bookmark") {
+    const bool is_bookmark = subcommand == "bookmark";
+    const std::string sub_str(subcommand);
     if (clear) {
       if (positional.size() != 3) {
-        return usage_error(is_rename
-                               ? "project rename --clear needs a database, image id and address"
-                               : "project comment --clear needs a database, image id and address");
+        return usage_error(
+            ("project " + sub_str + " --clear needs a database, image id and address").c_str());
       }
-    } else if (positional.size() != 4) {
-      return usage_error(is_rename
-                             ? "project rename needs a database, image id, address and text"
-                             : "project comment needs a database, image id, address and text");
+    } else if (positional.size() != 4 && !(is_bookmark && positional.size() == 3)) {
+      return usage_error(("project " + sub_str + " needs a database, image id and address" +
+                          (is_bookmark ? " (and optional text)" : " and text"))
+                             .c_str());
     }
     const std::string database(positional[0]);
     std::uint64_t parsed_id = 0;
@@ -1289,12 +1462,19 @@ int command_project(const std::vector<std::string_view>& arguments) {
     if (!project) {
       return fail(project.diagnostic());
     }
-    const AnnotationKind kind = is_rename ? AnnotationKind::Rename : AnnotationKind::Comment;
-    Result<void> written =
-        clear
-            ? project.value().clear_annotation(static_cast<std::int64_t>(parsed_id), kind, address)
-            : project.value().set_annotation(static_cast<std::int64_t>(parsed_id), kind, address,
-                                             std::string(positional[3]));
+    AnnotationKind kind = AnnotationKind::Rename;
+    if (subcommand == "comment") {
+      kind = AnnotationKind::Comment;
+    } else if (subcommand == "bookmark") {
+      kind = AnnotationKind::Bookmark;
+    }
+    const std::string text = positional.size() >= 4 ? std::string(positional[3])
+                             : is_bookmark          ? "bookmark"
+                                                    : "";
+    Result<void> written = clear ? project.value().clear_annotation(
+                                       static_cast<std::int64_t>(parsed_id), kind, address)
+                                 : project.value().set_annotation(
+                                       static_cast<std::int64_t>(parsed_id), kind, address, text);
     if (!written) {
       return fail(written.diagnostic());
     }
@@ -1369,8 +1549,468 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
+  if (subcommand == "backup") {
+    if (positional.size() != 2) {
+      return usage_error("project backup needs a database path and a backup path");
+    }
+    const std::string database(positional[0]);
+    const std::string backup(positional[1]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto written = project.value().backup(backup, force);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    auto restore_check = Project::open(backup);
+    if (!restore_check) {
+      return fail(restore_check.diagnostic());
+    }
+    auto integrity = restore_check.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"backup\": " + quote(backup) + ",\n";
+      out +=
+          "  \"project_schema\": " + std::to_string(restore_check.value().schema_version()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Backup:    %s\n", backup.c_str());
+      std::printf("Schema:    %d\n", restore_check.value().schema_version());
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "restore") {
+    if (positional.size() != 2) {
+      return usage_error("project restore needs a database path and a backup path");
+    }
+    const std::string database(positional[0]);
+    const std::string backup(positional[1]);
+    auto written = Project::restore(database, backup);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    auto restored = Project::open(database);
+    if (!restored) {
+      return fail(restored.diagnostic());
+    }
+    auto integrity = restored.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    auto images = restored.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"backup\": " + quote(backup) + ",\n";
+      out += "  \"project_schema\": " + std::to_string(restored.value().schema_version()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + ",\n";
+      out += "  \"images\": " + std::to_string(images.value().size()) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Restored:  %s\n", backup.c_str());
+      std::printf("Schema:    %d\n", restored.value().schema_version());
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+      std::printf("Images:    %zu\n", images.value().size());
+    }
+    return kExitOk;
+  }
+
   return usage_error(
-      "unknown project subcommand (expected save, info, rename, comment or annotations)");
+      "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
+      "backup or restore)");
+}
+
+int command_debug(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("debug needs a subcommand: launch");
+  }
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "launch") {
+    return usage_error("unknown debug subcommand; supported: launch");
+  }
+
+  bool json = false;
+  bool mock = false;
+  std::string binary_path;
+  std::vector<std::string> args;
+
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--mock") {
+      mock = true;
+    } else if (arg == "--arg") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--arg needs a value");
+      }
+      args.emplace_back(val);
+    } else if (!arg.empty() && arg.front() == '-') {
+      return usage_error("unknown option for debug launch");
+    } else if (binary_path.empty()) {
+      binary_path = std::string(arg);
+    } else {
+      return usage_error("debug launch accepts exactly one binary file");
+    }
+  }
+
+  if (binary_path.empty()) {
+    return usage_error("debug launch needs a binary file path");
+  }
+
+  auto adapter = debug::create_debug_adapter(mock);
+  debug::LaunchConfig config;
+  config.binary_path = binary_path;
+  config.arguments = args;
+  config.stop_at_entry = true;
+
+  auto res = adapter->launch(config);
+  if (!res) {
+    return fail(res.diagnostic());
+  }
+
+  auto ev = adapter->poll_events();
+  auto frames = adapter->call_stack();
+  auto threads = adapter->threads();
+
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"state\": " + quote(debug::session_state_name(adapter->state())) + ",\n";
+    out += "  \"stop_reason\": " +
+           quote(debug::stop_reason_name(ev.has_value() ? ev.value().reason
+                                                        : debug::StopReason::None)) +
+           ",\n";
+    out += "  \"entry_address\": " + quote(hex(ev.has_value() ? ev.value().address : 0)) + ",\n";
+    out += "  \"threads\": [";
+    if (threads.has_value()) {
+      for (std::size_t i = 0; i < threads.value().size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"id\": " + std::to_string(threads.value()[i].id) +
+               ", \"name\": " + quote(threads.value()[i].name) +
+               ", \"current\": " + (threads.value()[i].is_current ? "true" : "false") + "}";
+      }
+    }
+    out += (threads.has_value() && !threads.value().empty()) ? "\n  ],\n" : "],\n";
+    out += "  \"frames\": [";
+    if (frames.has_value()) {
+      for (std::size_t i = 0; i < frames.value().size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"index\": " + std::to_string(frames.value()[i].index) +
+               ", \"ip\": " + quote(hex(frames.value()[i].instruction_pointer)) +
+               ", \"sp\": " + quote(hex(frames.value()[i].stack_pointer)) +
+               ", \"function\": " + quote(frames.value()[i].function_name) +
+               ", \"static_address\": " + quote(hex(frames.value()[i].static_address)) + "}";
+      }
+    }
+    out += (frames.has_value() && !frames.value().empty()) ? "\n  ]\n" : "]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  std::printf("Debugger session state: %s (stopped at %s: %s)\n",
+              debug::session_state_name(adapter->state()),
+              debug::stop_reason_name(ev.has_value() ? ev.value().reason : debug::StopReason::None),
+              hex(ev.has_value() ? ev.value().address : 0).c_str());
+  if (frames.has_value()) {
+    std::printf("Call stack:\n");
+    for (const auto& f : frames.value()) {
+      std::printf("  #%u  %s  %s (static %s)\n", f.index, hex(f.instruction_pointer).c_str(),
+                  f.function_name.c_str(), hex(f.static_address).c_str());
+    }
+  }
+  return kExitOk;
+}
+
+static bool parse_hex_bytes(std::string_view text, std::vector<uint8_t>& out) {
+  out.clear();
+  std::string cleaned;
+  for (char c : text) {
+    if (std::isxdigit(static_cast<unsigned char>(c))) {
+      cleaned.push_back(c);
+    } else if (c == ' ' || c == ',' || c == '\t' || c == 'x' || c == 'X') {
+      continue;
+    } else {
+      return false;
+    }
+  }
+  if (cleaned.empty() || cleaned.size() % 2 != 0) return false;
+  for (size_t i = 0; i < cleaned.size(); i += 2) {
+    unsigned int val = 0;
+    if (std::sscanf(cleaned.substr(i, 2).c_str(), "%x", &val) != 1) return false;
+    out.push_back(static_cast<uint8_t>(val));
+  }
+  return true;
+}
+
+int command_patch(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("patch needs a subcommand ('apply')");
+  }
+
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "apply") {
+    return usage_error("unknown patch subcommand (expected 'apply')");
+  }
+
+  std::string source_path;
+  std::string dest_path;
+  uint64_t offset = 0;
+  bool has_offset = false;
+  std::vector<uint8_t> original_bytes;
+  std::vector<uint8_t> replacement_bytes;
+  bool force = false;
+  bool json = false;
+
+  for (size_t i = 1; i < arguments.size(); ++i) {
+    std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--force") {
+      force = true;
+    } else if (arg == "--offset") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_u64(val, offset)) {
+        return usage_error("--offset needs a valid address or offset (e.g. 0x1000)");
+      }
+      has_offset = true;
+    } else if (arg == "--output" || arg == "-o") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--output needs a file path");
+      }
+      dest_path = std::string(val);
+    } else if (arg == "--replacement") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_hex_bytes(val, replacement_bytes)) {
+        return usage_error("--replacement needs hex bytes (e.g. '90 90' or '9090')");
+      }
+    } else if (arg == "--original") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_hex_bytes(val, original_bytes)) {
+        return usage_error("--original needs hex bytes (e.g. '55' or '554889e5')");
+      }
+    } else if (arg.starts_with("-")) {
+      return usage_error("unknown patch option");
+    } else if (source_path.empty()) {
+      source_path = std::string(arg);
+    } else {
+      return usage_error("unexpected positional argument to patch apply");
+    }
+  }
+
+  if (source_path.empty()) {
+    return usage_error("patch apply needs a source binary path");
+  }
+  if (!has_offset) {
+    return usage_error("patch apply needs --offset");
+  }
+  if (replacement_bytes.empty()) {
+    return usage_error("patch apply needs --replacement bytes");
+  }
+  if (dest_path.empty()) {
+    return usage_error("patch apply needs --output <destination>");
+  }
+
+  PatchManager manager;
+  auto stage_res = manager.stage_patch(offset, original_bytes, replacement_bytes);
+  if (!stage_res) {
+    return fail(stage_res.diagnostic());
+  }
+
+  auto* patch_entry = const_cast<PatchEntry*>(manager.find_patch(stage_res.value()));
+  if (patch_entry) {
+    patch_entry->applied = true;
+  }
+
+  auto export_res = manager.export_patched_binary(source_path, dest_path, force);
+  if (!export_res) {
+    return fail(export_res.diagnostic());
+  }
+
+  const auto& exp = export_res.value();
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"status\": \"ok\",\n";
+    out += "  \"source\": " + quote(source_path) + ",\n";
+    out += "  \"destination\": " + quote(exp.path) + ",\n";
+    out += "  \"offset\": " + quote(hex(offset)) + ",\n";
+    out += "  \"bytes_written\": " + std::to_string(exp.bytes_written) + ",\n";
+    out += "  \"sha256\": " + quote(exp.sha256) + ",\n";
+    out += "  \"signature_invalidated\": " +
+           std::string(exp.signature_invalidated ? "true" : "false") + ",\n";
+    out += "  \"warnings\": [";
+    for (size_t i = 0; i < exp.warnings.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(exp.warnings[i]);
+    }
+    out += "]\n}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  std::printf("Exported patched binary to: %s\n", exp.path.c_str());
+  std::printf("  Size:     %llu bytes\n", static_cast<unsigned long long>(exp.bytes_written));
+  std::printf("  SHA-256:  %s\n", exp.sha256.c_str());
+  if (exp.signature_invalidated) {
+    std::printf("  Warning:  Binary code signature or certificate invalidated.\n");
+  }
+  for (const auto& w : exp.warnings) {
+    std::printf("  Note:     %s\n", w.c_str());
+  }
+  return kExitOk;
+}
+
+int command_plugin(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("plugin needs a subcommand ('info' or 'run')");
+  }
+
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "info" && subcommand != "run") {
+    return usage_error("unknown plugin subcommand (expected 'info' or 'run')");
+  }
+
+  std::string lib_path;
+  std::string input_json = "{}";
+  bool isolate = false;
+  bool json = false;
+
+  for (size_t i = 1; i < arguments.size(); ++i) {
+    std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--isolate") {
+      isolate = true;
+    } else if (arg == "--input") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--input needs a JSON string");
+      }
+      input_json = std::string(val);
+    } else if (arg.starts_with("-")) {
+      return usage_error("unknown plugin option");
+    } else if (lib_path.empty()) {
+      lib_path = std::string(arg);
+    } else {
+      return usage_error("unexpected positional argument to plugin");
+    }
+  }
+
+  if (lib_path.empty()) {
+    return usage_error("plugin needs a shared library path");
+  }
+
+  if (subcommand == "info") {
+    auto manifest_res = PluginHost::inspect_manifest(lib_path);
+    if (!manifest_res) {
+      return fail(manifest_res.diagnostic());
+    }
+    const auto& m = manifest_res.value();
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"id\": " + quote(m.id) + ",\n";
+      out += "  \"name\": " + quote(m.name) + ",\n";
+      out += "  \"version\": " + quote(m.version) + ",\n";
+      out += "  \"author\": " + quote(m.author) + ",\n";
+      out += "  \"description\": " + quote(m.description) + ",\n";
+      out += "  \"abi_version\": {\"major\": " + std::to_string(m.abi_version_major) +
+             ", \"minor\": " + std::to_string(m.abi_version_minor) + "},\n";
+      out += "  \"requested_capabilities\": " + std::to_string(m.requested_capabilities) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+      return kExitOk;
+    }
+
+    std::printf("Plugin: %s (%s)\n", m.name.c_str(), m.id.c_str());
+    std::printf("  Version:      %s\n", m.version.c_str());
+    std::printf("  Author:       %s\n", m.author.c_str());
+    std::printf("  Description:  %s\n", m.description.c_str());
+    std::printf("  ABI Version:  %u.%u\n", m.abi_version_major, m.abi_version_minor);
+    std::printf("  Capabilities: 0x%llx\n",
+                static_cast<unsigned long long>(m.requested_capabilities));
+    return kExitOk;
+  }
+
+  auto manifest_res = PluginHost::inspect_manifest(lib_path);
+  if (!manifest_res) {
+    return fail(manifest_res.diagnostic());
+  }
+
+  uint64_t granted_caps = manifest_res.value().requested_capabilities;
+  Result<PluginExecutionResult> exec_res =
+      isolate ? PluginHost::execute_isolated(lib_path, input_json, granted_caps)
+              : PluginHost::execute_trusted(lib_path, input_json, granted_caps);
+
+  if (!exec_res) {
+    return fail(exec_res.diagnostic());
+  }
+
+  const auto& res = exec_res.value();
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"success\": " + std::string(res.success ? "true" : "false") + ",\n";
+    out += "  \"crashed\": " + std::string(res.crashed ? "true" : "false") + ",\n";
+    out += "  \"timed_out\": " + std::string(res.timed_out ? "true" : "false") + ",\n";
+    out += "  \"exit_code\": " + std::to_string(res.exit_code) + ",\n";
+    out += "  \"output\": " + quote(res.output_json) + ",\n";
+    out += "  \"error_code\": " + quote(res.error_code) + ",\n";
+    out += "  \"error_message\": " + quote(res.error_message) + "\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return res.success ? kExitOk : kExitFailure;
+  }
+
+  if (res.crashed) {
+    std::fprintf(stderr, "Plugin crashed with signal %d (%s)\n", res.termination_signal,
+                 res.error_message.c_str());
+    return kExitFailure;
+  }
+  if (res.timed_out) {
+    std::fprintf(stderr, "Plugin timed out (%s)\n", res.error_message.c_str());
+    return kExitFailure;
+  }
+  if (!res.success) {
+    std::fprintf(stderr, "Plugin execution failed [%s]: %s\n", res.error_code.c_str(),
+                 res.error_message.c_str());
+    return kExitFailure;
+  }
+
+  std::printf("%s\n", res.output_json.c_str());
+  return kExitOk;
 }
 
 }  // namespace donkey::cli

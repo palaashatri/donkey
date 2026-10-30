@@ -1,9 +1,11 @@
 #include "donkey/project/project.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <optional>
 #include <string>
+#include <system_error>
 #include <utility>
 
 #include <sqlite3.h>
@@ -18,6 +20,8 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
       return "rename";
     case AnnotationKind::Comment:
       return "comment";
+    case AnnotationKind::Bookmark:
+      return "bookmark";
   }
   return "unknown";
 }
@@ -78,12 +82,11 @@ CREATE INDEX functions_by_image ON functions(image_id);
 CREATE INDEX analysis_runs_by_image ON analysis_runs(image_id);
 )sql";
 
-/// v2 adds user annotations. They are keyed by address inside an image so they
-/// survive re-import, which replaces only derived analysis rows.
-constexpr const char* kSchemaV2 = R"sql(
+/// v3 adds bookmark annotations.
+constexpr const char* kSchemaV3 = R"sql(
 CREATE TABLE annotations (
   image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
-  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment')),
+  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),
   address    INTEGER NOT NULL,
   text       TEXT    NOT NULL,
   updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
@@ -271,37 +274,65 @@ Result<Project> Project::open(const std::string& path) {
     if (schema == 0) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
-      const int rc_schema2 = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
+      const int rc_schema3 = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema2 != SQLITE_OK ||
+      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema3 != SQLITE_OK ||
           rc_version != SQLITE_OK || rc_commit != SQLITE_OK) {
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
                                    "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
                                        std::string(sqlite3_errstr(rc_schema)) + "/" +
-                                       std::string(sqlite3_errstr(rc_schema2)) + "/" +
+                                       std::string(sqlite3_errstr(rc_schema3)) + "/" +
                                        std::string(sqlite3_errstr(rc_version)) + "/" +
                                        std::string(sqlite3_errstr(rc_commit)) +
                                        " msg=" + sqlite3_errmsg(db));
       }
-      schema = 2;
+      schema = 3;
     } else if (schema == 1) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-      const int rc_schema = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
+      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_version != SQLITE_OK ||
           rc_commit != SQLITE_OK) {
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v1->v2: " + std::string(sqlite3_errstr(rc_begin)) +
+                                   "migrate v1->v3: " + std::string(sqlite3_errstr(rc_begin)) +
                                        "/" + std::string(sqlite3_errstr(rc_schema)) + "/" +
                                        std::string(sqlite3_errstr(rc_version)) + "/" +
                                        std::string(sqlite3_errstr(rc_commit)) +
                                        " msg=" + sqlite3_errmsg(db));
       }
-      schema = 2;
+      schema = 3;
+    } else if (schema == 2) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_rename = sqlite3_exec(db, "ALTER TABLE annotations RENAME TO annotations_v2_old",
+                                         nullptr, nullptr, nullptr);
+      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+      const int rc_copy =
+          sqlite3_exec(db,
+                       "INSERT INTO annotations (image_id, kind, address, text, updated_at) "
+                       "SELECT image_id, kind, address, text, updated_at FROM annotations_v2_old",
+                       nullptr, nullptr, nullptr);
+      const int rc_drop =
+          sqlite3_exec(db, "DROP TABLE annotations_v2_old", nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
+      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK || rc_rename != SQLITE_OK || rc_schema != SQLITE_OK ||
+          rc_copy != SQLITE_OK || rc_drop != SQLITE_OK || rc_version != SQLITE_OK ||
+          rc_commit != SQLITE_OK) {
+        execute(db, "ROLLBACK");
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "migrate v2->v3: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
+                std::string(sqlite3_errstr(rc_rename)) + "/" +
+                std::string(sqlite3_errstr(rc_schema)) + "/" +
+                std::string(sqlite3_errstr(rc_copy)) + "/" + std::string(sqlite3_errstr(rc_drop)) +
+                "/" + std::string(sqlite3_errstr(rc_version)) + "/" +
+                std::string(sqlite3_errstr(rc_commit)) + " msg=" + sqlite3_errmsg(db));
+      }
+      schema = 3;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -651,6 +682,8 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
       annotation.kind = AnnotationKind::Rename;
     } else if (kind == "comment") {
       annotation.kind = AnnotationKind::Comment;
+    } else if (kind == "bookmark") {
+      annotation.kind = AnnotationKind::Bookmark;
     } else {
       return make_error<std::vector<Annotation>>(
           Status::CorruptProject, "project.annotation_kind_invalid",
@@ -761,6 +794,189 @@ Result<bool> Project::check_integrity() const {
         storage_error(impl_->db, "project.integrity_failed", "foreign keys").message);
   }
   return !foreign_keys.step();
+}
+
+namespace {
+
+/// Copy the whole of `source` into `target` with SQLite's online backup API.
+/// Retries briefly on SQLITE_BUSY/LOCKED; every other failure is returned.
+Result<void> copy_database(sqlite3* source, sqlite3* target, const std::string& context) {
+  sqlite3_backup* handle = sqlite3_backup_init(target, "main", source, "main");
+  if (handle == nullptr) {
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            storage_error(target, "project.backup_failed", context).message);
+  }
+  int code = SQLITE_OK;
+  for (int attempt = 0; attempt < 1000; ++attempt) {
+    code = sqlite3_backup_step(handle, -1);
+    if (code != SQLITE_BUSY && code != SQLITE_LOCKED) {
+      break;
+    }
+    sqlite3_sleep(10);
+  }
+  const int finish = sqlite3_backup_finish(handle);
+  if (code != SQLITE_DONE || finish != SQLITE_OK) {
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            context + ": " + std::string(sqlite3_errstr(code)) + " / " +
+                                std::string(sqlite3_errstr(finish)));
+  }
+  return {};
+}
+
+void remove_sidecars(const std::string& database_path) {
+  std::error_code ignored;
+  std::filesystem::remove(database_path + "-wal", ignored);
+  std::filesystem::remove(database_path + "-shm", ignored);
+}
+
+/// Rename `from` onto `to`, replacing `to` when the platform allows it.
+Result<void> replace_file(const std::string& from, const std::string& to) {
+  std::error_code error;
+  std::filesystem::rename(from, to, error);
+  if (!error) {
+    return {};
+  }
+  std::error_code remove_error;
+  std::filesystem::remove(to, remove_error);
+  error.clear();
+  std::filesystem::rename(from, to, error);
+  if (error) {
+    return make_error<void>(Status::InternalError, "project.replace_failed",
+                            "could not replace '" + to + "': " + error.message());
+  }
+  return {};
+}
+
+}  // namespace
+
+Result<void> Project::backup(const std::string& destination, bool overwrite) const {
+  if (!is_open()) {
+    return make_error<void>(Status::InvalidInput, "project.not_open",
+                            "no project database is open");
+  }
+  std::error_code error;
+  if (!overwrite && std::filesystem::exists(destination, error)) {
+    return make_error<void>(Status::InvalidInput, "project.backup_exists",
+                            "backup destination already exists: '" + destination + "'");
+  }
+
+  const std::string temporary = destination + ".backup-tmp";
+  std::filesystem::remove(temporary, error);
+  sqlite3* target = nullptr;
+  const int opened = sqlite3_open_v2(temporary.c_str(), &target,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (opened != SQLITE_OK) {
+    const std::string message = target != nullptr ? sqlite3_errmsg(target) : "unknown error";
+    if (target != nullptr) {
+      sqlite3_close(target);
+    }
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::InternalError, "project.backup_failed",
+                            "could not create backup '" + temporary + "': " + message);
+  }
+
+  const auto copied = copy_database(impl_->db, target, "could not copy project");
+  sqlite3_close(target);
+  if (!copied) {
+    std::filesystem::remove(temporary, error);
+    return copied;
+  }
+
+  auto replaced = replace_file(temporary, destination);
+  if (!replaced) {
+    std::filesystem::remove(temporary, error);
+    return replaced;
+  }
+  return {};
+}
+
+Result<void> Project::restore(const std::string& database_path, const std::string& backup_path) {
+  std::error_code error;
+  if (!std::filesystem::exists(backup_path, error)) {
+    return make_error<void>(Status::InvalidInput, "project.backup_missing",
+                            "backup does not exist: '" + backup_path + "'");
+  }
+
+  sqlite3* source = nullptr;
+  if (sqlite3_open_v2(backup_path.c_str(), &source, SQLITE_OPEN_READONLY, nullptr) != SQLITE_OK) {
+    const std::string message = source != nullptr ? sqlite3_errmsg(source) : "unknown error";
+    if (source != nullptr) {
+      sqlite3_close(source);
+    }
+    return make_error<void>(Status::CorruptProject, "project.backup_unreadable",
+                            "could not read backup '" + backup_path + "': " + message);
+  }
+
+  auto close_source = [&]() {
+    sqlite3_close(source);
+    source = nullptr;
+  };
+
+  auto version = read_schema_version(source);
+  if (!version) {
+    close_source();
+    return make_error<void>(version.diagnostic().status, version.diagnostic().code,
+                            version.diagnostic().message);
+  }
+  if (version.value() <= 0 || version.value() > kProjectSchemaVersion) {
+    close_source();
+    return make_error<void>(
+        version.value() > kProjectSchemaVersion ? Status::Unsupported : Status::CorruptProject,
+        "project.backup_schema",
+        "backup schema " + std::to_string(version.value()) + " is not a supported project schema");
+  }
+  {
+    Statement tables(source,
+                     "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='images'");
+    if (!tables.ok() || !tables.step() || tables.integer(0) != 1) {
+      close_source();
+      return make_error<void>(
+          Status::CorruptProject, "project.backup_invalid",
+          "backup is a database but not a Donkey project: '" + backup_path + "'");
+    }
+  }
+  {
+    Statement integrity(source, "PRAGMA integrity_check");
+    if (!integrity.ok() || !integrity.step() || integrity.text(0) != "ok") {
+      close_source();
+      return make_error<void>(Status::CorruptProject, "project.backup_integrity",
+                              "backup failed integrity_check: '" + backup_path + "'");
+    }
+  }
+
+  const std::string temporary = database_path + ".restore-tmp";
+  std::filesystem::remove(temporary, error);
+  sqlite3* target = nullptr;
+  const int opened = sqlite3_open_v2(temporary.c_str(), &target,
+                                     SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nullptr);
+  if (opened != SQLITE_OK) {
+    const std::string message = target != nullptr ? sqlite3_errmsg(target) : "unknown error";
+    if (target != nullptr) {
+      sqlite3_close(target);
+    }
+    close_source();
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::InternalError, "project.restore_failed",
+                            "could not create restore target '" + temporary + "': " + message);
+  }
+
+  const auto copied = copy_database(source, target, "could not copy backup");
+  sqlite3_close(target);
+  close_source();
+  if (!copied) {
+    std::filesystem::remove(temporary, error);
+    return copied;
+  }
+
+  // Any stale WAL belonging to the old database must not be replayed over the
+  // restored file.
+  remove_sidecars(database_path);
+  auto replaced = replace_file(temporary, database_path);
+  if (!replaced) {
+    std::filesystem::remove(temporary, error);
+    return replaced;
+  }
+  return {};
 }
 
 }  // namespace donkey

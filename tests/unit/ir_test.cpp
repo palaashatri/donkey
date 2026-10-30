@@ -21,11 +21,13 @@ using donkey::BinaryImage;
 using donkey::IrBlock;
 using donkey::IrCondition;
 using donkey::IrFunction;
+using donkey::IrLocalVariable;
 using donkey::IrOp;
 using donkey::IrOperand;
 using donkey::IrOperandKind;
 using donkey::IrParameter;
 using donkey::IrStatement;
+using donkey::IrSwitchCase;
 using donkey::Section;
 
 std::string fixture_path(const std::string& name) {
@@ -204,6 +206,25 @@ std::vector<std::byte> x86_written_argument_function() {
       0xbf, 0x01, 0x00, 0x00, 0x00,  // mov edi, 1
       0x89, 0xf8,                    // mov eax, edi
       0xc3,                          // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+/// x86-32 cdecl frame:
+///   push ebp; mov ebp, esp; mov eax, [ebp+8]; add eax, [ebp+12]; pop ebp; ret
+/// Arguments are stack-passed, so the signature is `u32 sub_1000(void)`.
+std::vector<std::byte> x86_32_frame_function() {
+  const std::uint8_t bytes[] = {
+      0x55,              // push ebp
+      0x89, 0xe5,        // mov ebp, esp
+      0x8b, 0x45, 0x08,  // mov eax, [ebp+8]
+      0x03, 0x45, 0x0c,  // add eax, [ebp+0xc]
+      0x5d,              // pop ebp
+      0xc3,              // ret
   };
   std::vector<std::byte> out(sizeof(bytes));
   for (std::size_t i = 0; i < sizeof(bytes); ++i) {
@@ -563,6 +584,36 @@ TEST(Ir, DoesNotInferAnArgumentRegisterThatIsWrittenFirst) {
   EXPECT_NE(text.value().find("u32 sub_1000(void)"), std::string::npos) << text.value();
 }
 
+TEST(Ir, LiftsX86_32FrameFunction) {
+  const auto data = x86_32_frame_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86;
+  image.bits = 32;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  // cdecl passes arguments on the stack, so no register parameters are claimed.
+  EXPECT_TRUE(function.parameters.empty());
+  EXPECT_EQ(function.return_width, 4);
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("u32 sub_1000(void)"), std::string::npos) << code;
+  EXPECT_NE(code.find("esp = esp - 0x4;"), std::string::npos) << code;
+  EXPECT_NE(code.find("*(u32 *)(esp) = ebp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("ebp = esp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("eax = *(u32 *)(ebp + 0x8);"), std::string::npos) << code;
+  EXPECT_NE(code.find("return eax;"), std::string::npos) << code;
+}
+
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {
   const auto data = aarch64_two_argument_function();
   auto image = synthetic_image(data.size());
@@ -621,7 +672,7 @@ TEST(Ir, InfersVoidSignatureAndMarksMixedReturnPaths) {
 TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
   IrFunction function = single_block_function();
   function.return_width = 0;
-  donkey::infer_signature(function, Architecture::X86);
+  donkey::infer_signature(function, Architecture::RiscV64);
   EXPECT_FALSE(function.signature_inferred);
   EXPECT_TRUE(function.parameters.empty());
   EXPECT_EQ(function.return_width, 0);
@@ -905,6 +956,631 @@ TEST(Ir, TruncatedElfNeverProducesInvalidIr) {
       EXPECT_TRUE(text.has_value()) << "length " << length;
     }
   }
+}
+
+TEST(Ir, VerifierRejectsTypeWidthMismatch) {
+  IrFunction function = single_block_function();
+  IrStatement bad_binary;
+  bad_binary.op = IrOp::Add;
+  bad_binary.dest = IrOperand::register_ref("rax", 8);
+  bad_binary.a = IrOperand::register_ref("eax", 4);  // 4 != 8
+  bad_binary.b = IrOperand::constant_value(1, 8);
+  bad_binary.width = 8;
+  function.blocks[0].statements.insert(function.blocks[0].statements.begin(), bad_binary);
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.type_width_mismatch");
+}
+
+TEST(Ir, VerifierRejectsStatementsAfterTerminator) {
+  IrFunction function = single_block_function();
+  IrStatement dead_statement;
+  dead_statement.op = IrOp::Assign;
+  dead_statement.dest = IrOperand::register_ref("rax", 8);
+  dead_statement.a = IrOperand::constant_value(42, 8);
+  dead_statement.width = 8;
+  function.blocks[0].statements.push_back(dead_statement);  // follows return
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.dead_statements_after_terminator");
+}
+
+TEST(Ir, VerifierRejectsUnreachableBlock) {
+  IrFunction function = single_block_function();
+  // Add a second block that is never branched to
+  IrBlock dead_block;
+  dead_block.address = 0x2000;
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.width = 8;
+  dead_block.statements.push_back(ret);
+  function.blocks.push_back(dead_block);
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.unreachable_block");
+}
+
+TEST(Ir, VerifierRejectsUseBeforeDef) {
+  IrFunction function;
+  function.address = 0x1000;
+  IrBlock block;
+  block.address = 0x1000;
+
+  // Statement 0 uses var_0 before Statement 1 defines it
+  IrStatement use_stmt;
+  use_stmt.op = IrOp::Assign;
+  use_stmt.dest = IrOperand::register_ref("rax", 8);
+  use_stmt.a = IrOperand::register_ref("var_0", 8);
+  use_stmt.width = 8;
+  block.statements.push_back(use_stmt);
+
+  IrStatement def_stmt;
+  def_stmt.op = IrOp::Assign;
+  def_stmt.dest = IrOperand::register_ref("var_0", 8);
+  def_stmt.a = IrOperand::constant_value(5, 8);
+  def_stmt.width = 8;
+  block.statements.push_back(def_stmt);
+
+  block.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(block));
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.use_before_def");
+}
+
+TEST(Ir, VerifierRejectsInvalidDominatorUse) {
+  IrFunction function = branch_function();
+  // Block 0: CondBranch to block 2 (fallthrough to block 1)
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+
+  // Block 1: does NOT define var_0, branches to 3
+  function.blocks[1].statements.push_back(assign_register_statement("rax", 1));
+  function.blocks[1].statements.push_back(branch_statement(3));
+
+  // Block 2: defines var_0, branches to 3
+  IrStatement def_stmt;
+  def_stmt.op = IrOp::Assign;
+  def_stmt.dest = IrOperand::register_ref("var_0", 8);
+  def_stmt.a = IrOperand::constant_value(42, 8);
+  def_stmt.width = 8;
+  function.blocks[2].statements.push_back(def_stmt);
+  function.blocks[2].statements.push_back(branch_statement(3));
+
+  // Block 3: uses var_0. Since block 2 does NOT dominate block 3 (path 0->1->3 bypasses 2),
+  // this is an invalid dominator use!
+  IrStatement use_stmt;
+  use_stmt.op = IrOp::Assign;
+  use_stmt.dest = IrOperand::register_ref("rax", 8);
+  use_stmt.a = IrOperand::register_ref("var_0", 8);
+  use_stmt.width = 8;
+  function.blocks[3].statements.push_back(use_stmt);
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.invalid_dominator_use");
+}
+
+TEST(Ir, VerifierRejectsUndefinedVariable) {
+  IrFunction function = single_block_function();
+  IrStatement use_undefined;
+  use_undefined.op = IrOp::Assign;
+  use_undefined.dest = IrOperand::register_ref("rax", 8);
+  use_undefined.a = IrOperand::register_ref("var_99", 8);
+  use_undefined.width = 8;
+  function.blocks[0].statements.insert(function.blocks[0].statements.begin(), use_undefined);
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.undefined_variable");
+}
+
+// Bit-Vector Semantic Oracle (Acceptance Scenario A15)
+namespace {
+
+std::uint64_t mask_for_width(std::uint8_t width) {
+  switch (width) {
+    case 1:
+      return 0xFFULL;
+    case 2:
+      return 0xFFFFULL;
+    case 4:
+      return 0xFFFFFFFFULL;
+    case 8:
+      return ~0ULL;
+    default:
+      return ~0ULL;
+  }
+}
+
+std::int64_t sign_extend(std::uint64_t val, std::uint8_t width) {
+  switch (width) {
+    case 1:
+      return static_cast<std::int8_t>(val & 0xFF);
+    case 2:
+      return static_cast<std::int16_t>(val & 0xFFFF);
+    case 4:
+      return static_cast<std::int32_t>(val & 0xFFFFFFFF);
+    case 8:
+      return static_cast<std::int64_t>(val);
+    default:
+      return static_cast<std::int64_t>(val);
+  }
+}
+
+std::uint64_t eval_binary_op(IrOp op, std::uint64_t a, std::uint64_t b, std::uint8_t width) {
+  const std::uint64_t mask = mask_for_width(width);
+  a &= mask;
+  b &= mask;
+  switch (op) {
+    case IrOp::Add:
+      return (a + b) & mask;
+    case IrOp::Sub:
+      return (a - b) & mask;
+    case IrOp::Mul:
+      return (a * b) & mask;
+    case IrOp::And:
+      return (a & b) & mask;
+    case IrOp::Or:
+      return (a | b) & mask;
+    case IrOp::Xor:
+      return (a ^ b) & mask;
+    case IrOp::Shl: {
+      const std::uint32_t shift = static_cast<std::uint32_t>(b % (width * 8));
+      return (a << shift) & mask;
+    }
+    case IrOp::Shr: {
+      const std::uint32_t shift = static_cast<std::uint32_t>(b % (width * 8));
+      return (a >> shift) & mask;
+    }
+    case IrOp::Sar: {
+      const std::uint32_t shift = static_cast<std::uint32_t>(b % (width * 8));
+      const std::int64_t sa = sign_extend(a, width);
+      return static_cast<std::uint64_t>(sa >> shift) & mask;
+    }
+    default:
+      return 0;
+  }
+}
+
+bool eval_condition(IrCondition condition, std::uint64_t a, std::uint64_t b, std::uint8_t width) {
+  const std::uint64_t mask = mask_for_width(width);
+  const std::uint64_t ua = a & mask;
+  const std::uint64_t ub = b & mask;
+  const std::int64_t sa = sign_extend(a, width);
+  const std::int64_t sb = sign_extend(b, width);
+
+  switch (condition) {
+    case IrCondition::Equal:
+    case IrCondition::Zero:
+      return ua == ub;
+    case IrCondition::NotEqual:
+    case IrCondition::NonZero:
+      return ua != ub;
+    case IrCondition::UnsignedLess:
+    case IrCondition::Carry:
+      return ua < ub;
+    case IrCondition::UnsignedGreaterEqual:
+    case IrCondition::NoCarry:
+      return ua >= ub;
+    case IrCondition::UnsignedGreater:
+      return ua > ub;
+    case IrCondition::UnsignedLessEqual:
+      return ua <= ub;
+    case IrCondition::SignedLess:
+      return sa < sb;
+    case IrCondition::SignedGreaterEqual:
+      return sa >= sb;
+    case IrCondition::SignedGreater:
+      return sa > sb;
+    case IrCondition::SignedLessEqual:
+      return sa <= sb;
+    case IrCondition::Negative:
+      return sa < 0;
+    case IrCondition::Positive:
+      return sa > 0;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+TEST(Ir, SemanticOracleBitVectorArithmetic) {
+  // Test addition wrapping and two's complement behavior across widths
+  EXPECT_EQ(eval_binary_op(IrOp::Add, 0xFF, 1, 1), 0x00ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Add, 0xFFFF, 2, 2), 0x0001ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Add, 0xFFFFFFFF, 1, 4), 0x00000000ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Add, ~0ULL, 1, 8), 0ULL);
+
+  // Subtraction
+  EXPECT_EQ(eval_binary_op(IrOp::Sub, 0x00, 1, 1), 0xFFULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Sub, 0x10, 0x20, 2), 0xFFF0ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Sub, 0, 1, 4), 0xFFFFFFFFULL);
+
+  // Multiplication
+  EXPECT_EQ(eval_binary_op(IrOp::Mul, 0x10, 0x10, 1), 0x00ULL);  // 256 wraps to 0 in 8-bit
+  EXPECT_EQ(eval_binary_op(IrOp::Mul, 100, 200, 2), 20000ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Mul, 0x10000, 0x10000, 4), 0ULL);
+}
+
+TEST(Ir, SemanticOracleBitVectorShifts) {
+  // Logical left shift
+  EXPECT_EQ(eval_binary_op(IrOp::Shl, 0x01, 7, 1), 0x80ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Shl, 0x80, 1, 1), 0x00ULL);
+
+  // Logical right shift
+  EXPECT_EQ(eval_binary_op(IrOp::Shr, 0x80, 1, 1), 0x40ULL);
+  EXPECT_EQ(eval_binary_op(IrOp::Shr, 0x80000000, 1, 4), 0x40000000ULL);
+
+  // Arithmetic right shift (SAR) preserves sign bit
+  EXPECT_EQ(eval_binary_op(IrOp::Sar, 0x80, 1, 1), 0xC0ULL);  // -128 >> 1 = -64
+  EXPECT_EQ(eval_binary_op(IrOp::Sar, 0x80, 7, 1), 0xFFULL);  // -128 >> 7 = -1
+  EXPECT_EQ(eval_binary_op(IrOp::Sar, 0x40, 1, 1), 0x20ULL);  // positive value zero-fills
+  EXPECT_EQ(eval_binary_op(IrOp::Sar, 0x8000000000000000ULL, 1, 8), 0xC000000000000000ULL);
+}
+
+TEST(Ir, SemanticOracleBitVectorExtensions) {
+  // ZeroExtend
+  const std::uint64_t val = 0x85;
+  EXPECT_EQ(val & mask_for_width(1), 0x85ULL);
+  // Zero extension to 16, 32, 64 preserves exact unsigned value without sign replication
+  EXPECT_EQ(val & mask_for_width(1), 0x0085ULL);
+  EXPECT_EQ(val & mask_for_width(1), 0x00000085ULL);
+
+  // SignExtend
+  EXPECT_EQ(static_cast<std::uint16_t>(sign_extend(0x85, 1)), 0xFF85ULL);
+  EXPECT_EQ(static_cast<std::uint32_t>(sign_extend(0x85, 1)), 0xFFFFFF85ULL);
+  EXPECT_EQ(static_cast<std::uint64_t>(sign_extend(0x85, 1)), 0xFFFFFFFFFFFFFF85ULL);
+  EXPECT_EQ(static_cast<std::uint64_t>(sign_extend(0x7F, 1)), 0x000000000000007FULL);
+}
+
+TEST(Ir, SemanticOracleFlagsAndConditions) {
+  // Unsigned comparisons
+  EXPECT_TRUE(eval_condition(IrCondition::Equal, 42, 42, 4));
+  EXPECT_FALSE(eval_condition(IrCondition::Equal, 42, 43, 4));
+  EXPECT_TRUE(eval_condition(IrCondition::UnsignedLess, 0x7F, 0x80, 1));
+  EXPECT_TRUE(eval_condition(IrCondition::UnsignedLess, 5, 10, 4));
+  EXPECT_FALSE(eval_condition(IrCondition::UnsignedLess, 10, 5, 4));
+
+  // Signed comparisons: 0x80 is -128 in 8-bit, which is signed less than 1
+  EXPECT_TRUE(eval_condition(IrCondition::SignedLess, 0x80, 1, 1));
+  EXPECT_FALSE(eval_condition(IrCondition::UnsignedLess, 0x80, 1, 1));  // 128 > 1 unsigned
+
+  // Zero / NonZero
+  EXPECT_TRUE(eval_condition(IrCondition::Zero, 0, 0, 8));
+  EXPECT_FALSE(eval_condition(IrCondition::Zero, 1, 0, 8));
+  EXPECT_TRUE(eval_condition(IrCondition::NonZero, 1, 0, 8));
+
+  // Negative / Positive
+  EXPECT_TRUE(eval_condition(IrCondition::Negative, 0x8000, 0, 2));
+  EXPECT_FALSE(eval_condition(IrCondition::Negative, 0x7FFF, 0, 2));
+  EXPECT_TRUE(eval_condition(IrCondition::Positive, 0x7FFF, 0, 2));
+}
+
+TEST(Ir, PreservesUnsupportedInstructionsAsOpaqueEffects) {
+  IrFunction function;
+  function.address = 0x1000;
+  IrBlock block;
+  block.address = 0x1000;
+
+  IrStatement unsupported_stmt;
+  unsupported_stmt.op = IrOp::Unsupported;
+  unsupported_stmt.text = "cpuid";
+  unsupported_stmt.source_address = 0x1004;
+  unsupported_stmt.width = 8;
+  block.statements.push_back(unsupported_stmt);
+
+  block.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(block));
+  function.partial = true;
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+
+  auto pseudocode = donkey::format_pseudocode(function);
+  ASSERT_TRUE(pseudocode.has_value()) << pseudocode.diagnostic().message;
+  // Pseudocode must preserve the explicit opaque text and mark partial status
+  EXPECT_NE(pseudocode.value().find("cpuid"), std::string::npos);
+  EXPECT_NE(pseudocode.value().find("[partial]"), std::string::npos);
+}
+
+TEST(Ir, VerifierValidatesSwitchTerminator) {
+  IrFunction function;
+  function.address = 0x1000;
+  IrBlock b0;
+  b0.address = 0x1000;
+  IrBlock b1;
+  b1.address = 0x1010;
+  b1.statements.push_back(return_statement());
+  IrBlock b2;
+  b2.address = 0x1020;
+  b2.statements.push_back(return_statement());
+
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.dest = IrOperand::register_ref("eax", 4);
+  sw.a = IrOperand::block_ref(1);  // default
+  sw.width = 4;
+  sw.switch_cases.push_back(IrSwitchCase{0x1, 2});
+  b0.statements.push_back(sw);
+
+  function.blocks.push_back(b0);
+  function.blocks.push_back(b1);
+  function.blocks.push_back(b2);
+
+  auto res = donkey::verify_ir(function);
+  EXPECT_TRUE(res.has_value()) << res.diagnostic().message;
+
+  // Rejects out of range default target
+  function.blocks[0].statements.back().a = IrOperand::block_ref(99);
+  EXPECT_EQ(donkey::verify_ir(function).diagnostic().code, "ir.bad_block_index");
+
+  // Rejects out of range case target
+  function.blocks[0].statements.back().a = IrOperand::block_ref(1);
+  function.blocks[0].statements.back().switch_cases.front().target_block = 99;
+  EXPECT_EQ(donkey::verify_ir(function).diagnostic().code, "ir.bad_block_index");
+
+  // Rejects missing selector operand
+  function.blocks[0].statements.back().switch_cases.front().target_block = 2;
+  function.blocks[0].statements.back().dest = IrOperand();
+  EXPECT_EQ(donkey::verify_ir(function).diagnostic().code, "ir.malformed_switch");
+}
+
+TEST(Ir, StructuresReducibleSwitchStatement) {
+  IrFunction function;
+  function.address = 0x1000;
+
+  // b0: entry, switch (eax)
+  IrBlock b0;
+  b0.address = 0x1000;
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.dest = IrOperand::register_ref("eax", 4);
+  sw.a = IrOperand::block_ref(3);  // default is exit block 3
+  sw.width = 4;
+  sw.switch_cases.push_back(IrSwitchCase{0x10, 1});
+  sw.switch_cases.push_back(IrSwitchCase{0x20, 2});
+  b0.statements.push_back(sw);
+
+  // b1: case 0x10, rdx = 1, jump to b3
+  IrBlock b1;
+  b1.address = 0x1010;
+  IrStatement s1;
+  s1.op = IrOp::Assign;
+  s1.dest = IrOperand::register_ref("edx", 4);
+  s1.a = IrOperand::constant_value(1, 4);
+  s1.width = 4;
+  b1.statements.push_back(s1);
+  IrStatement br1;
+  br1.op = IrOp::Branch;
+  br1.a = IrOperand::block_ref(3);
+  br1.width = 4;
+  b1.statements.push_back(br1);
+
+  // b2: case 0x20, rdx = 2, jump to b3
+  IrBlock b2;
+  b2.address = 0x1020;
+  IrStatement s2;
+  s2.op = IrOp::Assign;
+  s2.dest = IrOperand::register_ref("edx", 4);
+  s2.a = IrOperand::constant_value(2, 4);
+  s2.width = 4;
+  b2.statements.push_back(s2);
+  IrStatement br2;
+  br2.op = IrOp::Branch;
+  br2.a = IrOperand::block_ref(3);
+  br2.width = 4;
+  b2.statements.push_back(br2);
+
+  // b3: exit block, return
+  IrBlock b3;
+  b3.address = 0x1030;
+  b3.statements.push_back(return_statement());
+
+  function.blocks.push_back(std::move(b0));
+  function.blocks.push_back(std::move(b1));
+  function.blocks.push_back(std::move(b2));
+  function.blocks.push_back(std::move(b3));
+
+  auto verified = donkey::verify_ir(function);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+
+  auto pc = donkey::format_pseudocode(function);
+  ASSERT_TRUE(pc.has_value()) << pc.diagnostic().message;
+  const std::string& text = pc.value();
+  EXPECT_NE(text.find("switch (eax) {"), std::string::npos) << text;
+  EXPECT_NE(text.find("case 0x10:"), std::string::npos) << text;
+  EXPECT_NE(text.find("edx = 0x1;"), std::string::npos) << text;
+  EXPECT_NE(text.find("case 0x20:"), std::string::npos) << text;
+  EXPECT_NE(text.find("edx = 0x2;"), std::string::npos) << text;
+  EXPECT_NE(text.find("default:"), std::string::npos) << text;
+}
+
+TEST(Ir, RecoversStackVariablesAndFormatsArrayExpressions) {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "process_items";
+
+  IrBlock b0;
+  b0.address = 0x1000;
+
+  // Assign argument at [ebp + 0x8] into eax
+  IrStatement s1;
+  s1.op = IrOp::Assign;
+  s1.dest = IrOperand::register_ref("eax", 4);
+  s1.a = IrOperand::memory_reference("ebp", "", 1, 8, 4);
+  s1.width = 4;
+  s1.source_address = 0x1000;
+  b0.statements.push_back(s1);
+
+  // Store eax into local at [ebp - 0x4]
+  IrStatement s2;
+  s2.op = IrOp::Store;
+  s2.a = IrOperand::memory_reference("ebp", "", 1, -4, 4);
+  s2.b = IrOperand::register_ref("eax", 4);
+  s2.width = 4;
+  s2.source_address = 0x1004;
+  b0.statements.push_back(s2);
+
+  // Load from array base + index: [rsi + rax]
+  IrStatement s3;
+  s3.op = IrOp::Load;
+  s3.dest = IrOperand::register_ref("ebx", 4);
+  s3.a = IrOperand::memory_reference("rsi", "rax", 1, 0, 4);
+  s3.width = 4;
+  s3.source_address = 0x1008;
+  b0.statements.push_back(s3);
+
+  b0.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(b0));
+
+  // Run recover_stack_variables
+  donkey::recover_stack_variables(function);
+  ASSERT_EQ(function.local_variables.size(), 2U);
+  EXPECT_EQ(function.local_variables[0].name, "local_4");
+  EXPECT_FALSE(function.local_variables[0].is_parameter);
+  EXPECT_EQ(function.local_variables[1].name, "arg_8");
+  EXPECT_TRUE(function.local_variables[1].is_parameter);
+
+  auto res = donkey::format_pseudocode_lines(function);
+  ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+  const std::string& code = res.value().full_text;
+
+  // Local variable declaration
+  EXPECT_NE(code.find("u32 local_4;"), std::string::npos) << code;
+  // Local variable use instead of dereference
+  EXPECT_NE(code.find("eax = arg_8;"), std::string::npos) << code;
+  EXPECT_NE(code.find("local_4 = eax;"), std::string::npos) << code;
+  // Array expression
+  EXPECT_NE(code.find("ebx = rsi[rax];"), std::string::npos) << code;
+}
+
+TEST(Ir, AcceptanceScenarioA16_SourceMapNavigation) {
+  IrFunction function;
+  function.address = 0x2000;
+  function.name = "loop_calc";
+
+  // b0: header
+  IrBlock b0;
+  b0.address = 0x2000;
+  IrStatement init;
+  init.op = IrOp::Assign;
+  init.dest = IrOperand::register_ref("eax", 4);
+  init.a = IrOperand::constant_value(0, 4);
+  init.width = 4;
+  init.source_address = 0x2000;
+  b0.statements.push_back(init);
+
+  IrStatement br0;
+  br0.op = IrOp::Branch;
+  br0.a = IrOperand::block_ref(1);
+  br0.width = 4;
+  br0.source_address = 0x2004;
+  b0.statements.push_back(br0);
+
+  // b1: while condition
+  IrBlock b1;
+  b1.address = 0x2010;
+  IrStatement cmp;
+  cmp.op = IrOp::Compare;
+  cmp.condition = IrCondition::SignedLess;
+  cmp.a = IrOperand::register_ref("eax", 4);
+  cmp.b = IrOperand::constant_value(10, 4);
+  cmp.width = 4;
+  cmp.source_address = 0x2010;
+  b1.statements.push_back(cmp);
+
+  IrStatement cbr;
+  cbr.op = IrOp::CondBranch;
+  cbr.condition = IrCondition::SignedGreaterEqual;
+  cbr.a = IrOperand::register_ref("flags", 4);
+  cbr.b = IrOperand::block_ref(3);
+  cbr.width = 4;
+  cbr.source_address = 0x2014;
+  b1.statements.push_back(cbr);
+
+  // b2: loop body
+  IrBlock b2;
+  b2.address = 0x2020;
+  IrStatement add;
+  add.op = IrOp::Add;
+  add.dest = IrOperand::register_ref("eax", 4);
+  add.a = IrOperand::register_ref("eax", 4);
+  add.b = IrOperand::constant_value(1, 4);
+  add.width = 4;
+  add.source_address = 0x2020;
+  b2.statements.push_back(add);
+
+  IrStatement br_loop;
+  br_loop.op = IrOp::Branch;
+  br_loop.a = IrOperand::block_ref(1);
+  br_loop.width = 4;
+  br_loop.source_address = 0x2024;
+  b2.statements.push_back(br_loop);
+
+  // b3: exit
+  IrBlock b3;
+  b3.address = 0x2030;
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("eax", 4);
+  ret.width = 4;
+  ret.source_address = 0x2030;
+  b3.statements.push_back(ret);
+
+  function.blocks.push_back(std::move(b0));
+  function.blocks.push_back(std::move(b1));
+  function.blocks.push_back(std::move(b2));
+  function.blocks.push_back(std::move(b3));
+
+  auto res = donkey::format_pseudocode_lines(function);
+  ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+  const auto& lines = res.value().lines;
+  EXPECT_FALSE(lines.empty());
+
+  bool found_source_map_entry = false;
+  for (const auto& line : lines) {
+    if (line.source_address == 0x2000 && line.text.find("eax = 0x0;") != std::string::npos) {
+      found_source_map_entry = true;
+    }
+  }
+  EXPECT_TRUE(found_source_map_entry);
+}
+
+TEST(Ir, AcceptanceScenarioA17_GracefulUnresolvedJumpTable) {
+  IrFunction function;
+  function.address = 0x3000;
+  function.name = "dispatch_indirect";
+  function.notes.push_back("unresolved jump table at 0x3004; dynamic indirect targets");
+
+  IrBlock b0;
+  b0.address = 0x3000;
+
+  IrStatement indirect_jump;
+  indirect_jump.op = IrOp::Unsupported;
+  indirect_jump.text = "jmp qword ptr [rax*8 + 0x403000] /* unresolved table */";
+  indirect_jump.source_address = 0x3004;
+  indirect_jump.width = 8;
+  b0.statements.push_back(indirect_jump);
+
+  b0.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(b0));
+  function.partial = true;
+
+  auto res = donkey::format_pseudocode(function);
+  ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+  const std::string& code = res.value();
+  // Must preserve honest diagnostic notes and unsupported statement, never crash or hallucinate
+  // targets
+  EXPECT_NE(code.find("unresolved jump table"), std::string::npos) << code;
+  EXPECT_NE(code.find("jmp qword ptr [rax*8 + 0x403000]"), std::string::npos) << code;
+  EXPECT_NE(code.find("[partial]"), std::string::npos) << code;
 }
 
 }  // namespace

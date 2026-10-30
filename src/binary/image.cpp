@@ -1,4 +1,5 @@
 #include "donkey/binary/image.h"
+#include "donkey/binary/isolation.h"
 
 #include <algorithm>
 #include <cstring>
@@ -60,10 +61,36 @@ Result<BinaryFormat> detect_format(std::span<const std::byte> data) {
   return BinaryFormat::Raw;
 }
 
-Result<void> parse_raw(ByteReader reader, BinaryImage& image) {
+unsigned default_bits_for_architecture(Architecture architecture) noexcept {
+  switch (architecture) {
+    case Architecture::X86_64:
+    case Architecture::AArch64:
+    case Architecture::RiscV64:
+      return 64;
+    case Architecture::X86:
+    case Architecture::Arm:
+      return 32;
+    case Architecture::Unknown:
+      return 0;
+  }
+  return 0;
+}
+
+Result<void> parse_raw(ByteReader reader, BinaryImage& image, const LoadOptions& options) {
   image.format = BinaryFormat::Raw;
-  image.architecture = Architecture::Unknown;
+  image.architecture = options.preferred_architecture;
+  image.endian = options.raw_endian;
+  image.bits =
+      options.raw_bits != 0 ? options.raw_bits : default_bits_for_architecture(image.architecture);
+  image.image_base = options.raw_base_address;
+  if (options.has_raw_entry_point) {
+    image.entry_point = options.raw_entry_point;
+  } else if (image.architecture != Architecture::Unknown) {
+    image.entry_point = options.raw_base_address;
+  }
   image.format_detail = "raw bytes";
+  const bool executable = image.architecture != Architecture::Unknown;
+
   Section section;
   section.id = SectionId{1};
   section.name = "raw";
@@ -71,8 +98,9 @@ Result<void> parse_raw(ByteReader reader, BinaryImage& image) {
   section.file_offset = 0;
   section.file_size = reader.size();
   section.virtual_size = reader.size();
-  section.address = 0;
+  section.address = options.raw_base_address;
   section.readable = true;
+  section.executable = executable;
   image.sections.push_back(section);
 
   Segment segment;
@@ -81,8 +109,9 @@ Result<void> parse_raw(ByteReader reader, BinaryImage& image) {
   segment.file_offset = 0;
   segment.file_size = reader.size();
   segment.virtual_size = reader.size();
-  segment.virtual_address = 0;
+  segment.virtual_address = options.raw_base_address;
   segment.readable = true;
+  segment.executable = executable;
   image.segments.push_back(segment);
   return {};
 }
@@ -121,6 +150,25 @@ const char* architecture_name(Architecture architecture) noexcept {
       return "riscv64";
   }
   return "unknown";
+}
+
+std::optional<Architecture> parse_architecture(std::string_view name) noexcept {
+  if (name == "x86" || name == "i386") {
+    return Architecture::X86;
+  }
+  if (name == "x86_64" || name == "x86-64" || name == "amd64") {
+    return Architecture::X86_64;
+  }
+  if (name == "arm" || name == "arm32") {
+    return Architecture::Arm;
+  }
+  if (name == "aarch64" || name == "arm64") {
+    return Architecture::AArch64;
+  }
+  if (name == "riscv64") {
+    return Architecture::RiscV64;
+  }
+  return std::nullopt;
 }
 
 const char* symbol_kind_name(SymbolKind kind) noexcept {
@@ -223,7 +271,7 @@ Result<std::uint64_t> BinaryImage::file_offset_to_va(std::uint64_t file_offset) 
 
 const Section* BinaryImage::section_for_va(std::uint64_t va) const noexcept {
   for (const Section& section : sections) {
-    if (section.address == 0) {
+    if (section.address == 0 && format != BinaryFormat::Raw) {
       continue;
     }
     if (va >= section.address && va - section.address < section.virtual_size) {
@@ -251,7 +299,8 @@ const Symbol* BinaryImage::symbol_at(std::uint64_t va) const noexcept {
   return nullptr;
 }
 
-Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string path) {
+Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string path,
+                                 const LoadOptions& options) {
   BinaryImage image;
   image.path = std::move(path);
   image.file_size = static_cast<std::uint64_t>(data.size());
@@ -262,11 +311,15 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
   }
 
   const ByteReader reader(data);
-  auto format = detect_format(data);
-  if (!format) {
-    return format.diagnostic();
+  if (options.force_raw) {
+    image.format = BinaryFormat::Raw;
+  } else {
+    auto format = detect_format(data);
+    if (!format) {
+      return format.diagnostic();
+    }
+    image.format = format.value();
   }
-  image.format = format.value();
 
   switch (image.format) {
     case BinaryFormat::Elf:
@@ -280,12 +333,13 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
       }
       break;
     case BinaryFormat::MachO:
-      if (auto parsed = binary::detail::parse_macho(reader, image); !parsed) {
+      if (auto parsed = binary::detail::parse_macho(reader, image, options.preferred_architecture);
+          !parsed) {
         return parsed.diagnostic();
       }
       break;
     case BinaryFormat::Raw:
-      if (auto parsed = parse_raw(reader, image); !parsed) {
+      if (auto parsed = parse_raw(reader, image, options); !parsed) {
         return parsed.diagnostic();
       }
       break;
@@ -305,6 +359,11 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
 }
 
 Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& options) {
+  if (options.isolate) {
+    LoadOptions inner_options = options;
+    inner_options.isolate = false;
+    return load_binary_isolated(path, inner_options);
+  }
   std::ifstream file(path, std::ios::binary | std::ios::ate);
   if (!file) {
     return error(Status::InvalidInput, "io.open_failed", "could not open the file for reading");
@@ -328,7 +387,7 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
   if (!file || static_cast<std::uint64_t>(file.gcount()) != size) {
     return error(Status::InvalidInput, "io.read_failed", "could not read the whole file");
   }
-  auto image = parse_binary(std::span<const std::byte>(data.data(), data.size()), path);
+  auto image = parse_binary(std::span<const std::byte>(data.data(), data.size()), path, options);
   if (!image) {
     return image.diagnostic();
   }

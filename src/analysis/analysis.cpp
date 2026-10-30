@@ -4,6 +4,7 @@
 #include <optional>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 #include <utility>
 
 #include "donkey/core/checked.h"
@@ -39,6 +40,99 @@ std::string synthetic_function_name(std::uint64_t address) {
   return out;
 }
 
+void fold_aarch64_data_references(std::vector<Instruction>& instructions) {
+  std::unordered_map<std::string, std::uint64_t> page_regs;
+
+  auto invalidate_reg = [&](const std::string& reg) {
+    if (reg.empty()) {
+      return;
+    }
+    page_regs.erase(reg);
+    if (reg.front() == 'x') {
+      page_regs.erase("w" + reg.substr(1));
+    } else if (reg.front() == 'w') {
+      page_regs.erase("x" + reg.substr(1));
+    }
+  };
+
+  for (Instruction& instruction : instructions) {
+    if (instruction.mnemonic == "adr") {
+      if (instruction.structured_operands.size() >= 2 &&
+          instruction.structured_operands[1].kind == OperandKind::Immediate) {
+        instruction.data_references.push_back(
+            static_cast<std::uint64_t>(instruction.structured_operands[1].immediate));
+      }
+      if (!instruction.structured_operands.empty() &&
+          instruction.structured_operands[0].kind == OperandKind::Register) {
+        invalidate_reg(instruction.structured_operands[0].reg);
+      }
+      continue;
+    }
+
+    if (instruction.mnemonic == "adrp") {
+      if (instruction.structured_operands.size() >= 2 &&
+          instruction.structured_operands[0].kind == OperandKind::Register &&
+          instruction.structured_operands[1].kind == OperandKind::Immediate) {
+        const std::string& reg = instruction.structured_operands[0].reg;
+        page_regs[reg] = static_cast<std::uint64_t>(instruction.structured_operands[1].immediate);
+        if (reg.front() == 'x') {
+          page_regs["w" + reg.substr(1)] = page_regs[reg];
+        }
+      }
+      continue;
+    }
+
+    if (instruction.mnemonic == "add" && instruction.structured_operands.size() >= 3 &&
+        instruction.structured_operands[0].kind == OperandKind::Register &&
+        instruction.structured_operands[1].kind == OperandKind::Register &&
+        instruction.structured_operands[2].kind == OperandKind::Immediate) {
+      const std::string& src_reg = instruction.structured_operands[1].reg;
+      auto it = page_regs.find(src_reg);
+      if (it != page_regs.end()) {
+        const std::uint64_t resolved =
+            it->second + static_cast<std::uint64_t>(instruction.structured_operands[2].immediate);
+        instruction.data_references.push_back(resolved);
+      }
+      invalidate_reg(instruction.structured_operands[0].reg);
+      continue;
+    }
+
+    if (instruction.structured_operands.size() >= 2 &&
+        instruction.structured_operands[1].kind == OperandKind::Memory) {
+      const auto& mem = instruction.structured_operands[1].memory;
+      if (!mem.base.empty()) {
+        auto it = page_regs.find(mem.base);
+        if (it != page_regs.end()) {
+          const std::uint64_t resolved = it->second + static_cast<std::uint64_t>(mem.displacement);
+          instruction.data_references.push_back(resolved);
+        }
+      }
+      if (instruction.mnemonic.rfind("ldr", 0) == 0 || instruction.mnemonic.rfind("ldur", 0) == 0) {
+        if (instruction.structured_operands[0].kind == OperandKind::Register) {
+          invalidate_reg(instruction.structured_operands[0].reg);
+        }
+      }
+      continue;
+    }
+
+    if (instruction.classification == InstructionClass::Jump ||
+        instruction.classification == InstructionClass::ConditionalJump ||
+        instruction.classification == InstructionClass::Call ||
+        instruction.classification == InstructionClass::Return ||
+        instruction.classification == InstructionClass::Interrupt) {
+      page_regs.clear();
+      continue;
+    }
+
+    if (!instruction.structured_operands.empty() &&
+        instruction.structured_operands[0].kind == OperandKind::Register &&
+        instruction.mnemonic != "cmp" && instruction.mnemonic != "cmn" &&
+        instruction.mnemonic != "tst") {
+      invalidate_reg(instruction.structured_operands[0].reg);
+    }
+  }
+}
+
 }  // namespace
 
 const char* xref_kind_name(XrefKind kind) noexcept {
@@ -58,6 +152,10 @@ const char* xref_kind_name(XrefKind kind) noexcept {
 Result<std::vector<StringLiteral>> extract_strings(const BinaryImage& image,
                                                    std::span<const std::byte> file,
                                                    const AnalysisOptions& options) {
+  if (options.cancellation_token.is_cancelled()) {
+    return make_error<std::vector<StringLiteral>>(Status::Cancelled, "analysis.cancelled",
+                                                  "string extraction was cancelled");
+  }
   if (options.min_string_length == 0) {
     return make_error<std::vector<StringLiteral>>(Status::InvalidInput,
                                                   "analysis.invalid_min_length",
@@ -90,10 +188,18 @@ Result<std::vector<StringLiteral>> extract_strings(const BinaryImage& image,
   }
 
   for (const Range& range : ranges) {
+    if (options.cancellation_token.is_cancelled()) {
+      return make_error<std::vector<StringLiteral>>(Status::Cancelled, "analysis.cancelled",
+                                                    "string extraction was cancelled");
+    }
     const std::uint64_t begin = range.file_offset;
     const std::uint64_t end = begin + range.size;
     std::uint64_t offset = begin;
     while (offset < end) {
+      if (options.cancellation_token.is_cancelled()) {
+        return make_error<std::vector<StringLiteral>>(Status::Cancelled, "analysis.cancelled",
+                                                      "string extraction was cancelled");
+      }
       if (strings.size() >= options.max_strings) {
         break;
       }
@@ -161,6 +267,10 @@ Result<std::vector<StringLiteral>> extract_strings(const BinaryImage& image,
 
 Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::byte> file,
                                const AnalysisOptions& options) {
+  if (options.cancellation_token.is_cancelled()) {
+    return make_error<AnalysisResult>(Status::Cancelled, "analysis.cancelled",
+                                      "analysis was cancelled");
+  }
   AnalysisResult result;
   result.architecture = image.architecture;
 
@@ -169,6 +279,11 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     return strings.diagnostic();
   }
   result.strings = std::move(strings.value());
+
+  if (options.cancellation_token.is_cancelled()) {
+    return make_error<AnalysisResult>(Status::Cancelled, "analysis.cancelled",
+                                      "analysis was cancelled");
+  }
 
   std::optional<Decoder> decoder;
   auto created = Decoder::create(image.architecture, image.endian);
@@ -183,6 +298,10 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   std::size_t decoded = 0;
   if (decoder.has_value()) {
     for (const Section& section : image.sections) {
+      if (options.cancellation_token.is_cancelled()) {
+        return make_error<AnalysisResult>(Status::Cancelled, "analysis.cancelled",
+                                          "analysis was cancelled");
+      }
       if (!section.executable || !section.has_file_data || section.file_size == 0) {
         continue;
       }
@@ -205,6 +324,11 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         result.diagnostics.push_back(stream.diagnostic());
         continue;
       }
+
+      if (image.architecture == Architecture::AArch64) {
+        fold_aarch64_data_references(stream.value().instructions);
+      }
+
       decoded += stream.value().instructions.size();
       for (const Instruction& instruction : stream.value().instructions) {
         if (instruction.direct_target.has_value()) {
@@ -244,13 +368,6 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.diagnostics.push_back(
         Diagnostic::make(Status::ResourceLimit, "analysis.instruction_limit",
                          "analysis stopped at the configured instruction limit"));
-  }
-
-  if (image.architecture == Architecture::AArch64 && decoder.has_value()) {
-    result.partial = true;
-    result.diagnostics.push_back(
-        Diagnostic::make(Status::Partial, "analysis.arm64_data_xrefs_incomplete",
-                         "AArch64 ADRP/ADD data references are not folded yet"));
   }
 
   // Function seeds: entry point, exported function symbols and call targets.

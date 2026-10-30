@@ -31,6 +31,7 @@ enum class SymbolBinding : std::uint8_t { Unknown = 0, Local, Global, Weak };
 
 const char* format_name(BinaryFormat format) noexcept;
 const char* architecture_name(Architecture architecture) noexcept;
+std::optional<Architecture> parse_architecture(std::string_view name) noexcept;
 const char* symbol_kind_name(SymbolKind kind) noexcept;
 const char* symbol_binding_name(SymbolBinding binding) noexcept;
 
@@ -91,6 +92,7 @@ struct BinaryImage {
   std::vector<Segment> segments;
   std::vector<Section> sections;
   std::vector<Symbol> symbols;
+  std::vector<Architecture> fat_architectures;
 
   /// True when the loader understood the structure but some metadata (for
   /// example a missing entry point) is unavailable. Never set for fatal errors.
@@ -113,6 +115,18 @@ struct BinaryImage {
 struct LoadOptions {
   /// Guard against accidental multi-gigabyte allocations on hostile input.
   std::uint64_t max_file_bytes = 1ULL << 31;
+  /// Preferred architecture for fat Mach-O slice selection or raw binary import.
+  Architecture preferred_architecture = Architecture::Unknown;
+  /// Treat the file as raw bytes with explicit mapping metadata instead of
+  /// auto-detecting container headers.
+  bool force_raw = false;
+  unsigned raw_bits = 0;
+  Endian raw_endian = Endian::Little;
+  std::uint64_t raw_base_address = 0;
+  std::uint64_t raw_entry_point = 0;
+  bool has_raw_entry_point = false;
+  /// Treat the file as untrusted and parse within an isolated OS process boundary.
+  bool isolate = false;
 };
 
 /// A parsed image together with the bytes it was parsed from. Callers that
@@ -132,6 +146,7 @@ struct LoadedBinary {
 
 /// Parse an in-memory image. Used by tests, fuzzing and embedded callers.
 [[nodiscard]] Result<BinaryImage> parse_binary(std::span<const std::byte> data,
-                                               std::string path = {});
+                                               std::string path = {},
+                                               const LoadOptions& options = {});
 
 }  // namespace donkey

@@ -13,11 +13,11 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 2;
+constexpr int kProjectSchemaVersion = 3;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
-enum class AnnotationKind : std::uint8_t { Rename = 0, Comment = 1 };
+enum class AnnotationKind : std::uint8_t { Rename = 0, Comment = 1, Bookmark = 2 };
 const char* annotation_kind_name(AnnotationKind kind) noexcept;
 
 struct Annotation {
@@ -90,6 +90,21 @@ class Project {
 
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;
+
+  /// Write a consistent, self-contained copy of the open project to
+  /// `destination` using SQLite's online backup API (so WAL content is
+  /// included). The copy is written to a temporary file first and renamed into
+  /// place, so a failed backup never damages an existing destination. Refuses
+  /// to replace an existing file unless `overwrite` is true.
+  [[nodiscard]] Result<void> backup(const std::string& destination, bool overwrite = false) const;
+
+  /// Replace `database_path` with `backup_path` after validating that the
+  /// backup is a readable project with a supported schema and passing
+  /// `PRAGMA integrity_check`. The replacement is written to a temporary file
+  /// and renamed into place. The destination must not have an active SQLite
+  /// connection open while it is replaced.
+  [[nodiscard]] static Result<void> restore(const std::string& database_path,
+                                            const std::string& backup_path);
 
  private:
   struct Impl;

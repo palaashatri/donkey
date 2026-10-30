@@ -1,18 +1,39 @@
 include(GoogleTest)
 
+add_library(test_plugin_valid MODULE fixtures/plugins/valid_plugin.c)
+target_include_directories(test_plugin_valid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_bad_abi MODULE fixtures/plugins/bad_abi_plugin.c)
+target_include_directories(test_plugin_bad_abi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_crash MODULE fixtures/plugins/crash_plugin.c)
+target_include_directories(test_plugin_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_hang MODULE fixtures/plugins/hang_plugin.c)
+target_include_directories(test_plugin_hang PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 add_executable(donkey_unit_tests
+  unit/acceptance_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
+  unit/debug_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
+  unit/patch_test.cpp
+  unit/plugin_test.cpp
   unit/project_test.cpp
   unit/session_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+  TEST_PLUGIN_VALID_PATH="$<TARGET_FILE:test_plugin_valid>"
+  TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
+  TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
+  TEST_PLUGIN_HANG_PATH="$<TARGET_FILE:test_plugin_hang>"
 )
+add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
@@ -31,6 +52,11 @@ add_test(NAME cli.info_elf_json
 set_tests_properties(cli.info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
 
+add_test(NAME cli.info_isolated_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --isolate --json)
+set_tests_properties(cli.info_isolated_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
+
 add_test(NAME cli.info_pe_human
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-pe-x86_64.exe)
 set_tests_properties(cli.info_pe_human PROPERTIES
@@ -40,6 +66,24 @@ add_test(NAME cli.info_macho_json
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64 --json)
 set_tests_properties(cli.info_macho_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"architecture\": \"aarch64\"")
+
+add_test(NAME cli.info_macho_i386_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-i386 --json)
+set_tests_properties(cli.info_macho_i386_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"format_detail\": \"Mach-O 32 \\(MH_EXECUTE\\)\".*\"architecture\": \"x86\"")
+
+add_test(NAME cli.info_macho_fat_x86_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-fat
+                 --arch x86 --json)
+set_tests_properties(cli.info_macho_fat_x86_json PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"architecture\": \"x86\".*\"fat_architectures\": \\[\"x86\", \"aarch64\"\\]")
+
+add_test(NAME cli.disasm_raw_x86_64_json
+         COMMAND donkey-cli disasm ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --raw --arch x86_64 --base 0x1000 --address 0x1100 --count 3 --json)
+set_tests_properties(cli.disasm_raw_x86_64_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"start\": \"0x1100\".*\"mnemonic\": \"push\"")
 
 add_test(NAME cli.info_missing_file COMMAND donkey-cli info /definitely/not/here)
 set_tests_properties(cli.info_missing_file PROPERTIES WILL_FAIL TRUE)
@@ -123,6 +167,12 @@ add_test(NAME cli.decompile_macho_aarch64
 set_tests_properties(cli.decompile_macho_aarch64 PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"_main\".*\"pseudocode\":.*sp - 0x10")
 
+add_test(NAME cli.decompile_elf_i386
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
+set_tests_properties(cli.decompile_elf_i386 PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"name\": \"_start\".*\"status\": \"Complete\".*u32 _start\\(void\\).*esp = esp - 0x4")
+
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
 # ---------------------------------------------------------------------------
@@ -133,13 +183,21 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 2.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
+
+if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
+  add_test(NAME ui.smoke_loads_project
+           COMMAND donkey --project ${DONKEY_CLI_PROJECT_DB} --exit-after-frames 20)
+  set_tests_properties(ui.smoke_loads_project PROPERTIES
+    TIMEOUT 120
+    DEPENDS cli.project_save_elf_json)
+endif()
 
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info
@@ -155,7 +213,7 @@ add_test(NAME cli.project_rejects_unknown_subcommand COMMAND donkey-cli project 
 set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
 
 # ---------------------------------------------------------------------------
-# Persisted annotations (schema v2).
+# Persisted annotations (schema v3).
 # ---------------------------------------------------------------------------
 
 set(DONKEY_CLI_ANN_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-annotations.db")
@@ -164,7 +222,7 @@ add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 2.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -174,16 +232,20 @@ add_test(NAME cli.project_comment
          COMMAND donkey-cli project comment ${DONKEY_CLI_ANN_DB} 1 0x400104 "calls the helper")
 set_tests_properties(cli.project_comment PROPERTIES DEPENDS cli.project_annotation_save)
 
+add_test(NAME cli.project_bookmark
+         COMMAND donkey-cli project bookmark ${DONKEY_CLI_ANN_DB} 1 0x400100 "important")
+set_tests_properties(cli.project_bookmark PROPERTIES DEPENDS cli.project_annotation_save)
+
 add_test(NAME cli.project_annotations_json
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
 set_tests_properties(cli.project_annotations_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"kind\": \"rename\".*\"address\": \"0x400100\".*\"text\": \"entry_point\".*\"kind\": \"comment\""
-  DEPENDS "cli.project_rename;cli.project_comment")
+  PASS_REGULAR_EXPRESSION "\"kind\": \"bookmark\".*\"address\": \"0x400100\".*\"kind\": \"rename\".*\"text\": \"entry_point\".*\"kind\": \"comment\""
+  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark")
 
 add_test(NAME cli.project_annotation_clear
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 --clear)
 set_tests_properties(cli.project_annotation_clear PROPERTIES
-  DEPENDS "cli.project_rename;cli.project_comment")
+  DEPENDS "cli.project_rename;cli.project_comment;cli.project_bookmark")
 
 add_test(NAME cli.project_annotations_after_clear
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} 1 --json)
@@ -200,3 +262,103 @@ set_tests_properties(cli.project_annotation_missing_image PROPERTIES
 add_test(NAME cli.project_annotations_reject_bad_id
          COMMAND donkey-cli project annotations ${DONKEY_CLI_ANN_DB} not-a-number)
 set_tests_properties(cli.project_annotations_reject_bad_id PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Project backup and restore.
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_BACKUP_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-backup.db")
+
+add_test(NAME cli.project_backup_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+set_tests_properties(cli.project_backup_save PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 3"
+  DEPENDS cli.project_annotations_after_clear)
+
+add_test(NAME cli.project_backup_json
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
+                 --json)
+set_tests_properties(cli.project_backup_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 3.*\"integrity\": true"
+  DEPENDS cli.project_backup_save)
+
+add_test(NAME cli.project_backup_refuses_overwrite
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB})
+set_tests_properties(cli.project_backup_refuses_overwrite PROPERTIES
+  WILL_FAIL TRUE DEPENDS cli.project_backup_json)
+
+add_test(NAME cli.project_backup_force
+         COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force --json)
+set_tests_properties(cli.project_backup_force PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"integrity\": true"
+  DEPENDS cli.project_backup_json)
+
+add_test(NAME cli.project_restore_json
+         COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
+set_tests_properties(cli.project_restore_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"images\": 1"
+  DEPENDS cli.project_backup_force)
+
+add_test(NAME cli.project_restore_rejects_non_database
+         COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.project_restore_rejects_non_database PROPERTIES
+  WILL_FAIL TRUE DEPENDS cli.project_restore_json)
+
+# ---------------------------------------------------------------------------
+# Debugger CLI
+# ---------------------------------------------------------------------------
+
+add_test(NAME cli.debug_launch_mock_json
+         COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock --json)
+set_tests_properties(cli.debug_launch_mock_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"state\": \"Stopped\".*\"stop_reason\": \"Entrypoint\".*\"frames\":")
+
+add_test(NAME cli.debug_launch_human
+         COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock)
+set_tests_properties(cli.debug_launch_human PROPERTIES
+  PASS_REGULAR_EXPRESSION "Debugger session state: Stopped.*Call stack:")
+
+add_test(NAME cli.debug_rejects_unknown_subcommand
+         COMMAND donkey-cli debug invalid-cmd)
+set_tests_properties(cli.debug_rejects_unknown_subcommand PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.debug_rejects_missing_file
+         COMMAND donkey-cli debug launch)
+set_tests_properties(cli.debug_rejects_missing_file PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Patch CLI
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_PATCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/cli_test_patched_arm64")
+
+add_test(NAME cli.patch_apply_json
+         COMMAND donkey-cli patch apply ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
+                 --offset 0 --replacement deadbeef --output ${DONKEY_CLI_PATCH_OUT} --json)
+set_tests_properties(cli.patch_apply_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status\": \"ok\".*\"destination\": \".*cli_test_patched_arm64\".*\"bytes_written\":")
+
+add_test(NAME cli.patch_refuses_overwrite_without_force
+         COMMAND donkey-cli patch apply ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
+                 --offset 0 --replacement deadbeef --output ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64)
+set_tests_properties(cli.patch_refuses_overwrite_without_force PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Plugin CLI
+# ---------------------------------------------------------------------------
+
+add_test(NAME cli.plugin_info_json
+         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_valid> --json)
+set_tests_properties(cli.plugin_info_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"id\": \"org.donkey.test.valid\".*\"abi_version\": \\{\"major\": 1, \"minor\": 0\\}")
+
+add_test(NAME cli.plugin_run_isolated_json
+         COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
+set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+
+add_test(NAME cli.plugin_rejects_bad_abi
+         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_bad_abi>)
+set_tests_properties(cli.plugin_rejects_bad_abi PROPERTIES WILL_FAIL TRUE)

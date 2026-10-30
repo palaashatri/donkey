@@ -32,6 +32,7 @@ enum class IrOp : std::uint8_t {
   Return,       ///< return a (a may be None)
   Branch,       ///< goto block a.block
   CondBranch,   ///< if (condition over a) goto block b.block
+  Switch,       ///< switch (dest) { case: goto target_block; default: goto a.block; }
   Compare,      ///< flags = a <condition> b
   Test,         ///< flags = a & b
   Unsupported,  ///< an instruction the lifter does not model; `text` is raw
@@ -91,6 +92,23 @@ struct IrOperand {
   [[nodiscard]] static IrOperand constant_value(std::uint64_t value, std::uint8_t width);
   [[nodiscard]] static IrOperand register_ref(std::string name, std::uint8_t width);
   [[nodiscard]] static IrOperand block_ref(std::uint32_t index);
+  [[nodiscard]] static IrOperand memory_reference(std::string base_reg, std::string index_reg,
+                                                  std::int32_t scale, std::int64_t displacement,
+                                                  std::uint8_t width) {
+    IrOperand op;
+    op.kind = IrOperandKind::Memory;
+    op.reg = std::move(base_reg);
+    op.index = std::move(index_reg);
+    op.scale = scale;
+    op.constant = static_cast<std::uint64_t>(displacement);
+    op.width = width;
+    return op;
+  }
+};
+
+struct IrSwitchCase {
+  std::uint64_t value = 0;
+  std::uint32_t target_block = 0;
 };
 
 struct IrStatement {
@@ -105,6 +123,8 @@ struct IrStatement {
   std::uint64_t source_address = 0;
   /// Raw text for Unsupported statements only.
   std::string text;
+  /// Case targets for Switch operations (dest is selector expression, a is default block).
+  std::vector<IrSwitchCase> switch_cases;
 };
 
 struct IrBlock {
@@ -122,6 +142,14 @@ struct IrParameter {
   std::string abi_register;
 };
 
+struct IrLocalVariable {
+  std::string name;
+  std::uint8_t width = 4;
+  std::int64_t offset = 0;
+  std::string base_reg;
+  bool is_parameter = false;
+};
+
 struct IrFunction {
   std::uint64_t address = 0;
   std::string name;
@@ -135,12 +163,30 @@ struct IrFunction {
   /// Width of the returned value in bytes; 0 means no value is returned.
   std::uint8_t return_width = 0;
   bool signature_inferred = false;
+  /// Stack local variables and arguments recovered from stack frames.
+  std::vector<IrLocalVariable> local_variables;
 };
+
+/// Recover local variables and stack arguments from stack frame memory accesses.
+void recover_stack_variables(IrFunction& function);
 
 /// Check structural invariants: operand widths, block indices, def-use order
 /// within each block, and required block terminators. Returns InvalidData with
 /// a precise message; never throws.
 [[nodiscard]] Result<bool> verify_ir(const IrFunction& function);
+
+struct PseudocodeLine {
+  std::string text;
+  std::uint64_t source_address = 0;
+};
+
+struct Pseudocode {
+  std::string full_text;
+  std::vector<PseudocodeLine> lines;
+};
+
+/// Verified C-like rendering of an IR function broken into line records with source addresses.
+[[nodiscard]] Result<Pseudocode> format_pseudocode_lines(const IrFunction& function);
 
 /// Verified C-like rendering of an IR function. Returns the verifier's
 /// diagnostic if the IR is malformed; it never prints partial garbage.

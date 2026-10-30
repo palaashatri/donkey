@@ -10,62 +10,6 @@
 #include <vector>
 
 namespace donkey::detail {
-namespace {
-
-using BlockId = std::size_t;
-constexpr BlockId kNoBlock = static_cast<BlockId>(-1);
-
-/// Fixed-size bit set over block indices. Functions are bounded by the
-/// analysis limits, so a flat word vector is enough and avoids allocation per
-/// dominator iteration.
-class BitSet {
- public:
-  BitSet() = default;
-  explicit BitSet(std::size_t size) : size_(size), words_((size + 63) / 64, 0) {}
-
-  static BitSet full(std::size_t size) {
-    BitSet set(size);
-    for (std::uint64_t& word : set.words_) {
-      word = ~std::uint64_t{0};
-    }
-    set.mask();
-    return set;
-  }
-
-  [[nodiscard]] bool test(std::size_t index) const {
-    return (words_[index / 64] >> (index % 64)) & 1U;
-  }
-  void set(std::size_t index) { words_[index / 64] |= std::uint64_t{1} << (index % 64); }
-  void intersect(const BitSet& other) {
-    for (std::size_t i = 0; i < words_.size(); ++i) {
-      words_[i] &= other.words_[i];
-    }
-  }
-  [[nodiscard]] std::size_t count() const {
-    std::size_t total = 0;
-    for (const std::uint64_t word : words_) {
-      total += static_cast<std::size_t>(__builtin_popcountll(word));
-    }
-    return total;
-  }
-  [[nodiscard]] bool equals(const BitSet& other) const { return words_ == other.words_; }
-
- private:
-  void mask() {
-    if (!words_.empty() && size_ % 64 != 0) {
-      words_.back() &= (std::uint64_t{1} << (size_ % 64)) - 1;
-    }
-  }
-
-  std::size_t size_ = 0;
-  std::vector<std::uint64_t> words_;
-};
-
-struct Graph {
-  std::vector<std::vector<BlockId>> successors;
-  std::vector<std::vector<BlockId>> predecessors;
-  bool valid = true;
-};
 
 Graph build_graph(const IrFunction& function) {
   Graph graph;
@@ -102,6 +46,20 @@ Graph build_graph(const IrFunction& function) {
           graph.valid = false;
         }
         break;
+      case IrOp::Switch:
+        if (terminator.a.kind == IrOperandKind::Block && terminator.a.block < count) {
+          add_edge(index, terminator.a.block);
+        } else {
+          graph.valid = false;
+        }
+        for (const auto& sc : terminator.switch_cases) {
+          if (sc.target_block < count) {
+            add_edge(index, sc.target_block);
+          } else {
+            graph.valid = false;
+          }
+        }
+        break;
       default:
         graph.valid = false;
         break;
@@ -117,6 +75,9 @@ Graph build_graph(const IrFunction& function) {
 std::vector<BitSet> compute_dominators(const Graph& graph) {
   const std::size_t count = graph.successors.size();
   std::vector<BitSet> dominators(count, BitSet::full(count));
+  if (count == 0) {
+    return dominators;
+  }
   dominators[0] = BitSet(count);
   dominators[0].set(0);
 
@@ -140,6 +101,8 @@ std::vector<BitSet> compute_dominators(const Graph& graph) {
   }
   return dominators;
 }
+
+namespace {
 
 /// Post-dominators over a virtual exit node. Every block without successors (a
 /// return) flows into the exit node.
@@ -234,11 +197,15 @@ struct Structurer {
     return out_;
   }
 
+  [[nodiscard]] const std::vector<StructuredLine>& lines() const noexcept { return lines_; }
+
  private:
-  void line(const std::string& text) {
-    out_.append(static_cast<std::size_t>(indent_) * 2, ' ');
-    out_ += text;
+  void line(const std::string& text, std::uint64_t source_address = 0) {
+    std::string indented(static_cast<std::size_t>(indent_) * 2, ' ');
+    indented += text;
+    out_ += indented;
     out_ += '\n';
+    lines_.push_back(StructuredLine{std::move(indented), source_address});
   }
 
   void emit_statements(BlockId block, bool include_terminator) {
@@ -250,7 +217,7 @@ struct Structurer {
       const IrStatement* previous = index == 0 ? nullptr : &body.statements[index - 1];
       const std::string text = render_statement(function_, body.statements[index], previous);
       if (!text.empty()) {
-        line(text);
+        line(text, body.statements[index].source_address);
       }
     }
   }
@@ -430,6 +397,57 @@ struct Structurer {
 
       const IrBlock& block = function_.blocks[index];
       const IrStatement& terminator = block.statements.back();
+      if (terminator.op == IrOp::Switch) {
+        const BlockId join = immediate_post_dominator_[index];
+        emit_statements(index, false);
+        line("switch (" + render_operand(function_, terminator.dest) + ") {");
+        ++indent_;
+        for (const auto& sc : terminator.switch_cases) {
+          char val_buf[32];
+          std::snprintf(val_buf, sizeof(val_buf), "0x%llx",
+                        static_cast<unsigned long long>(sc.value));
+          line("case " + std::string(val_buf) + ":");
+          ++indent_;
+          const bool ends_return =
+              sc.target_block < function_.blocks.size() &&
+              !function_.blocks[sc.target_block].statements.empty() &&
+              function_.blocks[sc.target_block].statements.back().op == IrOp::Return;
+          if (join != kNoBlock && sc.target_block < join) {
+            emit_range(sc.target_block, join, loop_header);
+          } else if (sc.target_block < function_.blocks.size()) {
+            emit_statements(sc.target_block, true);
+          }
+          if (!ends_return) {
+            line("break;");
+          }
+          --indent_;
+        }
+        if (terminator.a.kind == IrOperandKind::Block) {
+          line("default:");
+          ++indent_;
+          const bool ends_return =
+              terminator.a.block < function_.blocks.size() &&
+              !function_.blocks[terminator.a.block].statements.empty() &&
+              function_.blocks[terminator.a.block].statements.back().op == IrOp::Return;
+          if (join != kNoBlock && terminator.a.block < join) {
+            emit_range(terminator.a.block, join, loop_header);
+          } else if (terminator.a.block < function_.blocks.size()) {
+            emit_statements(terminator.a.block, true);
+          }
+          if (!ends_return) {
+            line("break;");
+          }
+          --indent_;
+        }
+        --indent_;
+        line("}");
+        if (join != kNoBlock && join <= last) {
+          index = join;
+        } else {
+          ++index;
+        }
+        continue;
+      }
       if (terminator.op != IrOp::CondBranch) {
         if (terminator.op == IrOp::Branch) {
           emit_statements(index, false);
@@ -592,6 +610,7 @@ struct Structurer {
   std::vector<BlockId> immediate_post_dominator_;
   std::unordered_map<BlockId, Loop> loops_;
   std::string out_;
+  std::vector<StructuredLine> lines_;
   int indent_ = 1;
   bool ok_ = true;
 };
@@ -601,6 +620,15 @@ struct Structurer {
 std::optional<std::string> format_structured_body(const IrFunction& function) {
   Structurer structurer(function);
   return structurer.run();
+}
+
+std::optional<std::vector<StructuredLine>> format_structured_body_lines(
+    const IrFunction& function) {
+  Structurer structurer(function);
+  if (!structurer.run().has_value()) {
+    return std::nullopt;
+  }
+  return structurer.lines();
 }
 
 }  // namespace donkey::detail

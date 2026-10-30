@@ -20,6 +20,8 @@ constexpr const char* kGraphWindow = "Graph";
 constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
+constexpr const char* kBookmarksWindow = "Bookmarks";
+constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
 
@@ -66,6 +68,30 @@ void Workspace::draw(bool& quit) {
   ImGui::End();
 
   draw_panels();
+
+  if (!ImGui::GetIO().WantTextInput) {
+    const bool cmd_or_ctrl = (ImGui::GetIO().KeyMods & ImGuiMod_Shortcut) != 0;
+    const bool alt = ImGui::GetIO().KeyAlt;
+    const bool shift = ImGui::GetIO().KeyShift;
+
+    if (cmd_or_ctrl && ImGui::IsKeyPressed(ImGuiKey_Z)) {
+      if (shift) {
+        session_.redo();
+      } else {
+        session_.undo();
+      }
+    } else if (cmd_or_ctrl && ImGui::IsKeyPressed(ImGuiKey_B)) {
+      if (state_.selected_address != 0) {
+        session_.toggle_bookmark(state_.selected_address);
+      }
+    } else if (alt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
+      state_.nav_back(session_.document().get());
+    } else if (alt && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
+      state_.nav_forward(session_.document().get());
+    } else if (ImGui::IsKeyPressed(ImGuiKey_Escape) && session_.busy()) {
+      session_.cancel();
+    }
+  }
 
   if (open_path_popup_) {
     ImGui::OpenPopup("Open binary");
@@ -135,14 +161,64 @@ void Workspace::draw(bool& quit) {
     ImGui::EndPopup();
   }
 
+  if (backup_project_popup_) {
+    ImGui::OpenPopup("Backup project");
+    backup_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Backup project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Destination path for the project backup");
+    if (session_.dirty()) {
+      ImGui::TextDisabled(
+          "Unsaved in-memory annotation edits are not included until you Save Project.");
+    }
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##backupprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((submitted || ImGui::Button("Backup")) && backup_path_buffer_[0] != '\0') {
+      session_.backup_project(backup_path_buffer_, true);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  if (restore_project_popup_) {
+    ImGui::OpenPopup("Restore project");
+    restore_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Restore project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Backup database path to restore into the current project");
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##restoreprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((submitted || ImGui::Button("Restore")) && backup_path_buffer_[0] != '\0') {
+      session_.restore_project(backup_path_buffer_);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
   if (state_.annotation_modal_requested) {
     ImGui::OpenPopup("Annotate");
     state_.annotation_modal_requested = false;
   }
   if (ImGui::BeginPopupModal("Annotate", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-    const bool rename = state_.annotation_kind == AnnotationKind::Rename;
-    ImGui::Text("%s %s", rename ? "Rename at" : "Comment at",
-                components::format_address(state_.annotation_address).c_str());
+    const char* kind_label = "Rename at";
+    if (state_.annotation_kind == AnnotationKind::Comment) {
+      kind_label = "Comment at";
+    } else if (state_.annotation_kind == AnnotationKind::Bookmark) {
+      kind_label = "Bookmark at";
+    }
+    ImGui::Text("%s %s", kind_label, components::format_address(state_.annotation_address).c_str());
     ImGui::SetNextItemWidth(520.0f);
     const bool submitted =
         ImGui::InputText("##annotation", state_.annotation_buffer, sizeof(state_.annotation_buffer),
@@ -172,10 +248,10 @@ void Workspace::draw(bool& quit) {
     ImGui::TextWrapped(
         "Early implementation. The headless core parses ELF, PE and Mach-O, "
         "decodes x86, x86-64 and AArch64 with Capstone, builds a bounded CFG "
-        "with estimated function extents, and lifts x86-64 functions into "
-        "verified IR before printing pseudocode. Projects save and reopen "
-        "address-keyed renames and comments. The debugger and non-x86-64 "
-        "lifting are not implemented.");
+        "with estimated function extents, and lifts x86-64, x86-32 subset and "
+        "AArch64 subset functions into verified IR before printing pseudocode. "
+        "Projects save, reopen, back up and restore address-keyed renames and "
+        "comments. The debugger and 32-bit ARM lifting are not implemented.");
     ImGui::Spacing();
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
@@ -207,12 +283,59 @@ void Workspace::draw_menu_bar(bool& quit) {
       std::snprintf(project_path_buffer_, sizeof(project_path_buffer_), "%s", existing.c_str());
       save_project_popup_ = true;
     }
+    if (ImGui::MenuItem("Backup Project…", nullptr, false,
+                        session_.has_project() && !session_.busy())) {
+      if (backup_path_buffer_[0] == '\0') {
+        const std::string suggested = session_.project_path() + ".bak";
+        std::snprintf(backup_path_buffer_, sizeof(backup_path_buffer_), "%s", suggested.c_str());
+      }
+      backup_project_popup_ = true;
+    }
+    if (ImGui::MenuItem("Restore Project…", nullptr, false,
+                        session_.has_project() && !session_.busy())) {
+      if (backup_path_buffer_[0] == '\0') {
+        const std::string suggested = session_.project_path() + ".bak";
+        std::snprintf(backup_path_buffer_, sizeof(backup_path_buffer_), "%s", suggested.c_str());
+      }
+      restore_project_popup_ = true;
+    }
     if (ImGui::MenuItem("Reload", nullptr, false, !session_.path().empty() && !session_.busy())) {
       session_.open(session_.path());
     }
     ImGui::Separator();
     if (ImGui::MenuItem("Quit", "Cmd+Q")) {
       quit = true;
+    }
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("Edit")) {
+    if (ImGui::MenuItem("Undo", "Cmd+Z", false, session_.can_undo())) {
+      session_.undo();
+    }
+    if (ImGui::MenuItem("Redo", "Cmd+Shift+Z", false, session_.can_redo())) {
+      session_.redo();
+    }
+    ImGui::Separator();
+    const bool bookmarked =
+        state_.annotations != nullptr && state_.annotations->has_bookmark(state_.selected_address);
+    if (ImGui::MenuItem(bookmarked ? "Remove Bookmark" : "Toggle Bookmark", "Cmd+B", false,
+                        state_.selected_address != 0)) {
+      session_.toggle_bookmark(state_.selected_address);
+    }
+    if (session_.busy()) {
+      ImGui::Separator();
+      if (ImGui::MenuItem("Cancel Task", "Esc")) {
+        session_.cancel();
+      }
+    }
+    ImGui::EndMenu();
+  }
+  if (ImGui::BeginMenu("Navigate")) {
+    if (ImGui::MenuItem("Back", "Alt+Left", false, state_.can_nav_back())) {
+      state_.nav_back(session_.document().get());
+    }
+    if (ImGui::MenuItem("Forward", "Alt+Right", false, state_.can_nav_forward())) {
+      state_.nav_forward(session_.document().get());
     }
     ImGui::EndMenu();
   }
@@ -226,6 +349,8 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kHexWindow, nullptr, &show_hex_);
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
+    ImGui::MenuItem(kBookmarksWindow, nullptr, &show_bookmarks_);
+    ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::EndMenu();
   }
@@ -287,6 +412,8 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGui::DockBuilderDockWindow(kHexWindow, bottom);
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
   ImGui::DockBuilderDockWindow(kXrefsWindow, bottom);
+  ImGui::DockBuilderDockWindow(kBookmarksWindow, bottom);
+  ImGui::DockBuilderDockWindow(kDebuggerWindow, bottom);
   ImGui::DockBuilderDockWindow(kSectionsWindow, left);
   ImGui::DockBuilderDockWindow(kFunctionsWindow, left_bottom);
   ImGui::DockBuilderDockWindow(kOverviewWindow, right);
@@ -399,6 +526,24 @@ void Workspace::draw_panels() {
     ImGui::Begin(kXrefsWindow, &show_xrefs_, panel_flags());
     if (document) {
       views::xrefs(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_bookmarks_) {
+    ImGui::Begin(kBookmarksWindow, &show_bookmarks_, panel_flags());
+    if (document) {
+      views::bookmarks(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_debugger_) {
+    ImGui::Begin(kDebuggerWindow, &show_debugger_, panel_flags());
+    if (document) {
+      views::debugger(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

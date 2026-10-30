@@ -49,6 +49,14 @@ AbiModel model_for(Architecture architecture) {
       }
       model.return_aliases = {{"x0", 8}, {"w0", 4}};
       break;
+    case Architecture::X86:
+      // x86-32 cdecl passes every argument on the stack, so there are no
+      // argument registers to recover. The result is in eax (formally
+      // edx:eax for 64-bit values, which this model does not cover). Leaving
+      // `arguments` empty means infer_signature reports no parameters, which
+      // is the honest reading rather than inventing stack slots.
+      model.return_aliases = {{"eax", 4}, {"ax", 2}, {"al", 1}};
+      break;
     default:
       break;
   }
@@ -103,12 +111,17 @@ struct Scan {
   std::vector<std::uint8_t> argument_width;
   bool has_value_return = false;
   bool has_bare_return = false;
+  // Default to the width of the ABI's own return register (rax/x0: 8, eax: 4)
+  // so a function that never writes it still reports the right size.
   std::uint8_t current_return_width = 8;
   std::uint8_t widest_return_width = 0;
 };
 
 Scan scan(const IrFunction& function, const AbiModel& model) {
   Scan result;
+  if (!model.return_aliases.empty()) {
+    result.current_return_width = model.return_aliases.front().width;
+  }
   const std::size_t argument_count = model.arguments.size();
   result.argument_read.assign(argument_count, false);
   result.argument_written.assign(argument_count, false);
@@ -186,7 +199,10 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
 
 void infer_signature(IrFunction& function, Architecture architecture) {
   const AbiModel model = model_for(architecture);
-  if (model.arguments.empty()) {
+  // x86-32 has no argument registers, so `arguments` is empty, but its return
+  // register is still modelled. Only skip entirely when the architecture has
+  // neither.
+  if (model.arguments.empty() && model.return_aliases.empty()) {
     return;
   }
 

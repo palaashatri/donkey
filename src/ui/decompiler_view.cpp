@@ -59,15 +59,17 @@ void refresh(UiState& state, const Document& document, const Function& function)
     state.pseudocode_text = lifted.diagnostic().message;
     return;
   }
-  auto text = format_pseudocode(lifted.value());
+  auto text = format_pseudocode_lines(lifted.value());
   if (!text) {
     state.pseudocode_status = "InvalidIR";
     state.pseudocode_code = text.diagnostic().code;
     state.pseudocode_text = text.diagnostic().code + ": " + text.diagnostic().message;
+    state.pseudocode_lines.clear();
     return;
   }
   state.pseudocode_status = lifted.value().partial ? "Partial" : "Complete";
-  state.pseudocode_text = std::move(text.value());
+  state.pseudocode_text = std::move(text.value().full_text);
+  state.pseudocode_lines = std::move(text.value().lines);
 }
 
 }  // namespace
@@ -109,7 +111,26 @@ void decompiler(const Document& document, UiState& state) {
           "return an explicit refusal instead of wrong pseudocode.");
     }
   } else {
-    ImGui::TextUnformatted(state.pseudocode_text.c_str());
+    for (std::size_t i = 0; i < state.pseudocode_lines.size(); ++i) {
+      const auto& line = state.pseudocode_lines[i];
+      const bool has_addr = line.source_address != 0;
+      const bool selected = has_addr && state.selected_address == line.source_address;
+      if (selected) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.9f, 0.4f, 1.0f));
+      }
+      char num[32];
+      std::snprintf(num, sizeof(num), "%3zu ", i + 1);
+      ImGui::TextDisabled("%s", num);
+      ImGui::SameLine();
+      if (ImGui::Selectable(line.text.c_str(), selected)) {
+        if (has_addr) {
+          state.navigate_to(line.source_address, &document);
+        }
+      }
+      if (selected) {
+        ImGui::PopStyleColor();
+      }
+    }
   }
   ImGui::EndChild();
 }
