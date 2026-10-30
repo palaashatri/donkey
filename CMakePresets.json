@@ -1,0 +1,204 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
+        "DONKEY_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "dev-macos",
+      "inherits": "base",
+      "displayName": "macOS development (Debug, UI)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "release-macos",
+      "inherits": "dev-macos",
+      "displayName": "macOS release (Release, UI)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release"
+      }
+    },
+    {
+      "name": "headless-macos",
+      "inherits": "base",
+      "displayName": "macOS headless core + CLI (Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "OFF",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "dev-linux",
+      "inherits": "base",
+      "displayName": "Linux development (Debug, UI)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "headless-linux",
+      "inherits": "base",
+      "displayName": "Linux headless core + CLI (Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "OFF",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "asan-linux",
+      "inherits": "headless-linux",
+      "displayName": "Linux headless + ASan/UBSan",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "headless-windows",
+      "inherits": "base",
+      "displayName": "Windows headless core + CLI (Debug)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "OFF",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "dev-windows",
+      "inherits": "base",
+      "displayName": "Windows development (Debug, UI)",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_UI": "ON",
+        "DONKEY_WARNINGS_AS_ERRORS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "fuzz-macos",
+      "inherits": "base",
+      "displayName": "macOS libFuzzer targets (Homebrew LLVM)",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "/opt/homebrew/opt/llvm/bin/clang",
+        "CMAKE_CXX_COMPILER": "/opt/homebrew/opt/llvm/bin/clang++",
+        "CMAKE_AR": "/usr/bin/ar",
+        "CMAKE_RANLIB": "/usr/bin/ranlib",
+        "CMAKE_BUILD_TYPE": "Debug",
+        "DONKEY_BUILD_TESTS": "OFF",
+        "DONKEY_BUILD_FUZZERS": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "dev-macos", "configurePreset": "dev-macos" },
+    { "name": "release-macos", "configurePreset": "release-macos" },
+    { "name": "headless-macos", "configurePreset": "headless-macos" },
+    { "name": "fuzz-macos", "configurePreset": "fuzz-macos" },
+    { "name": "dev-linux", "configurePreset": "dev-linux" },
+    { "name": "headless-linux", "configurePreset": "headless-linux" },
+    { "name": "headless-windows", "configurePreset": "headless-windows" },
+    { "name": "asan-linux", "configurePreset": "asan-linux" },
+    { "name": "dev-windows", "configurePreset": "dev-windows" }
+  ],
+  "testPresets": [
+    {
+      "name": "dev-macos",
+      "configurePreset": "dev-macos",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "release-macos",
+      "configurePreset": "release-macos",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "headless-macos",
+      "configurePreset": "headless-macos",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "dev-linux",
+      "configurePreset": "dev-linux",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "headless-linux",
+      "configurePreset": "headless-linux",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "headless-windows",
+      "configurePreset": "headless-windows",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "asan-linux",
+      "configurePreset": "asan-linux",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "dev-windows",
+      "configurePreset": "dev-windows",
+      "output": { "outputOnFailure": true }
+    }
+  ]
+}
