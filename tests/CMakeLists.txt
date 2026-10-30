@@ -367,6 +367,20 @@ if(NOT WIN32)
            COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
   set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
     PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+
+  add_test(NAME cli.plugin_info_catches_ctor_crash
+           COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_ctor_crash>)
+  set_tests_properties(cli.plugin_info_catches_ctor_crash PROPERTIES WILL_FAIL TRUE)
+
+  add_test(NAME cli.plugin_run_isolated_catches_crash
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_crash> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_catches_crash PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": false.*\"error_code\": \"plugin.crashed\"")
+
+  add_test(NAME cli.plugin_run_isolated_non_terminated
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_non_terminated> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_non_terminated PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": true")
 endif()
 
 add_test(NAME cli.plugin_rejects_bad_abi
