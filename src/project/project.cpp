@@ -8,6 +8,18 @@
 #include <system_error>
 #include <utility>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <cstdio>
+#endif
+
 #include <sqlite3.h>
 
 #include "donkey/core/version.h"
@@ -823,31 +835,107 @@ Result<void> copy_database(sqlite3* source, sqlite3* target, const std::string& 
   return {};
 }
 
-void remove_sidecars(const std::string& database_path) {
-  std::error_code ignored;
-  std::filesystem::remove(database_path + "-wal", ignored);
-  std::filesystem::remove(database_path + "-shm", ignored);
-}
+}  // namespace
 
-/// Rename `from` onto `to`, replacing `to` when the platform allows it.
-Result<void> replace_file(const std::string& from, const std::string& to) {
-  std::error_code error;
-  std::filesystem::rename(from, to, error);
-  if (!error) {
+Result<void> Project::replace_file_atomically(const std::string& from, const std::string& to) {
+  std::error_code ec;
+  if (!std::filesystem::exists(to, ec)) {
+    std::filesystem::rename(from, to, ec);
+    if (ec) {
+      return make_error<void>(Status::InternalError, "project.replace_failed",
+                              "could not move file to '" + to + "': " + ec.message());
+    }
     return {};
   }
-  std::error_code remove_error;
-  std::filesystem::remove(to, remove_error);
-  error.clear();
-  std::filesystem::rename(from, to, error);
-  if (error) {
-    return make_error<void>(Status::InternalError, "project.replace_failed",
-                            "could not replace '" + to + "': " + error.message());
+
+  const std::string old_db = to + ".restore-old-db";
+  const std::string old_wal = to + ".restore-old-wal";
+  const std::string old_shm = to + ".restore-old-shm";
+  const std::string wal = to + "-wal";
+  const std::string shm = to + "-shm";
+
+  const bool had_wal = std::filesystem::exists(wal, ec);
+  const bool had_shm = std::filesystem::exists(shm, ec);
+
+  // Clean any stale staging files
+  std::filesystem::remove(old_db, ec);
+  std::filesystem::remove(old_wal, ec);
+  std::filesystem::remove(old_shm, ec);
+
+  // Stage sidecars aside first before replacing main database file
+  if (had_wal) {
+    std::filesystem::rename(wal, old_wal, ec);
+    if (ec) {
+      return make_error<void>(Status::InternalError, "project.replace_failed",
+                              "could not stage wal sidecar: " + ec.message());
+    }
   }
+  if (had_shm) {
+    std::filesystem::rename(shm, old_shm, ec);
+    if (ec) {
+      if (had_wal) std::filesystem::rename(old_wal, wal, ec);
+      return make_error<void>(Status::InternalError, "project.replace_failed",
+                              "could not stage shm sidecar: " + ec.message());
+    }
+  }
+
+  bool replaced_ok = false;
+#if defined(_WIN32)
+  int from_len = MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, nullptr, 0);
+  int to_len = MultiByteToWideChar(CP_UTF8, 0, to.c_str(), -1, nullptr, 0);
+  if (from_len > 0 && to_len > 0) {
+    std::wstring from_w(static_cast<size_t>(from_len), L'\0');
+    std::wstring to_w(static_cast<size_t>(to_len), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, from.c_str(), -1, from_w.data(), from_len);
+    MultiByteToWideChar(CP_UTF8, 0, to.c_str(), -1, to_w.data(), to_len);
+    if (MoveFileExW(from_w.c_str(), to_w.c_str(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+      replaced_ok = true;
+    }
+  }
+  if (!replaced_ok) {
+    std::filesystem::rename(to, old_db, ec);
+    if (!ec) {
+      std::filesystem::rename(from, to, ec);
+      if (!ec) {
+        replaced_ok = true;
+      } else {
+        std::error_code rb_ec;
+        std::filesystem::rename(old_db, to, rb_ec);
+      }
+    }
+  }
+#else
+  if (::rename(from.c_str(), to.c_str()) == 0) {
+    replaced_ok = true;
+  } else {
+    std::filesystem::rename(to, old_db, ec);
+    if (!ec) {
+      std::filesystem::rename(from, to, ec);
+      if (!ec) {
+        replaced_ok = true;
+      } else {
+        std::error_code rb_ec;
+        std::filesystem::rename(old_db, to, rb_ec);
+      }
+    }
+  }
+#endif
+
+  if (!replaced_ok) {
+    // Replacement failed: rollback sidecars so existing database remains intact!
+    if (had_wal) std::filesystem::rename(old_wal, wal, ec);
+    if (had_shm) std::filesystem::rename(old_shm, shm, ec);
+    return make_error<void>(Status::InternalError, "project.replace_failed",
+                            "could not atomically replace '" + to + "'");
+  }
+
+  // Commit succeeded: clean up staged old files
+  std::filesystem::remove(old_db, ec);
+  std::filesystem::remove(old_wal, ec);
+  std::filesystem::remove(old_shm, ec);
   return {};
 }
-
-}  // namespace
 
 Result<void> Project::backup(const std::string& destination, bool overwrite) const {
   if (!is_open()) {
@@ -882,7 +970,7 @@ Result<void> Project::backup(const std::string& destination, bool overwrite) con
     return copied;
   }
 
-  auto replaced = replace_file(temporary, destination);
+  auto replaced = replace_file_atomically(temporary, destination);
   if (!replaced) {
     std::filesystem::remove(temporary, error);
     return replaced;
@@ -890,7 +978,9 @@ Result<void> Project::backup(const std::string& destination, bool overwrite) con
   return {};
 }
 
-Result<void> Project::restore(const std::string& database_path, const std::string& backup_path) {
+Result<void> Project::restore(const std::string& database_path, const std::string& backup_path,
+                              const CancellationToken& cancellation_token,
+                              RestoreCommitHook commit_hook) {
   std::error_code error;
   if (!std::filesystem::exists(backup_path, error)) {
     return make_error<void>(Status::InvalidInput, "project.backup_missing",
@@ -968,10 +1058,19 @@ Result<void> Project::restore(const std::string& database_path, const std::strin
     return copied;
   }
 
-  // Any stale WAL belonging to the old database must not be replayed over the
-  // restored file.
-  remove_sidecars(database_path);
-  auto replaced = replace_file(temporary, database_path);
+  if (cancellation_token.is_cancelled()) {
+    std::filesystem::remove(temporary, error);
+    return make_error<void>(Status::Cancelled, "io.cancelled",
+                            "restore was cancelled before replacing database");
+  }
+
+  Result<void> replaced;
+  if (commit_hook) {
+    replaced = commit_hook(temporary, database_path);
+  } else {
+    replaced = replace_file_atomically(temporary, database_path);
+  }
+
   if (!replaced) {
     std::filesystem::remove(temporary, error);
     return replaced;

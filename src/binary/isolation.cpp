@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if defined(__unix__) || defined(__APPLE__)
@@ -15,6 +16,36 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #define DONKEY_HAS_POSIX_ISOLATION 1
+
+static bool reap_child_bounded(pid_t pid, const std::chrono::steady_clock::time_point& deadline,
+                               int* out_status) {
+  while (true) {
+    int wstatus = 0;
+    pid_t res = waitpid(pid, &wstatus, WNOHANG);
+    if (res == pid) {
+      if (out_status != nullptr) {
+        *out_status = wstatus;
+      }
+      return true;
+    }
+    if (res < 0) {
+      if (errno == ECHILD) {
+        return true;
+      }
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    }
+
+    if (std::chrono::steady_clock::now() >= deadline) {
+      kill(pid, SIGKILL);
+      waitpid(pid, out_status, 0);
+      return false;
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+  }
+}
 #else
 #define DONKEY_HAS_POSIX_ISOLATION 0
 #endif
@@ -29,6 +60,7 @@ bool process_isolation_available() noexcept {
 #endif
 }
 
+#if DONKEY_HAS_POSIX_ISOLATION
 namespace {
 
 constexpr std::uint32_t kMagic = 0x444B4953;  // 'DKIS'
@@ -359,6 +391,7 @@ Result<LoadedBinary> deserialize_result(std::span<const std::byte> bytes) {
 }
 
 }  // namespace
+#endif  // DONKEY_HAS_POSIX_ISOLATION
 
 Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOptions& options,
                                           const IsolationConfig& config) {
@@ -429,22 +462,37 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   constexpr std::size_t kChunkSize = 65536;
   std::byte chunk[kChunkSize];
 
-  const int timeout_ms =
-      config.timeout_seconds > 0 ? static_cast<int>(config.timeout_seconds * 1000) : 5000;
+  const auto start_time = std::chrono::steady_clock::now();
+  const auto max_duration = std::chrono::milliseconds(
+      config.timeout_seconds > 0 ? static_cast<int>(config.timeout_seconds * 1000) : 5000);
 
   bool timed_out = false;
+  bool was_cancelled = false;
   while (true) {
+    if (options.cancellation_token.is_cancelled()) {
+      was_cancelled = true;
+      break;
+    }
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - start_time);
+    if (elapsed >= max_duration) {
+      timed_out = true;
+      break;
+    }
+    const int slice_ms = static_cast<int>(std::min<int64_t>(50, (max_duration - elapsed).count()));
+
     struct pollfd pfd{};
     pfd.fd = pipe_fds[0];
     pfd.events = POLLIN | POLLHUP;
 
-    const int poll_res = poll(&pfd, 1, timeout_ms);
+    const int poll_res = poll(&pfd, 1, slice_ms);
     if (poll_res == 0) {
-      // Timeout
-      timed_out = true;
-      break;
+      continue;
     }
     if (poll_res < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
       break;
     }
 
@@ -456,6 +504,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   }
   close(pipe_fds[0]);
 
+  if (was_cancelled) {
+    kill(pid, SIGKILL);
+    waitpid(pid, nullptr, 0);
+    return make_error<LoadedBinary>(Status::Cancelled, "io.cancelled", "file loading was cancelled",
+                                    0);
+  }
+
   if (timed_out) {
     kill(pid, SIGKILL);
     waitpid(pid, nullptr, 0);
@@ -465,7 +520,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   }
 
   int wstatus = 0;
-  waitpid(pid, &wstatus, 0);
+  const auto deadline = start_time + max_duration;
+  bool reaped = reap_child_bounded(pid, deadline, &wstatus);
+  if (!reaped) {
+    return make_error<LoadedBinary>(Status::ResourceLimit, "binary.worker_timeout",
+                                    "isolated parser worker exceeded resource limit or timed out",
+                                    0);
+  }
 
   if (WIFSIGNALED(wstatus)) {
     const int sig = WTERMSIG(wstatus);
@@ -488,14 +549,13 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
 
   return deserialize_result(response_buffer);
 #else
-  // Non-POSIX platforms degrade safely to in-process checked loading
-  auto loaded = load_binary(path, options);
-  if (loaded) {
-    loaded.value().image.add_diagnostic(
-        Status::Unsupported, "binary.isolation_unavailable",
-        "real OS process isolation is not supported on this host platform");
-  }
-  return loaded;
+  // Non-POSIX platforms fail closed to prevent loading untrusted input in the host process
+  (void)path;
+  (void)options;
+  (void)config;
+  return make_error<LoadedBinary>(
+      Status::Unsupported, "binary.isolation_unavailable",
+      "real OS process isolation is not supported on this host platform", 0);
 #endif
 }
 

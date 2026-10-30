@@ -1,8 +1,12 @@
 #pragma once
 
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "donkey/core/navigation.h"
@@ -12,6 +16,35 @@
 #include "session.h"
 
 namespace donkey::ui {
+
+struct AsyncDecompileState {
+  AsyncDecompileState();
+  ~AsyncDecompileState();
+
+  AsyncDecompileState(const AsyncDecompileState&) = delete;
+  AsyncDecompileState& operator=(const AsyncDecompileState&) = delete;
+
+  void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, Function target);
+
+  std::mutex mutex;
+  std::condition_variable cv;
+  bool stop = false;
+  std::thread worker;
+
+  std::uint64_t current_generation = 0;
+  std::shared_ptr<const Document> pending_doc;
+  Function pending_target;
+  std::uint64_t pending_gen = 0;
+  bool has_pending = false;
+
+  bool ready = false;
+  std::uint64_t ready_address = 0;
+  std::string ready_name;
+  std::string ready_status;
+  std::string ready_code;
+  std::string ready_text;
+  std::vector<PseudocodeLine> ready_lines;
+};
 
 /// Selection and filter state shared by every panel. It is render-thread
 /// state only; the parsed document stays immutable.
@@ -39,8 +72,8 @@ struct UiState {
   char annotation_buffer[512] = {};
 
   /// Cached decompilation for the currently selected function. Lifting is
-  /// bounded but still pure CPU work, so the render thread never redoes it
-  /// every frame. The document pointer is the cache key: a reload invalidates.
+  /// bounded and executed asynchronously off the render thread.
+  std::shared_ptr<const Document> pseudocode_document_owner;
   const Document* pseudocode_document = nullptr;
   std::uint64_t pseudocode_address = 0;
   std::string pseudocode_function;
@@ -48,6 +81,8 @@ struct UiState {
   std::string pseudocode_code;
   std::string pseudocode_text;
   std::vector<PseudocodeLine> pseudocode_lines;
+  bool pseudocode_in_progress = false;
+  std::shared_ptr<AsyncDecompileState> async_decompile = std::make_shared<AsyncDecompileState>();
 
   // --- navigation history ---------------------------------------------------
   NavigationHistory nav_history;

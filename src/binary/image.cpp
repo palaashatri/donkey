@@ -359,6 +359,9 @@ Result<BinaryImage> parse_binary(std::span<const std::byte> data, std::string pa
 }
 
 Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& options) {
+  if (options.cancellation_token.is_cancelled()) {
+    return error(Status::Cancelled, "io.cancelled", "file loading was cancelled");
+  }
   if (options.isolate) {
     LoadOptions inner_options = options;
     inner_options.isolate = false;
@@ -383,10 +386,25 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
 
   std::vector<std::byte> data(static_cast<std::size_t>(size));
   file.seekg(0, std::ios::beg);
-  file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()));
-  if (!file || static_cast<std::uint64_t>(file.gcount()) != size) {
-    return error(Status::InvalidInput, "io.read_failed", "could not read the whole file");
+
+  constexpr std::size_t kChunkSize = 64 * 1024;
+  std::uint64_t offset = 0;
+  while (offset < size) {
+    if (options.cancellation_token.is_cancelled()) {
+      return error(Status::Cancelled, "io.cancelled", "file loading was cancelled");
+    }
+    const auto to_read =
+        static_cast<std::size_t>(std::min<std::uint64_t>(size - offset, kChunkSize));
+    file.read(reinterpret_cast<char*>(data.data() + offset), static_cast<std::streamsize>(to_read));
+    if (!file || static_cast<std::size_t>(file.gcount()) != to_read) {
+      return error(Status::InvalidInput, "io.read_failed", "could not read the whole file");
+    }
+    offset += to_read;
   }
+  if (options.cancellation_token.is_cancelled()) {
+    return error(Status::Cancelled, "io.cancelled", "file loading was cancelled");
+  }
+
   auto image = parse_binary(std::span<const std::byte>(data.data(), data.size()), path, options);
   if (!image) {
     return image.diagnostic();

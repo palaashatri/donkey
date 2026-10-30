@@ -212,18 +212,39 @@ TEST(Debug, PermissionDeniedAndSafetyInvariants) {
   auto adapter = donkey::debug::create_debug_adapter(/*mock=*/false);
   ASSERT_NE(adapter, nullptr);
 
+#if !defined(__APPLE__)
+  auto attach_res = adapter->attach(1);
+  ASSERT_FALSE(attach_res.has_value());
+  EXPECT_TRUE(attach_res.diagnostic().code == "debug.permission_denied" ||
+              attach_res.diagnostic().code == "debug.unsupported_platform");
+#else
   // Attaching to another pid without task_for_pid permissions yields graceful refusal
   auto attach_res = adapter->attach(1);  // launchd
   ASSERT_FALSE(attach_res.has_value());
   EXPECT_EQ(attach_res.diagnostic().code, "debug.permission_denied");
   EXPECT_NE(attach_res.diagnostic().message.find("get-task-allow"), std::string::npos);
+#endif
 
   // Rejects empty binary path
   LaunchConfig cfg;
   cfg.binary_path = "";
   auto launch_res = adapter->launch(cfg);
   ASSERT_FALSE(launch_res.has_value());
-  EXPECT_EQ(launch_res.diagnostic().code, "debug.invalid_path");
+  EXPECT_TRUE(launch_res.diagnostic().code == "debug.invalid_path" ||
+              launch_res.diagnostic().code == "debug.unsupported_platform");
+
+  // Rejects removing nonexistent breakpoint
+  auto rm_res = adapter->remove_breakpoint(0xdeadbeef);
+  EXPECT_FALSE(rm_res.has_value());
+  EXPECT_TRUE(rm_res.diagnostic().code == "debug.breakpoint_not_found" ||
+              rm_res.diagnostic().code == "debug.unsupported_platform");
+
+#if defined(_WIN32)
+  auto caps = adapter->capabilities();
+  EXPECT_FALSE(caps.can_launch);
+  EXPECT_FALSE(caps.can_step);
+  EXPECT_FALSE(caps.can_read_memory);
+#endif
 }
 
 }  // namespace

@@ -21,23 +21,38 @@ struct RegisterFamily {
 struct AbiModel {
   std::vector<RegisterFamily> arguments;
   std::vector<Alias> return_aliases;
+  std::string convention_name = "ABI";
 };
 
-AbiModel model_for(Architecture architecture) {
+AbiModel model_for(Architecture architecture, BinaryFormat format) {
   AbiModel model;
   switch (architecture) {
     case Architecture::X86_64:
-      // System V AMD64: integer arguments in rdi, rsi, rdx, rcx, r8, r9 and the
-      // result in rax. Only aliases the x86-64 lifter can emit are listed.
-      model.arguments = {
-          {{{"rdi", 8}, {"edi", 4}, {"di", 2}, {"dil", 1}}},
-          {{{"rsi", 8}, {"esi", 4}, {"si", 2}, {"sil", 1}}},
-          {{{"rdx", 8}, {"edx", 4}, {"dx", 2}, {"dl", 1}}},
-          {{{"rcx", 8}, {"ecx", 4}, {"cx", 2}, {"cl", 1}}},
-          {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}}},
-          {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}}},
-      };
-      model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}};
+      if (format == BinaryFormat::Pe) {
+        // Microsoft x64 calling convention: integer arguments in rcx, rdx, r8, r9
+        // and the result in rax.
+        model.arguments = {
+            {{{"rcx", 8}, {"ecx", 4}, {"cx", 2}, {"cl", 1}}},
+            {{{"rdx", 8}, {"edx", 4}, {"dx", 2}, {"dl", 1}}},
+            {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}}},
+            {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}}},
+        };
+        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}};
+        model.convention_name = "Microsoft x64 calling convention";
+      } else {
+        // System V AMD64: integer arguments in rdi, rsi, rdx, rcx, r8, r9 and the
+        // result in rax. Only aliases the x86-64 lifter can emit are listed.
+        model.arguments = {
+            {{{"rdi", 8}, {"edi", 4}, {"di", 2}, {"dil", 1}}},
+            {{{"rsi", 8}, {"esi", 4}, {"si", 2}, {"sil", 1}}},
+            {{{"rdx", 8}, {"edx", 4}, {"dx", 2}, {"dl", 1}}},
+            {{{"rcx", 8}, {"ecx", 4}, {"cx", 2}, {"cl", 1}}},
+            {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}}},
+            {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}}},
+        };
+        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}};
+        model.convention_name = "System V AMD64 ABI";
+      }
       break;
     case Architecture::AArch64:
       // AAPCS64: integer arguments in x0..x7, integer result in x0. x0 is both
@@ -48,6 +63,7 @@ AbiModel model_for(Architecture architecture) {
             {{{("x" + std::to_string(index)), 8}, {("w" + std::to_string(index)), 4}}});
       }
       model.return_aliases = {{"x0", 8}, {"w0", 4}};
+      model.convention_name = "AAPCS64 ABI";
       break;
     case Architecture::X86:
       // x86-32 cdecl passes every argument on the stack, so there are no
@@ -56,6 +72,7 @@ AbiModel model_for(Architecture architecture) {
       // `arguments` empty means infer_signature reports no parameters, which
       // is the honest reading rather than inventing stack slots.
       model.return_aliases = {{"eax", 4}, {"ax", 2}, {"al", 1}};
+      model.convention_name = "x86-32 ABI";
       break;
     default:
       break;
@@ -197,8 +214,8 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
 
 }  // namespace
 
-void infer_signature(IrFunction& function, Architecture architecture) {
-  const AbiModel model = model_for(architecture);
+void infer_signature(IrFunction& function, Architecture architecture, BinaryFormat format) {
+  const AbiModel model = model_for(architecture, format);
   // x86-32 has no argument registers, so `arguments` is empty, but its return
   // register is still modelled. Only skip entirely when the architecture has
   // neither.
@@ -225,7 +242,8 @@ void infer_signature(IrFunction& function, Architecture architecture) {
   function.return_width = result.has_value_return ? result.widest_return_width : 0;
   function.signature_inferred = true;
 
-  function.notes.push_back("signature inferred from ABI register use, not debug info");
+  function.notes.push_back("signature inferred from " + model.convention_name +
+                           " register use, not debug info");
   if (result.has_value_return && result.has_bare_return) {
     function.notes.push_back("some return paths carry no value; return type is a guess");
   }

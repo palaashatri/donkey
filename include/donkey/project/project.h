@@ -7,6 +7,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/core/cancellation.h"
 #include "donkey/core/result.h"
 
 namespace donkey {
@@ -98,13 +99,23 @@ class Project {
   /// to replace an existing file unless `overwrite` is true.
   [[nodiscard]] Result<void> backup(const std::string& destination, bool overwrite = false) const;
 
+  /// Atomically replace `target_path` with `temp_path`, preserving existing
+  /// destination file and sidecars if replacement fails or is interrupted.
+  [[nodiscard]] static Result<void> replace_file_atomically(const std::string& temp_path,
+                                                            const std::string& target_path);
+
+  using RestoreCommitHook =
+      std::function<Result<void>(const std::string& temp_path, const std::string& target_path)>;
+
   /// Replace `database_path` with `backup_path` after validating that the
   /// backup is a readable project with a supported schema and passing
   /// `PRAGMA integrity_check`. The replacement is written to a temporary file
-  /// and renamed into place. The destination must not have an active SQLite
+  /// and atomically renamed into place. The destination must not have an active SQLite
   /// connection open while it is replaced.
   [[nodiscard]] static Result<void> restore(const std::string& database_path,
-                                            const std::string& backup_path);
+                                            const std::string& backup_path,
+                                            const CancellationToken& cancellation_token = {},
+                                            RestoreCommitHook commit_hook = nullptr);
 
  private:
   struct Impl;
