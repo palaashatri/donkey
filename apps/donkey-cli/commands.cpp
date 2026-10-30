@@ -18,6 +18,7 @@
 #include "donkey/core/version.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/lift.h"
+#include "donkey/project/project.h"
 #include "json.h"
 
 namespace donkey::cli {
@@ -597,6 +598,8 @@ void print_usage(std::FILE* out) {
                "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli xrefs <binary> [--json] [--address A]\n"
                "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
+               "  donkey-cli project save <database> <binary> [--json]\n"
+               "  donkey-cli project info <database> [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1126,6 +1129,132 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     std::fwrite(text.value().data(), 1, text.value().size(), stdout);
   }
   return kExitOk;
+}
+
+int command_project(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("project needs a subcommand: save or info");
+  }
+  const std::string_view subcommand = arguments[0];
+  bool json = false;
+  std::vector<std::string_view> positional;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    if (argument == "--json") {
+      json = true;
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for project");
+    } else {
+      positional.push_back(argument);
+    }
+  }
+
+  if (subcommand == "save") {
+    if (positional.size() != 2) {
+      return usage_error("project save needs a database path and a binary path");
+    }
+    const std::string database(positional[0]);
+    const std::string binary(positional[1]);
+    LoadedBinary loaded;
+    if (!load(binary, loaded)) {
+      return kExitFailure;
+    }
+    auto analysis = analyze(loaded.image, loaded.data);
+    if (!analysis) {
+      return fail(analysis.diagnostic());
+    }
+    auto project = Project::create(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto image_id = project.value().import(loaded, analysis.value());
+    if (!image_id) {
+      return fail(image_id.diagnostic());
+    }
+    auto integrity = project.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"schema\": " + std::to_string(project.value().schema_version()) + ",\n";
+      out += "  \"image_id\": " + std::to_string(image_id.value()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + ",\n";
+      out += "  \"sha256\": " + quote(loaded.image.sha256) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Schema:    %d\n", project.value().schema_version());
+      std::printf("Image ID:  %lld\n", static_cast<long long>(image_id.value()));
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+      std::printf("SHA-256:   %s\n", loaded.image.sha256.c_str());
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "info") {
+    if (positional.size() != 1) {
+      return usage_error("project info needs a database path");
+    }
+    const std::string database(positional[0]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    auto integrity = project.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"project_schema\": " + std::to_string(project.value().schema_version()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + ",\n";
+      out += "  \"images\": [";
+      for (std::size_t i = 0; i < images.value().size(); ++i) {
+        const ProjectImage& image = images.value()[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"id\": " + std::to_string(image.id) + ", \"path\": " + quote(image.path) +
+               ", \"sha256\": " + quote(image.sha256) + ", \"format\": " + quote(image.format) +
+               ", \"architecture\": " + quote(image.architecture) +
+               ", \"bits\": " + std::to_string(image.bits) +
+               ", \"entry_point\": " + quote(hex(image.entry_point)) +
+               ", \"file_size\": " + std::to_string(image.file_size) +
+               ", \"sections\": " + std::to_string(image.sections) +
+               ", \"functions\": " + std::to_string(image.functions) +
+               ", \"partial\": " + (image.analysis_partial ? "true" : "false") + "}";
+      }
+      out += images.value().empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Schema:    %d\n", project.value().schema_version());
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+      std::printf("Images:    %zu\n", images.value().size());
+      for (const ProjectImage& image : images.value()) {
+        std::printf("  [%lld] %s %s-%u entry %s, %zu sections, %zu functions%s\n",
+                    static_cast<long long>(image.id), image.format.c_str(),
+                    image.architecture.c_str(), image.bits, hex(image.entry_point).c_str(),
+                    image.sections, image.functions, image.analysis_partial ? " (partial)" : "");
+      }
+    }
+    return kExitOk;
+  }
+
+  return usage_error("unknown project subcommand (expected save or info)");
 }
 
 }  // namespace donkey::cli

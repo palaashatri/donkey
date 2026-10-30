@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.25)
 
-project(donkey VERSION 0.1.0 LANGUAGES CXX)
+project(donkey VERSION 0.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,6 +21,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(DonkeyWarnings)
 include(DonkeyDependencies)
+include(DonkeyStorageDependencies)
 
 # ---------------------------------------------------------------------------
 # Core libraries. Every target below must build and test without SDL, ImGui,
@@ -94,6 +95,21 @@ target_include_directories(donkey_ir
 target_link_libraries(donkey_ir PUBLIC donkey::analysis)
 target_compile_features(donkey_ir PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_ir)
+
+add_library(donkey_project STATIC
+  src/project/project.cpp
+)
+add_library(donkey::project ALIAS donkey_project)
+target_include_directories(donkey_project
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_project
+  PUBLIC donkey::analysis
+  PRIVATE donkey::sqlite
+)
+target_compile_features(donkey_project PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_project)
 
 # ---------------------------------------------------------------------------
 # Executables
