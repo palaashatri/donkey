@@ -9,6 +9,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/ir/abi.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
 
@@ -23,6 +24,7 @@ using donkey::IrFunction;
 using donkey::IrOp;
 using donkey::IrOperand;
 using donkey::IrOperandKind;
+using donkey::IrParameter;
 using donkey::IrStatement;
 using donkey::Section;
 
@@ -167,6 +169,49 @@ std::vector<std::byte> aarch64_branchy_function() {
   return out;
 }
 
+/// AArch64 two-argument function:
+///   add w0, w0, w1
+///   ret
+std::vector<std::byte> aarch64_two_argument_function() {
+  const std::uint8_t bytes[] = {
+      0x00, 0x00, 0x01, 0x0b,  // add w0, w0, w1
+      0xc0, 0x03, 0x5f, 0xd6,  // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+/// mov eax, edi; add eax, esi; ret  (two System V integer arguments)
+std::vector<std::byte> x86_two_argument_function() {
+  const std::uint8_t bytes[] = {
+      0x89, 0xf8,  // mov eax, edi
+      0x01, 0xf0,  // add eax, esi
+      0xc3,        // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
+/// mov edi, 1; mov eax, edi; ret  (rdi is written before any read)
+std::vector<std::byte> x86_written_argument_function() {
+  const std::uint8_t bytes[] = {
+      0xbf, 0x01, 0x00, 0x00, 0x00,  // mov edi, 1
+      0x89, 0xf8,                    // mov eax, edi
+      0xc3,                          // ret
+  };
+  std::vector<std::byte> out(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    out[i] = static_cast<std::byte>(bytes[i]);
+  }
+  return out;
+}
+
 BinaryImage synthetic_image(std::size_t size) {
   BinaryImage image;
   image.path = "<synthetic>";
@@ -221,6 +266,7 @@ IrFunction single_block_function() {
   IrFunction function;
   function.address = 0x1000;
   function.name = "test_function";
+  function.return_width = 8;  // as a lifter would infer for `return rax;`
   IrBlock block;
   block.address = 0x1000;
   block.statements.push_back(assign_statement(8));
@@ -278,6 +324,7 @@ IrFunction branch_function() {
   IrFunction function;
   function.address = 0x1000;
   function.name = "branchy";
+  function.return_width = 8;  // as a lifter would infer for `return rax;`
   function.blocks.push_back(make_block(0x1000));
   function.blocks.push_back(make_block(0x1008));
   function.blocks.push_back(make_block(0x100c));
@@ -472,6 +519,120 @@ TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
   EXPECT_NE(code.find("control flow not fully structured"), std::string::npos) << code;
   EXPECT_NE(code.find("goto loc_"), std::string::npos) << code;
   EXPECT_NE(code.find("loc_1000:"), std::string::npos) << code;
+}
+
+TEST(Ir, InfersX86_64IntegerArgumentsAndReturn) {
+  const auto data = x86_two_argument_function();
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  ASSERT_EQ(function.parameters.size(), 2U);
+  EXPECT_EQ(function.parameters[0].name, "a0");
+  EXPECT_EQ(function.parameters[0].width, 4);
+  EXPECT_EQ(function.parameters[0].abi_register, "rdi");
+  EXPECT_EQ(function.parameters[1].name, "a1");
+  EXPECT_EQ(function.parameters[1].abi_register, "rsi");
+  EXPECT_EQ(function.return_width, 4);
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("(u32 a0, u32 a1)"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("u32 sub_1000"), std::string::npos) << text.value();
+}
+
+TEST(Ir, DoesNotInferAnArgumentRegisterThatIsWrittenFirst) {
+  const auto data = x86_written_argument_function();
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  EXPECT_TRUE(function.parameters.empty());
+  EXPECT_EQ(function.return_width, 4);
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("u32 sub_1000(void)"), std::string::npos) << text.value();
+}
+
+TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {
+  const auto data = aarch64_two_argument_function();
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  ASSERT_EQ(function.parameters.size(), 2U);
+  EXPECT_EQ(function.parameters[0].width, 4);
+  EXPECT_EQ(function.parameters[0].abi_register, "x0");
+  EXPECT_EQ(function.parameters[1].abi_register, "x1");
+  EXPECT_EQ(function.return_width, 4);
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("u32 sub_1000(u32 a0, u32 a1)"), std::string::npos) << text.value();
+}
+
+TEST(Ir, InfersVoidSignatureAndMarksMixedReturnPaths) {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "void_function";
+  function.blocks.push_back(make_block(0x1000));
+  function.blocks.push_back(make_block(0x1008));
+  function.blocks.push_back(make_block(0x100c));
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(return_statement());
+
+  IrStatement bare_return;
+  bare_return.op = IrOp::Return;
+  bare_return.width = 8;
+  function.blocks[2].statements.push_back(bare_return);
+
+  donkey::infer_signature(function, Architecture::X86_64);
+  ASSERT_TRUE(function.signature_inferred);
+  EXPECT_TRUE(function.parameters.empty());
+  EXPECT_EQ(function.return_width, 8);
+  bool mixed_note = false;
+  for (const std::string& note : function.notes) {
+    if (note.find("some return paths carry no value") != std::string::npos) {
+      mixed_note = true;
+    }
+  }
+  EXPECT_TRUE(mixed_note);
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("u64 void_function(void)"), std::string::npos) << text.value();
+}
+
+TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
+  IrFunction function = single_block_function();
+  function.return_width = 0;
+  donkey::infer_signature(function, Architecture::X86);
+  EXPECT_FALSE(function.signature_inferred);
+  EXPECT_TRUE(function.parameters.empty());
+  EXPECT_EQ(function.return_width, 0);
+}
+
+TEST(Ir, VerifierRejectsBadSignatureWidth) {
+  IrFunction function = single_block_function();
+  function.parameters.push_back(IrParameter{"a0", 3, "rdi"});
+  auto verified = donkey::verify_ir(function);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.bad_parameter");
 }
 
 TEST(Ir, VerifierRejectsBadExtendWidth) {

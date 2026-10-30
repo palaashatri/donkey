@@ -85,6 +85,7 @@ target_compile_features(donkey_analysis PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_analysis)
 
 add_library(donkey_ir STATIC
+  src/ir/abi.cpp
   src/ir/ir.cpp
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp

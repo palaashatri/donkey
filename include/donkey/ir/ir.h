@@ -112,12 +112,29 @@ struct IrBlock {
   std::vector<IrStatement> statements;
 };
 
+/// One inferred incoming argument. The name is synthetic (`a0`, `a1`, …)
+/// because no debug information, symbol table or type system is consulted.
+struct IrParameter {
+  std::string name;
+  /// Width of the register the value is read from, in bytes.
+  std::uint8_t width = 8;
+  /// ABI register the value arrives in (`rdi`, `x0`, …).
+  std::string abi_register;
+};
+
 struct IrFunction {
   std::uint64_t address = 0;
   std::string name;
   std::vector<IrBlock> blocks;
   bool partial = false;
   std::vector<std::string> notes;
+  /// Signature recovered from ABI register use. Empty `parameters` plus
+  /// `return_width == 0` renders as `void f(void)`. This is an inference, not
+  /// debug-info truth; `signature_inferred` records that it was derived here.
+  std::vector<IrParameter> parameters;
+  /// Width of the returned value in bytes; 0 means no value is returned.
+  std::uint8_t return_width = 0;
+  bool signature_inferred = false;
 };
 
 /// Check structural invariants: operand widths, block indices, def-use order

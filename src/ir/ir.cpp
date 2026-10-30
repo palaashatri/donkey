@@ -463,6 +463,20 @@ IrOperand IrOperand::block_ref(std::uint32_t index) {
 }
 
 Result<bool> verify_ir(const IrFunction& function) {
+  for (const IrParameter& parameter : function.parameters) {
+    if (parameter.name.empty()) {
+      return make_error<bool>(Status::InternalError, "ir.bad_parameter",
+                              "inferred parameter has an empty name", function.address);
+    }
+    if (!valid_width(parameter.width)) {
+      return make_error<bool>(Status::InternalError, "ir.bad_parameter",
+                              "inferred parameter has an invalid width", function.address);
+    }
+  }
+  if (function.return_width != 0 && !valid_width(function.return_width)) {
+    return make_error<bool>(Status::InternalError, "ir.bad_return_width",
+                            "inferred return width is invalid", function.address);
+  }
   for (std::size_t block_index = 0; block_index < function.blocks.size(); ++block_index) {
     const IrBlock& block = function.blocks[block_index];
     auto fail = [&](std::string code, std::string message) {
@@ -634,7 +648,25 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
       out += "// note: " + note + "\n";
     }
   }
-  out += "u64 " + (function.name.empty() ? std::string("sub") : function.name) + "(void) {\n";
+  std::string signature;
+  signature += function.return_width != 0 ? width_type(function.return_width) : "void";
+  signature += " ";
+  signature += function.name.empty() ? std::string("sub") : function.name;
+  signature += "(";
+  if (function.parameters.empty()) {
+    signature += "void";
+  } else {
+    for (std::size_t index = 0; index < function.parameters.size(); ++index) {
+      if (index != 0) {
+        signature += ", ";
+      }
+      signature += width_type(function.parameters[index].width);
+      signature += " ";
+      signature += function.parameters[index].name;
+    }
+  }
+  signature += ") {\n";
+  out += signature;
 
   // Prefer structured control flow. When the graph does not match a shape the
   // structurer models, fall back to labeled blocks with explicit `goto`; the
