@@ -118,10 +118,10 @@ void functions(const Document& document, UiState& state) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
-  ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-  ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 2.0f);
-  ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthStretch, 0.7f);
-  ImGui::TableSetupColumn("Blocks", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+  ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+  ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch, 1.8f);
+  ImGui::TableSetupColumn("Size", ImGuiTableColumnFlags_WidthStretch, 0.65f);
+  ImGui::TableSetupColumn("Blocks", ImGuiTableColumnFlags_WidthStretch, 0.75f);
   ImGui::TableHeadersRow();
 
   for (const Function& function : document.analysis.functions) {

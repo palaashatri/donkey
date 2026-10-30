@@ -196,6 +196,36 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
     if (instruction->detail != nullptr) {
       for (int i = 0; i < instruction->detail->x86.op_count; ++i) {
         const cs_x86_op& operand = instruction->detail->x86.operands[i];
+        Operand parsed;
+        switch (operand.type) {
+          case X86_OP_REG:
+            parsed.kind = OperandKind::Register;
+            parsed.reg = cs_reg_name(impl_->handle, operand.reg);
+            parsed.size = static_cast<std::uint8_t>(operand.size);
+            break;
+          case X86_OP_IMM:
+            parsed.kind = OperandKind::Immediate;
+            parsed.immediate = operand.imm;
+            parsed.size = static_cast<std::uint8_t>(operand.size);
+            break;
+          case X86_OP_MEM:
+            parsed.kind = OperandKind::Memory;
+            parsed.size = static_cast<std::uint8_t>(operand.size);
+            if (operand.mem.base != X86_REG_INVALID) {
+              parsed.memory.base = cs_reg_name(impl_->handle, operand.mem.base);
+            }
+            if (operand.mem.index != X86_REG_INVALID) {
+              parsed.memory.index = cs_reg_name(impl_->handle, operand.mem.index);
+            }
+            parsed.memory.scale = operand.mem.scale;
+            parsed.memory.displacement = operand.mem.disp;
+            parsed.memory.size = parsed.size;
+            break;
+          default:
+            break;
+        }
+        result.structured_operands.push_back(std::move(parsed));
+
         if (operand.type != X86_OP_MEM) {
           continue;
         }
@@ -208,6 +238,37 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
           result.data_references.push_back(static_cast<std::uint64_t>(operand.mem.disp));
         }
       }
+    }
+  } else if (impl_->architecture == Architecture::AArch64 && instruction->detail != nullptr) {
+    for (int i = 0; i < instruction->detail->arm64.op_count; ++i) {
+      const cs_arm64_op& operand = instruction->detail->arm64.operands[i];
+      Operand parsed;
+      switch (operand.type) {
+        case ARM64_OP_REG:
+          parsed.kind = OperandKind::Register;
+          parsed.reg = cs_reg_name(impl_->handle, operand.reg);
+          // cs_arm64_op has no size field; the lifter infers width from the
+          // register name (x0 = 64-bit, w0 = 32-bit).
+          break;
+        case ARM64_OP_IMM:
+          parsed.kind = OperandKind::Immediate;
+          parsed.immediate = operand.imm;
+          break;
+        case ARM64_OP_MEM:
+          parsed.kind = OperandKind::Memory;
+          if (operand.mem.base != ARM64_REG_INVALID) {
+            parsed.memory.base = cs_reg_name(impl_->handle, operand.mem.base);
+          }
+          if (operand.mem.index != ARM64_REG_INVALID) {
+            parsed.memory.index = cs_reg_name(impl_->handle, operand.mem.index);
+          }
+          parsed.memory.displacement = operand.mem.disp;
+          parsed.memory.size = parsed.size;
+          break;
+        default:
+          break;
+      }
+      result.structured_operands.push_back(std::move(parsed));
     }
   }
 

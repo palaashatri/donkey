@@ -25,6 +25,27 @@ enum class InstructionClass : std::uint8_t {
 
 const char* instruction_class_name(InstructionClass value) noexcept;
 
+enum class OperandKind : std::uint8_t { Unknown = 0, Register, Immediate, Memory };
+
+struct MemoryOperand {
+  std::string base;
+  std::string index;
+  std::int32_t scale = 1;
+  std::int64_t displacement = 0;
+  /// Access width in bytes (1, 2, 4 or 8). 0 when unknown.
+  std::uint8_t size = 0;
+};
+
+struct Operand {
+  OperandKind kind = OperandKind::Unknown;
+  /// Register name, lowercase (`rax`, `x0`); empty for immediates.
+  std::string reg;
+  std::int64_t immediate = 0;
+  MemoryOperand memory;
+  /// Operand width in bytes (1, 2, 4 or 8). 0 when unknown.
+  std::uint8_t size = 0;
+};
+
 struct Instruction {
   std::uint64_t address = 0;
   std::uint8_t length = 0;
@@ -36,6 +57,8 @@ struct Instruction {
   /// Absolute addresses referenced through x86 RIP-relative or absolute memory
   /// operands. AArch64 ADRP/ADD pairs are not folded yet.
   std::vector<std::uint64_t> data_references;
+  /// Structured operands for the lifter. Empty when Capstone gave no detail.
+  std::vector<Operand> structured_operands;
 };
 
 struct DecodeStream {

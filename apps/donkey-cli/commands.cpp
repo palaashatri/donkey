@@ -17,6 +17,7 @@
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
 #include "donkey/decode/decode.h"
+#include "donkey/ir/lift.h"
 #include "json.h"
 
 namespace donkey::cli {
@@ -593,6 +594,7 @@ void print_usage(std::FILE* out) {
                " [--max-strings N]\n"
                "  donkey-cli functions <binary> [--json] [--max-instructions N]\n"
                "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
+               "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli xrefs <binary> [--json] [--address A]\n"
                "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
                "\n"
@@ -988,6 +990,140 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
                   edge.to == 0 ? "<indirect>" : hex(edge.to).c_str(),
                   cfg_edge_kind_name(edge.kind));
     }
+  }
+  return kExitOk;
+}
+
+int command_decompile(const std::vector<std::string_view>& arguments) {
+  AnalysisRequest request;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    if (argument == "--json") {
+      request.json = true;
+    } else if (argument == "--function") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--function needs an address");
+      }
+      std::uint64_t parsed = 0;
+      if (!parse_u64(value, parsed)) {
+        return usage_error("invalid --function address");
+      }
+      request.address = parsed;
+    } else if (argument == "--max-instructions") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--max-instructions needs a value");
+      }
+      std::uint64_t parsed = 0;
+      if (!parse_u64(value, parsed) || parsed == 0) {
+        return usage_error("invalid --max-instructions value");
+      }
+      request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for decompile");
+    } else if (request.path.empty()) {
+      request.path = std::string(argument);
+    } else {
+      return usage_error("decompile accepts exactly one file");
+    }
+  }
+  if (request.path.empty()) {
+    return usage_error("decompile needs a file path");
+  }
+
+  LoadedBinary loaded;
+  if (!load(request.path, loaded)) {
+    return kExitFailure;
+  }
+  AnalysisOptions options;
+  options.max_instructions = request.max_instructions;
+  auto analysis = analyze(loaded.image, loaded.data, options);
+  if (!analysis) {
+    return fail(analysis.diagnostic());
+  }
+
+  std::vector<const Function*> selected;
+  if (request.address.has_value()) {
+    for (const Function& function : analysis.value().functions) {
+      if (function.address == request.address.value()) {
+        selected.push_back(&function);
+        break;
+      }
+    }
+    if (selected.empty()) {
+      return fail(Diagnostic::make(Status::InvalidInput, "cli.unknown_function",
+                                   "no function starts at the requested address",
+                                   request.address.value()));
+    }
+  } else {
+    for (const Function& function : analysis.value().functions) {
+      selected.push_back(&function);
+    }
+  }
+
+  if (request.json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"functions\": [";
+    std::size_t written = 0;
+    for (const Function* function : selected) {
+      if (written >= request.max_items) {
+        break;
+      }
+      auto lifted = lift_function(loaded.image, analysis.value(), *function);
+      out += written == 0 ? "\n" : ",\n";
+      if (!lifted) {
+        out += "    {\"address\": " + quote(hex(function->address)) +
+               ", \"name\": " + quote(display_name(function->name)) +
+               ", \"status\": \"Unsupported\", \"code\": " + quote(lifted.diagnostic().code) +
+               ", \"pseudocode\": null}";
+        ++written;
+        continue;
+      }
+      auto text = format_pseudocode(lifted.value());
+      if (!text) {
+        out += "    {\"address\": " + quote(hex(function->address)) +
+               ", \"name\": " + quote(display_name(function->name)) +
+               ", \"status\": \"InvalidIR\", \"code\": " + quote(text.diagnostic().code) +
+               ", \"pseudocode\": null}";
+        ++written;
+        continue;
+      }
+      out += "    {\"address\": " + quote(hex(function->address)) +
+             ", \"name\": " + quote(display_name(function->name)) +
+             ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
+             ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
+             ", \"pseudocode\": " + quote(text.value()) + "}";
+      ++written;
+    }
+    out += written == 0 ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  bool first = true;
+  for (const Function* function : selected) {
+    if (!first) {
+      std::printf("\n");
+    }
+    first = false;
+    auto lifted = lift_function(loaded.image, analysis.value(), *function);
+    if (!lifted) {
+      std::printf("// %s: unsupported (%s)\n", display_name(function->name).c_str(),
+                  lifted.diagnostic().code.c_str());
+      continue;
+    }
+    auto text = format_pseudocode(lifted.value());
+    if (!text) {
+      std::printf("// %s: rejected IR (%s: %s)\n", display_name(function->name).c_str(),
+                  text.diagnostic().code.c_str(), text.diagnostic().message.c_str());
+      continue;
+    }
+    std::fwrite(text.value().data(), 1, text.value().size(), stdout);
   }
   return kExitOk;
 }

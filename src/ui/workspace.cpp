@@ -15,6 +15,7 @@ namespace {
 constexpr const char* kSectionsWindow = "Sections";
 constexpr const char* kFunctionsWindow = "Functions";
 constexpr const char* kDisassemblyWindow = "Disassembly";
+constexpr const char* kDecompilerWindow = "Decompiler";
 constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
@@ -94,9 +95,10 @@ void Workspace::draw(bool& quit) {
     ImGui::Separator();
     ImGui::TextWrapped(
         "Early implementation. The headless core parses ELF, PE and Mach-O, "
-        "decodes x86, x86-64 and AArch64 with Capstone, and produces linear "
-        "analysis. CFG, function extents, decompiler and debugger are not "
-        "implemented.");
+        "decodes x86, x86-64 and AArch64 with Capstone, builds a bounded CFG "
+        "with estimated function extents, and lifts x86-64 functions into "
+        "verified IR before printing pseudocode. Project persistence, graph "
+        "rendering, a debugger and non-x86-64 lifting are not implemented.");
     ImGui::Spacing();
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
@@ -128,6 +130,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kSectionsWindow, nullptr, &show_sections_);
     ImGui::MenuItem(kFunctionsWindow, nullptr, &show_functions_);
     ImGui::MenuItem(kDisassemblyWindow, nullptr, &show_disassembly_);
+    ImGui::MenuItem(kDecompilerWindow, nullptr, &show_decompiler_);
     ImGui::MenuItem(kHexWindow, nullptr, &show_hex_);
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
@@ -171,13 +174,15 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGui::DockBuilderSetNodeSize(root, ImGui::GetMainViewport()->WorkSize);
 
   ImGuiID center = root;
-  ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.22f, nullptr, &center);
+  ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.24f, nullptr, &center);
   ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
-  ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.38f, nullptr, &center);
+  ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.34f, nullptr, &center);
+  ImGuiID decompiler = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.45f, nullptr, &center);
   ImGuiID left_bottom = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.48f, nullptr, &left);
   ImGuiID right_bottom = ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.55f, nullptr, &right);
 
   ImGui::DockBuilderDockWindow(kDisassemblyWindow, center);
+  ImGui::DockBuilderDockWindow(kDecompilerWindow, decompiler);
   ImGui::DockBuilderDockWindow(kHexWindow, bottom);
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
   ImGui::DockBuilderDockWindow(kXrefsWindow, bottom);
@@ -244,6 +249,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDisassemblyWindow, &show_disassembly_, panel_flags());
     if (document) {
       views::disassembly(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_decompiler_) {
+    ImGui::Begin(kDecompilerWindow, &show_decompiler_, panel_flags());
+    if (document) {
+      views::decompiler(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }
