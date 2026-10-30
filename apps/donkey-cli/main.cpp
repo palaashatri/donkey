@@ -66,6 +66,12 @@ int main(int argc, char** argv) {
   if (command == "debug") {
     return donkey::cli::command_debug(rest);
   }
+  if (command == "patch") {
+    return donkey::cli::command_patch(rest);
+  }
+  if (command == "plugin") {
+    return donkey::cli::command_plugin(rest);
+  }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),
                command.data());
