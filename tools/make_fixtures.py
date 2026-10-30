@@ -38,6 +38,16 @@ ARM64_TEXT = bytes(
         0xC0, 0x03, 0x5F, 0xD6,  # ret
     ]
 )
+X86_32_TEXT = bytes(
+    [
+        0x55,                    # push ebp
+        0x89, 0xE5,              # mov ebp, esp
+        0xE8, 0x00, 0x00, 0x00, 0x00,  # call +0
+        0x90,                    # nop
+        0x5D,                    # pop ebp
+        0xC3,                    # ret
+    ]
+)
 
 
 def u16(buf, offset, value):
@@ -147,6 +157,105 @@ def build_elf() -> bytes:
     section(3, ".shstrtab", 3, 0, 0, 0x200, len(shstrtab))
     section(4, ".symtab", 2, 0, 0, 0x240, len(symbols) * 24, link=5, info=1,
             align=8, entsize=24)
+    section(5, ".strtab", 3, 0, 0, 0x2A0, len(strtab))
+    return bytes(buf)
+
+
+def build_elf_i386() -> bytes:
+    """A 32-bit ET_EXEC x86 ELF with the same shape as build_elf()."""
+    text = (X86_32_TEXT + b"\x90" * 16)[:16]
+    rodata = b"hello world\x00"
+
+    shstrtab = b"\x00.text\x00.rodata\x00.shstrtab\x00.symtab\x00.strtab\x00"
+    strtab = b"\x00_start\x00puts\x00message\x00"
+    names = {
+        ".text": 1,
+        ".rodata": 7,
+        ".shstrtab": 15,
+        ".symtab": 25,
+        ".strtab": 33,
+    }
+    strings = {
+        "_start": 1,
+        "puts": 8,
+        "message": 13,
+    }
+
+    shoff = 0x300
+    buf = bytearray(shoff + 6 * 40)
+    buf[0:4] = b"\x7fELF"
+    buf[4] = 1  # ELFCLASS32
+    buf[5] = 1  # ELFDATA2LSB
+    buf[6] = 1  # EV_CURRENT
+    buf[7] = 0  # ELFOSABI_SYSV
+
+    u16(buf, 16, 2)  # ET_EXEC
+    u16(buf, 18, 3)  # EM_386
+    u32(buf, 20, 1)
+    u32(buf, 24, 0x08048100)  # entry
+    u32(buf, 28, 52)  # phoff, immediately after the 52-byte header
+    u32(buf, 32, shoff)
+    u32(buf, 36, 0)
+    u16(buf, 40, 52)  # ehsize
+    u16(buf, 42, 32)  # phentsize
+    u16(buf, 44, 1)  # phnum
+    u16(buf, 46, 40)  # shentsize
+    u16(buf, 48, 6)  # shnum
+    u16(buf, 50, 3)  # shstrndx
+
+    # Program header (Elf32_Phdr): type, offset, vaddr, paddr, filesz, memsz,
+    # flags, align. One read/execute PT_LOAD covering the headers and content.
+    ph = 52
+    u32(buf, ph + 0, 1)
+    u32(buf, ph + 4, 0)
+    u32(buf, ph + 8, 0x08048000)
+    u32(buf, ph + 12, 0x08048000)
+    u32(buf, ph + 16, shoff)
+    u32(buf, ph + 20, shoff)
+    u32(buf, ph + 24, 5)  # R|X
+    u32(buf, ph + 28, 0x1000)
+
+    buf[0x100 : 0x100 + len(text)] = text
+    buf[0x180 : 0x180 + len(rodata)] = rodata
+    buf[0x200 : 0x200 + len(shstrtab)] = shstrtab
+
+    # Elf32_Sym: name, value, size, info, other, shndx.
+    symbols = [
+        (0, 0, 0, 0, 0),
+        (strings["_start"], 0x12, 1, 0x08048100, 16),
+        (strings["puts"], 0x12, 0, 0, 0),
+        (strings["message"], 0x11, 2, 0x08048180, 12),
+    ]
+    for index, (name, info, shndx, value, size) in enumerate(symbols):
+        base = 0x240 + index * 16
+        u32(buf, base, name)
+        u32(buf, base + 4, value)
+        u32(buf, base + 8, size)
+        buf[base + 12] = info
+        buf[base + 13] = 0
+        u16(buf, base + 14, shndx)
+    buf[0x2A0 : 0x2A0 + len(strtab)] = strtab
+
+    def section(index, name, sh_type, flags, addr, offset, size, link=0, info=0,
+                align=1, entsize=0):
+        base = shoff + index * 40
+        u32(buf, base, names.get(name, 0) if name else 0)
+        u32(buf, base + 4, sh_type)
+        u32(buf, base + 8, flags)
+        u32(buf, base + 12, addr)
+        u32(buf, base + 16, offset)
+        u32(buf, base + 20, size)
+        u32(buf, base + 24, link)
+        u32(buf, base + 28, info)
+        u32(buf, base + 32, align)
+        u32(buf, base + 36, entsize)
+
+    section(0, "", 0, 0, 0, 0, 0)
+    section(1, ".text", 1, 0x6, 0x08048100, 0x100, 16, align=16)
+    section(2, ".rodata", 1, 0x2, 0x08048180, 0x180, len(rodata), align=4)
+    section(3, ".shstrtab", 3, 0, 0, 0x200, len(shstrtab))
+    section(4, ".symtab", 2, 0, 0, 0x240, len(symbols) * 16, link=5, info=1,
+            align=4, entsize=16)
     section(5, ".strtab", 3, 0, 0, 0x2A0, len(strtab))
     return bytes(buf)
 
@@ -345,6 +454,7 @@ def main():
     MANIFESTS.mkdir(parents=True, exist_ok=True)
     fixtures = {
         "tiny-elf-x86_64": build_elf(),
+        "tiny-elf-i386": build_elf_i386(),
         "tiny-pe-x86_64.exe": build_pe(),
         "tiny-macho-arm64": build_macho(),
     }

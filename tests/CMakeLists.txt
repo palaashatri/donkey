@@ -123,6 +123,12 @@ add_test(NAME cli.decompile_macho_aarch64
 set_tests_properties(cli.decompile_macho_aarch64 PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"_main\".*\"pseudocode\":.*sp - 0x10")
 
+add_test(NAME cli.decompile_elf_i386
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
+set_tests_properties(cli.decompile_elf_i386 PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"name\": \"_start\".*\"status\": \"Complete\".*u32 _start\\(void\\).*esp = esp - 0x4")
+
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
 # ---------------------------------------------------------------------------
