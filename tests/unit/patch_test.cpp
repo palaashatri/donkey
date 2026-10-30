@@ -85,7 +85,7 @@ TEST(PatchTest, ExportPatchedBinaryVerifiesA21) {
   auto src_bytes = read_file_bytes(src);
   std::string orig_sha256 = Sha256::hex(std::as_bytes(std::span(src_bytes)));
 
-  std::string temp_out = std::filesystem::temp_directory_path() / "test_patched_macho";
+  std::string temp_out = (std::filesystem::temp_directory_path() / "test_patched_macho").string();
   std::error_code ec;
   std::filesystem::remove(temp_out, ec);
 
