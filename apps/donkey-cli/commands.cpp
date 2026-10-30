@@ -84,6 +84,7 @@ struct InfoOptions {
   std::string path;
   bool json = false;
   std::size_t max_symbols = 10000;
+  LoadOptions load_options;
 };
 
 struct DisasmOptions {
@@ -92,6 +93,7 @@ struct DisasmOptions {
   bool json = false;
   std::optional<std::uint64_t> address;
   std::size_t count = 64;
+  LoadOptions load_options;
 };
 
 struct AnalysisRequest {
@@ -102,7 +104,90 @@ struct AnalysisRequest {
   std::size_t max_strings = 100000;
   std::size_t min_string_length = 4;
   std::size_t max_items = 1000;
+  LoadOptions load_options;
 };
+
+bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::size_t& index,
+                         LoadOptions& options, const char*& error_message) {
+  const std::string_view argument = arguments[index];
+  if (argument == "--raw") {
+    options.force_raw = true;
+    return true;
+  }
+  if (argument == "--arch") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--arch needs an architecture name (x86, x86_64, arm, aarch64, riscv64)";
+      return true;
+    }
+    const auto arch = parse_architecture(value);
+    if (!arch.has_value()) {
+      error_message = "invalid --arch value";
+      return true;
+    }
+    options.preferred_architecture = arch.value();
+    return true;
+  }
+  if (argument == "--base") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--base needs an address";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed)) {
+      error_message = "invalid --base address";
+      return true;
+    }
+    options.raw_base_address = parsed;
+    return true;
+  }
+  if (argument == "--entry") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--entry needs an address";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed)) {
+      error_message = "invalid --entry address";
+      return true;
+    }
+    options.raw_entry_point = parsed;
+    options.has_raw_entry_point = true;
+    return true;
+  }
+  if (argument == "--bits") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--bits needs 32 or 64";
+      return true;
+    }
+    std::uint64_t parsed = 0;
+    if (!parse_u64(value, parsed) || (parsed != 32 && parsed != 64)) {
+      error_message = "invalid --bits value (expected 32 or 64)";
+      return true;
+    }
+    options.raw_bits = static_cast<unsigned>(parsed);
+    return true;
+  }
+  if (argument == "--endian") {
+    std::string_view value;
+    if (!take_value(arguments, index, value)) {
+      error_message = "--endian needs little or big";
+      return true;
+    }
+    if (value == "little") {
+      options.raw_endian = Endian::Little;
+    } else if (value == "big") {
+      options.raw_endian = Endian::Big;
+    } else {
+      error_message = "invalid --endian value (expected little or big)";
+    }
+    return true;
+  }
+  return false;
+}
 
 void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("File:      %s\n", image.path.c_str());
@@ -111,6 +196,13 @@ void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("Format:    %s (%s), %s-endian, %u-bit\n", format_name(image.format),
               image.format_detail.c_str(), endian_name(image.endian), image.bits);
   std::printf("Arch:      %s\n", architecture_name(image.architecture));
+  if (!image.fat_architectures.empty()) {
+    std::printf("Slices:    ");
+    for (std::size_t i = 0; i < image.fat_architectures.size(); ++i) {
+      std::printf("%s%s", i == 0 ? "" : ", ", architecture_name(image.fat_architectures[i]));
+    }
+    std::printf("\n");
+  }
   std::printf("Base:      %s\n", hex(image.image_base).c_str());
   if (image.has_entry_point()) {
     std::printf("Entry:     %s\n", hex(image.entry_point).c_str());
@@ -187,6 +279,13 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
   out += "    \"bits\": " + std::to_string(image.bits) + ",\n";
   out += "    \"endian\": " + quote(endian_name(image.endian)) + ",\n";
   out += "    \"architecture\": " + quote(architecture_name(image.architecture)) + ",\n";
+  if (!image.fat_architectures.empty()) {
+    out += "    \"fat_architectures\": [";
+    for (std::size_t i = 0; i < image.fat_architectures.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(architecture_name(image.fat_architectures[i]));
+    }
+    out += "],\n";
+  }
   out += "    \"image_base\": " + quote(hex(image.image_base)) + ",\n";
   out += "    \"entry_point\": " +
          (image.has_entry_point() ? quote(hex(image.entry_point)) : std::string("null")) + "\n";
@@ -265,8 +364,8 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
   return out;
 }
 
-bool load(const std::string& path, LoadedBinary& loaded) {
-  auto result = load_binary(path);
+bool load(const std::string& path, LoadedBinary& loaded, const LoadOptions& options = {}) {
+  auto result = load_binary(path, options);
   if (!result) {
     fail(result.diagnostic());
     return false;
@@ -292,7 +391,7 @@ std::string instruction_json(const Instruction& instruction) {
 
 int command_disasm_run(const DisasmOptions& options) {
   LoadedBinary loaded;
-  if (!load(options.path, loaded)) {
+  if (!load(options.path, loaded, options.load_options)) {
     return kExitFailure;
   }
   const BinaryImage& image = loaded.image;
@@ -394,7 +493,7 @@ int command_disasm_run(const DisasmOptions& options) {
 
 int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -615,6 +714,7 @@ int command_info(const std::vector<std::string_view>& arguments) {
   InfoOptions options;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       options.json = true;
     } else if (argument == "--max-symbols") {
@@ -627,6 +727,10 @@ int command_info(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-symbols value");
       }
       options.max_symbols = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, options.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for info");
     } else if (options.path.empty()) {
@@ -639,7 +743,7 @@ int command_info(const std::vector<std::string_view>& arguments) {
     return usage_error("info needs a file path");
   }
   LoadedBinary loaded;
-  if (!load(options.path, loaded)) {
+  if (!load(options.path, loaded, options.load_options)) {
     return kExitFailure;
   }
   if (options.json) {
@@ -655,6 +759,7 @@ int command_disasm(const std::vector<std::string_view>& arguments) {
   DisasmOptions options;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       options.json = true;
     } else if (argument == "--address") {
@@ -683,6 +788,10 @@ int command_disasm(const std::vector<std::string_view>& arguments) {
         return usage_error("--section needs a value");
       }
       options.section = std::string(value);
+    } else if (try_parse_load_flag(arguments, i, options.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for disasm");
     } else if (options.path.empty()) {
@@ -701,6 +810,7 @@ int command_strings(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--min-length") {
@@ -733,6 +843,10 @@ int command_strings(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for strings");
     } else if (request.path.empty()) {
@@ -751,6 +865,7 @@ int command_functions(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--max-instructions") {
@@ -763,6 +878,10 @@ int command_functions(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for functions");
     } else if (request.path.empty()) {
@@ -781,6 +900,7 @@ int command_xrefs(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--address") {
@@ -803,6 +923,10 @@ int command_xrefs(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for xrefs");
     } else if (request.path.empty()) {
@@ -821,6 +945,7 @@ int command_analyze(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--max-instructions") {
@@ -833,6 +958,10 @@ int command_analyze(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for analyze");
     } else if (request.path.empty()) {
@@ -851,6 +980,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--function") {
@@ -873,6 +1003,10 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for cfg");
     } else if (request.path.empty()) {
@@ -886,7 +1020,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   }
 
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -1007,6 +1141,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       request.json = true;
     } else if (argument == "--function") {
@@ -1029,6 +1164,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for decompile");
     } else if (request.path.empty()) {
@@ -1042,7 +1181,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   }
 
   LoadedBinary loaded;
-  if (!load(request.path, loaded)) {
+  if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
   AnalysisOptions options;
@@ -1145,15 +1284,21 @@ int command_project(const std::vector<std::string_view>& arguments) {
   bool json = false;
   bool clear = false;
   bool force = false;
+  LoadOptions load_options;
   std::vector<std::string_view> positional;
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
     if (argument == "--json") {
       json = true;
     } else if (argument == "--clear") {
       clear = true;
     } else if (argument == "--force") {
       force = true;
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for project");
     } else {
@@ -1168,7 +1313,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
     const std::string database(positional[0]);
     const std::string binary(positional[1]);
     LoadedBinary loaded;
-    if (!load(binary, loaded)) {
+    if (!load(binary, loaded, load_options)) {
       return kExitFailure;
     }
     auto analysis = analyze(loaded.image, loaded.data);

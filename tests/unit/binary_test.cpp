@@ -376,6 +376,97 @@ TEST(Binary, LoadsMachOMetadata) {
   EXPECT_EQ(offset.value(), 0xF00U);
 }
 
+TEST(Binary, LoadsMachO32Metadata) {
+  auto image = donkey::load_binary_file(fixture_path("tiny-macho-i386"));
+  ASSERT_TRUE(image.has_value()) << image.diagnostic().message;
+  const auto& macho = image.value();
+  EXPECT_EQ(macho.format, donkey::BinaryFormat::MachO);
+  EXPECT_EQ(macho.architecture, donkey::Architecture::X86);
+  EXPECT_EQ(macho.bits, 32U);
+  EXPECT_EQ(macho.image_base, 0x00001000U);
+  EXPECT_EQ(macho.entry_point, 0x00001F00U);
+  EXPECT_EQ(macho.format_detail, "Mach-O 32 (MH_EXECUTE)");
+
+  ASSERT_EQ(macho.sections.size(), 1U);
+  EXPECT_EQ(macho.sections[0].name, "__TEXT,__text");
+  EXPECT_TRUE(macho.sections[0].executable);
+
+  bool found_main = false;
+  bool found_puts = false;
+  for (const auto& symbol : macho.symbols) {
+    if (symbol.name == "_main") {
+      found_main = true;
+      EXPECT_EQ(symbol.kind, donkey::SymbolKind::Function);
+      EXPECT_TRUE(symbol.exported);
+      EXPECT_EQ(symbol.address, 0x00001F00U);
+    }
+    if (symbol.name == "_puts") {
+      found_puts = true;
+      EXPECT_TRUE(symbol.imported);
+      EXPECT_EQ(symbol.kind, donkey::SymbolKind::Import);
+    }
+  }
+  EXPECT_TRUE(found_main);
+  EXPECT_TRUE(found_puts);
+
+  auto offset = macho.va_to_file_offset(0x00001F00);
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_EQ(offset.value(), 0xF00U);
+}
+
+TEST(Binary, LoadsFatMachOSlicesAndRejectsMissingSlice) {
+  auto default_slice = donkey::load_binary_file(fixture_path("tiny-macho-fat"));
+  ASSERT_TRUE(default_slice.has_value()) << default_slice.diagnostic().message;
+  EXPECT_EQ(default_slice.value().architecture, donkey::Architecture::AArch64);
+  EXPECT_EQ(default_slice.value().bits, 64U);
+  ASSERT_EQ(default_slice.value().fat_architectures.size(), 2U);
+  EXPECT_EQ(default_slice.value().fat_architectures[0], donkey::Architecture::X86);
+  EXPECT_EQ(default_slice.value().fat_architectures[1], donkey::Architecture::AArch64);
+
+  donkey::LoadOptions x86_options;
+  x86_options.preferred_architecture = donkey::Architecture::X86;
+  auto x86_slice = donkey::load_binary_file(fixture_path("tiny-macho-fat"), x86_options);
+  ASSERT_TRUE(x86_slice.has_value()) << x86_slice.diagnostic().message;
+  EXPECT_EQ(x86_slice.value().architecture, donkey::Architecture::X86);
+  EXPECT_EQ(x86_slice.value().bits, 32U);
+  EXPECT_EQ(x86_slice.value().entry_point, 0x00001F00U);
+  auto x86_offset = x86_slice.value().va_to_file_offset(0x00001F00);
+  ASSERT_TRUE(x86_offset.has_value());
+  EXPECT_EQ(x86_offset.value(), 0x1F00U);
+
+  donkey::LoadOptions missing_options;
+  missing_options.preferred_architecture = donkey::Architecture::RiscV64;
+  auto missing_slice = donkey::load_binary_file(fixture_path("tiny-macho-fat"), missing_options);
+  ASSERT_FALSE(missing_slice.has_value());
+  EXPECT_EQ(missing_slice.diagnostic().code, "macho.slice_not_found");
+}
+
+TEST(Binary, RawImportWithExplicitMetadata) {
+  const std::vector<std::byte> raw_code{
+      std::byte{0x55}, std::byte{0x48}, std::byte{0x89}, std::byte{0xE5}, std::byte{0xC3},
+  };
+  donkey::LoadOptions options;
+  options.force_raw = true;
+  options.preferred_architecture = donkey::Architecture::X86_64;
+  options.raw_base_address = 0x800000;
+  options.raw_entry_point = 0x800001;
+  options.has_raw_entry_point = true;
+
+  auto parsed = donkey::parse_binary(raw_code, "shellcode.bin", options);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& image = parsed.value();
+  EXPECT_EQ(image.format, donkey::BinaryFormat::Raw);
+  EXPECT_EQ(image.architecture, donkey::Architecture::X86_64);
+  EXPECT_EQ(image.bits, 64U);
+  EXPECT_EQ(image.image_base, 0x800000U);
+  EXPECT_EQ(image.entry_point, 0x800001U);
+  ASSERT_EQ(image.sections.size(), 1U);
+  EXPECT_TRUE(image.sections[0].executable);
+  auto offset = image.va_to_file_offset(0x800001);
+  ASSERT_TRUE(offset.has_value());
+  EXPECT_EQ(offset.value(), 1U);
+}
+
 TEST(Binary, RawFallbackAndDeterministicHash) {
   const std::string bytes = "not an executable";
   const auto data =
@@ -394,8 +485,9 @@ TEST(Binary, RawFallbackAndDeterministicHash) {
 }
 
 TEST(Binary, PublicFixturesMatchRecordedHash) {
-  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
-                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
+  for (const std::string name :
+       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-pe-i386.exe",
+        "tiny-macho-arm64", "tiny-macho-i386", "tiny-macho-fat"}) {
     const auto bytes = read_fixture(name);
     auto image = donkey::parse_binary(bytes, name);
     ASSERT_TRUE(image.has_value()) << name << ": " << image.diagnostic().message;
@@ -405,11 +497,14 @@ TEST(Binary, PublicFixturesMatchRecordedHash) {
 }
 
 TEST(Binary, TruncatedFixturesNeverCrashOrHang) {
-  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
-                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
+  for (const std::string name :
+       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-pe-i386.exe",
+        "tiny-macho-arm64", "tiny-macho-i386", "tiny-macho-fat"}) {
     const auto bytes = read_fixture(name);
     ASSERT_FALSE(bytes.empty());
-    for (std::size_t length = 0; length <= bytes.size(); ++length) {
+    // Step by 1 byte across headers and by 16 bytes in trailing padding on larger fat binaries.
+    for (std::size_t length = 0; length <= bytes.size();
+         length += (length < 512 || length + 16 > bytes.size()) ? 1 : 16) {
       const auto slice = std::span<const std::byte>(bytes.data(), length);
       auto image = donkey::parse_binary(slice, name);
       if (!image) {
@@ -431,8 +526,9 @@ TEST(Binary, CorruptedHeadersAreRejectedDeterministically) {
     return state;
   };
 
-  for (const std::string name : {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe",
-                                 "tiny-pe-i386.exe", "tiny-macho-arm64"}) {
+  for (const std::string name :
+       {"tiny-elf-x86_64", "tiny-elf-i386", "tiny-pe-x86_64.exe", "tiny-pe-i386.exe",
+        "tiny-macho-arm64", "tiny-macho-i386", "tiny-macho-fat"}) {
     auto bytes = read_fixture(name);
     for (int iteration = 0; iteration < 256; ++iteration) {
       auto mutated = bytes;

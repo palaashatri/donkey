@@ -29,6 +29,18 @@
       "provenance": "generated from first principles by tools/make_fixtures.py",
       "sha256": "fc5e8b09d25a30cdd1abc9071d64abaf0429381be3989b7f642291003847490f",
       "size": 4160
+    },
+    {
+      "name": "tiny-macho-i386",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "bfad9473f135756be7fd436d84b4ebd0c2ea6a0f118b13a65e935da8c11d894c",
+      "size": 4160
+    },
+    {
+      "name": "tiny-macho-fat",
+      "provenance": "generated from first principles by tools/make_fixtures.py",
+      "sha256": "ac385fd7664a80ed11fef02b769ba35d191cc9a15a3ba3bcfb19814729d413cd",
+      "size": 16448
     }
   ],
   "generator": "tools/make_fixtures.py"

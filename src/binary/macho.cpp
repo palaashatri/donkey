@@ -11,8 +11,10 @@
 namespace donkey::binary::detail {
 namespace {
 
+constexpr std::uint32_t kLcSegment = 0x1;
 constexpr std::uint32_t kLcSegment64 = 0x19;
 constexpr std::uint32_t kLcSymtab = 0x2;
+constexpr std::uint32_t kLcUnixThread = 0x5;
 constexpr std::uint32_t kLcMain = 0x80000028;
 constexpr std::uint64_t kMaxLoadCommands = 4096;
 constexpr std::uint64_t kMaxSections = 65536;
@@ -79,7 +81,9 @@ bool is_zerofill(std::uint32_t flags) noexcept {
   return type == 0x1U || type == 0xCU || type == 0x12U;
 }
 
-Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t base, bool is_fat) {
+Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t base, bool is_64,
+                        bool is_fat) {
+  const std::uint64_t header_size = is_64 ? 32 : 28;
   auto cputype = reader.u32(4, image.endian);
   if (!cputype) return cputype.diagnostic();
   auto filetype = reader.u32(12, image.endian);
@@ -92,15 +96,15 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
   if (!flags) return flags.diagnostic();
 
   image.architecture = cpu_to_architecture(cputype.value());
-  image.bits = 64;
-  image.format_detail = std::string("Mach-O 64 (") + filetype_name(filetype.value()) +
-                        (is_fat ? ", fat slice)" : ")");
+  image.bits = is_64 ? 64 : 32;
+  image.format_detail = std::string(is_64 ? "Mach-O 64 (" : "Mach-O 32 (") +
+                        filetype_name(filetype.value()) + (is_fat ? ", fat slice)" : ")");
 
   if (command_count.value() > kMaxLoadCommands) {
     return macho_error(Status::ResourceLimit, "macho.too_many_load_commands",
                        "load command count exceeds the limit", 16);
   }
-  if (!checked::in_range(32, command_bytes.value(), reader.size())) {
+  if (!checked::in_range(header_size, command_bytes.value(), reader.size())) {
     return macho_error(Status::InvalidInput, "macho.load_commands_out_of_bounds",
                        "load commands extend past end of file", 20);
   }
@@ -113,9 +117,10 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
     bool present = false;
   } symtab;
   std::optional<std::uint64_t> entry_offset;
+  std::optional<std::uint64_t> thread_entry_va;
 
-  std::uint64_t command_offset = 32;
-  const std::uint64_t command_limit = 32 + command_bytes.value();
+  std::uint64_t command_offset = header_size;
+  const std::uint64_t command_limit = header_size + command_bytes.value();
   for (std::uint64_t i = 0; i < command_count.value(); ++i) {
     auto command_header = reader.slice(command_offset, 8);
     if (!command_header) {
@@ -133,10 +138,13 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
                          "load command size is invalid", command_offset);
     }
 
-    if (command.value() == kLcSegment64) {
-      if (size.value() < 72) {
+    if ((is_64 && command.value() == kLcSegment64) || (!is_64 && command.value() == kLcSegment)) {
+      const std::uint64_t seg_header_size = is_64 ? 72 : 56;
+      const std::uint64_t sec_header_size = is_64 ? 80 : 68;
+      if (size.value() < seg_header_size) {
         return macho_error(Status::InvalidInput, "macho.short_segment_command",
-                           "LC_SEGMENT_64 is too small", command_offset);
+                           is_64 ? "LC_SEGMENT_64 is too small" : "LC_SEGMENT is too small",
+                           command_offset);
       }
       auto segment_bytes = reader.slice(command_offset, size.value());
       if (!segment_bytes) {
@@ -144,12 +152,28 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
       }
       const ByteReader segment(segment_bytes.value());
       const std::string segment_name = fixed_name(segment, 8, 16);
-      auto vmaddr = segment.u64(24, image.endian);
-      auto vmsize = segment.u64(32, image.endian);
-      auto fileoff = segment.u64(40, image.endian);
-      auto filesize = segment.u64(48, image.endian);
-      auto initprot = segment.u32(60, image.endian);
-      auto section_count = segment.u32(64, image.endian);
+      Result<std::uint64_t> vmaddr =
+          is_64 ? segment.u64(24, image.endian)
+          : segment.u32(24, image.endian).has_value()
+              ? Result<std::uint64_t>(segment.u32(24, image.endian).value())
+              : segment.u32(24, image.endian).diagnostic();
+      Result<std::uint64_t> vmsize =
+          is_64 ? segment.u64(32, image.endian)
+          : segment.u32(28, image.endian).has_value()
+              ? Result<std::uint64_t>(segment.u32(28, image.endian).value())
+              : segment.u32(28, image.endian).diagnostic();
+      Result<std::uint64_t> fileoff =
+          is_64 ? segment.u64(40, image.endian)
+          : segment.u32(32, image.endian).has_value()
+              ? Result<std::uint64_t>(segment.u32(32, image.endian).value())
+              : segment.u32(32, image.endian).diagnostic();
+      Result<std::uint64_t> filesize =
+          is_64 ? segment.u64(48, image.endian)
+          : segment.u32(36, image.endian).has_value()
+              ? Result<std::uint64_t>(segment.u32(36, image.endian).value())
+              : segment.u32(36, image.endian).diagnostic();
+      auto initprot = segment.u32(is_64 ? 60 : 44, image.endian);
+      auto section_count = segment.u32(is_64 ? 64 : 48, image.endian);
       if (!vmaddr || !vmsize || !fileoff || !filesize || !initprot || !section_count) {
         return macho_error(Status::InternalError, "macho.segment_read",
                            "failed to read a validated segment", command_offset);
@@ -160,7 +184,7 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
                            "section count exceeds the limit", command_offset);
       }
       const std::uint64_t section_bytes_needed =
-          72 + static_cast<std::uint64_t>(section_count.value()) * 80;
+          seg_header_size + static_cast<std::uint64_t>(section_count.value()) * sec_header_size;
       if (section_bytes_needed > size.value()) {
         return macho_error(Status::InvalidInput, "macho.truncated_sections",
                            "segment section list exceeds the load command", command_offset);
@@ -184,14 +208,22 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
       image.segments.push_back(parsed_segment);
 
       for (std::uint64_t s = 0; s < section_count.value(); ++s) {
-        const std::uint64_t at = 72 + s * 80;
+        const std::uint64_t at = seg_header_size + s * sec_header_size;
         auto name = fixed_name(segment, at, 16);
         auto segment_for_section = fixed_name(segment, at + 16, 16);
-        auto address = segment.u64(at + 32, image.endian);
-        auto section_size = segment.u64(at + 40, image.endian);
-        auto file_offset = segment.u32(at + 48, image.endian);
-        auto alignment = segment.u32(at + 52, image.endian);
-        auto section_flags = segment.u32(at + 64, image.endian);
+        Result<std::uint64_t> address =
+            is_64 ? segment.u64(at + 32, image.endian)
+            : segment.u32(at + 32, image.endian).has_value()
+                ? Result<std::uint64_t>(segment.u32(at + 32, image.endian).value())
+                : segment.u32(at + 32, image.endian).diagnostic();
+        Result<std::uint64_t> section_size =
+            is_64 ? segment.u64(at + 40, image.endian)
+            : segment.u32(at + 36, image.endian).has_value()
+                ? Result<std::uint64_t>(segment.u32(at + 36, image.endian).value())
+                : segment.u32(at + 36, image.endian).diagnostic();
+        auto file_offset = segment.u32(at + (is_64 ? 48 : 40), image.endian);
+        auto alignment = segment.u32(at + (is_64 ? 52 : 44), image.endian);
+        auto section_flags = segment.u32(at + (is_64 ? 64 : 56), image.endian);
         if (!address || !section_size || !file_offset || !alignment || !section_flags) {
           return macho_error(Status::InternalError, "macho.section_read",
                              "failed to read a validated section", command_offset + at);
@@ -230,6 +262,15 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
         return offset.diagnostic();
       }
       entry_offset = offset.value();
+    } else if (!is_64 && command.value() == kLcUnixThread) {
+      // i386 LC_UNIXTHREAD: flavor=1 (x86_THREAD_STATE32), count=16, eip at +56.
+      if (image.architecture == Architecture::X86 && size.value() >= 60) {
+        auto flavor = reader.u32(command_offset + 8, image.endian);
+        auto eip = reader.u32(command_offset + 56, image.endian);
+        if (flavor && eip && flavor.value() == 1U) {
+          thread_entry_va = eip.value();
+        }
+      }
     } else if (command.value() == kLcSymtab) {
       if (size.value() < 24) {
         return macho_error(Status::InvalidInput, "macho.short_symtab_command",
@@ -278,6 +319,8 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
         image.entry_point = text->virtual_address + (entry_offset.value() - text_fileoff);
       }
     }
+  } else if (thread_entry_va.has_value()) {
+    image.entry_point = thread_entry_va.value();
   } else if (filetype.value() == 2 || filetype.value() == 6 || filetype.value() == 7 ||
              filetype.value() == 8) {
     image.partial = true;
@@ -286,12 +329,14 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
   }
 
   if (symtab.present) {
+    const std::uint64_t nlist_size = is_64 ? 16 : 12;
     if (symtab.symbol_count > kMaxSymbols) {
       return macho_error(Status::ResourceLimit, "macho.too_many_symbols",
                          "symbol count exceeds the limit", symtab.symbol_offset);
     }
     if (!checked::in_range(symtab.symbol_offset,
-                           static_cast<std::uint64_t>(symtab.symbol_count) * 16, reader.size()) ||
+                           static_cast<std::uint64_t>(symtab.symbol_count) * nlist_size,
+                           reader.size()) ||
         !checked::in_range(symtab.string_offset, symtab.string_size, reader.size())) {
       return macho_error(Status::InvalidInput, "macho.symbol_table_out_of_bounds",
                          "symbol table extends past end of file", symtab.symbol_offset);
@@ -306,11 +351,15 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
     using Key = std::tuple<std::string, std::uint64_t, std::uint8_t>;
     std::set<Key> seen;
     for (std::uint64_t i = 0; i < symtab.symbol_count; ++i) {
-      const std::uint64_t at = symtab.symbol_offset + i * 16;
+      const std::uint64_t at = symtab.symbol_offset + i * nlist_size;
       auto string_index = reader.u32(at, image.endian);
       auto type = reader.u8(at + 4);
       auto section_index = reader.u8(at + 5);
-      auto value = reader.u64(at + 8, image.endian);
+      Result<std::uint64_t> value =
+          is_64 ? reader.u64(at + 8, image.endian)
+          : reader.u32(at + 8, image.endian).has_value()
+              ? Result<std::uint64_t>(reader.u32(at + 8, image.endian).value())
+              : reader.u32(at + 8, image.endian).diagnostic();
       if (!string_index || !type || !section_index || !value) {
         return macho_error(Status::InternalError, "macho.symbol_read",
                            "failed to read a validated symbol", at);
@@ -365,7 +414,8 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
 
 }  // namespace
 
-Result<void> parse_macho(ByteReader reader, BinaryImage& image) {
+Result<void> parse_macho(ByteReader reader, BinaryImage& image,
+                         Architecture preferred_architecture) {
   const auto little = reader.u32(0, Endian::Little);
   const auto big = reader.u32(0, Endian::Big);
   if (!little || !big) {
@@ -380,14 +430,13 @@ Result<void> parse_macho(ByteReader reader, BinaryImage& image) {
   const bool fat_big = big.value() == 0xCAFEBABEU;
   const bool fat_little = little.value() == 0xCAFEBABEU;
 
-  if (thin32_little || thin32_big) {
-    return macho_error(Status::Unsupported, "macho.unsupported_32_bit",
-                       "only 64-bit Mach-O images are supported", 0);
-  }
-
   if (thin64_little || thin64_big) {
     image.endian = thin64_little ? Endian::Little : Endian::Big;
-    return parse_thin(reader, image, 0, false);
+    return parse_thin(reader, image, 0, true, false);
+  }
+  if (thin32_little || thin32_big) {
+    image.endian = thin32_little ? Endian::Little : Endian::Big;
+    return parse_thin(reader, image, 0, false, false);
   }
 
   if (!fat_big && !fat_little) {
@@ -406,10 +455,12 @@ Result<void> parse_macho(ByteReader reader, BinaryImage& image) {
 
   struct Slice {
     std::uint32_t cpu = 0;
+    Architecture arch = Architecture::Unknown;
     std::uint64_t offset = 0;
     std::uint64_t size = 0;
   };
-  std::optional<Slice> chosen;
+  std::vector<Slice> slices;
+  slices.reserve(architecture_count.value());
   for (std::uint64_t i = 0; i < architecture_count.value(); ++i) {
     const std::uint64_t at = 8 + i * 20;
     auto cpu = reader.u32(at, fat_endian);
@@ -423,20 +474,41 @@ Result<void> parse_macho(ByteReader reader, BinaryImage& image) {
       return macho_error(Status::InvalidInput, "macho.fat_slice_out_of_bounds",
                          "fat slice extends past end of file", offset.value());
     }
-    const Slice slice{cpu.value(), offset.value(), size.value()};
-    if (!chosen.has_value()) {
-      chosen = slice;
-    }
-    if (slice.cpu == 0x0100000CU) {  // arm64 preferred
-      chosen = slice;
-      break;
-    }
-    if (slice.cpu == 0x01000007U && chosen->cpu != 0x0100000CU) {
-      chosen = slice;
-    }
+    const Architecture arch = cpu_to_architecture(cpu.value());
+    slices.push_back(Slice{cpu.value(), arch, offset.value(), size.value()});
+    image.fat_architectures.push_back(arch);
   }
-  if (!chosen.has_value()) {
+  if (slices.empty()) {
     return macho_error(Status::InvalidInput, "macho.empty_fat", "fat binary contains no slices", 4);
+  }
+
+  std::optional<Slice> chosen;
+  if (preferred_architecture != Architecture::Unknown) {
+    for (const Slice& slice : slices) {
+      if (slice.arch == preferred_architecture) {
+        chosen = slice;
+        break;
+      }
+    }
+    if (!chosen.has_value()) {
+      return macho_error(Status::InvalidInput, "macho.slice_not_found",
+                         "fat Mach-O does not contain a slice for architecture '" +
+                             std::string(architecture_name(preferred_architecture)) + "'",
+                         4);
+    }
+  } else {
+    for (const Slice& slice : slices) {
+      if (!chosen.has_value()) {
+        chosen = slice;
+      }
+      if (slice.arch == Architecture::AArch64) {
+        chosen = slice;
+        break;
+      }
+      if (slice.arch == Architecture::X86_64 && chosen->arch != Architecture::AArch64) {
+        chosen = slice;
+      }
+    }
   }
 
   auto slice_bytes = reader.slice(chosen->offset, chosen->size);
@@ -450,15 +522,24 @@ Result<void> parse_macho(ByteReader reader, BinaryImage& image) {
     return macho_error(Status::InvalidInput, "macho.truncated_slice",
                        "fat slice is too small for a Mach-O header", chosen->offset);
   }
+  bool slice_is_64 = false;
   if (thin_little.value() == 0xFEEDFACFU) {
     image.endian = Endian::Little;
+    slice_is_64 = true;
   } else if (thin_big.value() == 0xFEEDFACFU) {
     image.endian = Endian::Big;
+    slice_is_64 = true;
+  } else if (thin_little.value() == 0xFEEDFACEU) {
+    image.endian = Endian::Little;
+    slice_is_64 = false;
+  } else if (thin_big.value() == 0xFEEDFACEU) {
+    image.endian = Endian::Big;
+    slice_is_64 = false;
   } else {
     return macho_error(Status::Unsupported, "macho.unsupported_slice",
-                       "selected fat slice is not a 64-bit Mach-O image", chosen->offset);
+                       "selected fat slice is not a supported Mach-O image", chosen->offset);
   }
-  return parse_thin(thin, image, chosen->offset, true);
+  return parse_thin(thin, image, chosen->offset, slice_is_64, true);
 }
 
 }  // namespace donkey::binary::detail
