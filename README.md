@@ -23,7 +23,7 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 | Platform | Packages | Verified by |
 |---|---|---|
 | Linux x86-64 | `.deb`, `.rpm`, `.tar.gz` (glibc ≥ 2.35) | CI (Ubuntu 22.04 build; install-and-run on Ubuntu 22.04/24.04, Debian 12, Fedora 41, Arch) and local GUI automation under Xvfb |
-| macOS 11+ (universal arm64/x86_64) | `.dmg`, `.zip` | CI on macOS 14 (arm64) and earlier manual testing on macOS arm64; ad-hoc signed, not notarised |
+| macOS 11+ (universal arm64/x86_64) | `.dmg`, `.zip` | CI on macOS 15 (arm64) and earlier manual testing on macOS arm64; ad-hoc signed, not notarised |
 | Windows 10/11 x64 | `setup.exe` (NSIS), portable `.zip` | CI on Windows Server 2022 (silent install, run, uninstall) and local wine runs |
 | FreeBSD 14 amd64 | `.pkg`, `.tar.gz` | CI in a FreeBSD 14.3 VM (CLI and software-rendered GUI); no native debugger |
 
@@ -48,11 +48,19 @@ Donkey provides a fast, native Dear ImGui + SDL3 docked desktop workbench with s
 
 ### Mach-O AArch64 Reverse Engineering Workspace
 ![Mach-O AArch64 Workspace](docs/images/donkey-overview-macho.png)
-*Mach-O AArch64 binary loaded in Donkey: docked panels showing Binary Overview, Functions, Interactive Disassembly with call/jump xrefs, Control-Flow Graph with block highlights, Decompiler pseudocode, and Debugger controls with runtime-to-static ASLR translation.*
+*Mach-O AArch64 binary loaded in Donkey: docked panels showing Binary Overview, Functions, Interactive Disassembly with call/jump xrefs, Control-Flow Graph with block highlights, and Decompiler pseudocode. (Captured before the native debugger existed; the Debugger panel in this image is the simulation adapter, and macOS has no native debugger yet.)*
 
 ### ELF x86-64 SSA Decompiler & Stack Frame Variable Recovery
 ![ELF x86-64 Decompiler & Disassembly](docs/images/donkey-decompiler-x86.png)
 *ELF x86-64 binary decompiled in Donkey: C-like decompilation with SSA form, dominator-verified control flow, recovered local stack variables (`local_X`), parameter inference, address-linked source mapping, synchronized hex inspection, and cross references.*
+
+### Native debugging on Linux
+![Native debugger stopped at a breakpoint](docs/images/donkey-linux-native-debugger.png)
+*Linux x86-64 (Xvfb, Mesa lavapipe): a PIE test program launched under the ptrace debugger and stopped at a breakpoint on `donkey_debuggee_tick`; the runtime address `0x55c670115149` is mapped back through the live ASLR base to static `0x1149`, and the decompiler follows the stop.*
+
+### Hex editing with staged patches
+![Hex editor with a staged patch](docs/images/donkey-linux-hex-patch.png)
+*Four bytes at `0x1060` replaced with `nop`s: the patch is staged on a copy (highlighted in orange), can be reverted, and is exported to a new file; the opened binary is never modified.*
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)
