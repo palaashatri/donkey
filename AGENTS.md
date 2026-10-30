@@ -2,7 +2,7 @@
 
 Donkey is a planned free, open-source, native binary reverse-engineering suite (disassembler, analysis graphs, decompiler, debugger) written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core.
 
-**Implementation started on 2026-10-30.** The build system, foundation contracts, bounded ELF/PE/Mach-O import, Capstone decoding, linear analysis, `donkey-cli info|disasm|strings|functions|xrefs|analyze` and the SDL3 + Dear ImGui workspace (`donkey`) work on macOS arm64; project persistence, CFG/function extents, decompiler and debugger are not implemented yet. Do not describe unverified platforms or unfinished milestones as working in READMEs, PRs or release notes. Check the truth table in `docs/DESIGN.md` §17.2 before claiming anything works.
+**Implementation started on 2026-10-30.** The build system, foundation contracts, bounded ELF/PE/Mach-O import, Capstone decoding, seeded analysis with a bounded CFG and estimated function extents, `donkey-cli info|disasm|strings|functions|cfg|xrefs|analyze` and the SDL3 + Dear ImGui workspace (`donkey`) work on macOS arm64; project persistence, graph rendering, decompiler and debugger are not implemented yet. Do not describe unverified platforms or unfinished milestones as working in READMEs, PRs or release notes. Check the truth table in `docs/DESIGN.md` §17.2 before claiming anything works.
 
 The full design — architecture, module rules, decompiler pipeline, debugger model, milestones M0–M12, acceptance tests and backlog — is in [`docs/DESIGN.md`](docs/DESIGN.md). This file is the short instruction sheet.
 

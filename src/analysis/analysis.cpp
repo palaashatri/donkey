@@ -275,7 +275,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
 
   for (const std::uint64_t address : seeds) {
-    FunctionSeed seed;
+    Function seed;
     seed.address = address;
     seed.from_symbol = named.count(address) != 0;
     for (const Symbol& symbol : image.symbols) {
@@ -293,6 +293,33 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
   for (std::size_t i = 0; i < result.functions.size(); ++i) {
     result.functions[i].id = FunctionId{i + 1};
+  }
+
+  if (options.build_control_flow) {
+    auto graph = build_control_flow_graph(image, result.instructions, result.functions, options);
+    if (!graph) {
+      result.partial = true;
+      result.diagnostics.push_back(graph.diagnostic());
+    } else {
+      result.cfg = std::move(graph.value());
+      for (const Function& function : result.cfg.functions) {
+        for (Function& existing : result.functions) {
+          if (existing.address == function.address) {
+            existing.end_address = function.end_address;
+            existing.block_count = function.block_count;
+            existing.has_extent = function.has_extent;
+            existing.estimated = function.estimated;
+            break;
+          }
+        }
+      }
+      if (result.cfg.partial) {
+        result.partial = true;
+      }
+      for (const Diagnostic& diagnostic : result.cfg.diagnostics) {
+        result.diagnostics.push_back(diagnostic);
+      }
+    }
   }
 
   std::sort(result.xrefs.begin(), result.xrefs.end(), [](const Xref& a, const Xref& b) {

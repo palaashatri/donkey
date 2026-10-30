@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
   if (command == "functions") {
     return donkey::cli::command_functions(rest);
   }
+  if (command == "cfg") {
+    return donkey::cli::command_cfg(rest);
+  }
   if (command == "xrefs") {
     return donkey::cli::command_xrefs(rest);
   }
