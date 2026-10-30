@@ -129,6 +129,7 @@ if(DONKEY_BUILD_UI)
     src/ui/components.cpp
     src/ui/decompiler_view.cpp
     src/ui/disasm_view.cpp
+    src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
     src/ui/session.cpp

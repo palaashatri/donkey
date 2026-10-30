@@ -31,6 +31,16 @@ struct UiState {
   std::string pseudocode_status;
   std::string pseudocode_code;
   std::string pseudocode_text;
+
+  // --- CFG graph view -------------------------------------------------------
+  // Pan/zoom is render-thread state. The layout is re-derived per frame from
+  // the immutable analysis; blocks are bounded by the CFG builder.
+  float graph_zoom = 0.0f;  // 0 = fit on first draw
+  ImVec2 graph_pan{0.0f, 0.0f};
+  ImVec2 graph_canvas_size{0.0f, 0.0f};
+  bool graph_user_adjusted = false;
+  const Document* graph_document = nullptr;
+  std::uint64_t graph_function = 0;
 };
 
 class Workspace {
@@ -64,6 +74,7 @@ class Workspace {
   bool show_functions_ = true;
   bool show_disassembly_ = true;
   bool show_decompiler_ = true;
+  bool show_graph_ = true;
   bool show_hex_ = true;
   bool show_strings_ = true;
   bool show_xrefs_ = true;

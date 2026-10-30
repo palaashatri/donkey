@@ -10,6 +10,7 @@ void sections(const Document& document, UiState& state);
 void functions(const Document& document, UiState& state);
 void disassembly(const Document& document, UiState& state);
 void decompiler(const Document& document, UiState& state);
+void cfg_graph(const Document& document, UiState& state);
 void hex(const Document& document, UiState& state);
 void strings(const Document& document, UiState& state);
 void xrefs(const Document& document, UiState& state);

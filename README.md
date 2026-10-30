@@ -10,10 +10,10 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 - Deterministic analysis: instructions, call/data xrefs, ASCII and UTF-16LE strings, seeded functions, and a bounded control-flow graph with basic blocks, branch edges and estimated per-function extents. Indirect branches mark results `Partial`/`estimated`.
 - IR-based decompiler for a documented x86-64 subset: instructions are lifted into typed IR that a verifier checks (operand widths, block targets, terminators, statement shape) before a C-like printer runs. Unsupported instructions and architectures return explicit `Unsupported`/`Partial` results, never guessed pseudocode. Other architectures are not lifted yet.
 - SQLite project storage (pinned 3.46.1 amalgamation): `PRAGMA user_version` migrations, transactional image/section/function import with re-import replacing stale derived rows, integrity checks, and rejection of corrupt or newer-schema databases without mutating them.
-- A SDL3 + Dear ImGui desktop shell (`donkey [binary]`) with a docked workspace: overview, sections, functions, disassembly, decompiler, hex, strings, xrefs and diagnostics panels. Loading and analysis run on a worker thread so the UI stays responsive.
+- A SDL3 + Dear ImGui desktop shell (`donkey [binary]`) with a docked workspace: overview, sections, functions, disassembly, a CFG graph with pan/zoom and block selection, decompiler, hex, strings, xrefs and diagnostics panels. Loading and analysis run on a worker thread so the UI stays responsive.
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
 
-Not implemented yet: GUI project save/reopen, project backup/restore, graph rendering, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
+Not implemented yet: GUI project save/reopen, project backup/restore, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)
