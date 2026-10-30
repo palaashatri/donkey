@@ -14,7 +14,7 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
 - libFuzzer harnesses for the parse→analyze→lift→verify→print pipeline and for verifier/printer agreement, with a persisted corpus; fuzzing has already found and fixed three real lifter defects.
 
-Not implemented yet: GUI project save/reopen, project backup/restore, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
+Not implemented yet: project backup/restore, native project picker beyond the path dialog, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)

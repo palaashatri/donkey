@@ -32,17 +32,27 @@ const Function* selected_function(const Document& document, std::uint64_t addres
 /// Never runs on a background thread: the lifter is bounded and only reads
 /// the immutable analysis, so it cannot stall the session's worker.
 void refresh(UiState& state, const Document& document, const Function& function) {
-  if (state.pseudocode_document == &document && state.pseudocode_address == function.address) {
+  const std::string* renamed =
+      state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
+  const std::string name = renamed != nullptr ? *renamed : function.name;
+  if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
+      state.pseudocode_function == name) {
     return;
   }
   state.pseudocode_document = &document;
   state.pseudocode_address = function.address;
-  state.pseudocode_function = function.name;
+  state.pseudocode_function = name;
   state.pseudocode_status.clear();
   state.pseudocode_code.clear();
   state.pseudocode_text.clear();
 
-  auto lifted = lift_function(document.loaded.image, document.analysis, function);
+  // A user rename only changes the printed name, so lift a cheap copy of the
+  // function record instead of mutating the shared analysis.
+  Function target = function;
+  if (renamed != nullptr) {
+    target.name = *renamed;
+  }
+  auto lifted = lift_function(document.loaded.image, document.analysis, target);
   if (!lifted) {
     state.pseudocode_status = "Unsupported";
     state.pseudocode_code = lifted.diagnostic().code;

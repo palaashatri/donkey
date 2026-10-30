@@ -7,8 +7,9 @@ add_executable(donkey_unit_tests
   unit/foundation_test.cpp
   unit/ir_test.cpp
   unit/project_test.cpp
+  unit/session_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::project donkey::ir donkey::analysis donkey::sqlite GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
 )

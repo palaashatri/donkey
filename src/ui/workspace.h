@@ -22,6 +22,18 @@ struct UiState {
   bool show_hex_bytes = true;
   bool follow_selection = true;
 
+  /// Current annotation snapshot for this frame, owned by the caller. Views
+  /// only read it; edits go through Workspace's modal into the session.
+  const Annotations* annotations = nullptr;
+
+  // --- annotation editor ----------------------------------------------------
+  // Views set a request; Workspace owns the modal and forwards the result to
+  // Session::set_annotation, which mutates an immutable snapshot off-thread.
+  bool annotation_modal_requested = false;
+  AnnotationKind annotation_kind = AnnotationKind::Rename;
+  std::uint64_t annotation_address = 0;
+  char annotation_buffer[512] = {};
+
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded but still pure CPU work, so the render thread never redoes it
   /// every frame. The document pointer is the cache key: a reload invalidates.
@@ -81,7 +93,10 @@ class Workspace {
   bool show_diagnostics_ = true;
   bool show_about_ = false;
   char path_buffer_[1024] = {};
+  char project_path_buffer_[1024] = {};
   bool open_path_popup_ = false;
+  bool open_project_popup_ = false;
+  bool save_project_popup_ = false;
   std::function<void()> open_file_handler_;
 };
 

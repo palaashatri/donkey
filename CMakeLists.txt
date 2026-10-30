@@ -106,11 +106,26 @@ target_include_directories(donkey_project
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_link_libraries(donkey_project
-  PUBLIC donkey::analysis
-  PRIVATE donkey::sqlite
+  PUBLIC donkey::analysis donkey::sqlite
 )
 target_compile_features(donkey_project PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_project)
+
+# The session owns loading, analysis and project persistence on a worker
+# thread. It has no SDL or ImGui dependency, so it is built headless and is
+# covered by the unit tests even when the desktop shell is disabled.
+add_library(donkey_session STATIC
+  src/ui/session.cpp
+)
+add_library(donkey::session ALIAS donkey_session)
+target_include_directories(donkey_session
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/ui>
+)
+target_link_libraries(donkey_session PUBLIC donkey::analysis donkey::project)
+target_compile_features(donkey_session PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_session)
 
 # ---------------------------------------------------------------------------
 # Executables
@@ -133,7 +148,6 @@ if(DONKEY_BUILD_UI)
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
-    src/ui/session.cpp
     src/ui/theme.cpp
     src/ui/workspace.cpp
   )
@@ -143,8 +157,8 @@ if(DONKEY_BUILD_UI)
       $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
   )
   target_link_libraries(donkey_ui
-    PUBLIC donkey::analysis
-    PRIVATE donkey::ir donkey_imgui
+    PUBLIC donkey::analysis donkey::session
+    PRIVATE donkey::ir donkey::project donkey_imgui
   )
   target_compile_features(donkey_ui PUBLIC cxx_std_20)
   donkey_apply_warnings(donkey_ui)

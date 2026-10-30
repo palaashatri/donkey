@@ -13,9 +13,9 @@ void print_usage() {
                "donkey - desktop binary workbench (early implementation)\n"
                "\n"
                "Usage:\n"
-               "  donkey [<binary>] [--exit-after-frames N]\n"
+               "  donkey [<binary>] [--project <database>] [--exit-after-frames N]\n"
                "\n"
-               "Opening a file only reads it; nothing is executed.\n");
+               "Opening a file or project only reads it; nothing is executed.\n");
 }
 
 }  // namespace
@@ -27,6 +27,14 @@ int main(int argc, char** argv) {
     if (argument == "--help" || argument == "-h") {
       print_usage();
       return 0;
+    }
+    if (argument == "--project") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "donkey: --project needs a database path\n");
+        return 2;
+      }
+      options.initial_project = std::string(argv[++i]);
+      continue;
     }
     if (argument == "--exit-after-frames") {
       if (i + 1 >= argc) {
