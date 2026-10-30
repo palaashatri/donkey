@@ -201,6 +201,31 @@ TEST(Binary, MapsOffsetsAndAddresses) {
   EXPECT_EQ(bad_offset.diagnostic().code, "image.unmapped_offset");
 }
 
+TEST(Binary, SectionsWithoutAddressNeverClaimVirtualSpace) {
+  auto image = donkey::load_binary_file(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(image.has_value());
+
+  // .symtab/.strtab/.shstrtab have sh_addr == 0. They used to be mapped as if
+  // they lived at VA 0, so VA 0 resolved to their file contents.
+  const auto zero = image.value().va_to_file_offset(0x0);
+  EXPECT_FALSE(zero.has_value());
+  EXPECT_EQ(zero.diagnostic().code, "image.unmapped_va");
+
+  for (std::uint64_t va = 0x0; va < 0x100; va += 0x8) {
+    EXPECT_FALSE(image.value().va_to_file_offset(va).has_value()) << va;
+    EXPECT_EQ(image.value().section_for_va(va), nullptr) << va;
+  }
+
+  const auto* text = image.value().section_for_va(0x400100);
+  ASSERT_NE(text, nullptr);
+  EXPECT_EQ(text->name, ".text");
+
+  // File offset 0 is still reachable through the LOAD segment.
+  const auto mapped = image.value().file_offset_to_va(0x0);
+  ASSERT_TRUE(mapped.has_value());
+  EXPECT_EQ(mapped.value(), 0x400000U);
+}
+
 TEST(Binary, LoadsPeImportsAndExports) {
   auto image = donkey::load_binary_file(fixture_path("tiny-pe-x86_64.exe"));
   ASSERT_TRUE(image.has_value()) << image.diagnostic().message;

@@ -1093,9 +1093,9 @@ No freehand `100%`, `production ready`, or `feature parity` without a test-groun
 
 | Milestone | State | Evidence | Blocker/next action |
 |---|---|---|---|
-| M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless preset configures/builds; 51/51 CTest pass; `donkey-cli 0.1.0`; clang-format clean. GUI shell and CI results outstanding. | Implement T004 SDL3/ImGui shell; obtain CI results |
-| M1 Import/UI | IN_PROGRESS | 2026-10-30 macOS arm64: ELF/PE/Mach-O (thin and fat) metadata + imports/exports, offset↔VA mapping, SHA-256, `donkey-cli info --json`; truncation sweep and header-mutation tests pass. No GUI import or project persistence yet. | Build UI workspace and project save/reopen |
-| M2 Disassembly | IN_PROGRESS | 2026-10-30 macOS arm64: Capstone 5.0.9 decode for x86/x86-64/AArch64, call/jump/return classification, direct targets, x86 RIP-relative data refs; `disasm`, `strings`, `functions`, `xrefs`, `analyze` CLI commands with schema-versioned JSON; 51/51 CTest pass. Linear/seeded analysis only — no CFG, no function extents, no hex view, no navigable UI. | CFG + function extents, hex view, GUI workspace |
+| M0 Foundation | IN_PROGRESS | 2026-10-30 macOS arm64: headless and dev presets configure/build; 54/54 CTest pass (incl. display-dependent UI smoke tests); `donkey-cli 0.1.0`; SDL3 3.4.18 + ImGui 1.93.0-docking shell opens, docks and closes; clang-format clean. CI results outstanding. | Obtain CI results; Linux/Windows validation |
+| M1 Import/UI | IN_PROGRESS | 2026-10-30 macOS arm64: ELF/PE/Mach-O (thin and fat) metadata + imports/exports, offset↔VA mapping, SHA-256, `donkey-cli info --json`; truncation sweep and header-mutation tests pass; GUI opens files by argument, menu dialog, native picker and drag-drop and renders sections/functions/strings/xrefs/diagnostics. No project persistence yet. | Project save/reopen |
+| M2 Disassembly | IN_PROGRESS | 2026-10-30 macOS arm64: Capstone 5.0.9 decode for x86/x86-64/AArch64, call/jump/return classification, direct targets, x86 RIP-relative data refs; `disasm`, `strings`, `functions`, `xrefs`, `analyze` CLI commands with schema-versioned JSON; docked disassembly, hex and title views with filtering and selection. Linear/seeded analysis only — no CFG, no function extents. | CFG + function extents |
 | M3 Analysis graphs | NOT_STARTED | None | M2 foundations |
 | M4 IR/isolation | NOT_STARTED | None | M3 graph + decoder semantics |
 | M5 Decompiler | NOT_STARTED | None | Verified lifter and IR |

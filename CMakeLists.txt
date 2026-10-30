@@ -13,6 +13,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(DONKEY_BUILD_UI "Build the SDL3 + Dear ImGui desktop shell" OFF)
+option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 
@@ -85,6 +86,38 @@ donkey_apply_warnings(donkey_analysis)
 # ---------------------------------------------------------------------------
 
 add_subdirectory(apps/donkey-cli)
+
+# ---------------------------------------------------------------------------
+# Desktop shell (SDL3 + Dear ImGui). Never a dependency of the core targets.
+# ---------------------------------------------------------------------------
+
+if(DONKEY_BUILD_UI)
+  include(DonkeyUiDependencies)
+
+  add_library(donkey_ui STATIC
+    src/ui/application.cpp
+    src/ui/components.cpp
+    src/ui/disasm_view.cpp
+    src/ui/hex_view.cpp
+    src/ui/panels_view.cpp
+    src/ui/session.cpp
+    src/ui/theme.cpp
+    src/ui/workspace.cpp
+  )
+  add_library(donkey::ui ALIAS donkey_ui)
+  target_include_directories(donkey_ui
+    PUBLIC
+      $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  )
+  target_link_libraries(donkey_ui
+    PUBLIC donkey::analysis
+    PRIVATE donkey_imgui
+  )
+  target_compile_features(donkey_ui PUBLIC cxx_std_20)
+  donkey_apply_warnings(donkey_ui)
+
+  add_subdirectory(apps/donkey)
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests
