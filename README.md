@@ -17,6 +17,18 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
 - libFuzzer harnesses for the parse→analyze→lift→verify→print pipeline and for verifier/printer agreement, with a persisted corpus; fuzzing has already found and fixed three real lifter defects.
 
+## Workbench Showcase
+
+Donkey provides a fast, native Dear ImGui + SDL3 docked desktop workbench on macOS with synchronised disassembly, control flow graphs, an SSA-based decompiler, hex editor, debugger panel, and SQLite project annotations:
+
+### Mach-O AArch64 Reverse Engineering Workspace
+![Mach-O AArch64 Workspace](docs/images/donkey-overview-macho.png)
+*Mach-O AArch64 binary loaded in Donkey: docked panels showing Binary Overview, Functions, Interactive Disassembly with call/jump xrefs, Control-Flow Graph with block highlights, Decompiler pseudocode, and Debugger controls with runtime-to-static ASLR translation.*
+
+### ELF x86-64 SSA Decompiler & Stack Frame Variable Recovery
+![ELF x86-64 Decompiler & Disassembly](docs/images/donkey-decompiler-x86.png)
+*ELF x86-64 binary decompiled in Donkey: C-like decompilation with SSA form, dominator-verified control flow, recovered local stack variables (`local_X`), parameter inference, address-linked source mapping, synchronized hex inspection, and cross references.*
+
 Not implemented yet: native project picker beyond the path dialog, target memory writes, remote debug protocols, struct widening, floating-point/vector and stack-passed parameters, varargs, 32-bit ARM lifting, and the rest of the x86 and AArch64 instruction sets. Anything not covered by the test suite should be treated as unverified.
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
@@ -27,11 +39,18 @@ Not implemented yet: native project picker beyond the path dialog, target memory
 Requires CMake ≥ 3.25, Ninja, and a C++20 compiler (AppleClang 16+ verified so far). Dependencies are fetched with `FetchContent` at pinned commits.
 
 ```bash
+# Headless core and CLI:
 cmake --preset headless-macos
 cmake --build --preset headless-macos --parallel
 ctest --preset headless-macos --output-on-failure
 ./build/headless-macos/apps/donkey-cli/donkey-cli info tests/fixtures/binaries/tiny-macho-arm64
 ./build/headless-macos/apps/donkey-cli/donkey-cli info tests/fixtures/binaries/tiny-elf-x86_64 --json
+
+# Desktop workbench (Dear ImGui + SDL3 GUI):
+cmake --preset dev-macos
+cmake --build --preset dev-macos --parallel
+ctest --preset dev-macos --output-on-failure
+./build/dev-macos/apps/donkey/donkey tests/fixtures/binaries/tiny-macho-arm64
 ```
 
 Linux and Windows presets exist but have not been validated.
