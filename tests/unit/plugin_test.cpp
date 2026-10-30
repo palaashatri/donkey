@@ -72,5 +72,39 @@ TEST(PluginTest, IsolatedHangFixtureTimesOutCleanly) {
   EXPECT_EQ(exec.error_code, "plugin.timeout");
 }
 
+TEST(PluginTest, InspectManifestIsolatedValidPlugin) {
+  auto res = PluginHost::inspect_manifest_isolated(TEST_PLUGIN_VALID_PATH, 3);
+  ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+
+  const auto& manifest = res.value();
+  EXPECT_EQ(manifest.id, "org.donkey.test.valid");
+  EXPECT_EQ(manifest.name, "Valid Test Plugin");
+  EXPECT_EQ(manifest.version, "1.0.0");
+  EXPECT_EQ(manifest.abi_version_major, 1U);
+  EXPECT_EQ(manifest.abi_version_minor, 0U);
+  EXPECT_EQ(manifest.requested_capabilities, DONKEY_CAP_ANALYSIS);
+}
+
+TEST(PluginTest, InspectManifestIsolatedCatchesCrashInLibraryConstructor) {
+  // Acceptance scenario: A library whose static constructor crashes (SIGSEGV)
+  // must never crash the parent process when inspected in isolation.
+  auto res = PluginHost::inspect_manifest_isolated(TEST_PLUGIN_CTOR_CRASH_PATH, 3);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_TRUE(res.diagnostic().code == "plugin.crashed" ||
+              res.diagnostic().code == "plugin.worker_terminated");
+}
+
+TEST(PluginTest, IsolatedNonTerminatedOutputIsSafelyBounded) {
+  // Acceptance scenario: Plugin returns buffer without null-terminator.
+  // Supervisor must handle safely without memory out-of-bounds.
+  auto res =
+      PluginHost::execute_isolated(TEST_PLUGIN_NON_TERMINATED_PATH, "{}", DONKEY_CAP_NONE, 3);
+  ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+  const auto& exec = res.value();
+  EXPECT_TRUE(exec.success);
+  EXPECT_FALSE(exec.crashed);
+  EXPECT_FALSE(exec.output_json.empty());
+}
+
 }  // namespace
 }  // namespace donkey

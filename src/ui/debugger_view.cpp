@@ -40,7 +40,8 @@ void debugger(const Document& document, UiState& state) {
       adapter->state() == debug::SessionState::Exited) {
     if (ImGui::Button("Launch Target")) {
       debug::LaunchConfig cfg;
-      cfg.binary_path = !document.loaded.image.path.empty() ? document.loaded.image.path : "/bin/ls";
+      cfg.binary_path =
+          !document.loaded.image.path.empty() ? document.loaded.image.path : "/bin/ls";
       cfg.stop_at_entry = true;
       (void)adapter->launch(cfg);
     }

@@ -1,3 +1,126 @@
+#if defined(_WIN32)
+#include "debug_internal.h"
+
+namespace donkey::debug {
+
+LocalDebugAdapter::LocalDebugAdapter() {
+  translator_.static_base = 0;
+  translator_.runtime_base = 0;
+  translator_.size = 0;
+}
+
+LocalDebugAdapter::~LocalDebugAdapter() = default;
+
+void LocalDebugAdapter::clean_child() {}
+
+DebugCapabilities LocalDebugAdapter::capabilities() const noexcept {
+  return DebugCapabilities{};
+}
+
+Result<bool> LocalDebugAdapter::launch(const LaunchConfig&) {
+  state_ = SessionState::Error;
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::attach(std::uint32_t) {
+  state_ = SessionState::Error;
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::detach() {
+  state_ = SessionState::Detached;
+  return true;
+}
+
+Result<bool> LocalDebugAdapter::terminate() {
+  state_ = SessionState::Exited;
+  return true;
+}
+
+Result<bool> LocalDebugAdapter::resume() {
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::pause() {
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::step_into() {
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::step_over() {
+  return step_into();
+}
+
+Result<bool> LocalDebugAdapter::step_out() {
+  return step_into();
+}
+
+Result<Breakpoint> LocalDebugAdapter::set_breakpoint(std::uint64_t) {
+  return make_error<Breakpoint>(Status::Unsupported, "debug.unsupported_platform",
+                                "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::remove_breakpoint(std::uint64_t) {
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<std::vector<std::byte>> LocalDebugAdapter::read_memory(std::uint64_t, std::size_t) {
+  return make_error<std::vector<std::byte>>(
+      Status::Unsupported, "debug.unsupported_platform",
+      "Local process debugging is not supported on Windows host");
+}
+
+Result<std::size_t> LocalDebugAdapter::write_memory(std::uint64_t, std::span<const std::byte>) {
+  return make_error<std::size_t>(Status::Unsupported, "debug.unsupported_platform",
+                                 "Local process debugging is not supported on Windows host");
+}
+
+Result<std::vector<RegisterValue>> LocalDebugAdapter::read_registers() {
+  return make_error<std::vector<RegisterValue>>(
+      Status::Unsupported, "debug.unsupported_platform",
+      "Local process debugging is not supported on Windows host");
+}
+
+Result<bool> LocalDebugAdapter::write_register(const std::string&, std::uint64_t) {
+  return make_error<bool>(Status::Unsupported, "debug.unsupported_platform",
+                          "Local process debugging is not supported on Windows host");
+}
+
+Result<std::vector<StackFrame>> LocalDebugAdapter::call_stack() {
+  return make_error<std::vector<StackFrame>>(
+      Status::Unsupported, "debug.unsupported_platform",
+      "Local process debugging is not supported on Windows host");
+}
+
+Result<std::vector<DebugThread>> LocalDebugAdapter::threads() {
+  return make_error<std::vector<DebugThread>>(
+      Status::Unsupported, "debug.unsupported_platform",
+      "Local process debugging is not supported on Windows host");
+}
+
+Result<std::vector<DebugModule>> LocalDebugAdapter::modules() {
+  return make_error<std::vector<DebugModule>>(
+      Status::Unsupported, "debug.unsupported_platform",
+      "Local process debugging is not supported on Windows host");
+}
+
+Result<StopInfo> LocalDebugAdapter::poll_events() {
+  return make_error<StopInfo>(Status::Unsupported, "debug.unsupported_platform",
+                              "Local process debugging is not supported on Windows host");
+}
+
+}  // namespace donkey::debug
+
+#else
+
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -32,11 +155,11 @@ void LocalDebugAdapter::clean_child() {
 DebugCapabilities LocalDebugAdapter::capabilities() const noexcept {
   DebugCapabilities caps;
   caps.can_launch = true;
-  caps.can_attach = true;
-  caps.can_step = true;
-  caps.can_read_memory = true;
-  caps.can_write_memory = true;
-  caps.can_software_breakpoints = true;
+  caps.can_attach = false;
+  caps.can_step = false;
+  caps.can_read_memory = false;
+  caps.can_write_memory = false;
+  caps.can_software_breakpoints = false;
   caps.can_hardware_breakpoints = false;
   return caps;
 }
@@ -154,23 +277,16 @@ Result<bool> LocalDebugAdapter::step_out() {
 
 Result<Breakpoint> LocalDebugAdapter::set_breakpoint(std::uint64_t address) {
   Breakpoint bp;
-  bp.id = breakpoints_.size() + 1;
+  bp.id = address;
   bp.address = address;
   bp.enabled = true;
-  bp.hit_count = 0;
   breakpoints_[address] = bp;
   return bp;
 }
 
 Result<bool> LocalDebugAdapter::remove_breakpoint(std::uint64_t id_or_address) {
-  for (auto it = breakpoints_.begin(); it != breakpoints_.end(); ++it) {
-    if (it->second.id == id_or_address || it->first == id_or_address) {
-      breakpoints_.erase(it);
-      return true;
-    }
-  }
-  return make_error<bool>(Status::InvalidInput, "debug.breakpoint_not_found",
-                          "breakpoint not found");
+  breakpoints_.erase(id_or_address);
+  return true;
 }
 
 Result<std::vector<std::byte>> LocalDebugAdapter::read_memory(std::uint64_t address,
@@ -181,16 +297,17 @@ Result<std::vector<std::byte>> LocalDebugAdapter::read_memory(std::uint64_t addr
 }
 
 Result<std::size_t> LocalDebugAdapter::write_memory(std::uint64_t address,
-                                                    std::span<const std::byte> data) {
+                                                    std::span<const std::byte> bytes) {
   (void)address;
-  return data.size();
+  return bytes.size();
 }
 
 Result<std::vector<RegisterValue>> LocalDebugAdapter::read_registers() {
   std::vector<RegisterValue> regs;
-  regs.push_back(RegisterValue{"pc", translator_.runtime_base + 0x1000, 8});
-  regs.push_back(RegisterValue{"sp", 0x7ffe0000, 8});
-  regs.push_back(RegisterValue{"fp", 0x7ffe0020, 8});
+  regs.push_back(
+      RegisterValue{.name = "pc", .value = translator_.runtime_base + 0x1000, .size = 8});
+  regs.push_back(RegisterValue{.name = "sp", .value = 0x7ffe0000, .size = 8});
+  regs.push_back(RegisterValue{.name = "fp", .value = 0x7ffe0020, .size = 8});
   return regs;
 }
 
@@ -202,28 +319,28 @@ Result<bool> LocalDebugAdapter::write_register(const std::string& name, std::uin
 
 Result<std::vector<StackFrame>> LocalDebugAdapter::call_stack() {
   std::vector<StackFrame> frames;
-  StackFrame f;
-  f.index = 0;
-  f.instruction_pointer = translator_.runtime_base + 0x1000;
-  f.stack_pointer = 0x7ffe0000;
-  f.frame_pointer = 0x7ffe0020;
-  f.module_name = "target";
-  f.function_name = "entry";
-  f.static_address = translator_.runtime_to_static(f.instruction_pointer);
-  frames.push_back(f);
+  StackFrame f0;
+  f0.index = 0;
+  f0.instruction_pointer = translator_.runtime_base + 0x1000;
+  f0.stack_pointer = 0x7ffe0000;
+  f0.frame_pointer = 0x7ffe0020;
+  f0.module_name = "target";
+  f0.function_name = "entry";
+  f0.static_address = translator_.runtime_to_static(f0.instruction_pointer);
+  frames.push_back(f0);
   return frames;
 }
 
 Result<std::vector<DebugThread>> LocalDebugAdapter::threads() {
-  std::vector<DebugThread> list;
+  std::vector<DebugThread> ths;
   if (child_pid_ > 0) {
-    DebugThread t;
-    t.id = static_cast<std::uint64_t>(child_pid_);
-    t.name = "process_main";
-    t.is_current = true;
-    list.push_back(t);
+    DebugThread t0;
+    t0.id = static_cast<std::uint64_t>(child_pid_);
+    t0.name = "process_main";
+    t0.is_current = true;
+    ths.push_back(t0);
   }
-  return list;
+  return ths;
 }
 
 Result<std::vector<DebugModule>> LocalDebugAdapter::modules() {
@@ -242,7 +359,7 @@ Result<StopInfo> LocalDebugAdapter::poll_events() {
   if (child_pid_ > 0) {
     int status = 0;
     pid_t res = ::waitpid(child_pid_, &status, WNOHANG);
-    if (res == child_pid_) {
+    if (res > 0) {
       if (WIFEXITED(status)) {
         state_ = SessionState::Exited;
         info.reason = StopReason::Exited;
@@ -262,3 +379,5 @@ Result<StopInfo> LocalDebugAdapter::poll_events() {
 }
 
 }  // namespace donkey::debug
+
+#endif

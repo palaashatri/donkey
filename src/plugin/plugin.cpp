@@ -1,22 +1,74 @@
 #include "donkey/plugin/plugin.h"
 
+#include <vector>
+
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+
+namespace donkey {
+
+static void* os_dlopen(const char* path) {
+  return static_cast<void*>(LoadLibraryA(path));
+}
+
+static void* os_dlsym(void* handle, const char* name) {
+  return reinterpret_cast<void*>(GetProcAddress(static_cast<HMODULE>(handle), name));
+}
+
+static void os_dlclose(void* handle) {
+  if (handle) {
+    FreeLibrary(static_cast<HMODULE>(handle));
+  }
+}
+
+static const char* os_dlerror() {
+  return "Failed to load Windows DLL";
+}
+
+}  // namespace donkey
+
+#else
+
 #include <dlfcn.h>
 
-#include <vector>
+namespace donkey {
+
+static void* os_dlopen(const char* path) {
+  return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+static void* os_dlsym(void* handle, const char* name) {
+  return dlsym(handle, name);
+}
+
+static void os_dlclose(void* handle) {
+  if (handle) {
+    dlclose(handle);
+  }
+}
+
+static const char* os_dlerror() {
+  return dlerror();
+}
+
+}  // namespace donkey
+
+#endif
 
 namespace donkey {
 
 Result<PluginManifest> PluginHost::inspect_manifest(const std::string& library_path) {
-  void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void* handle = os_dlopen(library_path.c_str());
   if (!handle) {
-    const char* err = dlerror();
+    const char* err = os_dlerror();
     return Diagnostic::make(Status::InvalidInput, "plugin.load_failed",
-                            err ? err : "Failed to dlopen plugin library");
+                            err ? err : "Failed to load plugin library");
   }
 
-  void* sym = dlsym(handle, DONKEY_PLUGIN_ENTRY_SYMBOL);
+  void* sym = os_dlsym(handle, DONKEY_PLUGIN_ENTRY_SYMBOL);
   if (!sym) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.missing_entry_symbol",
                             "Plugin missing 'donkey_plugin_entry' symbol export");
   }
@@ -24,13 +76,13 @@ Result<PluginManifest> PluginHost::inspect_manifest(const std::string& library_p
   auto entry_fn = reinterpret_cast<DonkeyPluginEntryFn>(sym);
   const DonkeyPluginDescriptor* desc = entry_fn();
   if (!desc) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.null_descriptor",
                             "Plugin entry function returned null descriptor");
   }
 
   if (desc->struct_size != sizeof(DonkeyPluginDescriptor)) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.struct_size_mismatch",
                             "Plugin descriptor size mismatch: expected " +
                                 std::to_string(sizeof(DonkeyPluginDescriptor)) + ", got " +
@@ -39,7 +91,7 @@ Result<PluginManifest> PluginHost::inspect_manifest(const std::string& library_p
 
   if (desc->abi_version_major != DONKEY_PLUGIN_ABI_VERSION_MAJOR) {
     uint32_t got_major = desc->abi_version_major;
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.abi_version_mismatch",
                             "Incompatible plugin ABI version: expected major " +
                                 std::to_string(DONKEY_PLUGIN_ABI_VERSION_MAJOR) + ", got " +
@@ -57,23 +109,23 @@ Result<PluginManifest> PluginHost::inspect_manifest(const std::string& library_p
       .requested_capabilities = desc->requested_capabilities,
   };
 
-  dlclose(handle);
+  os_dlclose(handle);
   return manifest;
 }
 
 Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& library_path,
                                                           const std::string& input_json,
                                                           uint64_t granted_capabilities) {
-  void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+  void* handle = os_dlopen(library_path.c_str());
   if (!handle) {
-    const char* err = dlerror();
+    const char* err = os_dlerror();
     return Diagnostic::make(Status::InvalidInput, "plugin.load_failed",
-                            err ? err : "Failed to dlopen plugin library");
+                            err ? err : "Failed to load plugin library");
   }
 
-  void* sym = dlsym(handle, DONKEY_PLUGIN_ENTRY_SYMBOL);
+  void* sym = os_dlsym(handle, DONKEY_PLUGIN_ENTRY_SYMBOL);
   if (!sym) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.missing_entry_symbol",
                             "Plugin missing 'donkey_plugin_entry' symbol export");
   }
@@ -81,20 +133,20 @@ Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& lib
   auto entry_fn = reinterpret_cast<DonkeyPluginEntryFn>(sym);
   const DonkeyPluginDescriptor* desc = entry_fn();
   if (!desc) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.null_descriptor",
                             "Plugin entry function returned null descriptor");
   }
 
   if (desc->struct_size != sizeof(DonkeyPluginDescriptor)) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.struct_size_mismatch",
                             "Plugin descriptor size mismatch");
   }
 
   if (desc->abi_version_major != DONKEY_PLUGIN_ABI_VERSION_MAJOR) {
     uint32_t got_major = desc->abi_version_major;
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::InvalidInput, "plugin.abi_version_mismatch",
                             "Incompatible plugin ABI version: expected major " +
                                 std::to_string(DONKEY_PLUGIN_ABI_VERSION_MAJOR) + ", got " +
@@ -102,7 +154,7 @@ Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& lib
   }
 
   if ((desc->requested_capabilities & ~granted_capabilities) != 0) {
-    dlclose(handle);
+    os_dlclose(handle);
     return Diagnostic::make(Status::PermissionDenied, "plugin.capability_denied",
                             "Plugin requested capabilities that have not been granted by user");
   }
@@ -110,7 +162,7 @@ Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& lib
   if (desc->init) {
     int init_rc = desc->init();
     if (init_rc != 0) {
-      dlclose(handle);
+      os_dlclose(handle);
       return Diagnostic::make(Status::InternalError, "plugin.init_failed",
                               "Plugin init() returned error code " + std::to_string(init_rc));
     }
@@ -126,7 +178,7 @@ Result<PluginExecutionResult> PluginHost::execute_trusted(const std::string& lib
     desc->shutdown();
   }
 
-  dlclose(handle);
+  os_dlclose(handle);
 
   PluginExecutionResult res;
   res.exit_code = exec_rc;

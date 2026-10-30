@@ -1,5 +1,6 @@
 #include <cstdint>
 #include <string>
+#include <thread>
 
 #include "components.h"
 #include "donkey/ir/lift.h"
@@ -28,48 +29,105 @@ const Function* selected_function(const Document& document, std::uint64_t addres
   return &analysis.functions.front();
 }
 
-/// Lifts and formats one function, caching the result in the shared UI state.
-/// Never runs on a background thread: the lifter is bounded and only reads
-/// the immutable analysis, so it cannot stall the session's worker.
+/// Lifts and formats one function asynchronously off the render thread, caching
+/// the result in the shared UI state. The render thread never executes CPU-heavy
+/// lifting synchronously.
 void refresh(UiState& state, const Document& document, const Function& function) {
   const std::string* renamed =
       state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
   const std::string name = renamed != nullptr ? *renamed : function.name;
+
+  // 1. If currently showing this exact function and not in progress, nothing to do.
   if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
-      state.pseudocode_function == name) {
+      state.pseudocode_function == name && !state.pseudocode_in_progress) {
     return;
   }
+
+  // 2. Check if background decompiler finished.
+  if (state.async_decompile) {
+    std::lock_guard<std::mutex> lock(state.async_decompile->mutex);
+    if (state.async_decompile->ready && state.async_decompile->ready_address == function.address &&
+        state.pseudocode_document == &document) {
+      state.pseudocode_status = std::move(state.async_decompile->ready_status);
+      state.pseudocode_code = std::move(state.async_decompile->ready_code);
+      state.pseudocode_text = std::move(state.async_decompile->ready_text);
+      state.pseudocode_lines = std::move(state.async_decompile->ready_lines);
+      state.pseudocode_address = function.address;
+      state.pseudocode_function = name;
+      state.pseudocode_in_progress = false;
+      state.async_decompile->ready = false;
+      return;
+    }
+  }
+
+  // 3. If already in progress for this exact function, wait for it to complete.
+  if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
+      state.pseudocode_function == name && state.pseudocode_in_progress) {
+    return;
+  }
+
+  // 4. Otherwise, initiate asynchronous lift off the UI render thread.
   state.pseudocode_document = &document;
   state.pseudocode_address = function.address;
   state.pseudocode_function = name;
-  state.pseudocode_status.clear();
+  state.pseudocode_status = "Lifting";
   state.pseudocode_code.clear();
-  state.pseudocode_text.clear();
+  state.pseudocode_text = "Lifting in background...";
+  state.pseudocode_lines.clear();
+  state.pseudocode_in_progress = true;
 
-  // A user rename only changes the printed name, so lift a cheap copy of the
-  // function record instead of mutating the shared analysis.
+  if (!state.async_decompile) {
+    state.async_decompile = std::make_shared<AsyncDecompileState>();
+  }
+
   Function target = function;
   if (renamed != nullptr) {
     target.name = *renamed;
   }
-  auto lifted = lift_function(document.loaded.image, document.analysis, target);
-  if (!lifted) {
-    state.pseudocode_status = "Unsupported";
-    state.pseudocode_code = lifted.diagnostic().code;
-    state.pseudocode_text = lifted.diagnostic().message;
-    return;
+
+  std::shared_ptr<AsyncDecompileState> async_state = state.async_decompile;
+  std::uint64_t gen = 0;
+  {
+    std::lock_guard<std::mutex> lock(async_state->mutex);
+    gen = ++async_state->current_generation;
+    async_state->ready = false;
   }
-  auto text = format_pseudocode_lines(lifted.value());
-  if (!text) {
-    state.pseudocode_status = "InvalidIR";
-    state.pseudocode_code = text.diagnostic().code;
-    state.pseudocode_text = text.diagnostic().code + ": " + text.diagnostic().message;
-    state.pseudocode_lines.clear();
-    return;
-  }
-  state.pseudocode_status = lifted.value().partial ? "Partial" : "Complete";
-  state.pseudocode_text = std::move(text.value().full_text);
-  state.pseudocode_lines = std::move(text.value().lines);
+
+  std::thread([async_state, gen, image = document.loaded.image, analysis = document.analysis,
+               target]() {
+    auto lifted = lift_function(image, analysis, target);
+    std::string status;
+    std::string code;
+    std::string full_text;
+    std::vector<PseudocodeLine> lines;
+
+    if (!lifted) {
+      status = "Unsupported";
+      code = lifted.diagnostic().code;
+      full_text = lifted.diagnostic().message;
+    } else {
+      auto text = format_pseudocode_lines(lifted.value());
+      if (!text) {
+        status = "InvalidIR";
+        code = text.diagnostic().code;
+        full_text = text.diagnostic().code + ": " + text.diagnostic().message;
+      } else {
+        status = lifted.value().partial ? "Partial" : "Complete";
+        full_text = std::move(text.value().full_text);
+        lines = std::move(text.value().lines);
+      }
+    }
+
+    std::lock_guard<std::mutex> lock(async_state->mutex);
+    if (async_state->current_generation == gen) {
+      async_state->ready_status = std::move(status);
+      async_state->ready_code = std::move(code);
+      async_state->ready_text = std::move(full_text);
+      async_state->ready_lines = std::move(lines);
+      async_state->ready_address = target.address;
+      async_state->ready = true;
+    }
+  }).detach();
 }
 
 }  // namespace
@@ -100,7 +158,9 @@ void decompiler(const Document& document, UiState& state) {
   ImGui::Separator();
   ImGui::BeginChild("##pseudocode", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
                     ImGuiWindowFlags_HorizontalScrollbar);
-  if (state.pseudocode_status == "Unsupported" || state.pseudocode_status == "InvalidIR") {
+  if (state.pseudocode_in_progress) {
+    ImGui::TextDisabled("Decompiling %s in background...", function->name.c_str());
+  } else if (state.pseudocode_status == "Unsupported" || state.pseudocode_status == "InvalidIR") {
     ImGui::PushStyleColor(ImGuiCol_Text, components::status_color("Unsupported"));
     ImGui::TextWrapped("%s", state.pseudocode_text.c_str());
     ImGui::PopStyleColor();

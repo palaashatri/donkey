@@ -39,6 +39,13 @@ class PluginHost {
   /// Rejects incompatible ABI versions with Diagnostic.
   static Result<PluginManifest> inspect_manifest(const std::string& library_path);
 
+  /// Inspect a plugin library manifest inside an isolated child process with CPU/memory limits.
+  /// Protects the caller against static constructors, crashes, or timeouts in untrusted plugins.
+  static Result<PluginManifest> inspect_manifest_isolated(const std::string& library_path,
+                                                          uint32_t timeout_seconds = 3,
+                                                          size_t max_memory_bytes = 64 * 1024 *
+                                                                                    1024);
+
   /// Execute a trusted plugin in-process. Checks requested capabilities against
   /// granted_capabilities.
   static Result<PluginExecutionResult> execute_trusted(

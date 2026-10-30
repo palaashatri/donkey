@@ -20,13 +20,23 @@ AnalysisOptions analysis_options() {
 }  // namespace
 
 Session::~Session() {
-  join_worker();
-}
-
-void Session::join_worker() {
   cancel();
   if (worker_.joinable()) {
     worker_.join();
+  }
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto& t : retired_workers_) {
+    if (t.joinable()) {
+      t.join();
+    }
+  }
+}
+
+void Session::retire_worker() {
+  cancel();
+  if (worker_.joinable()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retired_workers_.push_back(std::move(worker_));
   }
 }
 
@@ -45,7 +55,7 @@ void Session::publish_project(std::string path, std::int64_t image_id) {
 }
 
 void Session::open(const std::string& path) {
-  join_worker();
+  retire_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
   CancellationToken token;
   {
@@ -59,11 +69,14 @@ void Session::open(const std::string& path) {
   }
   busy_.store(true);
   worker_ = std::thread([this, path, generation, token]() {
-    auto loaded = load_binary(path);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(path, load_opts);
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
@@ -75,10 +88,11 @@ void Session::open(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
@@ -106,7 +120,7 @@ void Session::open(const std::string& path) {
 }
 
 void Session::open_project(const std::string& path) {
-  join_worker();
+  retire_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
   CancellationToken token;
   {
@@ -174,11 +188,14 @@ void Session::open_project(const std::string& path) {
       return;
     }
 
-    auto loaded = load_binary(image_path);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(image_path, load_opts);
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
@@ -190,10 +207,11 @@ void Session::open_project(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
@@ -232,7 +250,7 @@ void Session::open_project(const std::string& path) {
 }
 
 void Session::save_project(const std::string& path) {
-  join_worker();
+  retire_worker();
   std::shared_ptr<const Document> document;
   std::shared_ptr<const Annotations> annotations;
   {
@@ -319,7 +337,7 @@ void Session::save_project(const std::string& path) {
 }
 
 void Session::backup_project(const std::string& destination, bool overwrite) {
-  join_worker();
+  retire_worker();
   std::string source_path;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -378,7 +396,7 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
 }
 
 void Session::restore_project(const std::string& backup_path) {
-  join_worker();
+  retire_worker();
   std::string target_path;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -398,13 +416,15 @@ void Session::restore_project(const std::string& backup_path) {
   }
 
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
+  CancellationToken token;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    current_cancellation_ = token;
     status_ = "Restoring project from " + backup_path;
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, target_path, backup_path, generation]() {
+  worker_ = std::thread([this, target_path, backup_path, generation, token]() {
     auto restored = Project::restore(target_path, backup_path);
     if (generation_.load() != generation) {
       return;
@@ -460,8 +480,14 @@ void Session::restore_project(const std::string& backup_path) {
       return;
     }
 
-    auto loaded = load_binary(image_path);
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(image_path, load_opts);
     if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
@@ -470,8 +496,14 @@ void Session::restore_project(const std::string& backup_path) {
            "Failed to load restored project image");
       return;
     }
-    auto analysis = analyze(loaded.value().image, loaded.value().data, analysis_options());
+    AnalysisOptions options = analysis_options();
+    options.cancellation_token = token;
+    auto analysis = analyze(loaded.value().image, loaded.value().data, options);
     if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail("Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {

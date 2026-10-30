@@ -45,10 +45,10 @@ Result<uint64_t> PatchManager::stage_patch(uint64_t file_offset, std::span<const
     const uint64_t exist_start = existing.file_offset;
     const uint64_t exist_end = existing.file_offset + existing.replacement_bytes.size();
     if (patch_start < exist_end && exist_start < patch_end) {
-      return Diagnostic::make(Status::InvalidInput, "patch.overlap",
-                              "Patch range overlaps with existing patch ID " +
-                                  std::to_string(existing.id),
-                              file_offset);
+      return Diagnostic::make(
+          Status::InvalidInput, "patch.overlap",
+          "Patch range overlaps with existing patch ID " + std::to_string(existing.id),
+          file_offset);
     }
   }
 

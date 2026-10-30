@@ -118,7 +118,7 @@ class Session {
   [[nodiscard]] bool can_redo() const;
 
  private:
-  void join_worker();
+  void retire_worker();
   void fail(const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
@@ -135,6 +135,7 @@ class Session {
   bool dirty_ = false;
   std::atomic<bool> busy_{false};
   std::thread worker_;
+  std::vector<std::thread> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
 
   CancellationToken current_cancellation_;

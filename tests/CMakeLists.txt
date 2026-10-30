@@ -12,6 +12,12 @@ target_include_directories(test_plugin_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 add_library(test_plugin_hang MODULE fixtures/plugins/hang_plugin.c)
 target_include_directories(test_plugin_hang PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
+add_library(test_plugin_ctor_crash MODULE fixtures/plugins/ctor_crash_plugin.c)
+target_include_directories(test_plugin_ctor_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_non_terminated MODULE fixtures/plugins/non_terminated_plugin.c)
+target_include_directories(test_plugin_non_terminated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/binary_test.cpp
@@ -32,8 +38,10 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
   TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
   TEST_PLUGIN_HANG_PATH="$<TARGET_FILE:test_plugin_hang>"
+  TEST_PLUGIN_CTOR_CRASH_PATH="$<TARGET_FILE:test_plugin_ctor_crash>"
+  TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
 )
-add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang)
+add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
