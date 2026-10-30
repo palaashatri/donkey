@@ -124,5 +124,65 @@ TEST(PluginTest, IsolatedNonTerminatedOutputIsSafelyBounded) {
   EXPECT_FALSE(exec.output_json.empty());
 }
 
+TEST(PluginTest, IpcResponseRejectsTruncatedHeader) {
+  // Response smaller than sizeof(int)
+  std::vector<char> tiny = {0x00, 0x00};
+  auto res = PluginHost::parse_worker_response(0, tiny);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_FALSE(res.value().success);
+  EXPECT_EQ(res.value().error_code, "plugin.worker_failed");
+
+  // Response has sizeof(int) == 0, but is missing uint32_t length prefix
+  std::vector<char> no_len(4, 0);
+  auto res2 = PluginHost::parse_worker_response(0, no_len);
+  ASSERT_TRUE(res2.has_value());
+  EXPECT_FALSE(res2.value().success);
+  EXPECT_EQ(res2.value().error_code, "plugin.ipc_error");
+}
+
+TEST(PluginTest, IpcResponseRejectsTruncatedPayload) {
+  // Header declares 50 bytes output, but buffer only provides 10 bytes
+  std::vector<char> truncated(sizeof(int) + sizeof(uint32_t) + 10, 'A');
+  int exec_rc = 0;
+  uint32_t declared_len = 50;
+  std::memcpy(truncated.data(), &exec_rc, sizeof(exec_rc));
+  std::memcpy(truncated.data() + sizeof(int), &declared_len, sizeof(declared_len));
+
+  auto res = PluginHost::parse_worker_response(0, truncated);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_FALSE(res.value().success);
+  EXPECT_EQ(res.value().error_code, "plugin.ipc_error");
+}
+
+TEST(PluginTest, IpcResponseRejectsExcessPayload) {
+  // Header declares 5 bytes output, but buffer provides 10 bytes
+  std::vector<char> excess(sizeof(int) + sizeof(uint32_t) + 10, 'B');
+  int exec_rc = 0;
+  uint32_t declared_len = 5;
+  std::memcpy(excess.data(), &exec_rc, sizeof(exec_rc));
+  std::memcpy(excess.data() + sizeof(int), &declared_len, sizeof(declared_len));
+
+  auto res = PluginHost::parse_worker_response(0, excess);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_FALSE(res.value().success);
+  EXPECT_EQ(res.value().error_code, "plugin.ipc_error");
+}
+
+TEST(PluginTest, IpcResponseAcceptsExactPayload) {
+  std::string expected_json = R"({"result": "ok"})";
+  std::vector<char> valid(sizeof(int) + sizeof(uint32_t) + expected_json.size());
+  int exec_rc = 0;
+  uint32_t declared_len = static_cast<uint32_t>(expected_json.size());
+  std::memcpy(valid.data(), &exec_rc, sizeof(exec_rc));
+  std::memcpy(valid.data() + sizeof(int), &declared_len, sizeof(declared_len));
+  std::memcpy(valid.data() + sizeof(int) + sizeof(uint32_t), expected_json.data(),
+              expected_json.size());
+
+  auto res = PluginHost::parse_worker_response(0, valid);
+  ASSERT_TRUE(res.has_value());
+  EXPECT_TRUE(res.value().success);
+  EXPECT_EQ(res.value().output_json, expected_json);
+}
+
 }  // namespace
 }  // namespace donkey

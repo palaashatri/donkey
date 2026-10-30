@@ -123,13 +123,15 @@ void Workspace::draw(bool& quit) {
   if (ImGui::BeginPopupModal("Open project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("Path to a project database");
     ImGui::SetNextItemWidth(520.0f);
-    if (ImGui::InputText("##projectpath", project_path_buffer_, sizeof(project_path_buffer_),
-                         ImGuiInputTextFlags_EnterReturnsTrue) &&
-        project_path_buffer_[0] != '\0') {
-      session_.open_project(project_path_buffer_);
-      ImGui::CloseCurrentPopup();
-    }
-    if (ImGui::Button("Open") && project_path_buffer_[0] != '\0') {
+    const bool open_busy = session_.busy();
+    ImGui::BeginDisabled(open_busy);
+    const bool open_submitted =
+        ImGui::InputText("##projectpath", project_path_buffer_, sizeof(project_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    const bool open_clicked = ImGui::Button("Open");
+    ImGui::EndDisabled();
+
+    if (!open_busy && (open_submitted || open_clicked) && project_path_buffer_[0] != '\0') {
       session_.open_project(project_path_buffer_);
       ImGui::CloseCurrentPopup();
     }
@@ -147,10 +149,15 @@ void Workspace::draw(bool& quit) {
   if (ImGui::BeginPopupModal("Save project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("Database path for this project");
     ImGui::SetNextItemWidth(520.0f);
-    const bool submitted =
+    const bool save_busy = session_.busy();
+    ImGui::BeginDisabled(save_busy);
+    const bool save_submitted =
         ImGui::InputText("##saveprojectpath", project_path_buffer_, sizeof(project_path_buffer_),
                          ImGuiInputTextFlags_EnterReturnsTrue);
-    if ((submitted || ImGui::Button("Save")) && project_path_buffer_[0] != '\0') {
+    const bool save_clicked = ImGui::Button("Save");
+    ImGui::EndDisabled();
+
+    if (!save_busy && (save_submitted || save_clicked) && project_path_buffer_[0] != '\0') {
       session_.save_project(project_path_buffer_);
       ImGui::CloseCurrentPopup();
     }
@@ -172,10 +179,15 @@ void Workspace::draw(bool& quit) {
           "Unsaved in-memory annotation edits are not included until you Save Project.");
     }
     ImGui::SetNextItemWidth(520.0f);
-    const bool submitted =
+    const bool backup_busy = session_.busy();
+    ImGui::BeginDisabled(backup_busy);
+    const bool backup_submitted =
         ImGui::InputText("##backupprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
                          ImGuiInputTextFlags_EnterReturnsTrue);
-    if ((submitted || ImGui::Button("Backup")) && backup_path_buffer_[0] != '\0') {
+    const bool backup_clicked = ImGui::Button("Backup");
+    ImGui::EndDisabled();
+
+    if (!backup_busy && (backup_submitted || backup_clicked) && backup_path_buffer_[0] != '\0') {
       session_.backup_project(backup_path_buffer_, true);
       ImGui::CloseCurrentPopup();
     }
@@ -193,10 +205,15 @@ void Workspace::draw(bool& quit) {
   if (ImGui::BeginPopupModal("Restore project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
     ImGui::TextUnformatted("Backup database path to restore into the current project");
     ImGui::SetNextItemWidth(520.0f);
-    const bool submitted =
+    const bool restore_busy = session_.busy();
+    ImGui::BeginDisabled(restore_busy);
+    const bool restore_submitted =
         ImGui::InputText("##restoreprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
                          ImGuiInputTextFlags_EnterReturnsTrue);
-    if ((submitted || ImGui::Button("Restore")) && backup_path_buffer_[0] != '\0') {
+    const bool restore_clicked = ImGui::Button("Restore");
+    ImGui::EndDisabled();
+
+    if (!restore_busy && (restore_submitted || restore_clicked) && backup_path_buffer_[0] != '\0') {
       session_.restore_project(backup_path_buffer_);
       ImGui::CloseCurrentPopup();
     }

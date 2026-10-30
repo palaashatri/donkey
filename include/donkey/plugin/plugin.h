@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <span>
 #include <string>
 
 #include "donkey/core/result.h"
@@ -58,6 +59,12 @@ class PluginHost {
       const std::string& library_path, const std::string& input_json,
       uint64_t granted_capabilities = DONKEY_CAP_NONE, uint32_t timeout_seconds = 3,
       size_t max_memory_bytes = 64 * 1024 * 1024);
+
+  /// Parse IPC execution response buffer received from an isolated worker.
+  /// Enforces complete header and exact payload length matching.
+  static Result<PluginExecutionResult> parse_worker_response(int wstatus,
+                                                             std::span<const char> response_acc,
+                                                             uint32_t timeout_seconds = 3);
 };
 
 }  // namespace donkey

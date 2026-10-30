@@ -205,7 +205,8 @@ static bool detect_macho_code_signature(std::span<const uint8_t> bytes) {
   std::memcpy(&ncmds, bytes.data() + 16, 4);
 
   size_t offset = header_size;
-  for (uint32_t i = 0; i < ncmds && offset + 8 <= bytes.size(); ++i) {
+  for (uint32_t i = 0; i < ncmds; ++i) {
+    if (offset > bytes.size() || bytes.size() - offset < 8) break;
     uint32_t cmd = 0;
     uint32_t cmdsize = 0;
     std::memcpy(&cmd, bytes.data() + offset, 4);
@@ -214,7 +215,9 @@ static bool detect_macho_code_signature(std::span<const uint8_t> bytes) {
     if (cmd == 0x1d) {  // LC_CODE_SIGNATURE
       return true;
     }
-    offset += cmdsize;
+    const size_t cmdsize_st = static_cast<size_t>(cmdsize);
+    if (offset > bytes.size() || bytes.size() - offset < cmdsize_st) break;
+    offset += cmdsize_st;
   }
   return false;
 }
@@ -223,22 +226,33 @@ static bool detect_pe_signature(std::span<const uint8_t> bytes) {
   if (bytes.size() < 64) return false;
   if (bytes[0] != 'M' || bytes[1] != 'Z') return false;
 
-  uint32_t pe_offset = 0;
-  std::memcpy(&pe_offset, bytes.data() + 0x3c, 4);
-  if (pe_offset + 24 + 128 > bytes.size()) return false;
+  uint32_t pe_offset_raw = 0;
+  std::memcpy(&pe_offset_raw, bytes.data() + 0x3c, 4);
+  const size_t pe_offset = static_cast<size_t>(pe_offset_raw);
+
+  // Cast to size_t and use subtraction-based bounds guards before every dereference
+  if (pe_offset > bytes.size() || bytes.size() - pe_offset < 24) return false;
   if (std::memcmp(bytes.data() + pe_offset, "PE\0\0", 4) != 0) return false;
 
-  uint16_t magic = 0;
-  std::memcpy(&magic, bytes.data() + pe_offset + 24, 2);
-  bool pe32plus = (magic == 0x20b);
+  const size_t opt_offset = pe_offset + 24;
+  if (opt_offset > bytes.size() || bytes.size() - opt_offset < 2) return false;
 
-  size_t sec_dir_offset = pe_offset + 24 + (pe32plus ? 112 : 96) + (4 * 8);
-  if (sec_dir_offset + 8 <= bytes.size()) {
-    uint32_t sec_size = 0;
-    std::memcpy(&sec_size, bytes.data() + sec_dir_offset + 4, 4);
-    if (sec_size > 0) return true;
-  }
-  return false;
+  uint16_t magic = 0;
+  std::memcpy(&magic, bytes.data() + opt_offset, 2);
+  const bool pe32plus = (magic == 0x20b);
+
+  const size_t dir_base_offset = pe32plus ? 112 : 96;
+  const size_t cert_entry_offset = 4 * 8;  // Entry 4: IMAGE_DIRECTORY_ENTRY_SECURITY
+  const size_t sec_dir_offset_within_opt = dir_base_offset + cert_entry_offset;
+
+  if (opt_offset > bytes.size() || bytes.size() - opt_offset < sec_dir_offset_within_opt)
+    return false;
+  const size_t sec_dir_offset = opt_offset + sec_dir_offset_within_opt;
+  if (sec_dir_offset > bytes.size() || bytes.size() - sec_dir_offset < 8) return false;
+
+  uint32_t sec_size = 0;
+  std::memcpy(&sec_size, bytes.data() + sec_dir_offset + 4, 4);
+  return sec_size > 0;
 }
 
 Result<ExportResult> PatchManager::export_patched_binary(const std::string& source_path,

@@ -2,6 +2,8 @@
 
 #if defined(_WIN32)
 
+#include <cstring>
+
 namespace donkey {
 
 Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string&, const std::string&,
@@ -13,6 +15,53 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string&, c
 Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string&, uint32_t, size_t) {
   return Diagnostic::make(Status::Unsupported, "plugin.isolation_unavailable",
                           "Process-isolated plugin inspection is not supported on Windows host");
+}
+
+Result<PluginExecutionResult> PluginHost::parse_worker_response(int wstatus,
+                                                                std::span<const char> response_acc,
+                                                                uint32_t timeout_seconds) {
+  (void)timeout_seconds;
+  PluginExecutionResult res;
+  if (wstatus != 0 || response_acc.size() < sizeof(int)) {
+    res.success = false;
+    res.exit_code = wstatus;
+    res.error_code = "plugin.worker_failed";
+    res.error_message = "Plugin worker exited with non-zero code";
+    return res;
+  }
+
+  int exec_rc = 0;
+  std::memcpy(&exec_rc, response_acc.data(), sizeof(exec_rc));
+  res.exit_code = exec_rc;
+
+  if (exec_rc == 0) {
+    if (response_acc.size() < sizeof(int) + sizeof(uint32_t)) {
+      res.success = false;
+      res.error_code = "plugin.ipc_error";
+      res.error_message = "Plugin worker response header was truncated";
+      return res;
+    }
+
+    uint32_t out_len = 0;
+    std::memcpy(&out_len, response_acc.data() + sizeof(int), sizeof(out_len));
+    const size_t payload_len = response_acc.size() - sizeof(int) - sizeof(uint32_t);
+    if (payload_len != static_cast<size_t>(out_len)) {
+      res.success = false;
+      res.error_code = "plugin.ipc_error";
+      res.error_message = "Plugin worker response payload length mismatch (expected " +
+                          std::to_string(out_len) + " bytes, received " +
+                          std::to_string(payload_len) + " bytes)";
+      return res;
+    }
+
+    res.success = true;
+    res.output_json.assign(response_acc.data() + sizeof(int) + sizeof(uint32_t), out_len);
+  } else {
+    res.success = false;
+    res.error_code = "plugin.execution_failed";
+    res.error_message = "Plugin execute() returned non-zero code";
+  }
+  return res;
 }
 
 }  // namespace donkey
@@ -123,6 +172,26 @@ bool reap_child_bounded(pid_t pid, const std::chrono::steady_clock::time_point& 
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(2));
   }
+}
+
+bool write_all(int fd, const void* data, size_t size) {
+  const char* ptr = static_cast<const char*>(data);
+  size_t remaining = size;
+  while (remaining > 0) {
+    ssize_t n = write(fd, ptr, remaining);
+    if (n > 0) {
+      ptr += n;
+      remaining -= static_cast<size_t>(n);
+    } else if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    } else {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -365,14 +434,14 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
                  : static_cast<uint32_t>(out_buf.size());
 
     // Write execution code (int) and length-prefixed output string
-    (void)write(pipe_fds[1], &exec_rc, sizeof(exec_rc));
-    (void)write(pipe_fds[1], &out_len, sizeof(out_len));
-    if (out_len > 0) {
-      (void)write(pipe_fds[1], out_buf.data(), out_len);
+    bool write_ok = write_all(pipe_fds[1], &exec_rc, sizeof(exec_rc)) &&
+                    write_all(pipe_fds[1], &out_len, sizeof(out_len));
+    if (write_ok && out_len > 0) {
+      write_ok = write_all(pipe_fds[1], out_buf.data(), out_len);
     }
 
     close(pipe_fds[1]);
-    _exit(0);
+    _exit(write_ok ? 0 : 1);
   }
 
   // Parent supervisor process
@@ -462,8 +531,8 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
   int wstatus = 0;
   bool reaped = reap_child_bounded(pid, deadline, &wstatus);
 
-  PluginExecutionResult res;
   if (!reaped) {
+    PluginExecutionResult res;
     res.timed_out = true;
     res.success = false;
     res.error_code = "plugin.timeout";
@@ -472,6 +541,14 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
     return res;
   }
 
+  return parse_worker_response(wstatus, response_acc, timeout_seconds);
+}
+
+Result<PluginExecutionResult> PluginHost::parse_worker_response(int wstatus,
+                                                                std::span<const char> response_acc,
+                                                                uint32_t timeout_seconds) {
+  (void)timeout_seconds;
+  PluginExecutionResult res;
   if (WIFSIGNALED(wstatus)) {
     int sig = WTERMSIG(wstatus);
     res.crashed = true;
@@ -524,18 +601,27 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
 
     res.exit_code = exec_rc;
     if (exec_rc == 0) {
-      res.success = true;
-      if (response_acc.size() >= sizeof(int) + sizeof(uint32_t)) {
-        uint32_t out_len = 0;
-        std::memcpy(&out_len, response_acc.data() + sizeof(int), sizeof(out_len));
-        size_t available = response_acc.size() - sizeof(int) - sizeof(uint32_t);
-        size_t actual_len = std::min(static_cast<size_t>(out_len), available);
-        res.output_json =
-            std::string(response_acc.data() + sizeof(int) + sizeof(uint32_t), actual_len);
-      } else {
-        res.output_json =
-            std::string(response_acc.data() + sizeof(int), response_acc.size() - sizeof(int));
+      if (response_acc.size() < sizeof(int) + sizeof(uint32_t)) {
+        res.success = false;
+        res.error_code = "plugin.ipc_error";
+        res.error_message = "Plugin worker response header was truncated";
+        return res;
       }
+
+      uint32_t out_len = 0;
+      std::memcpy(&out_len, response_acc.data() + sizeof(int), sizeof(out_len));
+      const size_t payload_len = response_acc.size() - sizeof(int) - sizeof(uint32_t);
+      if (payload_len != static_cast<size_t>(out_len)) {
+        res.success = false;
+        res.error_code = "plugin.ipc_error";
+        res.error_message = "Plugin worker response payload length mismatch (expected " +
+                            std::to_string(out_len) + " bytes, received " +
+                            std::to_string(payload_len) + " bytes)";
+        return res;
+      }
+
+      res.success = true;
+      res.output_json.assign(response_acc.data() + sizeof(int) + sizeof(uint32_t), out_len);
     } else {
       res.success = false;
       res.error_code = "plugin.execution_failed";

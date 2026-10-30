@@ -235,5 +235,37 @@ TEST(PatchTest, ReplacedPatchAfterRevert) {
   EXPECT_EQ(reapply.diagnostic().code, "patch.retired");
 }
 
+TEST(PatchTest, PeSignatureDetectionWithCraftedNearMaxOffsetDoesNotOverflowOrReadOutOfBounds) {
+  // Construct a synthetic MZ file of 256 bytes with e_lfanew = 0xfffffff0.
+  // In 32-bit arithmetic: 0xfffffff0 + 24 + 128 = 136 <= 256, which previously bypassed
+  // the bounds check and caused an out-of-bounds pointer dereference.
+  std::vector<uint8_t> crafted(256, 0);
+  crafted[0] = 'M';
+  crafted[1] = 'Z';
+  uint32_t near_max_lfanew = 0xfffffff0;
+  std::memcpy(crafted.data() + 0x3c, &near_max_lfanew, 4);
+
+  std::string temp_crafted = "pe_crafted_near_max_lfanew.bin";
+  std::ofstream out(temp_crafted, std::ios::binary);
+  out.write(reinterpret_cast<const char*>(crafted.data()), crafted.size());
+  out.close();
+
+  PatchManager manager;
+  const uint8_t orig[] = {0x00};
+  const uint8_t repl[] = {0x01};
+  auto stage = manager.stage_patch(10, orig, repl);
+  ASSERT_TRUE(stage.has_value());
+
+  std::string temp_out = "pe_crafted_patched.bin";
+  // Export patched binary calls detect_pe_signature internally; must not crash or ASan-abort!
+  auto export_res = manager.export_patched_binary(temp_crafted, temp_out, true);
+  ASSERT_TRUE(export_res.has_value());
+  EXPECT_FALSE(export_res.value().signature_invalidated);
+
+  std::error_code ec;
+  std::filesystem::remove(temp_crafted, ec);
+  std::filesystem::remove(temp_out, ec);
+}
+
 }  // namespace
 }  // namespace donkey

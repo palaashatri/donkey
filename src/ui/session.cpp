@@ -17,6 +17,15 @@ AnalysisOptions analysis_options() {
   return options;
 }
 
+struct WorkerDoneGuard {
+  std::shared_ptr<std::atomic<bool>> flag;
+  ~WorkerDoneGuard() {
+    if (flag) {
+      flag->store(true);
+    }
+  }
+};
+
 }  // namespace
 
 Session::~Session() {
@@ -24,14 +33,28 @@ Session::~Session() {
   if (worker_.joinable()) {
     worker_.join();
   }
-  std::vector<std::thread> retired;
+  std::vector<RetiredWorker> retired;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     retired = std::move(retired_workers_);
   }
-  for (auto& t : retired) {
-    if (t.joinable()) {
-      t.join();
+  for (auto& rw : retired) {
+    if (rw.thread.joinable()) {
+      rw.thread.join();
+    }
+  }
+}
+
+void Session::reap_retired_workers() {
+  std::lock_guard<std::mutex> lock(mutex_);
+  for (auto it = retired_workers_.begin(); it != retired_workers_.end();) {
+    if (it->done && it->done->load()) {
+      if (it->thread.joinable()) {
+        it->thread.join();
+      }
+      it = retired_workers_.erase(it);
+    } else {
+      ++it;
     }
   }
 }
@@ -40,8 +63,9 @@ void Session::retire_worker() {
   cancel();
   if (worker_.joinable()) {
     std::lock_guard<std::mutex> lock(mutex_);
-    retired_workers_.push_back(std::move(worker_));
+    retired_workers_.push_back({std::move(worker_), current_worker_done_});
   }
+  reap_retired_workers();
 }
 
 void Session::fail(std::uint64_t generation, const std::string& message,
@@ -76,7 +100,13 @@ void Session::open(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation, token]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
     auto loaded = load_binary(path, load_opts);
@@ -137,7 +167,13 @@ void Session::open_project(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation, token]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
     // Read everything the project owns first, then close the database before
     // the (slower) binary load and analysis. busy_ is only cleared after the
     // connection is released, so an observer that sees "idle" knows the
@@ -268,7 +304,13 @@ void Session::save_project(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, document, annotations, generation]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, document, annotations, generation, done]() {
+    WorkerDoneGuard done_guard{done};
     // Everything that touches the database happens in this scope so the
     // connection (and its WAL checkpoint) is released before busy_ is cleared.
     std::string failure;
@@ -356,7 +398,13 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, source_path, destination, overwrite, generation]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, source_path, destination, overwrite, generation, done]() {
+    WorkerDoneGuard done_guard{done};
     std::string failure;
     {
       auto project = Project::open(source_path);
@@ -414,7 +462,13 @@ void Session::restore_project(const std::string& backup_path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, target_path, backup_path, generation, token]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, target_path, backup_path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
     if (generation_.load() != generation) {
       return;
     }
@@ -422,7 +476,22 @@ void Session::restore_project(const std::string& backup_path) {
       fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
-    auto restored = Project::restore(target_path, backup_path, token);
+
+    auto commit_hook = [this, generation](const std::string& temp,
+                                          const std::string& dest) -> Result<void> {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (generation != generation_.load() || current_cancellation_.is_cancelled()) {
+        return make_error<void>(Status::Cancelled, "io.cancelled",
+                                "restore was superseded or cancelled before commit");
+      }
+      auto replaced = Project::replace_file_atomically(temp, dest);
+      if (replaced) {
+        committed_generation_ = generation;
+      }
+      return replaced;
+    };
+
+    auto restored = Project::restore(target_path, backup_path, token, commit_hook);
     if (!restored) {
       fail(generation, restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
            "Failed to restore project from " + backup_path);

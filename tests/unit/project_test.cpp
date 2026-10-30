@@ -622,4 +622,68 @@ TEST(Project, RestoreHonorsCancellationBeforeReplacingDatabase) {
   EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
 }
 
+TEST(Project, FailedReplacePreservesExistingDatabaseAndSidecars) {
+  TempPath source("restore-fail-source");
+  TempPath destination("restore-fail-destination");
+  TempPath backup("restore-fail-backup");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  {
+    auto project = Project::create(source.str());
+    ASSERT_TRUE(project.has_value());
+    ASSERT_TRUE(project.value().import(loaded, analysis.value()).has_value());
+    ASSERT_TRUE(project.value().backup(backup.str()).has_value());
+  }
+
+  const std::string orig_db_content = "original destination database content";
+  const std::string orig_wal_content = "original wal sidecar content";
+  const std::string orig_shm_content = "original shm sidecar content";
+
+  {
+    std::ofstream db_file(destination.str(), std::ios::binary | std::ios::trunc);
+    db_file << orig_db_content;
+    std::ofstream wal_file(destination.str() + "-wal", std::ios::binary | std::ios::trunc);
+    wal_file << orig_wal_content;
+    std::ofstream shm_file(destination.str() + "-shm", std::ios::binary | std::ios::trunc);
+    shm_file << orig_shm_content;
+  }
+
+  // Inject failure at commit phase
+  auto failing_commit = [](const std::string&, const std::string&) -> donkey::Result<void> {
+    return donkey::make_error<void>(donkey::Status::InternalError, "injected.commit_failure",
+                                    "injected filesystem failure during commit");
+  };
+
+  auto restored = Project::restore(destination.str(), backup.str(), {}, failing_commit);
+  ASSERT_FALSE(restored.has_value());
+  EXPECT_EQ(restored.diagnostic().code, "injected.commit_failure");
+
+  // Verify byte-for-byte preservation of original database and sidecars
+  {
+    std::ifstream check_db(destination.str());
+    std::string content;
+    std::getline(check_db, content);
+    EXPECT_EQ(content, orig_db_content);
+
+    std::ifstream check_wal(destination.str() + "-wal");
+    std::getline(check_wal, content);
+    EXPECT_EQ(content, orig_wal_content);
+
+    std::ifstream check_shm(destination.str() + "-shm");
+    std::getline(check_shm, content);
+    EXPECT_EQ(content, orig_shm_content);
+  }
+
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-db"));
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-wal"));
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-shm"));
+
+  std::error_code ec;
+  std::filesystem::remove(destination.str() + "-wal", ec);
+  std::filesystem::remove(destination.str() + "-shm", ec);
+}
+
 }  // namespace
