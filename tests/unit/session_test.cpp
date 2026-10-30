@@ -3,6 +3,7 @@
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 
@@ -242,6 +243,89 @@ TEST(Session, OpeningAPlainBinaryClearsTheProjectAssociation) {
   EXPECT_FALSE(session.has_project());
   EXPECT_TRUE(session.annotations()->renames.empty());
   EXPECT_TRUE(session.annotations()->comments.empty());
+}
+
+TEST(Session, BackupAndRestoreProjectRoundTripsAnnotationsAndClearsDirtyState) {
+  TempPath project_path("backup-source");
+  TempPath backup_path("backup-copy");
+  create_project_with_annotations(project_path.str());
+
+  Session session;
+  session.open_project(project_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  session.backup_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value()) << "backup failed";
+
+  // Mutate and save the live project so both disk and memory diverge from the backup.
+  session.set_annotation(donkey::AnnotationKind::Rename, 0x400100, "mutated_entry");
+  session.set_annotation(donkey::AnnotationKind::Comment, 0x400104, "");
+  session.save_project(project_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+  ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
+  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "mutated_entry");
+  EXPECT_EQ(session.annotations()->comment_at(0x400104), nullptr);
+
+  // Also stage an unsaved in-memory edit before restoring.
+  session.set_annotation(donkey::AnnotationKind::Comment, 0x400109, "unsaved note");
+  EXPECT_TRUE(session.dirty());
+
+  session.restore_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value()) << "restore failed";
+  EXPECT_FALSE(session.dirty());
+
+  const auto restored = session.annotations();
+  ASSERT_NE(restored, nullptr);
+  ASSERT_NE(restored->rename_at(0x400100), nullptr);
+  EXPECT_EQ(*restored->rename_at(0x400100), "entry_point");
+  ASSERT_NE(restored->comment_at(0x400104), nullptr);
+  EXPECT_EQ(*restored->comment_at(0x400104), "calls helper");
+  EXPECT_EQ(restored->comment_at(0x400109), nullptr);
+}
+
+TEST(Session, RestoreProjectRejectsCorruptBackupAndPreservesLiveSession) {
+  TempPath project_path("restore-live");
+  TempPath corrupt_backup("restore-corrupt");
+  create_project_with_annotations(project_path.str());
+  {
+    std::ofstream out(corrupt_backup.str(), std::ios::binary);
+    out << "not a sqlite database";
+  }
+
+  Session session;
+  session.open_project(project_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  session.restore_project(corrupt_backup.str());
+  ASSERT_TRUE(wait_idle(session));
+  const auto error = session.take_error();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("project.schema_read_failed"), std::string::npos) << *error;
+
+  // The live document and annotations must remain intact after a rejected restore.
+  ASSERT_NE(session.document(), nullptr);
+  ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
+  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "entry_point");
+}
+
+TEST(Session, BackupAndRestoreRequireOpenProject) {
+  TempPath backup_path("no-project-backup");
+  Session session;
+
+  session.backup_project(backup_path.str());
+  const auto backup_error = session.take_error();
+  ASSERT_TRUE(backup_error.has_value());
+  EXPECT_NE(backup_error->find("project.not_open"), std::string::npos) << *backup_error;
+
+  session.restore_project(backup_path.str());
+  const auto restore_error = session.take_error();
+  ASSERT_TRUE(restore_error.has_value());
+  EXPECT_NE(restore_error->find("project.not_open"), std::string::npos) << *restore_error;
 }
 
 }  // namespace

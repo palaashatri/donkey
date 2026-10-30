@@ -135,6 +135,52 @@ void Workspace::draw(bool& quit) {
     ImGui::EndPopup();
   }
 
+  if (backup_project_popup_) {
+    ImGui::OpenPopup("Backup project");
+    backup_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Backup project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Destination path for the project backup");
+    if (session_.dirty()) {
+      ImGui::TextDisabled(
+          "Unsaved in-memory annotation edits are not included until you Save Project.");
+    }
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##backupprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((submitted || ImGui::Button("Backup")) && backup_path_buffer_[0] != '\0') {
+      session_.backup_project(backup_path_buffer_, true);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
+  if (restore_project_popup_) {
+    ImGui::OpenPopup("Restore project");
+    restore_project_popup_ = false;
+  }
+  if (ImGui::BeginPopupModal("Restore project", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Backup database path to restore into the current project");
+    ImGui::SetNextItemWidth(520.0f);
+    const bool submitted =
+        ImGui::InputText("##restoreprojectpath", backup_path_buffer_, sizeof(backup_path_buffer_),
+                         ImGuiInputTextFlags_EnterReturnsTrue);
+    if ((submitted || ImGui::Button("Restore")) && backup_path_buffer_[0] != '\0') {
+      session_.restore_project(backup_path_buffer_);
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel")) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
+  }
+
   if (state_.annotation_modal_requested) {
     ImGui::OpenPopup("Annotate");
     state_.annotation_modal_requested = false;
@@ -172,10 +218,10 @@ void Workspace::draw(bool& quit) {
     ImGui::TextWrapped(
         "Early implementation. The headless core parses ELF, PE and Mach-O, "
         "decodes x86, x86-64 and AArch64 with Capstone, builds a bounded CFG "
-        "with estimated function extents, and lifts x86-64 functions into "
-        "verified IR before printing pseudocode. Projects save and reopen "
-        "address-keyed renames and comments. The debugger and non-x86-64 "
-        "lifting are not implemented.");
+        "with estimated function extents, and lifts x86-64, x86-32 subset and "
+        "AArch64 subset functions into verified IR before printing pseudocode. "
+        "Projects save, reopen, back up and restore address-keyed renames and "
+        "comments. The debugger and 32-bit ARM lifting are not implemented.");
     ImGui::Spacing();
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
@@ -206,6 +252,22 @@ void Workspace::draw_menu_bar(bool& quit) {
       const std::string existing = session_.project_path();
       std::snprintf(project_path_buffer_, sizeof(project_path_buffer_), "%s", existing.c_str());
       save_project_popup_ = true;
+    }
+    if (ImGui::MenuItem("Backup Project…", nullptr, false,
+                        session_.has_project() && !session_.busy())) {
+      if (backup_path_buffer_[0] == '\0') {
+        const std::string suggested = session_.project_path() + ".bak";
+        std::snprintf(backup_path_buffer_, sizeof(backup_path_buffer_), "%s", suggested.c_str());
+      }
+      backup_project_popup_ = true;
+    }
+    if (ImGui::MenuItem("Restore Project…", nullptr, false,
+                        session_.has_project() && !session_.busy())) {
+      if (backup_path_buffer_[0] == '\0') {
+        const std::string suggested = session_.project_path() + ".bak";
+        std::snprintf(backup_path_buffer_, sizeof(backup_path_buffer_), "%s", suggested.c_str());
+      }
+      restore_project_popup_ = true;
     }
     if (ImGui::MenuItem("Reload", nullptr, false, !session_.path().empty() && !session_.busy())) {
       session_.open(session_.path());
