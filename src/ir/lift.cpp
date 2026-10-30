@@ -16,8 +16,6 @@ namespace {
 
 using namespace donkey;
 
-constexpr std::uint8_t kPointerWidth = 8;
-
 std::uint8_t register_width(const std::string& name) {
   static const std::unordered_map<std::string, std::uint8_t> kWidths = {
       {"rax", 8},  {"rbx", 8},  {"rcx", 8},  {"rdx", 8},  {"rsi", 8}, {"rdi", 8},  {"rbp", 8},
@@ -72,14 +70,15 @@ IrOperand memory_operand(const Operand& operand, const Instruction& instruction)
   return result;
 }
 
-IrOperand to_ir_operand(const Operand& operand, const Instruction& instruction) {
+IrOperand to_ir_operand(const Operand& operand, const Instruction& instruction,
+                        std::uint8_t default_width) {
   switch (operand.kind) {
     case OperandKind::Register:
       return IrOperand::register_ref(operand.reg, register_width(operand.reg));
     case OperandKind::Immediate:
       return IrOperand::constant_value(
           static_cast<std::uint64_t>(operand.immediate),
-          operand_width(operand) == 0 ? kPointerWidth : operand_width(operand));
+          operand_width(operand) == 0 ? default_width : operand_width(operand));
     case OperandKind::Memory:
       return memory_operand(operand, instruction);
     case OperandKind::Unknown:
@@ -170,10 +169,21 @@ struct Lifter {
   IrFunction out;
   std::size_t statement_count = 0;
   std::uint32_t temporary = 0;
+  std::uint8_t pointer_width = 8;
+  const char* stack_pointer = "rsp";
+  const char* frame_pointer = "rbp";
+  const char* return_register = "rax";
 
   Lifter(const BinaryImage& image_in, const AnalysisResult& analysis_in,
          const Function& function_in, const LiftOptions& options_in)
-      : image(image_in), analysis(analysis_in), function(function_in), options(options_in) {}
+      : image(image_in),
+        analysis(analysis_in),
+        function(function_in),
+        options(options_in),
+        pointer_width(image_in.architecture == Architecture::X86 ? 4 : 8),
+        stack_pointer(image_in.architecture == Architecture::X86 ? "esp" : "rsp"),
+        frame_pointer(image_in.architecture == Architecture::X86 ? "ebp" : "rbp"),
+        return_register(image_in.architecture == Architecture::X86 ? "eax" : "rax") {}
 
   std::uint32_t temporary_id() { return temporary++; }
 
@@ -188,7 +198,7 @@ struct Lifter {
       return;
     }
     if (statement.width == 0) {
-      statement.width = kPointerWidth;
+      statement.width = pointer_width;
     }
     // Never emit an operand the verifier would reject. An unknown register
     // width is a modelling gap, so the statement becomes an explicit opaque
@@ -203,7 +213,7 @@ struct Lifter {
       const std::uint64_t address = statement.source_address;
       statement = IrStatement{};
       statement.op = IrOp::Unsupported;
-      statement.width = kPointerWidth;
+      statement.width = pointer_width;
       statement.source_address = address;
       statement.text = "operand width is not modelled";
       out.partial = true;
@@ -223,7 +233,7 @@ struct Lifter {
     IrStatement statement;
     statement.op = IrOp::Unsupported;
     statement.source_address = instruction.address;
-    statement.width = kPointerWidth;
+    statement.width = pointer_width;
     statement.text = instruction.mnemonic;
     if (!instruction.operands.empty()) {
       statement.text += " " + instruction.operands;
@@ -238,8 +248,8 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
-    const IrOperand source = to_ir_operand(operands[1], instruction);
-    const IrOperand destination = to_ir_operand(operands[0], instruction);
+    const IrOperand source = to_ir_operand(operands[1], instruction, pointer_width);
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
 
     if (destination.kind == IrOperandKind::Register) {
       IrStatement statement;
@@ -270,8 +280,8 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
-    const IrOperand destination = to_ir_operand(operands[0], instruction);
-    const IrOperand source = to_ir_operand(operands[1], instruction);
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    const IrOperand source = to_ir_operand(operands[1], instruction, pointer_width);
     if (destination.kind != IrOperandKind::Register || destination.width < source.width ||
         source.width == 0) {
       // movsxd from a 64-bit source is a plain copy; anything else that does
@@ -296,7 +306,7 @@ struct Lifter {
     }
     IrStatement statement;
     statement.op = IrOp::Lea;
-    statement.dest = to_ir_operand(operands[0], instruction);
+    statement.dest = to_ir_operand(operands[0], instruction, pointer_width);
     statement.a = memory_operand(operands[1], instruction);
     statement.width = statement.dest.width;
     statement.source_address = instruction.address;
@@ -311,10 +321,10 @@ struct Lifter {
       return;
     }
 
-    IrOperand destination = to_ir_operand(operands[0], instruction);
+    IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
     IrOperand source;
     if (operands.size() >= 2) {
-      source = to_ir_operand(operands[1], instruction);
+      source = to_ir_operand(operands[1], instruction, pointer_width);
     } else {
       source = IrOperand::constant_value(1, destination.width);
     }
@@ -372,8 +382,8 @@ struct Lifter {
     }
     IrStatement statement;
     statement.op = IrOp::Compare;
-    statement.a = to_ir_operand(operands[0], instruction);
-    statement.b = to_ir_operand(operands[1], instruction);
+    statement.a = to_ir_operand(operands[0], instruction, pointer_width);
+    statement.b = to_ir_operand(operands[1], instruction, pointer_width);
     statement.condition = IrCondition::Equal;
     statement.width = statement.a.width;
     statement.source_address = instruction.address;
@@ -388,8 +398,8 @@ struct Lifter {
     }
     IrStatement statement;
     statement.op = IrOp::Test;
-    statement.a = to_ir_operand(operands[0], instruction);
-    statement.b = to_ir_operand(operands[1], instruction);
+    statement.a = to_ir_operand(operands[0], instruction, pointer_width);
+    statement.b = to_ir_operand(operands[1], instruction, pointer_width);
     statement.width = statement.a.width;
     statement.source_address = instruction.address;
     push(block, std::move(statement));
@@ -401,7 +411,7 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
-    const IrOperand source = to_ir_operand(operands[0], instruction);
+    const IrOperand source = to_ir_operand(operands[0], instruction, pointer_width);
     if (source.kind == IrOperandKind::None) {
       // An operand this lifter cannot model would produce malformed IR.
       unsupported(block, instruction);
@@ -409,22 +419,22 @@ struct Lifter {
     }
     IrStatement decrement;
     decrement.op = IrOp::Sub;
-    decrement.dest = IrOperand::register_ref("rsp", kPointerWidth);
-    decrement.a = IrOperand::register_ref("rsp", kPointerWidth);
-    decrement.b = IrOperand::constant_value(8, kPointerWidth);
-    decrement.width = kPointerWidth;
+    decrement.dest = IrOperand::register_ref(stack_pointer, pointer_width);
+    decrement.a = IrOperand::register_ref(stack_pointer, pointer_width);
+    decrement.b = IrOperand::constant_value(pointer_width, pointer_width);
+    decrement.width = pointer_width;
     decrement.source_address = instruction.address;
     push(block, std::move(decrement));
 
     IrOperand slot;
     slot.kind = IrOperandKind::Memory;
-    slot.reg = "rsp";
-    slot.width = kPointerWidth;
+    slot.reg = stack_pointer;
+    slot.width = pointer_width;
     IrStatement store;
     store.op = IrOp::Store;
     store.a = slot;
     store.b = source;
-    store.width = kPointerWidth;
+    store.width = pointer_width;
     store.source_address = instruction.address;
     push(block, std::move(store));
   }
@@ -435,7 +445,7 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
-    const IrOperand destination = to_ir_operand(operands[0], instruction);
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
     if (destination.kind != IrOperandKind::Register) {
       // pop with a memory destination would need a load/store pair; model it
       // as unsupported rather than emitting a Load with no register result.
@@ -444,22 +454,22 @@ struct Lifter {
     }
     IrOperand slot;
     slot.kind = IrOperandKind::Memory;
-    slot.reg = "rsp";
-    slot.width = kPointerWidth;
+    slot.reg = stack_pointer;
+    slot.width = pointer_width;
     IrStatement load;
     load.op = IrOp::Load;
     load.dest = destination;
     load.a = slot;
-    load.width = kPointerWidth;
+    load.width = pointer_width;
     load.source_address = instruction.address;
     push(block, std::move(load));
 
     IrStatement increment;
     increment.op = IrOp::Add;
-    increment.dest = IrOperand::register_ref("rsp", kPointerWidth);
-    increment.a = IrOperand::register_ref("rsp", kPointerWidth);
-    increment.b = IrOperand::constant_value(8, kPointerWidth);
-    increment.width = kPointerWidth;
+    increment.dest = IrOperand::register_ref(stack_pointer, pointer_width);
+    increment.a = IrOperand::register_ref(stack_pointer, pointer_width);
+    increment.b = IrOperand::constant_value(pointer_width, pointer_width);
+    increment.width = pointer_width;
     increment.source_address = instruction.address;
     push(block, std::move(increment));
   }
@@ -467,30 +477,30 @@ struct Lifter {
   void lift_leave(IrBlock& block, const Instruction& instruction) {
     IrStatement restore_stack;
     restore_stack.op = IrOp::Assign;
-    restore_stack.dest = IrOperand::register_ref("rsp", kPointerWidth);
-    restore_stack.a = IrOperand::register_ref("rbp", kPointerWidth);
-    restore_stack.width = kPointerWidth;
+    restore_stack.dest = IrOperand::register_ref(stack_pointer, pointer_width);
+    restore_stack.a = IrOperand::register_ref(frame_pointer, pointer_width);
+    restore_stack.width = pointer_width;
     restore_stack.source_address = instruction.address;
     push(block, std::move(restore_stack));
 
     IrOperand slot;
     slot.kind = IrOperandKind::Memory;
-    slot.reg = "rsp";
-    slot.width = kPointerWidth;
+    slot.reg = stack_pointer;
+    slot.width = pointer_width;
     IrStatement load;
     load.op = IrOp::Load;
-    load.dest = IrOperand::register_ref("rbp", kPointerWidth);
+    load.dest = IrOperand::register_ref(frame_pointer, pointer_width);
     load.a = slot;
-    load.width = kPointerWidth;
+    load.width = pointer_width;
     load.source_address = instruction.address;
     push(block, std::move(load));
 
     IrStatement increment;
     increment.op = IrOp::Add;
-    increment.dest = IrOperand::register_ref("rsp", kPointerWidth);
-    increment.a = IrOperand::register_ref("rsp", kPointerWidth);
-    increment.b = IrOperand::constant_value(8, kPointerWidth);
-    increment.width = kPointerWidth;
+    increment.dest = IrOperand::register_ref(stack_pointer, pointer_width);
+    increment.a = IrOperand::register_ref(stack_pointer, pointer_width);
+    increment.b = IrOperand::constant_value(pointer_width, pointer_width);
+    increment.width = pointer_width;
     increment.source_address = instruction.address;
     push(block, std::move(increment));
   }
@@ -498,14 +508,15 @@ struct Lifter {
   void lift_call(IrBlock& block, const Instruction& instruction) {
     IrStatement statement;
     statement.op = IrOp::Call;
-    statement.width = kPointerWidth;
+    statement.width = pointer_width;
     statement.source_address = instruction.address;
     if (instruction.direct_target.has_value()) {
-      statement.a = IrOperand::constant_value(instruction.direct_target.value(), kPointerWidth);
+      statement.a = IrOperand::constant_value(instruction.direct_target.value(), pointer_width);
     } else if (!instruction.structured_operands.empty()) {
-      statement.a = to_ir_operand(instruction.structured_operands.front(), instruction);
+      statement.a =
+          to_ir_operand(instruction.structured_operands.front(), instruction, pointer_width);
     } else {
-      statement.a = IrOperand::constant_value(0, kPointerWidth);
+      statement.a = IrOperand::constant_value(0, pointer_width);
     }
     push(block, std::move(statement));
     note("outgoing call arguments and return values follow no modelled ABI");
@@ -523,10 +534,10 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     }
     return lifted;
   }
-  if (image.architecture != Architecture::X86_64) {
+  if (image.architecture != Architecture::X86_64 && image.architecture != Architecture::X86) {
     return make_error<IrFunction>(
         Status::Unsupported, "lift.unsupported_architecture",
-        "the lifter models x86-64 and AArch64 only; no pseudocode is produced for other "
+        "the lifter models x86, x86-64 and AArch64 only; no pseudocode is produced for other "
         "architectures",
         function.address);
   }
@@ -559,7 +570,10 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   lifter.out.name = function.name.empty() ? "sub" : function.name;
   lifter.out.partial = function.estimated;
   lifter.out.notes.push_back(
-      "x86-64 subset; register aliases are not canonicalised and locals are not recovered");
+      image.architecture == Architecture::X86
+          ? "x86-32 subset; register aliases are not canonicalised, cdecl stack arguments are "
+            "not recovered and locals are not recovered"
+          : "x86-64 subset; register aliases are not canonicalised and locals are not recovered");
 
   bool previous_sets_flags = false;
   for (const BasicBlock* block : lifter.blocks) {
@@ -581,10 +595,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         IrStatement statement;
         statement.op = IrOp::CondBranch;
         statement.source_address = instruction.address;
-        statement.width = kPointerWidth;
+        statement.width = lifter.pointer_width;
         statement.condition = condition;
-        statement.a = previous_sets_flags ? IrOperand::register_ref("flags", kPointerWidth)
-                                          : IrOperand::register_ref("flags", kPointerWidth);
+        statement.a = IrOperand::register_ref("flags", lifter.pointer_width);
         if (!previous_sets_flags) {
           lifter.mark_partial("conditional branch depends on flags this lifter does not model");
         }
@@ -611,7 +624,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         IrStatement statement;
         statement.op = IrOp::Branch;
         statement.source_address = instruction.address;
-        statement.width = kPointerWidth;
+        statement.width = lifter.pointer_width;
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
@@ -621,17 +634,18 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           IrStatement call;
           call.op = IrOp::Call;
           call.source_address = instruction.address;
-          call.width = kPointerWidth;
+          call.width = lifter.pointer_width;
           call.a = instruction.direct_target.has_value()
-                       ? IrOperand::constant_value(instruction.direct_target.value(), kPointerWidth)
-                       : IrOperand::constant_value(0, kPointerWidth);
+                       ? IrOperand::constant_value(instruction.direct_target.value(),
+                                                   lifter.pointer_width)
+                       : IrOperand::constant_value(0, lifter.pointer_width);
           lifter.push(out_block, std::move(call));
           lifter.mark_partial("jump leaves the function; treated as a tail call");
           IrStatement tail;
           tail.op = IrOp::Return;
           tail.source_address = instruction.address;
-          tail.width = kPointerWidth;
-          tail.a = IrOperand::register_ref("rax", kPointerWidth);
+          tail.width = lifter.pointer_width;
+          tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
           lifter.push(out_block, std::move(tail));
         } else {
           statement.a = IrOperand::block_ref(target->second);
@@ -645,10 +659,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         IrStatement statement;
         statement.op = IrOp::Return;
         statement.source_address = instruction.address;
-        statement.width = kPointerWidth;
-        if (image.architecture == Architecture::X86_64) {
-          statement.a = IrOperand::register_ref("rax", kPointerWidth);
-        }
+        statement.width = lifter.pointer_width;
+        statement.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
         lifter.push(out_block, std::move(statement));
         previous_sets_flags = false;
         continue;
@@ -659,7 +671,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         IrStatement statement;
         statement.op = IrOp::Return;
         statement.source_address = instruction.address;
-        statement.width = kPointerWidth;
+        statement.width = lifter.pointer_width;
         lifter.push(out_block, std::move(statement));
         previous_sets_flags = false;
         continue;
@@ -709,17 +721,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         IrStatement statement;
         statement.op = IrOp::Branch;
         statement.a = IrOperand::block_ref(next->second);
-        statement.width = kPointerWidth;
+        statement.width = lifter.pointer_width;
         statement.source_address = block->end_address;
         lifter.push(out_block, std::move(statement));
       } else {
         IrStatement statement;
         statement.op = IrOp::Return;
-        statement.width = kPointerWidth;
+        statement.width = lifter.pointer_width;
         statement.source_address = block->end_address;
-        if (image.architecture == Architecture::X86_64) {
-          statement.a = IrOperand::register_ref("rax", kPointerWidth);
-        }
+        statement.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
         lifter.push(out_block, std::move(statement));
         lifter.out.partial = true;
       }
@@ -745,11 +755,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     exit_block.address = lifter.blocks.back()->end_address;
     IrStatement statement;
     statement.op = IrOp::Return;
-    statement.width = kPointerWidth;
+    statement.width = lifter.pointer_width;
     statement.source_address = exit_block.address;
-    if (image.architecture == Architecture::X86_64) {
-      statement.a = IrOperand::register_ref("rax", kPointerWidth);
-    }
+    statement.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
     exit_block.statements.push_back(std::move(statement));
     lifter.out.blocks.push_back(std::move(exit_block));
     lifter.out.partial = true;
