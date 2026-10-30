@@ -110,6 +110,140 @@ TEST(Project, ReimportReplacesDerivedRows) {
   EXPECT_EQ(images.value().front().functions, 2U);
 }
 
+TEST(Project, PersistsAnnotationsAcrossReopen) {
+  TempPath path("annotations-persist");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    image_id = imported.value();
+
+    auto rename = project.value().set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100,
+                                                 "entry_point");
+    ASSERT_TRUE(rename.has_value()) << rename.diagnostic().message;
+    auto comment = project.value().set_annotation(image_id, donkey::AnnotationKind::Comment,
+                                                  0x400104, "calls the helper");
+    ASSERT_TRUE(comment.has_value()) << comment.diagnostic().message;
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto found = reopened.value().annotations(image_id);
+  ASSERT_TRUE(found.has_value()) << found.diagnostic().message;
+  ASSERT_EQ(found.value().size(), 2U);
+  EXPECT_EQ(found.value()[0].kind, donkey::AnnotationKind::Rename);
+  EXPECT_EQ(found.value()[0].address, 0x400100U);
+  EXPECT_EQ(found.value()[0].text, "entry_point");
+  EXPECT_EQ(found.value()[1].kind, donkey::AnnotationKind::Comment);
+  EXPECT_EQ(found.value()[1].text, "calls the helper");
+
+  auto images = reopened.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  EXPECT_EQ(images.value().front().annotations, 2U);
+}
+
+TEST(Project, AnnotationsSurviveReimportAndCanBeCleared) {
+  TempPath path("annotations-reimport");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  auto imported = project.value().import(loaded, analysis.value());
+  ASSERT_TRUE(imported.has_value());
+  const std::int64_t image_id = imported.value();
+
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "main")
+                  .has_value());
+  // Re-import replaces derived rows but must not drop user annotations.
+  ASSERT_TRUE(project.value().import(loaded, analysis.value()).has_value());
+  auto after = project.value().annotations(image_id);
+  ASSERT_TRUE(after.has_value());
+  ASSERT_EQ(after.value().size(), 1U);
+  EXPECT_EQ(after.value().front().text, "main");
+
+  // Empty text clears through set_annotation.
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "")
+                  .has_value());
+  auto cleared = project.value().annotations(image_id);
+  ASSERT_TRUE(cleared.has_value());
+  EXPECT_TRUE(cleared.value().empty());
+
+  // Clearing an absent annotation is still success.
+  EXPECT_TRUE(project.value()
+                  .clear_annotation(image_id, donkey::AnnotationKind::Comment, 0x400100)
+                  .has_value());
+}
+
+TEST(Project, RejectsAnnotationsForMissingImageAndOverlongText) {
+  TempPath path("annotations-invalid");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+
+  auto missing = project.value().set_annotation(42, donkey::AnnotationKind::Rename, 0x1000, "x");
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.diagnostic().code, "project.image_not_found");
+
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+  auto imported = project.value().import(loaded, analysis.value());
+  ASSERT_TRUE(imported.has_value());
+
+  const std::string too_long(5000, 'x');
+  auto overlong = project.value().set_annotation(imported.value(), donkey::AnnotationKind::Comment,
+                                                 0x400100, too_long);
+  ASSERT_FALSE(overlong.has_value());
+  EXPECT_EQ(overlong.diagnostic().code, "project.annotation_too_long");
+}
+
+TEST(Project, MigratesVersionOneDatabaseForward) {
+  TempPath path("migrate-v1");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value());
+    image_id = imported.value();
+  }
+
+  // Turn the database back into a v1 project: drop the v2 table and reset the
+  // version. Reopening must recreate annotations and keep existing images.
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=1", nullptr, nullptr, nullptr), SQLITE_OK);
+    sqlite3_close(db);
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 2);
+  auto images = reopened.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  EXPECT_EQ(images.value().front().id, image_id);
+  EXPECT_TRUE(reopened.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100, "entry")
+                  .has_value());
+}
+
 TEST(Project, FailedImportRollsBackEverything) {
   TempPath path("rollback");
   {

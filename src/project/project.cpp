@@ -11,6 +11,17 @@
 #include "donkey/core/version.h"
 
 namespace donkey {
+
+const char* annotation_kind_name(AnnotationKind kind) noexcept {
+  switch (kind) {
+    case AnnotationKind::Rename:
+      return "rename";
+    case AnnotationKind::Comment:
+      return "comment";
+  }
+  return "unknown";
+}
+
 namespace {
 
 constexpr const char* kSchemaV1 = R"sql(
@@ -65,6 +76,19 @@ CREATE TABLE analysis_runs (
 CREATE INDEX sections_by_image ON sections(image_id);
 CREATE INDEX functions_by_image ON functions(image_id);
 CREATE INDEX analysis_runs_by_image ON analysis_runs(image_id);
+)sql";
+
+/// v2 adds user annotations. They are keyed by address inside an image so they
+/// survive re-import, which replaces only derived analysis rows.
+constexpr const char* kSchemaV2 = R"sql(
+CREATE TABLE annotations (
+  image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment')),
+  address    INTEGER NOT NULL,
+  text       TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (image_id, kind, address)
+);
 )sql";
 
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
@@ -247,19 +271,37 @@ Result<Project> Project::open(const std::string& path) {
     if (schema == 0) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=1", nullptr, nullptr, nullptr);
+      const int rc_schema2 = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
+      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema2 != SQLITE_OK ||
+          rc_version != SQLITE_OK || rc_commit != SQLITE_OK) {
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
+                                       std::string(sqlite3_errstr(rc_schema)) + "/" +
+                                       std::string(sqlite3_errstr(rc_schema2)) + "/" +
+                                       std::string(sqlite3_errstr(rc_version)) + "/" +
+                                       std::string(sqlite3_errstr(rc_commit)) +
+                                       " msg=" + sqlite3_errmsg(db));
+      }
+      schema = 2;
+    } else if (schema == 1) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_schema = sqlite3_exec(db, kSchemaV2, nullptr, nullptr, nullptr);
+      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_version != SQLITE_OK ||
           rc_commit != SQLITE_OK) {
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
-                                       std::string(sqlite3_errstr(rc_schema)) + "/" +
+                                   "migrate v1->v2: " + std::string(sqlite3_errstr(rc_begin)) +
+                                       "/" + std::string(sqlite3_errstr(rc_schema)) + "/" +
                                        std::string(sqlite3_errstr(rc_version)) + "/" +
                                        std::string(sqlite3_errstr(rc_commit)) +
                                        " msg=" + sqlite3_errmsg(db));
       }
-      schema = 1;
+      schema = 2;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -481,6 +523,7 @@ Result<std::vector<ProjectImage>> Project::images() const {
                   "i.entry_point, i.file_size, "
                   "(SELECT COUNT(*) FROM sections s WHERE s.image_id = i.id), "
                   "(SELECT COUNT(*) FROM functions f WHERE f.image_id = i.id), "
+                  "(SELECT COUNT(*) FROM annotations a WHERE a.image_id = i.id), "
                   "COALESCE((SELECT r.partial FROM analysis_runs r WHERE r.image_id = i.id "
                   "ORDER BY r.id DESC LIMIT 1), 0) "
                   "FROM images i ORDER BY i.id");
@@ -503,13 +546,124 @@ Result<std::vector<ProjectImage>> Project::images() const {
     image.file_size = static_cast<std::uint64_t>(query.integer(8));
     image.sections = static_cast<std::size_t>(query.integer(9));
     image.functions = static_cast<std::size_t>(query.integer(10));
-    image.analysis_partial = query.integer(11) != 0;
+    image.annotations = static_cast<std::size_t>(query.integer(11));
+    image.analysis_partial = query.integer(12) != 0;
     out.push_back(std::move(image));
   }
   if (!query.done()) {
     return make_error<std::vector<ProjectImage>>(
         Status::InternalError, "project.query_failed",
         storage_error(impl_->db, "project.query_failed", "read images").message);
+  }
+  return out;
+}
+
+Result<void> Project::set_annotation(std::int64_t image_id, AnnotationKind kind,
+                                     std::uint64_t address, const std::string& text) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (!fits_storage(address)) {
+    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                           "annotation address does not fit the storage integer range", address);
+  }
+  constexpr std::size_t kMaxAnnotationLength = 4096;
+  if (text.size() > kMaxAnnotationLength) {
+    return make_void_error(Status::InvalidInput, "project.annotation_too_long",
+                           "annotation text exceeds 4096 bytes");
+  }
+  if (text.empty()) {
+    return clear_annotation(image_id, kind, address);
+  }
+
+  sqlite3* db = impl_->db;
+  {
+    Statement check(db, "SELECT 1 FROM images WHERE id = ?1");
+    check.bind(1, image_id);
+    if (!check.ok() || !check.step()) {
+      if (!check.done()) {
+        return make_void_error(
+            Status::InternalError, "project.query_failed",
+            storage_error(db, "project.query_failed", "lookup image for annotation").message);
+      }
+      return make_void_error(Status::InvalidInput, "project.image_not_found",
+                             "no image with id " + std::to_string(image_id));
+    }
+  }
+
+  Statement upsert(db,
+                   "INSERT INTO annotations(image_id, kind, address, text) VALUES(?1, ?2, ?3, ?4) "
+                   "ON CONFLICT(image_id, kind, address) DO UPDATE SET text = excluded.text, "
+                   "updated_at = datetime('now')");
+  upsert.bind(1, image_id);
+  upsert.bind(2, std::string(annotation_kind_name(kind)));
+  upsert.bind(3, static_cast<std::int64_t>(address));
+  upsert.bind(4, text);
+  if (!upsert.execute_statement()) {
+    return make_void_error(
+        Status::InternalError, "project.annotation_write_failed",
+        storage_error(db, "project.annotation_write_failed", "write annotation").message);
+  }
+  return Result<void>();
+}
+
+Result<void> Project::clear_annotation(std::int64_t image_id, AnnotationKind kind,
+                                       std::uint64_t address) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (!fits_storage(address)) {
+    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                           "annotation address does not fit the storage integer range", address);
+  }
+  Statement remove(impl_->db,
+                   "DELETE FROM annotations WHERE image_id = ?1 AND kind = ?2 AND address = ?3");
+  remove.bind(1, image_id);
+  remove.bind(2, std::string(annotation_kind_name(kind)));
+  remove.bind(3, static_cast<std::int64_t>(address));
+  if (!remove.execute_statement()) {
+    return make_void_error(
+        Status::InternalError, "project.annotation_delete_failed",
+        storage_error(impl_->db, "project.annotation_delete_failed", "delete annotation").message);
+  }
+  return Result<void>();
+}
+
+Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) const {
+  if (!is_open()) {
+    return make_error<std::vector<Annotation>>(Status::InvalidInput, "project.not_open",
+                                               "no project database is open");
+  }
+  Statement query(impl_->db,
+                  "SELECT kind, address, text FROM annotations WHERE image_id = ?1 "
+                  "ORDER BY address, kind");
+  query.bind(1, image_id);
+  if (!query.ok()) {
+    return make_error<std::vector<Annotation>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(impl_->db, "project.query_failed", "list annotations").message);
+  }
+  std::vector<Annotation> out;
+  while (query.step()) {
+    const std::string kind = query.text(0);
+    Annotation annotation;
+    if (kind == "rename") {
+      annotation.kind = AnnotationKind::Rename;
+    } else if (kind == "comment") {
+      annotation.kind = AnnotationKind::Comment;
+    } else {
+      return make_error<std::vector<Annotation>>(
+          Status::CorruptProject, "project.annotation_kind_invalid",
+          "annotation row has an unknown kind '" + kind + "'");
+    }
+    annotation.address = static_cast<std::uint64_t>(query.integer(1));
+    annotation.text = query.text(2);
+    out.push_back(std::move(annotation));
+  }
+  if (!query.done()) {
+    return make_error<std::vector<Annotation>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(impl_->db, "project.query_failed", "read annotations").message);
   }
   return out;
 }
