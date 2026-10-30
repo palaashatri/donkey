@@ -1236,20 +1236,30 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         ++written;
         continue;
       }
-      auto text = format_pseudocode(lifted.value());
-      if (!text) {
+      auto pseudo_res = format_pseudocode_lines(lifted.value());
+      if (!pseudo_res) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
-               ", \"status\": \"InvalidIR\", \"code\": " + quote(text.diagnostic().code) +
+               ", \"status\": \"InvalidIR\", \"code\": " + quote(pseudo_res.diagnostic().code) +
                ", \"pseudocode\": null}";
         ++written;
         continue;
       }
+      const Pseudocode& pc = pseudo_res.value();
       out += "    {\"address\": " + quote(hex(function->address)) +
              ", \"name\": " + quote(display_name(function->name)) +
              ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
              ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
-             ", \"pseudocode\": " + quote(text.value()) + "}";
+             ", \"pseudocode\": " + quote(pc.full_text) + ", \"source_map\": [";
+      for (std::size_t li = 0; li < pc.lines.size(); ++li) {
+        out += li == 0 ? "\n" : ",\n";
+        out +=
+            "        {\"line\": " + std::to_string(li + 1) +
+            ", \"text\": " + quote(pc.lines[li].text) + ", \"source_address\": " +
+            (pc.lines[li].source_address != 0 ? quote(hex(pc.lines[li].source_address)) : "null") +
+            "}";
+      }
+      out += pc.lines.empty() ? "]}" : "\n      ]}";
       ++written;
     }
     out += written == 0 ? "]\n" : "\n  ]\n";
