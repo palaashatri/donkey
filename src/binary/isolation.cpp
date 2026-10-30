@@ -29,6 +29,7 @@ bool process_isolation_available() noexcept {
 #endif
 }
 
+#if DONKEY_HAS_POSIX_ISOLATION
 namespace {
 
 constexpr std::uint32_t kMagic = 0x444B4953;  // 'DKIS'
@@ -359,6 +360,7 @@ Result<LoadedBinary> deserialize_result(std::span<const std::byte> bytes) {
 }
 
 }  // namespace
+#endif  // DONKEY_HAS_POSIX_ISOLATION
 
 Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOptions& options,
                                           const IsolationConfig& config) {
@@ -489,6 +491,7 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
   return deserialize_result(response_buffer);
 #else
   // Non-POSIX platforms degrade safely to in-process checked loading
+  (void)config;
   auto loaded = load_binary(path, options);
   if (loaded) {
     loaded.value().image.add_diagnostic(

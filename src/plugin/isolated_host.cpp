@@ -5,6 +5,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <cstring>
+#include <string>
 #include <vector>
 
 #include "donkey/plugin/plugin.h"
@@ -16,24 +18,14 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
                                                            uint64_t granted_capabilities,
                                                            uint32_t timeout_seconds,
                                                            size_t max_memory_bytes) {
-  // First, verify manifest and ABI version upfront
-  auto manifest_res = inspect_manifest(library_path);
-  if (!manifest_res) {
-    return manifest_res.diagnostic();
-  }
-
-  const auto& manifest = manifest_res.value();
-  if ((manifest.requested_capabilities & ~granted_capabilities) != 0) {
-    return Diagnostic::make(Status::PermissionDenied, "plugin.capability_denied",
-                            "Plugin requested capabilities that have not been granted by user");
-  }
-
   int pipe_fds[2];
   if (pipe(pipe_fds) != 0) {
     return Diagnostic::make(Status::InternalError, "plugin.pipe_failed",
                             "Failed to allocate pipe for isolated worker");
   }
 
+  // Security: Fork the worker process FIRST before loading any untrusted library.
+  // The parent supervisor NEVER calls dlopen() or executes static constructors.
   pid_t pid = fork();
   if (pid < 0) {
     close(pipe_fds[0]);
@@ -43,7 +35,7 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
   }
 
   if (pid == 0) {
-    // Child process: execute untrusted plugin
+    // Child process: untrusted execution domain
     close(pipe_fds[0]);
 
     if (timeout_seconds > 0) {
@@ -62,6 +54,7 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
     }
 #endif
 
+    // Safely load the plugin inside the isolated child process
     void* handle = dlopen(library_path.c_str(), RTLD_NOW | RTLD_LOCAL);
     if (!handle) {
       close(pipe_fds[1]);
@@ -82,6 +75,13 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
       dlclose(handle);
       close(pipe_fds[1]);
       _exit(3);
+    }
+
+    // Verify requested capabilities against user-granted capabilities
+    if ((desc->requested_capabilities & ~granted_capabilities) != 0) {
+      dlclose(handle);
+      close(pipe_fds[1]);
+      _exit(5);
     }
 
     if (desc->init) {
@@ -180,6 +180,27 @@ Result<PluginExecutionResult> PluginHost::execute_isolated(const std::string& li
 
   if (WIFEXITED(wstatus)) {
     int exit_code = WEXITSTATUS(wstatus);
+    if (exit_code == 3) {
+      return Diagnostic::make(Status::InvalidInput, "plugin.abi_version_mismatch",
+                              "Plugin ABI version mismatch or invalid descriptor");
+    }
+    if (exit_code == 5) {
+      return Diagnostic::make(Status::PermissionDenied, "plugin.capability_denied",
+                              "Plugin requested capabilities that have not been granted by user");
+    }
+    if (exit_code == 1) {
+      return Diagnostic::make(Status::InvalidInput, "plugin.load_failed",
+                              "Failed to dlopen plugin in isolated worker");
+    }
+    if (exit_code == 2) {
+      return Diagnostic::make(Status::InvalidInput, "plugin.missing_entry",
+                              "Plugin does not export donkey_plugin_entry symbol");
+    }
+    if (exit_code == 4) {
+      return Diagnostic::make(Status::InvalidInput, "plugin.init_failed",
+                              "Plugin initialization function returned non-zero code");
+    }
+
     if (exit_code != 0 || r1 != sizeof(exec_rc)) {
       res.success = false;
       res.exit_code = exit_code;

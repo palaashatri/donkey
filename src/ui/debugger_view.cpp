@@ -21,7 +21,7 @@ void debugger(const Document& document, UiState& state) {
     return;
   }
 
-  components::heading("Debugger");
+  components::heading("Debugger (Mock Architecture Simulation)");
   ImGui::SameLine();
   const char* state_str = debug::session_state_name(adapter->state());
   components::badge(
@@ -31,12 +31,16 @@ void debugger(const Document& document, UiState& state) {
               ? "Complete"
               : (adapter->state() == debug::SessionState::Running ? "Partial" : "Unsupported")));
 
-  ImGui::SameLine();
+  ImGui::TextDisabled(
+      "Note: The Debugger view is currently connected to a mock architecture adapter. Native "
+      "OS-level process debugging (Mach VM/ptrace/Win32) is not yet implemented.");
+
+  ImGui::Spacing();
   if (adapter->state() == debug::SessionState::Disconnected ||
       adapter->state() == debug::SessionState::Exited) {
-    if (ImGui::Button("Launch")) {
+    if (ImGui::Button("Launch Target")) {
       debug::LaunchConfig cfg;
-      cfg.binary_path = "/bin/ls";
+      cfg.binary_path = !document.loaded.image.path.empty() ? document.loaded.image.path : "/bin/ls";
       cfg.stop_at_entry = true;
       (void)adapter->launch(cfg);
     }

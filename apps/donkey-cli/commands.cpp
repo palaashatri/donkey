@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <span>
@@ -1835,6 +1836,19 @@ int command_patch(const std::vector<std::string_view>& arguments) {
   }
   if (dest_path.empty()) {
     return usage_error("patch apply needs --output <destination>");
+  }
+
+  if (original_bytes.empty()) {
+    std::ifstream src_file(source_path, std::ios::binary);
+    if (src_file) {
+      src_file.seekg(static_cast<std::streamoff>(offset));
+      original_bytes.resize(replacement_bytes.size());
+      src_file.read(reinterpret_cast<char*>(original_bytes.data()),
+                    static_cast<std::streamsize>(replacement_bytes.size()));
+      if (src_file.gcount() != static_cast<std::streamsize>(replacement_bytes.size())) {
+        original_bytes.clear();
+      }
+    }
   }
 
   PatchManager manager;

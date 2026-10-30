@@ -24,6 +24,7 @@ Session::~Session() {
 }
 
 void Session::join_worker() {
+  cancel();
   if (worker_.joinable()) {
     worker_.join();
   }

@@ -138,5 +138,60 @@ TEST(PatchTest, ExportPatchedBinaryVerifiesA21) {
   std::filesystem::remove(temp_out, ec);
 }
 
+TEST(PatchTest, RejectsEmptyOriginal) {
+  PatchManager manager;
+  const uint8_t repl[] = {0x90};
+  auto res = manager.stage_patch(0x10, {}, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.empty_original");
+}
+
+TEST(PatchTest, RejectsSizeMismatch) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90};
+  const uint8_t repl[] = {0xCC, 0xCC, 0xCC, 0xCC};
+  auto res = manager.stage_patch(0x10, orig, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.size_mismatch");
+}
+
+TEST(PatchTest, RejectsOverflowingOffset) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl[] = {0xCC, 0xCC};
+  auto res = manager.stage_patch(std::numeric_limits<uint64_t>::max() - 1, orig, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.offset_overflow");
+}
+
+TEST(PatchTest, RejectsOverlappingPatches) {
+  PatchManager manager;
+  const uint8_t orig1[] = {0x90, 0x90, 0x90, 0x90};
+  const uint8_t repl1[] = {0xCC, 0xCC, 0xCC, 0xCC};
+  auto res1 = manager.stage_patch(0x10, orig1, repl1);
+  ASSERT_TRUE(res1.has_value());
+
+  // Overlap start: 0x12..0x16 overlaps with 0x10..0x14
+  const uint8_t orig2[] = {0x90, 0x90, 0x90, 0x90};
+  const uint8_t repl2[] = {0x00, 0x00, 0x00, 0x00};
+  auto res2 = manager.stage_patch(0x12, orig2, repl2);
+  EXPECT_FALSE(res2.has_value());
+  EXPECT_EQ(res2.diagnostic().code, "patch.overlap");
+}
+
+TEST(PatchTest, SafeOutOfBoundsCheckOnApplyAndRevert) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl[] = {0xCC, 0xCC};
+  auto stage_res = manager.stage_patch(10, orig, repl);
+  ASSERT_TRUE(stage_res.has_value());
+
+  // Buffer smaller than offset + size
+  std::vector<uint8_t> short_buffer = {0x90, 0x90, 0x90};
+  auto apply_res = manager.apply_patch(stage_res.value(), short_buffer);
+  EXPECT_FALSE(apply_res.has_value());
+  EXPECT_EQ(apply_res.diagnostic().code, "patch.out_of_bounds");
+}
+
 }  // namespace
 }  // namespace donkey
