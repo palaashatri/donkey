@@ -604,6 +604,8 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
                "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
                "  donkey-cli project annotations <database> <image-id> [--json]\n"
+               "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
+               "  donkey-cli project restore <database> <backup> [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1142,6 +1144,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
   const std::string_view subcommand = arguments[0];
   bool json = false;
   bool clear = false;
+  bool force = false;
   std::vector<std::string_view> positional;
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view argument = arguments[i];
@@ -1149,6 +1152,8 @@ int command_project(const std::vector<std::string_view>& arguments) {
       json = true;
     } else if (argument == "--clear") {
       clear = true;
+    } else if (argument == "--force") {
+      force = true;
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for project");
     } else {
@@ -1369,8 +1374,96 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
+  if (subcommand == "backup") {
+    if (positional.size() != 2) {
+      return usage_error("project backup needs a database path and a backup path");
+    }
+    const std::string database(positional[0]);
+    const std::string backup(positional[1]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto written = project.value().backup(backup, force);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    auto restore_check = Project::open(backup);
+    if (!restore_check) {
+      return fail(restore_check.diagnostic());
+    }
+    auto integrity = restore_check.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"backup\": " + quote(backup) + ",\n";
+      out +=
+          "  \"project_schema\": " + std::to_string(restore_check.value().schema_version()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Backup:    %s\n", backup.c_str());
+      std::printf("Schema:    %d\n", restore_check.value().schema_version());
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "restore") {
+    if (positional.size() != 2) {
+      return usage_error("project restore needs a database path and a backup path");
+    }
+    const std::string database(positional[0]);
+    const std::string backup(positional[1]);
+    auto written = Project::restore(database, backup);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    auto restored = Project::open(database);
+    if (!restored) {
+      return fail(restored.diagnostic());
+    }
+    auto integrity = restored.value().check_integrity();
+    if (!integrity) {
+      return fail(integrity.diagnostic());
+    }
+    auto images = restored.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"backup\": " + quote(backup) + ",\n";
+      out += "  \"project_schema\": " + std::to_string(restored.value().schema_version()) + ",\n";
+      out += "  \"integrity\": " + std::string(integrity.value() ? "true" : "false") + ",\n";
+      out += "  \"images\": " + std::to_string(images.value().size()) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Database:  %s\n", database.c_str());
+      std::printf("Restored:  %s\n", backup.c_str());
+      std::printf("Schema:    %d\n", restored.value().schema_version());
+      std::printf("Integrity: %s\n", integrity.value() ? "ok" : "failed");
+      std::printf("Images:    %zu\n", images.value().size());
+    }
+    return kExitOk;
+  }
+
   return usage_error(
-      "unknown project subcommand (expected save, info, rename, comment or annotations)");
+      "unknown project subcommand (expected save, info, rename, comment, annotations, backup or "
+      "restore)");
 }
 
 }  // namespace donkey::cli

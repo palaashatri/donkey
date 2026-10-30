@@ -382,4 +382,145 @@ TEST(Project, RejectsNewerSchemaWithoutTouchingIt) {
   EXPECT_EQ(project.diagnostic().status, donkey::Status::Unsupported);
 }
 
+TEST(Project, BacksUpAndRestoresAnnotations) {
+  TempPath source("backup-source");
+  TempPath destination("restore-destination");
+  TempPath backup("backup-file");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(source.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    image_id = imported.value();
+    auto set = project.value().set_annotation(image_id, donkey::AnnotationKind::Rename, 0x400100,
+                                              "entry_point");
+    ASSERT_TRUE(set.has_value()) << set.diagnostic().message;
+  }
+
+  {
+    auto project = Project::open(source.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto written = project.value().backup(backup.str());
+    ASSERT_TRUE(written.has_value())
+        << written.diagnostic().code << ": " << written.diagnostic().message;
+
+    // Without --force an existing destination is preserved.
+    auto refused = project.value().backup(backup.str());
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.diagnostic().code, "project.backup_exists");
+
+    auto forced = project.value().backup(backup.str(), true);
+    ASSERT_TRUE(forced.has_value()) << forced.diagnostic().message;
+  }
+
+  {
+    auto project = Project::open(backup.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto integrity = project.value().check_integrity();
+    ASSERT_TRUE(integrity.has_value());
+    EXPECT_TRUE(integrity.value());
+    auto annotations = project.value().annotations(image_id);
+    ASSERT_TRUE(annotations.has_value()) << annotations.diagnostic().message;
+    ASSERT_EQ(annotations.value().size(), 1U);
+    EXPECT_EQ(annotations.value().front().text, "entry_point");
+  }
+
+  // A destination with different annotations is overwritten by the backup.
+  {
+    auto project = Project::create(destination.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    auto set = project.value().set_annotation(imported.value(), donkey::AnnotationKind::Comment,
+                                              0x400100, "stale");
+    ASSERT_TRUE(set.has_value()) << set.diagnostic().message;
+  }
+  auto restored = Project::restore(destination.str(), backup.str());
+  ASSERT_TRUE(restored.has_value())
+      << restored.diagnostic().code << ": " << restored.diagnostic().message;
+
+  auto project = Project::open(destination.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto integrity = project.value().check_integrity();
+  ASSERT_TRUE(integrity.has_value());
+  EXPECT_TRUE(integrity.value());
+  auto annotations = project.value().annotations(image_id);
+  ASSERT_TRUE(annotations.has_value()) << annotations.diagnostic().message;
+  ASSERT_EQ(annotations.value().size(), 1U);
+  EXPECT_EQ(annotations.value().front().kind, donkey::AnnotationKind::Rename);
+  EXPECT_EQ(annotations.value().front().text, "entry_point");
+}
+
+TEST(Project, RestoreReplacesCorruptDestinationFile) {
+  TempPath source("restore-corrupt-source");
+  TempPath destination("restore-corrupt-destination");
+  TempPath backup("restore-corrupt-backup");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+
+  {
+    auto project = Project::create(source.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    auto written = project.value().backup(backup.str());
+    ASSERT_TRUE(written.has_value()) << written.diagnostic().message;
+  }
+
+  {
+    std::ofstream file(destination.str(), std::ios::binary | std::ios::trunc);
+    file << "this is not a SQLite database";
+  }
+
+  auto restored = Project::restore(destination.str(), backup.str());
+  ASSERT_TRUE(restored.has_value())
+      << restored.diagnostic().code << ": " << restored.diagnostic().message;
+
+  auto project = Project::open(destination.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value()) << images.diagnostic().message;
+  ASSERT_EQ(images.value().size(), 1U);
+  EXPECT_EQ(images.value().front().sha256, loaded.image.sha256);
+}
+
+TEST(Project, RestoreRejectsInvalidBackups) {
+  TempPath database("restore-invalid-db");
+  TempPath garbage("restore-invalid-backup");
+  TempPath newer("restore-newer-backup");
+
+  auto missing = Project::restore(database.str(), garbage.str() + ".missing");
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.diagnostic().code, "project.backup_missing");
+
+  {
+    std::ofstream file(garbage.str(), std::ios::binary | std::ios::trunc);
+    file << "this is not a SQLite database";
+  }
+  auto bad = Project::restore(database.str(), garbage.str());
+  ASSERT_FALSE(bad.has_value());
+  EXPECT_EQ(bad.diagnostic().status, donkey::Status::CorruptProject)
+      << bad.diagnostic().code << ": " << bad.diagnostic().message;
+
+  {
+    auto project = Project::create(newer.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  }
+  sqlite3* raw = nullptr;
+  ASSERT_EQ(sqlite3_open(newer.str().c_str(), &raw), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(raw, "PRAGMA user_version=99", nullptr, nullptr, nullptr), SQLITE_OK);
+  sqlite3_close(raw);
+
+  auto too_new = Project::restore(database.str(), newer.str());
+  ASSERT_FALSE(too_new.has_value());
+  EXPECT_EQ(too_new.diagnostic().status, donkey::Status::Unsupported);
+  EXPECT_EQ(too_new.diagnostic().code, "project.backup_schema");
+}
+
 }  // namespace

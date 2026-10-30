@@ -91,6 +91,21 @@ class Project {
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;
 
+  /// Write a consistent, self-contained copy of the open project to
+  /// `destination` using SQLite's online backup API (so WAL content is
+  /// included). The copy is written to a temporary file first and renamed into
+  /// place, so a failed backup never damages an existing destination. Refuses
+  /// to replace an existing file unless `overwrite` is true.
+  [[nodiscard]] Result<void> backup(const std::string& destination, bool overwrite = false) const;
+
+  /// Replace `database_path` with `backup_path` after validating that the
+  /// backup is a readable project with a supported schema and passing
+  /// `PRAGMA integrity_check`. The replacement is written to a temporary file
+  /// and renamed into place. The destination must not be open in another
+  /// process; the CLI is the supported entry point today.
+  [[nodiscard]] static Result<void> restore(const std::string& database_path,
+                                            const std::string& backup_path);
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
