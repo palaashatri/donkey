@@ -55,6 +55,10 @@ target_include_directories(donkey_foundation
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_compile_features(donkey_foundation PUBLIC cxx_std_20)
+# Workers, SQLite's sorter threads and std::thread users need the platform
+# thread library (a separate libpthread on FreeBSD and older glibc).
+find_package(Threads REQUIRED)
+target_link_libraries(donkey_foundation PUBLIC Threads::Threads)
 target_compile_definitions(donkey_foundation PRIVATE DONKEY_VERSION="${PROJECT_VERSION}")
 donkey_apply_warnings(donkey_foundation)
 

@@ -2,7 +2,7 @@
 
 Donkey is a planned free, open-source, native binary reverse-engineering suite (disassembler, analysis graphs, decompiler, debugger) written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core.
 
-**Implementation started on 2026-10-30.** The build system, foundation contracts, bounded ELF/PE/Mach-O import (including ELF32, PE32, Mach-O 32-bit, multi-slice fat Mach-O, explicit raw binary import, and real OS process boundary isolation via `load_binary_isolated` / `--isolate`), Capstone decoding, seeded analysis with a bounded CFG, AArch64 ADRP/ADD/LDR data reference folding and estimated function extents, an IR-based decompiler with strict SSA and dominator verification, an independent bit-vector arithmetic/flags oracle, switch recovery with jump table diagnostics, stack frame local variable and argument recovery (`recover_stack_variables`), array and pointer expression syntax, source map line tracking (`source_map` CLI JSON and interactive GUI clicking), an x86-64 lifter, an x86-32 subset and an AArch64 subset (`donkey-cli decompile` and the GUI Decompiler panel), SQLite project storage with schema v3 annotations (renames, comments, bookmarks) and backup/restore, GUI project open/save/backup/restore with annotation and bookmark editing (`donkey-cli project save|info|rename|comment|bookmark|annotations|backup|restore`), bidirectional navigation history, undo/redo, cooperative task cancellation, debugger adapter architecture (`donkey-cli debug launch`, mock/local child process management, step/stack/register inspection, and ASLR runtime-to-static address translation, and GUI Debugger panel), safe binary patching with original-byte verification and signature invalidation warnings (`donkey-cli patch apply`, `PatchManager`), process-isolated versioned C ABI plugins (`donkey-cli plugin info|run`, `PluginHost`), `donkey-cli info|disasm|strings|functions|cfg|decompile|xrefs|analyze` and the SDL3 + Dear ImGui workspace (`donkey`) work on macOS arm64; remote debugger adapters and 32-bit ARM lifting are not implemented yet. Do not describe unverified platforms or unfinished milestones as working in READMEs, PRs or release notes. Check the truth table in `docs/DESIGN.md` §17.2 before claiming anything works.
+**Implementation started on 2026-10-30.** Working today (see `docs/DESIGN.md` §17.2 for evidence): bounded ELF/PE/Mach-O/raw import with optional process isolation, Capstone disassembly, CFG and xrefs, a verified-IR decompiler subset (x86-64, x86-32, AArch64), SQLite projects with crash-safe backup/restore, safe patching (CLI and GUI hex editor), process-isolated C ABI plugins on POSIX, a **native debugger on Linux (ptrace, x86-64/AArch64) and Windows (Win32 debug API, x64)**, and the SDL3 + Dear ImGui desktop app, packaged as .deb/.rpm/.tar.gz, .dmg/.zip, NSIS setup/.zip and FreeBSD .pkg by `.github/workflows/package.yml`. Not implemented: native debugging on macOS and FreeBSD, remote debug adapters, 32-bit ARM lifting, floating-point/SIMD/varargs/struct decompilation, streamed large-file loading. Do not describe unverified platforms or unfinished milestones as working in READMEs, PRs or release notes. Check the truth table in `docs/DESIGN.md` §17.2 before claiming anything works.
 
 The full design — architecture, module rules, decompiler pipeline, debugger model, milestones M0–M12, acceptance tests and backlog — is in [`docs/DESIGN.md`](docs/DESIGN.md). This file is the short instruction sheet.
 
@@ -19,26 +19,35 @@ Then T003 (checked binary reader), T005–T007, and the ELF/PE/Mach-O readers (T
 
 ## Commands
 
-macOS arm64 is the currently validated host (CMake + Ninja + AppleClang):
+Validated hosts: macOS arm64 (AppleClang), Linux x86-64 (GCC 12/13, Ninja), and Windows x64 via MinGW-w64 GCC; FreeBSD presets are exercised in CI.
 
 ```bash
-cmake --preset headless-macos       # core + CLI, no SDL/ImGui
+cmake --preset headless-macos       # core + CLI, no SDL/ImGui (also -linux, -windows, -freebsd)
 cmake --build --preset headless-macos --parallel
-ctest --preset headless-macos --output-on-failure
+ctest --preset headless-macos --output-on-failure --parallel 4
 
-cmake --preset dev-macos            # core + CLI + desktop shell (once the shell lands)
+cmake --preset dev-macos            # core + CLI + desktop shell (also dev-linux, dev-windows)
 cmake --build --preset dev-macos --parallel
+
+# Desktop smoke tests need a display; on Linux CI they run under Xvfb:
+cmake --preset dev-linux -DDONKEY_UI_SMOKE_TEST=ON
+cmake --build --preset dev-linux --parallel
+xvfb-run -a ctest --preset dev-linux --output-on-failure
+
+# Release packages (static runtime, UI, smoke tests); then run cpack in the build dir:
+cmake --preset package-linux        # DEB, RPM, TGZ (also package-macos, -windows, -freebsd)
+cmake --build --preset package-linux --parallel
+(cd build/package-linux && cpack)
+sh packaging/freebsd/make-pkg.sh build/package-freebsd dist   # FreeBSD .pkg
 
 # libFuzzer targets (Homebrew LLVM; AppleClang has no libFuzzer runtime):
 cmake --preset fuzz-macos
 cmake --build build/fuzz-macos --parallel
 ./build/fuzz-macos/fuzz_binary tests/fuzz/corpus/binary -max_total_time=60
 ./build/fuzz-macos/fuzz_ir tests/fuzz/corpus/ir -max_total_time=60
-
-# Linux/Windows presets exist but are not yet validated:
-cmake --preset headless-linux
-cmake --preset headless-windows
 ```
+
+`-DDONKEY_USE_SYSTEM_SQLITE=ON` builds against the system SQLite when sqlite.org is unreachable. `.github/workflows/package.yml` is the reference for each platform's dependencies and release steps.
 
 When you add or change presets, update this section in the same PR so it always lists commands that actually work.
 

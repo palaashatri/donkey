@@ -38,6 +38,8 @@ get_filename_component(DONKEY_SQLITE_DIR "${DONKEY_SQLITE_SOURCE}" DIRECTORY)
 add_library(donkey_sqlite STATIC "${DONKEY_SQLITE_SOURCE}")
 add_library(donkey::sqlite ALIAS donkey_sqlite)
 target_include_directories(donkey_sqlite SYSTEM PUBLIC "${DONKEY_SQLITE_DIR}")
+find_package(Threads REQUIRED)
+target_link_libraries(donkey_sqlite PUBLIC Threads::Threads)
 target_compile_definitions(donkey_sqlite PRIVATE
   SQLITE_THREADSAFE=1
   SQLITE_OMIT_LOAD_EXTENSION

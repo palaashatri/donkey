@@ -32,16 +32,22 @@ jobs:
       # ptrace for the native debugger tests.
       options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
     env:
-      CC: gcc-12
-      CXX: g++-12
+      # GCC 13 (Ubuntu toolchain PPA): GCC 12 reports false -Wrestrict and
+      # -Wmaybe-uninitialized errors inside libstdc++ at -O3. libstdc++ is
+      # linked statically, so the packages still only need glibc >= 2.35.
+      CC: gcc-13
+      CXX: g++-13
       DEBIAN_FRONTEND: noninteractive
       XDG_RUNTIME_DIR: /tmp/xdg-runtime
     steps:
       - name: Install toolchain and SDL3 build dependencies
         run: |
           apt-get update
+          apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update
           apt-get install -y --no-install-recommends \
-            ca-certificates git build-essential gcc-12 g++-12 python3-pip ninja-build \
+            ca-certificates git build-essential gcc-13 g++-13 python3-pip ninja-build \
             pkg-config file rpm dpkg-dev xvfb xauth mesa-vulkan-drivers fonts-dejavu-core \
             libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
             libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
