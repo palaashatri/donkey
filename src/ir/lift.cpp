@@ -1,5 +1,7 @@
 #include "donkey/ir/lift.h"
 
+#include "donkey/ir/abi.h"
+
 #include <algorithm>
 #include <cstddef>
 #include <string>
@@ -506,7 +508,7 @@ struct Lifter {
       statement.a = IrOperand::constant_value(0, kPointerWidth);
     }
     push(block, std::move(statement));
-    note("call arguments and return values follow no modelled ABI");
+    note("outgoing call arguments and return values follow no modelled ABI");
   }
 };
 
@@ -515,7 +517,11 @@ struct Lifter {
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
-    return internal::lift_aarch64(image, analysis, function, options);
+    auto lifted = internal::lift_aarch64(image, analysis, function, options);
+    if (lifted) {
+      infer_signature(lifted.value(), image.architecture);
+    }
+    return lifted;
   }
   if (image.architecture != Architecture::X86_64) {
     return make_error<IrFunction>(
@@ -749,6 +755,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
+  infer_signature(lifter.out, image.architecture);
   return lifter.out;
 }
 
