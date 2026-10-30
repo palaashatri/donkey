@@ -20,6 +20,8 @@
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/lift.h"
+#include "donkey/patch/patch.h"
+#include "donkey/plugin/plugin.h"
 #include "donkey/project/project.h"
 #include "json.h"
 
@@ -712,6 +714,10 @@ void print_usage(std::FILE* out) {
                "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
                "  donkey-cli project restore <database> <backup> [--json]\n"
                "  donkey-cli debug launch <binary> [--mock] [--json]\n"
+               "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
+               "<hex>] --output <out> [--force] [--json]\n"
+               "  donkey-cli plugin info <plugin-lib> [--json]\n"
+               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1738,6 +1744,272 @@ int command_debug(const std::vector<std::string_view>& arguments) {
                   f.function_name.c_str(), hex(f.static_address).c_str());
     }
   }
+  return kExitOk;
+}
+
+static bool parse_hex_bytes(std::string_view text, std::vector<uint8_t>& out) {
+  out.clear();
+  std::string cleaned;
+  for (char c : text) {
+    if (std::isxdigit(static_cast<unsigned char>(c))) {
+      cleaned.push_back(c);
+    } else if (c == ' ' || c == ',' || c == '\t' || c == 'x' || c == 'X') {
+      continue;
+    } else {
+      return false;
+    }
+  }
+  if (cleaned.empty() || cleaned.size() % 2 != 0) return false;
+  for (size_t i = 0; i < cleaned.size(); i += 2) {
+    unsigned int val = 0;
+    if (std::sscanf(cleaned.substr(i, 2).c_str(), "%x", &val) != 1) return false;
+    out.push_back(static_cast<uint8_t>(val));
+  }
+  return true;
+}
+
+int command_patch(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("patch needs a subcommand ('apply')");
+  }
+
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "apply") {
+    return usage_error("unknown patch subcommand (expected 'apply')");
+  }
+
+  std::string source_path;
+  std::string dest_path;
+  uint64_t offset = 0;
+  bool has_offset = false;
+  std::vector<uint8_t> original_bytes;
+  std::vector<uint8_t> replacement_bytes;
+  bool force = false;
+  bool json = false;
+
+  for (size_t i = 1; i < arguments.size(); ++i) {
+    std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--force") {
+      force = true;
+    } else if (arg == "--offset") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_u64(val, offset)) {
+        return usage_error("--offset needs a valid address or offset (e.g. 0x1000)");
+      }
+      has_offset = true;
+    } else if (arg == "--output" || arg == "-o") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--output needs a file path");
+      }
+      dest_path = std::string(val);
+    } else if (arg == "--replacement") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_hex_bytes(val, replacement_bytes)) {
+        return usage_error("--replacement needs hex bytes (e.g. '90 90' or '9090')");
+      }
+    } else if (arg == "--original") {
+      std::string_view val;
+      if (!take_value(arguments, i, val) || !parse_hex_bytes(val, original_bytes)) {
+        return usage_error("--original needs hex bytes (e.g. '55' or '554889e5')");
+      }
+    } else if (arg.starts_with("-")) {
+      return usage_error("unknown patch option");
+    } else if (source_path.empty()) {
+      source_path = std::string(arg);
+    } else {
+      return usage_error("unexpected positional argument to patch apply");
+    }
+  }
+
+  if (source_path.empty()) {
+    return usage_error("patch apply needs a source binary path");
+  }
+  if (!has_offset) {
+    return usage_error("patch apply needs --offset");
+  }
+  if (replacement_bytes.empty()) {
+    return usage_error("patch apply needs --replacement bytes");
+  }
+  if (dest_path.empty()) {
+    return usage_error("patch apply needs --output <destination>");
+  }
+
+  PatchManager manager;
+  auto stage_res = manager.stage_patch(offset, original_bytes, replacement_bytes);
+  if (!stage_res) {
+    return fail(stage_res.diagnostic());
+  }
+
+  auto* patch_entry = const_cast<PatchEntry*>(manager.find_patch(stage_res.value()));
+  if (patch_entry) {
+    patch_entry->applied = true;
+  }
+
+  auto export_res = manager.export_patched_binary(source_path, dest_path, force);
+  if (!export_res) {
+    return fail(export_res.diagnostic());
+  }
+
+  const auto& exp = export_res.value();
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"status\": \"ok\",\n";
+    out += "  \"source\": " + quote(source_path) + ",\n";
+    out += "  \"destination\": " + quote(exp.path) + ",\n";
+    out += "  \"offset\": " + quote(hex(offset)) + ",\n";
+    out += "  \"bytes_written\": " + std::to_string(exp.bytes_written) + ",\n";
+    out += "  \"sha256\": " + quote(exp.sha256) + ",\n";
+    out += "  \"signature_invalidated\": " +
+           std::string(exp.signature_invalidated ? "true" : "false") + ",\n";
+    out += "  \"warnings\": [";
+    for (size_t i = 0; i < exp.warnings.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(exp.warnings[i]);
+    }
+    out += "]\n}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return kExitOk;
+  }
+
+  std::printf("Exported patched binary to: %s\n", exp.path.c_str());
+  std::printf("  Size:     %llu bytes\n", static_cast<unsigned long long>(exp.bytes_written));
+  std::printf("  SHA-256:  %s\n", exp.sha256.c_str());
+  if (exp.signature_invalidated) {
+    std::printf("  Warning:  Binary code signature or certificate invalidated.\n");
+  }
+  for (const auto& w : exp.warnings) {
+    std::printf("  Note:     %s\n", w.c_str());
+  }
+  return kExitOk;
+}
+
+int command_plugin(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("plugin needs a subcommand ('info' or 'run')");
+  }
+
+  const std::string_view subcommand = arguments[0];
+  if (subcommand != "info" && subcommand != "run") {
+    return usage_error("unknown plugin subcommand (expected 'info' or 'run')");
+  }
+
+  std::string lib_path;
+  std::string input_json = "{}";
+  bool isolate = false;
+  bool json = false;
+
+  for (size_t i = 1; i < arguments.size(); ++i) {
+    std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--isolate") {
+      isolate = true;
+    } else if (arg == "--input") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--input needs a JSON string");
+      }
+      input_json = std::string(val);
+    } else if (arg.starts_with("-")) {
+      return usage_error("unknown plugin option");
+    } else if (lib_path.empty()) {
+      lib_path = std::string(arg);
+    } else {
+      return usage_error("unexpected positional argument to plugin");
+    }
+  }
+
+  if (lib_path.empty()) {
+    return usage_error("plugin needs a shared library path");
+  }
+
+  if (subcommand == "info") {
+    auto manifest_res = PluginHost::inspect_manifest(lib_path);
+    if (!manifest_res) {
+      return fail(manifest_res.diagnostic());
+    }
+    const auto& m = manifest_res.value();
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"id\": " + quote(m.id) + ",\n";
+      out += "  \"name\": " + quote(m.name) + ",\n";
+      out += "  \"version\": " + quote(m.version) + ",\n";
+      out += "  \"author\": " + quote(m.author) + ",\n";
+      out += "  \"description\": " + quote(m.description) + ",\n";
+      out += "  \"abi_version\": {\"major\": " + std::to_string(m.abi_version_major) +
+             ", \"minor\": " + std::to_string(m.abi_version_minor) + "},\n";
+      out += "  \"requested_capabilities\": " + std::to_string(m.requested_capabilities) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+      return kExitOk;
+    }
+
+    std::printf("Plugin: %s (%s)\n", m.name.c_str(), m.id.c_str());
+    std::printf("  Version:      %s\n", m.version.c_str());
+    std::printf("  Author:       %s\n", m.author.c_str());
+    std::printf("  Description:  %s\n", m.description.c_str());
+    std::printf("  ABI Version:  %u.%u\n", m.abi_version_major, m.abi_version_minor);
+    std::printf("  Capabilities: 0x%llx\n",
+                static_cast<unsigned long long>(m.requested_capabilities));
+    return kExitOk;
+  }
+
+  auto manifest_res = PluginHost::inspect_manifest(lib_path);
+  if (!manifest_res) {
+    return fail(manifest_res.diagnostic());
+  }
+
+  uint64_t granted_caps = manifest_res.value().requested_capabilities;
+  Result<PluginExecutionResult> exec_res =
+      isolate ? PluginHost::execute_isolated(lib_path, input_json, granted_caps)
+              : PluginHost::execute_trusted(lib_path, input_json, granted_caps);
+
+  if (!exec_res) {
+    return fail(exec_res.diagnostic());
+  }
+
+  const auto& res = exec_res.value();
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"success\": " + std::string(res.success ? "true" : "false") + ",\n";
+    out += "  \"crashed\": " + std::string(res.crashed ? "true" : "false") + ",\n";
+    out += "  \"timed_out\": " + std::string(res.timed_out ? "true" : "false") + ",\n";
+    out += "  \"exit_code\": " + std::to_string(res.exit_code) + ",\n";
+    out += "  \"output\": " + quote(res.output_json) + ",\n";
+    out += "  \"error_code\": " + quote(res.error_code) + ",\n";
+    out += "  \"error_message\": " + quote(res.error_message) + "\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+    return res.success ? kExitOk : kExitFailure;
+  }
+
+  if (res.crashed) {
+    std::fprintf(stderr, "Plugin crashed with signal %d (%s)\n", res.termination_signal,
+                 res.error_message.c_str());
+    return kExitFailure;
+  }
+  if (res.timed_out) {
+    std::fprintf(stderr, "Plugin timed out (%s)\n", res.error_message.c_str());
+    return kExitFailure;
+  }
+  if (!res.success) {
+    std::fprintf(stderr, "Plugin execution failed [%s]: %s\n", res.error_code.c_str(),
+                 res.error_message.c_str());
+    return kExitFailure;
+  }
+
+  std::printf("%s\n", res.output_json.c_str());
   return kExitOk;
 }
 

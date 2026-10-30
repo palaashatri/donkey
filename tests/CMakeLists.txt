@@ -1,5 +1,17 @@
 include(GoogleTest)
 
+add_library(test_plugin_valid MODULE fixtures/plugins/valid_plugin.c)
+target_include_directories(test_plugin_valid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_bad_abi MODULE fixtures/plugins/bad_abi_plugin.c)
+target_include_directories(test_plugin_bad_abi PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_crash MODULE fixtures/plugins/crash_plugin.c)
+target_include_directories(test_plugin_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_hang MODULE fixtures/plugins/hang_plugin.c)
+target_include_directories(test_plugin_hang PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
 add_executable(donkey_unit_tests
   unit/binary_test.cpp
   unit/cfg_test.cpp
@@ -7,13 +19,20 @@ add_executable(donkey_unit_tests
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
+  unit/patch_test.cpp
+  unit/plugin_test.cpp
   unit/project_test.cpp
   unit/session_test.cpp
 )
-target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug GTest::gtest_main)
+target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+  TEST_PLUGIN_VALID_PATH="$<TARGET_FILE:test_plugin_valid>"
+  TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
+  TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
+  TEST_PLUGIN_HANG_PATH="$<TARGET_FILE:test_plugin_hang>"
 )
+add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
@@ -307,3 +326,38 @@ set_tests_properties(cli.debug_rejects_unknown_subcommand PROPERTIES WILL_FAIL T
 add_test(NAME cli.debug_rejects_missing_file
          COMMAND donkey-cli debug launch)
 set_tests_properties(cli.debug_rejects_missing_file PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Patch CLI
+# ---------------------------------------------------------------------------
+
+set(DONKEY_CLI_PATCH_OUT "${CMAKE_CURRENT_BINARY_DIR}/cli_test_patched_arm64")
+
+add_test(NAME cli.patch_apply_json
+         COMMAND donkey-cli patch apply ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
+                 --offset 0 --replacement deadbeef --output ${DONKEY_CLI_PATCH_OUT} --json)
+set_tests_properties(cli.patch_apply_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status\": \"ok\".*\"destination\": \".*cli_test_patched_arm64\".*\"bytes_written\":")
+
+add_test(NAME cli.patch_refuses_overwrite_without_force
+         COMMAND donkey-cli patch apply ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
+                 --offset 0 --replacement deadbeef --output ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64)
+set_tests_properties(cli.patch_refuses_overwrite_without_force PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Plugin CLI
+# ---------------------------------------------------------------------------
+
+add_test(NAME cli.plugin_info_json
+         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_valid> --json)
+set_tests_properties(cli.plugin_info_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"id\": \"org.donkey.test.valid\".*\"abi_version\": \\{\"major\": 1, \"minor\": 0\\}")
+
+add_test(NAME cli.plugin_run_isolated_json
+         COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
+set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+
+add_test(NAME cli.plugin_rejects_bad_abi
+         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_bad_abi>)
+set_tests_properties(cli.plugin_rejects_bad_abi PROPERTIES WILL_FAIL TRUE)

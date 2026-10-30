@@ -130,6 +130,31 @@ target_link_libraries(donkey_debug PUBLIC donkey::foundation donkey::analysis)
 target_compile_features(donkey_debug PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_debug)
 
+add_library(donkey_patch STATIC
+  src/patch/patch.cpp
+)
+add_library(donkey::patch ALIAS donkey_patch)
+target_include_directories(donkey_patch
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_patch PUBLIC donkey::binary donkey::foundation)
+target_compile_features(donkey_patch PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_patch)
+
+add_library(donkey_plugin STATIC
+  src/plugin/plugin.cpp
+  src/plugin/isolated_host.cpp
+)
+add_library(donkey::plugin ALIAS donkey_plugin)
+target_include_directories(donkey_plugin
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+)
+target_link_libraries(donkey_plugin PUBLIC donkey::foundation ${CMAKE_DL_LIBS})
+target_compile_features(donkey_plugin PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_plugin)
+
 # The session owns loading, analysis and project persistence on a worker
 # thread. It has no SDL or ImGui dependency, so it is built headless and is
 # covered by the unit tests even when the desktop shell is disabled.
