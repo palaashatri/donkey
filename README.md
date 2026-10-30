@@ -12,6 +12,7 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 - SQLite project storage (pinned 3.46.1 amalgamation): `PRAGMA user_version` migrations, transactional image/section/function import with re-import replacing stale derived rows, integrity checks, and rejection of corrupt or newer-schema databases without mutating them.
 - A SDL3 + Dear ImGui desktop shell (`donkey [binary]`) with a docked workspace: overview, sections, functions, disassembly, a CFG graph with pan/zoom and block selection, decompiler, hex, strings, xrefs and diagnostics panels. Loading and analysis run on a worker thread so the UI stays responsive.
 - Truncated and mutated headers return deterministic diagnostics in tests; opened files are never executed.
+- libFuzzer harnesses for the parse→analyze→lift→verify→print pipeline and for verifier/printer agreement, with a persisted corpus; fuzzing has already found and fixed three real lifter defects.
 
 Not implemented yet: GUI project save/reopen, project backup/restore, debugger, control-flow structuring for the decompiler (it prints verified blocks with labels and `goto`), parameter/type recovery, and lifting for architectures other than x86-64. Anything not covered by the test suite should be treated as unverified.
 

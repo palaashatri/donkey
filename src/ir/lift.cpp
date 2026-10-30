@@ -23,17 +23,19 @@ std::uint8_t register_width(const std::string& name) {
       {"edi", 4},  {"ebp", 4},  {"esp", 4},  {"r8d", 4},  {"r9d", 4}, {"r10d", 4}, {"r11d", 4},
       {"r12d", 4}, {"r13d", 4}, {"r14d", 4}, {"r15d", 4}, {"ax", 2},  {"bx", 2},   {"cx", 2},
       {"dx", 2},   {"si", 2},   {"di", 2},   {"bp", 2},   {"sp", 2},  {"al", 1},   {"bl", 1},
-      {"cl", 1},   {"dl", 1},   {"sil", 1},  {"dil", 1},  {"bpl", 1}, {"spl", 1},  {"x0", 8},
-      {"x1", 8},   {"x2", 8},   {"x3", 8},   {"x4", 8},   {"x5", 8},  {"x6", 8},   {"x7", 8},
-      {"x8", 8},   {"x9", 8},   {"x10", 8},  {"x11", 8},  {"x12", 8}, {"x13", 8},  {"x14", 8},
-      {"x15", 8},  {"x16", 8},  {"x17", 8},  {"x18", 8},  {"x19", 8}, {"x20", 8},  {"x21", 8},
-      {"x22", 8},  {"x23", 8},  {"x24", 8},  {"x25", 8},  {"x26", 8}, {"x27", 8},  {"x28", 8},
-      {"x29", 8},  {"x30", 8},  {"w0", 4},   {"w1", 4},   {"w2", 4},  {"w3", 4},   {"w4", 4},
-      {"w5", 4},   {"w6", 4},   {"w7", 4},   {"w8", 4},   {"w9", 4},  {"w10", 4},  {"w11", 4},
-      {"w12", 4},  {"w13", 4},  {"w14", 4},  {"w15", 4},  {"w16", 4}, {"w17", 4},  {"w18", 4},
-      {"w19", 4},  {"w20", 4},  {"w21", 4},  {"w22", 4},  {"w23", 4}, {"w24", 4},  {"w25", 4},
-      {"w26", 4},  {"w27", 4},  {"w28", 4},  {"w29", 4},  {"w30", 4}, {"sp", 8},   {"fp", 8},
-      {"lr", 8},   {"pc", 8},   {"xzr", 8},  {"wzr", 4},
+      {"cl", 1},   {"dl", 1},   {"ah", 1},   {"bh", 1},   {"ch", 1},  {"dh", 1},   {"sil", 1},
+      {"dil", 1},  {"bpl", 1},  {"spl", 1},  {"r8b", 1},  {"r9b", 1}, {"r10b", 1}, {"r11b", 1},
+      {"r12b", 1}, {"r13b", 1}, {"r14b", 1}, {"r15b", 1}, {"x0", 8},  {"x1", 8},   {"x2", 8},
+      {"x3", 8},   {"x4", 8},   {"x5", 8},   {"x6", 8},   {"x7", 8},  {"x8", 8},   {"x9", 8},
+      {"x10", 8},  {"x11", 8},  {"x12", 8},  {"x13", 8},  {"x14", 8}, {"x15", 8},  {"x16", 8},
+      {"x17", 8},  {"x18", 8},  {"x19", 8},  {"x20", 8},  {"x21", 8}, {"x22", 8},  {"x23", 8},
+      {"x24", 8},  {"x25", 8},  {"x26", 8},  {"x27", 8},  {"x28", 8}, {"x29", 8},  {"x30", 8},
+      {"w0", 4},   {"w1", 4},   {"w2", 4},   {"w3", 4},   {"w4", 4},  {"w5", 4},   {"w6", 4},
+      {"w7", 4},   {"w8", 4},   {"w9", 4},   {"w10", 4},  {"w11", 4}, {"w12", 4},  {"w13", 4},
+      {"w14", 4},  {"w15", 4},  {"w16", 4},  {"w17", 4},  {"w18", 4}, {"w19", 4},  {"w20", 4},
+      {"w21", 4},  {"w22", 4},  {"w23", 4},  {"w24", 4},  {"w25", 4}, {"w26", 4},  {"w27", 4},
+      {"w28", 4},  {"w29", 4},  {"w30", 4},  {"sp", 8},   {"wsp", 4}, {"fp", 8},   {"lr", 8},
+      {"pc", 8},   {"xzr", 8},  {"wzr", 4},
   };
   const auto found = kWidths.find(name);
   return found == kWidths.end() ? 0 : found->second;
@@ -184,6 +186,24 @@ struct Lifter {
     }
     if (statement.width == 0) {
       statement.width = kPointerWidth;
+    }
+    // Never emit an operand the verifier would reject. An unknown register
+    // width is a modelling gap, so the statement becomes an explicit opaque
+    // effect instead of malformed IR.
+    auto bad_width = [](const IrOperand& operand) {
+      if (operand.kind == IrOperandKind::None || operand.kind == IrOperandKind::Block) {
+        return false;
+      }
+      return operand.width != 1 && operand.width != 2 && operand.width != 4 && operand.width != 8;
+    };
+    if (bad_width(statement.dest) || bad_width(statement.a) || bad_width(statement.b)) {
+      const std::uint64_t address = statement.source_address;
+      statement = IrStatement{};
+      statement.op = IrOp::Unsupported;
+      statement.width = kPointerWidth;
+      statement.source_address = address;
+      statement.text = "operand width is not modelled";
+      out.partial = true;
     }
     block.statements.push_back(std::move(statement));
     ++statement_count;
@@ -379,6 +399,11 @@ struct Lifter {
       return;
     }
     const IrOperand source = to_ir_operand(operands[0], instruction);
+    if (source.kind == IrOperandKind::None) {
+      // An operand this lifter cannot model would produce malformed IR.
+      unsupported(block, instruction);
+      return;
+    }
     IrStatement decrement;
     decrement.op = IrOp::Sub;
     decrement.dest = IrOperand::register_ref("rsp", kPointerWidth);
@@ -408,6 +433,12 @@ struct Lifter {
       return;
     }
     const IrOperand destination = to_ir_operand(operands[0], instruction);
+    if (destination.kind != IrOperandKind::Register) {
+      // pop with a memory destination would need a load/store pair; model it
+      // as unsupported rather than emitting a Load with no register result.
+      unsupported(block, instruction);
+      return;
+    }
     IrOperand slot;
     slot.kind = IrOperandKind::Memory;
     slot.reg = "rsp";
@@ -693,6 +724,25 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   if (lifter.out.blocks.empty()) {
     return make_error<IrFunction>(Status::Unsupported, "lift.empty",
                                   "nothing was lifted for this function", function.address);
+  }
+
+  // A conditional branch falls through to the next block. When the branch is in
+  // the last block there is no fallthrough block, so add an explicit exit block
+  // for the unknown path instead of emitting IR that cannot be rendered.
+  if (lifter.out.blocks.back().statements.back().op == IrOp::CondBranch) {
+    IrBlock exit_block;
+    exit_block.address = lifter.blocks.back()->end_address;
+    IrStatement statement;
+    statement.op = IrOp::Return;
+    statement.width = kPointerWidth;
+    statement.source_address = exit_block.address;
+    if (image.architecture == Architecture::X86_64) {
+      statement.a = IrOperand::register_ref("rax", kPointerWidth);
+    }
+    exit_block.statements.push_back(std::move(statement));
+    lifter.out.blocks.push_back(std::move(exit_block));
+    lifter.out.partial = true;
+    lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
   return lifter.out;
 }

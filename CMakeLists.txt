@@ -15,6 +15,7 @@ endif()
 option(DONKEY_BUILD_UI "Build the SDL3 + Dear ImGui desktop shell" OFF)
 option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
+option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
@@ -149,6 +150,28 @@ if(DONKEY_BUILD_UI)
   donkey_apply_warnings(donkey_ui)
 
   add_subdirectory(apps/donkey)
+endif()
+
+# ---------------------------------------------------------------------------
+# Fuzzers. Clang-only, sanitizer-backed, never part of the default build.
+# ---------------------------------------------------------------------------
+
+if(DONKEY_BUILD_FUZZERS)
+  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    message(FATAL_ERROR "DONKEY_BUILD_FUZZERS requires Clang (libFuzzer)")
+  endif()
+  set(DONKEY_FUZZ_SANITIZE -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer -g)
+  add_executable(fuzz_binary fuzz/fuzz_binary.cpp)
+  target_link_libraries(fuzz_binary PRIVATE donkey::ir)
+  target_compile_features(fuzz_binary PRIVATE cxx_std_20)
+  target_compile_options(fuzz_binary PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_binary PRIVATE ${DONKEY_FUZZ_SANITIZE})
+
+  add_executable(fuzz_ir fuzz/fuzz_ir.cpp)
+  target_link_libraries(fuzz_ir PRIVATE donkey::ir)
+  target_compile_features(fuzz_ir PRIVATE cxx_std_20)
+  target_compile_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
 
 # ---------------------------------------------------------------------------
