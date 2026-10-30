@@ -12,6 +12,7 @@
 #include "donkey/core/navigation.h"
 #include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
+#include "donkey/patch/patch.h"
 #include "imgui.h"
 #include "session.h"
 
@@ -137,6 +138,25 @@ struct UiState {
   bool graph_user_adjusted = false;
   const Document* graph_document = nullptr;
   std::uint64_t graph_function = 0;
+
+  // --- Hex editor / patching -------------------------------------------------
+  // Edits never touch the opened file: they are staged in a PatchManager,
+  // shown on a copy of the bytes and written only by an explicit export to a
+  // new file (on a worker thread).
+  const Document* patch_document = nullptr;
+  std::string patch_document_sha;
+  std::shared_ptr<PatchManager> patches;
+  std::vector<std::uint8_t> patched_bytes;
+  std::uint64_t hex_cursor = ~std::uint64_t{0};  ///< file offset of the edit cursor
+  char patch_hex[160] = {};
+  char patch_export_path[1024] = {};
+  std::string patch_message;
+  struct PatchExportJob {
+    std::mutex mutex;
+    bool done = false;
+    std::string message;
+  };
+  std::shared_ptr<PatchExportJob> patch_export;
 
   // --- Debugger state -------------------------------------------------------
   // The adapter is driven from the render thread only (ptrace and the Win32

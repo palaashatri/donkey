@@ -282,8 +282,8 @@ Result<ExportResult> PatchManager::export_patched_binary(const std::string& sour
   for (const auto& p : history_) {
     if (!p.applied) continue;
 
-    if (p.file_offset + p.original_bytes.size() > buffer.size() ||
-        p.file_offset + p.replacement_bytes.size() > buffer.size()) {
+    if (p.file_offset > buffer.size() || p.original_bytes.size() > buffer.size() - p.file_offset ||
+        p.replacement_bytes.size() > buffer.size() - p.file_offset) {
       return Diagnostic::make(Status::InternalError, "patch.export_out_of_bounds",
                               "Patch is out of bounds for source binary size", p.file_offset);
     }
@@ -316,8 +316,13 @@ Result<ExportResult> PatchManager::export_patched_binary(const std::string& sour
 
   std::string sha256 = Sha256::hex(std::as_bytes(std::span(buffer)));
 
-  // Write to temporary file first, then atomically rename
+  // Write to a temporary file with the source's permissions, then rename it
+  // into place so the destination is never partially written.
   std::string temp_dest = destination_path + ".tmp";
+  auto discard_temp = [&]() {
+    std::error_code ignored;
+    std::filesystem::remove(temp_dest, ignored);
+  };
   {
     std::ofstream out(temp_dest, std::ios::binary | std::ios::trunc);
     if (!out.is_open()) {
@@ -326,22 +331,25 @@ Result<ExportResult> PatchManager::export_patched_binary(const std::string& sour
     }
     out.write(reinterpret_cast<const char*>(buffer.data()),
               static_cast<std::streamsize>(buffer.size()));
+    out.flush();
     if (!out.good()) {
+      out.close();
+      discard_temp();
       return Diagnostic::make(Status::InternalError, "patch.write_failed",
                               "Failed to write patched bytes to temporary output file");
     }
   }
 
-  std::filesystem::rename(temp_dest, destination_path, ec);
-  if (ec) {
-    return Diagnostic::make(Status::InternalError, "patch.rename_failed",
-                            "Failed to rename temporary file to destination: " + ec.message());
-  }
-
-  // Preserve permissions if possible
   auto perms = std::filesystem::status(source_path, ec).permissions();
   if (!ec) {
-    std::filesystem::permissions(destination_path, perms, ec);
+    std::filesystem::permissions(temp_dest, perms, ec);
+  }
+
+  std::filesystem::rename(temp_dest, destination_path, ec);
+  if (ec) {
+    discard_temp();
+    return Diagnostic::make(Status::InternalError, "patch.rename_failed",
+                            "Failed to rename temporary file to destination: " + ec.message());
   }
 
   return ExportResult{

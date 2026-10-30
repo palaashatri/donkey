@@ -208,6 +208,7 @@ if(DONKEY_BUILD_UI)
   )
   target_link_libraries(donkey_ui
     PUBLIC donkey::analysis donkey::session
+    PUBLIC donkey::patch
     PRIVATE donkey::ir donkey::project donkey::debug donkey_imgui
   )
   target_compile_features(donkey_ui PUBLIC cxx_std_20)

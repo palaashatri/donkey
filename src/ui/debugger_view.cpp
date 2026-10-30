@@ -148,6 +148,7 @@ void draw_launch_modal(const Document& document, UiState& state) {
     ImGui::PopTextWrapPos();
     ImGui::Spacing();
     ImGui::TextDisabled("%s", document.loaded.image.path.c_str());
+    ImGui::SetNextItemWidth(380.0f);
     ImGui::InputText("Arguments", state.debug_arguments, sizeof(state.debug_arguments));
     ImGui::Spacing();
     if (ImGui::Button("Run")) {
@@ -225,7 +226,10 @@ void draw_breakpoints(const Document& document, UiState& state) {
     ImGui::TextDisabled("No breakpoints. Select an instruction and toggle one.");
     return;
   }
-  if (ImGui::BeginTable("##breakpoints", 3, kTableFlags, ImVec2(0.0f, 120.0f))) {
+  const float rows =
+      static_cast<float>(std::min<std::size_t>(state.debug_breakpoints.size(), 4) + 1);
+  const float height = rows * ImGui::GetFrameHeight() + ImGui::GetStyle().CellPadding.y * 2.0f;
+  if (ImGui::BeginTable("##breakpoints", 3, kTableFlags, ImVec2(0.0f, height))) {
     ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 140.0f);
     ImGui::TableSetupColumn("Symbol", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 70.0f);
