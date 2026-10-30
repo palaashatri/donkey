@@ -77,3 +77,18 @@ set_tests_properties(cli.analyze_rejects_unknown_flag PROPERTIES WILL_FAIL TRUE)
 add_test(NAME cli.disasm_rejects_bad_address
          COMMAND donkey-cli disasm ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --address zz)
 set_tests_properties(cli.disasm_rejects_bad_address PROPERTIES WILL_FAIL TRUE)
+
+# ---------------------------------------------------------------------------
+# Desktop shell smoke test. Default OFF: it needs a real display and GPU, so
+# headless CI must never run it. Enable with -DDONKEY_UI_SMOKE_TEST=ON.
+# ---------------------------------------------------------------------------
+
+if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
+  add_test(NAME ui.smoke_loads_elf
+           COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                   --exit-after-frames 20)
+  set_tests_properties(ui.smoke_loads_elf PROPERTIES TIMEOUT 120)
+
+  add_test(NAME ui.smoke_rejects_unknown_option COMMAND donkey --nope)
+  set_tests_properties(ui.smoke_rejects_unknown_option PROPERTIES WILL_FAIL TRUE)
+endif()

@@ -175,7 +175,9 @@ Result<std::uint64_t> BinaryImage::va_to_file_offset(std::uint64_t va) const {
     }
   }
   for (const Section& section : sections) {
-    if (!section.has_file_data || section.file_size == 0) {
+    // Sections without an address (ELF .symtab/.strtab/.shstrtab, Mach-O debug
+    // data) live only in the file and must never claim VA space.
+    if (section.address == 0 || !section.has_file_data || section.file_size == 0) {
       continue;
     }
     if (va >= section.address && va - section.address < section.file_size) {
@@ -204,7 +206,7 @@ Result<std::uint64_t> BinaryImage::file_offset_to_va(std::uint64_t file_offset) 
     }
   }
   for (const Section& section : sections) {
-    if (!section.has_file_data || section.file_size == 0) {
+    if (section.address == 0 || !section.has_file_data || section.file_size == 0) {
       continue;
     }
     if (file_offset >= section.file_offset &&
@@ -221,6 +223,9 @@ Result<std::uint64_t> BinaryImage::file_offset_to_va(std::uint64_t file_offset) 
 
 const Section* BinaryImage::section_for_va(std::uint64_t va) const noexcept {
   for (const Section& section : sections) {
+    if (section.address == 0) {
+      continue;
+    }
     if (va >= section.address && va - section.address < section.virtual_size) {
       return &section;
     }

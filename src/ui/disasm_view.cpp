@@ -1,0 +1,140 @@
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <string>
+#include <vector>
+
+#include "components.h"
+#include "views.h"
+
+namespace donkey::ui::views {
+namespace {
+
+struct DisassemblyCache {
+  const Document* document = nullptr;
+  std::string filter;
+  std::vector<std::uint32_t> indices;
+};
+
+bool contains_lower(std::string_view haystack, std::string_view needle) {
+  if (needle.empty()) {
+    return true;
+  }
+  auto lower = [](char ch) {
+    return static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+  };
+  std::size_t matched = 0;
+  for (const char ch : haystack) {
+    if (lower(ch) == lower(needle[matched])) {
+      ++matched;
+      if (matched == needle.size()) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+void rebuild(const Document& document, UiState& state, DisassemblyCache& cache) {
+  cache.document = &document;
+  cache.filter = state.disassembly_filter;
+  cache.indices.clear();
+  const auto& instructions = document.analysis.instructions;
+  cache.indices.reserve(instructions.size());
+  char address[32];
+  for (std::uint32_t i = 0; i < instructions.size(); ++i) {
+    if (!cache.filter.empty()) {
+      std::snprintf(address, sizeof(address), "%llx",
+                    static_cast<unsigned long long>(instructions[i].address));
+      const bool address_match = contains_lower(address, cache.filter) ||
+                                 contains_lower(instructions[i].mnemonic, cache.filter) ||
+                                 contains_lower(instructions[i].operands, cache.filter);
+      if (!address_match) {
+        continue;
+      }
+    }
+    cache.indices.push_back(i);
+  }
+}
+
+}  // namespace
+
+void disassembly(const Document& document, UiState& state) {
+  static DisassemblyCache cache;
+  if (cache.document != &document || cache.filter != state.disassembly_filter) {
+    rebuild(document, state, cache);
+  }
+
+  const auto& instructions = document.analysis.instructions;
+  ImGui::SetNextItemWidth(-1.0f);
+  char filter[128];
+  std::snprintf(filter, sizeof(filter), "%s", state.disassembly_filter.c_str());
+  if (ImGui::InputTextWithHint("##disasmfilter", "Filter by address or mnemonic", filter,
+                               sizeof(filter))) {
+    state.disassembly_filter = filter;
+    rebuild(document, state, cache);
+  }
+
+  ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.60f, 0.68f, 1.0f));
+  ImGui::Text("%zu of %zu instructions", cache.indices.size(), instructions.size());
+  ImGui::PopStyleColor();
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+  if (!ImGui::BeginTable("##disasm", 4, flags)) {
+    return;
+  }
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("Bytes", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("Instruction", ImGuiTableColumnFlags_WidthStretch, 2.6f);
+  ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+  ImGui::TableHeadersRow();
+
+  ImGuiListClipper clipper;
+  clipper.Begin(static_cast<int>(cache.indices.size()));
+  while (clipper.Step()) {
+    for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+      const Instruction& instruction = instructions[cache.indices[static_cast<std::size_t>(row)]];
+      const bool selected = state.selected_address == instruction.address;
+
+      ImGui::TableNextRow();
+      ImGui::TableSetColumnIndex(0);
+      const std::string address = components::format_address(instruction.address);
+      if (ImGui::Selectable(address.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+        state.selected_address = instruction.address;
+      }
+
+      ImGui::TableSetColumnIndex(1);
+      ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.68f, 0.76f, 1.0f));
+      ImGui::TextUnformatted(instruction_bytes_hex(instruction).c_str());
+      ImGui::PopStyleColor();
+
+      ImGui::TableSetColumnIndex(2);
+      const std::string text = instruction.mnemonic + " " + instruction.operands;
+      if (instruction.classification == InstructionClass::Call) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 0.62f, 1.0f));
+      } else if (instruction.classification == InstructionClass::Return) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.90f, 0.55f, 0.55f, 1.0f));
+      } else if (instruction.classification == InstructionClass::Jump ||
+                 instruction.classification == InstructionClass::ConditionalJump) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.80f, 0.50f, 1.0f));
+      }
+      ImGui::TextUnformatted(text.c_str());
+      if (instruction.classification != InstructionClass::Other) {
+        ImGui::PopStyleColor();
+      }
+
+      ImGui::TableSetColumnIndex(3);
+      if (instruction.direct_target.has_value()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.62f, 0.78f, 0.98f, 1.0f));
+        ImGui::TextUnformatted(
+            components::format_address(instruction.direct_target.value()).c_str());
+        ImGui::PopStyleColor();
+      }
+    }
+  }
+  ImGui::EndTable();
+}
+
+}  // namespace donkey::ui::views
