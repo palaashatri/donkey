@@ -115,6 +115,21 @@ target_link_libraries(donkey_project
 target_compile_features(donkey_project PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_project)
 
+add_library(donkey_debug STATIC
+  src/debug/debug.cpp
+  src/debug/mock_adapter.cpp
+  src/debug/local_adapter.cpp
+)
+add_library(donkey::debug ALIAS donkey_debug)
+target_include_directories(donkey_debug
+  PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/debug>
+)
+target_link_libraries(donkey_debug PUBLIC donkey::foundation donkey::analysis)
+target_compile_features(donkey_debug PUBLIC cxx_std_20)
+donkey_apply_warnings(donkey_debug)
+
 # The session owns loading, analysis and project persistence on a worker
 # thread. It has no SDL or ImGui dependency, so it is built headless and is
 # covered by the unit tests even when the desktop shell is disabled.
@@ -147,6 +162,7 @@ if(DONKEY_BUILD_UI)
   add_library(donkey_ui STATIC
     src/ui/application.cpp
     src/ui/components.cpp
+    src/ui/debugger_view.cpp
     src/ui/decompiler_view.cpp
     src/ui/disasm_view.cpp
     src/ui/graph_view.cpp
@@ -162,7 +178,7 @@ if(DONKEY_BUILD_UI)
   )
   target_link_libraries(donkey_ui
     PUBLIC donkey::analysis donkey::session
-    PRIVATE donkey::ir donkey::project donkey_imgui
+    PRIVATE donkey::ir donkey::project donkey::debug donkey_imgui
   )
   target_compile_features(donkey_ui PUBLIC cxx_std_20)
   donkey_apply_warnings(donkey_ui)

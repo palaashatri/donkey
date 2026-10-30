@@ -63,6 +63,9 @@ int main(int argc, char** argv) {
   if (command == "project") {
     return donkey::cli::command_project(rest);
   }
+  if (command == "debug") {
+    return donkey::cli::command_debug(rest);
+  }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),
                command.data());

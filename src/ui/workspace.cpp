@@ -21,6 +21,7 @@ constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
 constexpr const char* kBookmarksWindow = "Bookmarks";
+constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
 
@@ -349,6 +350,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
     ImGui::MenuItem(kBookmarksWindow, nullptr, &show_bookmarks_);
+    ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::EndMenu();
   }
@@ -411,6 +413,7 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
   ImGui::DockBuilderDockWindow(kXrefsWindow, bottom);
   ImGui::DockBuilderDockWindow(kBookmarksWindow, bottom);
+  ImGui::DockBuilderDockWindow(kDebuggerWindow, bottom);
   ImGui::DockBuilderDockWindow(kSectionsWindow, left);
   ImGui::DockBuilderDockWindow(kFunctionsWindow, left_bottom);
   ImGui::DockBuilderDockWindow(kOverviewWindow, right);
@@ -532,6 +535,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kBookmarksWindow, &show_bookmarks_, panel_flags());
     if (document) {
       views::bookmarks(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_debugger_) {
+    ImGui::Begin(kDebuggerWindow, &show_debugger_, panel_flags());
+    if (document) {
+      views::debugger(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }
