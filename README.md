@@ -45,10 +45,10 @@ The desktop app is `donkey`; the scriptable tool is `donkey-cli`. Opening a file
 
 ## Workbench Showcase
 
-[docs/images/screenshots](docs/images/screenshots/README.md) has screenshots of every platform. The app captured them itself, driven by `tests/ui/screenshots.donkeyui` on a small demo program built with each platform's own compiler: the workspace, a jump-table switch, a DWARF prototype, the component gallery and, where a native debugger exists, a breakpoint stop.
+[docs/images/screenshots](docs/images/screenshots/README.md) has screenshots of every platform. The app captured them itself, driven by `tests/ui/screenshots.donkeyui` on a small demo program built with each platform's own compiler: the workspace, a `switch` (a jump table on x86, a lookup table with Apple Clang), a loop with its DWARF prototype where the binary carries DWARF, the component gallery and, where a native debugger exists, a breakpoint stop. Results that are not fully modelled are shown as `Partial`, as on the arm64 builds of the loop.
 
 ![Workspace on Linux x86-64](docs/images/screenshots/linux-x86_64/03-loop-and-dwarf.png)
-*Linux x86-64: the demo program's `stock_value` with its DWARF prototype beside verified pseudocode.*
+*Linux x86-64: the demo program's `stock_value` with its DWARF prototype above verified pseudocode.*
 
 Older captures:
 

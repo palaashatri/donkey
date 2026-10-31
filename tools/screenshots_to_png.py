@@ -13,10 +13,14 @@ from PIL import Image
 CAPTIONS = {
     "01-workspace": "Workspace on the demo program: sections, functions, disassembly, "
                     "pseudocode, hex view, overview",
-    "02-switch-decompiled": "A switch compiled to a jump table, recovered from the bounds "
-                            "check and the table bytes",
-    "03-loop-and-dwarf": "A loop over a struct array, with the DWARF prototype shown beside "
-                         "the pseudocode",
+    "02-switch-decompiled": "category_name, a switch in the source. Compilers emit it "
+                            "differently: a jump table (x86) or a bounds check and a lookup "
+                            "table (Apple Clang). Where the control flow is not structured, the "
+                            "exact pseudocode is shown as labelled blocks",
+    "03-loop-and-dwarf": "stock_value, a loop over a struct array. Where the binary carries "
+                         "DWARF (not macOS, which keeps it in a .dSYM bundle Donkey does not "
+                         "read), its prototype is shown above the pseudocode. Partial where an "
+                         "instruction or flag is not modelled",
     "04-component-gallery": "Shared UI components and the 1,000,000-row virtualised table",
     "05-debugger-breakpoint": "The native debugger stopped at a breakpoint (Linux and Windows "
                               "only)",
@@ -45,7 +49,8 @@ def main() -> int:
          f"Captured locally under Xvfb (commit {commit[:12]}) from the"),
         "`ui.screenshots` test: `tests/ui/screenshots.donkeyui` drives the real application",
         "on `tests/fixtures/demo/demo.c`, built on each platform with its own compiler, using",
-        "the software renderer. Nothing here is edited by hand.",
+        "the software renderer. The images are not edited; captions come from "
+        "`tools/screenshots_to_png.py`.",
         "",
     ]
     for platform, names in platforms:
