@@ -14,6 +14,7 @@ struct DisassemblyCache {
   const Document* document = nullptr;
   std::string filter;
   std::vector<std::uint32_t> indices;
+  std::uint64_t scrolled_to = 0;  ///< selection the view last scrolled to
 };
 
 bool contains_lower(std::string_view haystack, std::string_view needle) {
@@ -92,8 +93,28 @@ void disassembly(const Document& document, UiState& state) {
   ImGui::TableSetupColumn("Comment", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableHeadersRow();
 
+  // When the selection changes elsewhere (Go to, Functions, Xrefs, history),
+  // bring its row into view; clicks inside this table do not jump.
+  const float row_height = ImGui::GetTextLineHeightWithSpacing();
+  if (state.selected_address != cache.scrolled_to) {
+    cache.scrolled_to = state.selected_address;
+    const auto row_of =
+        std::lower_bound(cache.indices.begin(), cache.indices.end(), state.selected_address,
+                         [&](std::uint32_t index, std::uint64_t address) {
+                           return instructions[index].address < address;
+                         });
+    if (row_of != cache.indices.end()) {
+      const float row = static_cast<float>(row_of - cache.indices.begin());
+      const float top = ImGui::GetScrollY();
+      const float visible = ImGui::GetWindowHeight() - 2.0f * row_height;
+      if (row * row_height < top || row * row_height > top + visible) {
+        ImGui::SetScrollY(std::max(0.0f, row * row_height - visible / 3.0f));
+      }
+    }
+  }
+
   ImGuiListClipper clipper;
-  clipper.Begin(static_cast<int>(cache.indices.size()));
+  clipper.Begin(static_cast<int>(cache.indices.size()), row_height);
   while (clipper.Step()) {
     for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
       const Instruction& instruction = instructions[cache.indices[static_cast<std::size_t>(row)]];
@@ -107,6 +128,7 @@ void disassembly(const Document& document, UiState& state) {
           (bookmarked ? "[*] " : "") + components::format_address(instruction.address);
       if (ImGui::Selectable(address.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
         state.navigate_to(instruction.address, &document);
+        cache.scrolled_to = instruction.address;  // already on screen
       }
       if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         if (instruction.direct_target.has_value()) {

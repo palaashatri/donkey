@@ -98,13 +98,11 @@ class TableSlice {
       return false;
     }
     const Operand& dest = ops[0];
-    if (dest.kind == OperandKind::Register && selector_.kind == OperandKind::Register &&
-        x86_family(dest.reg) == x86_family(selector_.reg)) {
-      return false;  // the selector itself is rewritten: not a table read
-    }
+    const bool writes_selector = selector_.kind == OperandKind::Register &&
+                                 x86_family(dest.reg) == x86_family(selector_.reg);
     if (m == "lea") {
       auto address = address_of(ops[1], instruction);
-      return address && write_register(dest.reg, dest.size, *address);
+      return !writes_selector && address && write_register(dest.reg, dest.size, *address);
     }
     auto source = value_of(ops[1], instruction);
     if (!source) {
@@ -137,6 +135,10 @@ class TableSlice {
       } else {
         return false;
       }
+    }
+    if (writes_selector &&
+        (result & width_mask(selector_.size)) != (value_ & width_mask(selector_.size))) {
+      return false;  // the selector is changed, not just zero-extended (mov edi, edi)
     }
     return write_register(dest.reg, dest.size, result);
   }

@@ -84,6 +84,11 @@ jobs:
           name: donkey-linux-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-linux-${{ matrix.arch }}
+          path: build/package-linux/tests/screenshots/*.bmp
+          if-no-files-found: warn
 
   linux-verify:
     name: Install on ${{ matrix.image }} (${{ matrix.arch }})
@@ -196,6 +201,11 @@ jobs:
           name: donkey-macos-arm64
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-macos-arm64
+          path: build/package-macos/tests/screenshots/*.bmp
+          if-no-files-found: warn
 
   windows:
     name: Windows packages (${{ matrix.arch }})
@@ -295,6 +305,11 @@ jobs:
           name: donkey-windows-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-windows-${{ matrix.arch }}
+          path: build/package-windows/tests/screenshots/*.bmp
+          if-no-files-found: warn
 
   freebsd:
     name: FreeBSD packages (${{ matrix.arch }})
@@ -333,6 +348,8 @@ jobs:
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             sleep 2
             DISPLAY=:99 ctest --preset package-freebsd --parallel 2
+            mkdir -p screenshots
+            cp build/package-freebsd/tests/screenshots/*.bmp screenshots/ || true
             (cd build/package-freebsd && cpack)
             mkdir -p dist
             cp build/package-freebsd/donkey-*.tar.gz build/package-freebsd/donkey-*.sha256 dist/
@@ -354,6 +371,48 @@ jobs:
           name: donkey-freebsd-${{ matrix.arch }}
           path: dist/*
           if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-freebsd-${{ matrix.arch }}
+          path: screenshots/*.bmp
+          if-no-files-found: warn
+
+  # On manual runs only: commit the screenshots every platform captured to
+  # docs/images/screenshots/ on the branch that was built. Pushes made with
+  # GITHUB_TOKEN do not start new workflow runs.
+  screenshots:
+    name: Commit documentation screenshots
+    if: always() && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+    needs: [linux, macos, windows, freebsd]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: screenshots-*
+          path: shots
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Convert to PNG and commit
+        run: |
+          set -e
+          python -m pip install --quiet pillow==11.0.0
+          python tools/screenshots_to_png.py shots docs/images/screenshots "$GITHUB_SHA" "$GITHUB_RUN_ID"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/images/screenshots
+          if git diff --cached --quiet; then echo "screenshots unchanged"; exit 0; fi
+          git commit -m "docs: screenshots from package run $GITHUB_RUN_ID (${GITHUB_SHA::12})"
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME" && exit 0
+            sleep 10
+          done
+          exit 1
 
   release:
     name: Publish GitHub release

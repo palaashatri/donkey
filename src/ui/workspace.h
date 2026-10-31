@@ -240,6 +240,17 @@ class Workspace {
   }
 
   void focus_address(std::uint64_t address, const std::string& section);
+  /// UI-script hooks for the debugger (the consent dialog's Run button does
+  /// the same launch). `debug_supported_for_testing` is false on hosts
+  /// without a native debugger.
+  bool debug_supported_for_testing();
+  void debug_launch_for_testing(std::uint64_t break_static_address);
+  void debug_continue_for_testing();
+  void debug_terminate_for_testing();
+  [[nodiscard]] bool debug_stopped_for_testing() const;
+
+  /// Navigate like "Go to" does (history, section, view scrolling).
+  void go_to(std::uint64_t address) { state_.navigate_to(address, session_.document().get()); }
 
   /// Skip the built-in dock layout because a saved one was loaded.
   void set_layout_restored(bool restored) { layout_initialized_ = restored; }

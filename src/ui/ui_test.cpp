@@ -302,7 +302,8 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
   const auto number = [&](std::size_t i, double fallback) {
     return i < c.args.size() ? std::atof(c.args[i].c_str()) : fallback;
   };
-  constexpr int kSettleFrames = 3;
+  // ImGui spreads a chord's key events over several frames (input trickling).
+  constexpr int kSettleFrames = 6;
 
   if (c.name == "frames") {
     wait_frames_ = std::max(1, static_cast<int>(number(0, 1)));
@@ -377,6 +378,11 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     wait_frames_ = kSettleFrames;
     return false;
   }
+  if (c.name == "gallery_close") {
+    workspace.gallery().open = false;
+    wait_frames_ = kSettleFrames;
+    return false;
+  }
   if (c.name == "focus_window") {
     ImGui::SetWindowFocus(c.rest.c_str());
     wait_frames_ = kSettleFrames;
@@ -442,6 +448,30 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
                  c.line, g.NavWindow != nullptr ? g.NavWindow->Name : "<none>", g.NavId, g.ActiveId,
                  ImGui::GetIO().WantTextInput ? 1 : 0, workspace.gallery().search_id);
     return true;
+  }
+  if (c.name == "screenshot") {
+    // screenshot NAME: saved as $DONKEY_SCREENSHOT_DIR/NAME.bmp (default:
+    // the current directory) from the next rendered frame.
+    const char* dir = std::getenv("DONKEY_SCREENSHOT_DIR");
+    std::string path = (dir != nullptr && dir[0] != '\0') ? std::string(dir) + "/" : "";
+    path += arg(0) + ".bmp";
+    host.pending_screenshot = path;
+    host.screenshot_error.clear();
+    screenshot_expected_ = host.screenshots_saved + 1;
+    screenshot_command_ = &c;
+    wait_frames_ = 2;
+    return false;
+  }
+  if (c.name == "select_function") {
+    // Navigation without keyboard, for screenshot setup.
+    const std::uint64_t address = workspace.resolve_location(c.rest);
+    if (address == 0) {
+      fail(c, "no function named '" + c.rest + "'");
+      return true;
+    }
+    workspace.go_to(address);
+    wait_frames_ = 3;
+    return false;
   }
   if (c.name == "quit") {
     done_ = true;
@@ -550,6 +580,36 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "require_native_debugger") {
+    if (!workspace.debug_supported_for_testing()) {
+      log_.push_back("line " + std::to_string(c.line) +
+                     ": no native debugger on this host; debugger steps skipped");
+      std::fprintf(stderr, "donkey ui-test: NOTE no native debugger; debugger steps skipped\n");
+      while (next_ < commands_.size() && commands_[next_].name != "end_require") {
+        ++next_;
+      }
+    }
+    return true;
+  }
+  if (c.name == "debug_run_to") {
+    // Launch the open program under the native debugger and continue to a
+    // breakpoint on the named function (static address).
+    const std::uint64_t address = workspace.resolve_location(c.rest);
+    if (address == 0) {
+      fail(c, "no function named '" + c.rest + "'");
+      return true;
+    }
+    workspace.debug_launch_for_testing(address);
+    debug_continue_pending_ = true;
+    debug_deadline_ = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+    debug_command_ = &c;
+    return false;
+  }
+  if (c.name == "debug_terminate") {
+    workspace.debug_terminate_for_testing();
+    wait_frames_ = 10;
+    return false;
+  }
   if (c.name == "end_require") {
     return true;
   }
@@ -647,6 +707,34 @@ void UiScriptRunner::before_frame(UiTestHost& host) {
   }
   if (wait_frames_ > 0) {
     return;
+  }
+  if (debug_command_ != nullptr) {
+    // First stop: the entry point; continue once to reach the breakpoint.
+    if (std::chrono::steady_clock::now() > debug_deadline_) {
+      fail(*debug_command_, "the debuggee did not stop at the breakpoint in time");
+      debug_command_ = nullptr;
+    } else if (!host.workspace->debug_stopped_for_testing()) {
+      return;
+    } else if (debug_continue_pending_) {
+      debug_continue_pending_ = false;
+      host.workspace->debug_continue_for_testing();
+      wait_frames_ = 5;
+      return;
+    } else {
+      debug_command_ = nullptr;
+      wait_frames_ = 10;
+      return;
+    }
+  }
+  if (screenshot_command_ != nullptr) {
+    if (host.screenshots_saved < screenshot_expected_ || !host.screenshot_error.empty()) {
+      fail(*screenshot_command_,
+           host.screenshot_error.empty() ? "no frame was captured" : host.screenshot_error);
+    } else {
+      log_.push_back("screenshot saved: " + host.pending_screenshot);
+    }
+    host.pending_screenshot.clear();
+    screenshot_command_ = nullptr;
   }
   if (waiting_idle_) {
     if (host.session->busy()) {

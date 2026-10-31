@@ -485,6 +485,43 @@ void Workspace::draw_menu_bar(bool& quit) {
   ImGui::EndMainMenuBar();
 }
 
+bool Workspace::debug_supported_for_testing() {
+  if (state_.debug_controller == nullptr) {
+    state_.debug_controller = std::make_unique<debug::DebugController>(false);
+  }
+  return state_.debug_controller->snapshot().capabilities.can_launch;
+}
+
+void Workspace::debug_launch_for_testing(std::uint64_t break_static_address) {
+  const auto document = session_.document();
+  if (!document || !debug_supported_for_testing()) {
+    return;
+  }
+  show_debugger_ = true;
+  state_.debug_controller->toggle_breakpoint(break_static_address);
+  debug::LaunchConfig config;
+  config.binary_path = document->loaded.image.path;
+  config.stop_at_entry = true;
+  state_.debug_controller->launch(std::move(config));
+}
+
+void Workspace::debug_continue_for_testing() {
+  if (state_.debug_controller != nullptr) {
+    state_.debug_controller->resume();
+  }
+}
+
+void Workspace::debug_terminate_for_testing() {
+  if (state_.debug_controller != nullptr) {
+    state_.debug_controller->terminate();
+  }
+}
+
+bool Workspace::debug_stopped_for_testing() const {
+  return state_.debug_controller != nullptr &&
+         state_.debug_controller->snapshot().state == debug::SessionState::Stopped;
+}
+
 std::uint64_t Workspace::resolve_location(const std::string& query) const {
   std::string text = query;
   while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
@@ -552,8 +589,8 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGuiID center = root;
   ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.24f, nullptr, &center);
   ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.28f, nullptr, &center);
-  ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.34f, nullptr, &center);
-  ImGuiID decompiler = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.45f, nullptr, &center);
+  ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.28f, nullptr, &center);
+  ImGuiID decompiler = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.55f, nullptr, &center);
   ImGuiID left_bottom = ImGui::DockBuilderSplitNode(left, ImGuiDir_Down, 0.48f, nullptr, &left);
   ImGuiID right_bottom = ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.55f, nullptr, &right);
 

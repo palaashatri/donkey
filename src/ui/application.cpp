@@ -228,6 +228,12 @@ void keep_window_on_a_display(SDL_Window* window) {
   std::fprintf(stderr, "donkey: window moved back onto the primary display\n");
 }
 
+/// One capture per `screenshot` command: the runner clears the pending path
+/// after checking the result.
+int host_screenshot_target(const UiTestHost& host) {
+  return host.screenshot_error.empty() ? host.screenshots_saved + 1 : host.screenshots_saved;
+}
+
 std::string layout_file(const AppOptions& options) {
   std::string dir = options.config_dir;
   if (dir.empty()) {
@@ -454,6 +460,9 @@ int run(const AppOptions& options) {
     const bool is_minimized = draw_data->DisplaySize.x <= 0.0f || draw_data->DisplaySize.y <= 0.0f;
 
     double cpu_ms = 0.0;
+    if (graphics.device != nullptr && scripted && !host.pending_screenshot.empty()) {
+      host.screenshot_error = "screenshots need --renderer software (SDL_Renderer readback)";
+    }
     if (graphics.device != nullptr) {
       const bool rendered = render_gpu(graphics.device, window, draw_data, is_minimized,
                                        clear_color, frame_start, cpu_ms);
@@ -475,6 +484,16 @@ int run(const AppOptions& options) {
                                   clear_color.w);
       SDL_RenderClear(graphics.renderer);
       ImGui_ImplSDLRenderer3_RenderDrawData(draw_data, graphics.renderer);
+      if (scripted && !host.pending_screenshot.empty() &&
+          host.screenshots_saved < host_screenshot_target(host)) {
+        SDL_Surface* shot = SDL_RenderReadPixels(graphics.renderer, nullptr);
+        if (shot == nullptr || !SDL_SaveBMP(shot, host.pending_screenshot.c_str())) {
+          host.screenshot_error = std::string("could not save the frame: ") + SDL_GetError();
+        } else {
+          ++host.screenshots_saved;
+        }
+        SDL_DestroySurface(shot);
+      }
       cpu_ms =
           std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frame_start)
               .count();

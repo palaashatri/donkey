@@ -33,6 +33,11 @@ set_target_properties(
 # It is compiled with -g: its DWARF is the debug-info fixture (ELF, and PE
 # with MinGW; Apple keeps DWARF out of the executable).
 add_executable(donkey_test_debuggee fixtures/debuggee/debuggee.c)
+# Demo program for the documentation screenshots.
+add_executable(donkey_demo fixtures/demo/demo.c)
+if(NOT MSVC)
+  target_compile_options(donkey_demo PRIVATE -O1 -g -fno-inline-functions)
+endif()
 # The dynamic-module fixture `debuggee load` opens at run time.
 add_library(donkey_test_module SHARED fixtures/debuggee/module.c)
 if(MSVC)
@@ -91,7 +96,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
-add_dependencies(donkey_unit_tests donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
+add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
@@ -299,6 +304,23 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   set_tests_properties(ui.script_display_dpi_device_auto PROPERTIES
     TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
     FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
+  # Documentation screenshots of the demo program (BMP; see docs/UI_TESTING.md).
+  add_test(NAME ui.screenshots
+           COMMAND ${CMAKE_COMMAND} -E env DONKEY_SCREENSHOT_DIR=${CMAKE_CURRENT_BINARY_DIR}/screenshots
+                   $<TARGET_FILE:donkey> --renderer software
+                   --config-dir ${DONKEY_UI_CONFIG_DIR}/screenshots
+                   --ui-script ${CMAKE_CURRENT_SOURCE_DIR}/ui/screenshots.donkeyui
+                   $<TARGET_FILE:donkey_demo>)
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/screenshots)
+  # Always from the default layout, never one a previous run saved.
+  add_test(NAME ui.screenshots_clean
+           COMMAND ${CMAKE_COMMAND} -E rm -rf ${DONKEY_UI_CONFIG_DIR}/screenshots)
+  set_tests_properties(ui.screenshots_clean PROPERTIES FIXTURES_SETUP ui_screenshots_clean)
+  set_tests_properties(ui.screenshots PROPERTIES FIXTURES_REQUIRED ui_screenshots_clean
+
+    TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+    FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
+
   # The responsiveness run starts 8 analysis threads; keep it alone.
   donkey_ui_script(responsiveness)
   set_tests_properties(ui.script_responsiveness PROPERTIES RUN_SERIAL TRUE)

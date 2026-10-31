@@ -29,6 +29,11 @@ struct UiTestHost {
   /// Number of times the renderer was torn down and recreated.
   int graphics_resets = 0;
   std::string renderer_name;
+  /// Set by the `screenshot` command; the app saves the next frame there
+  /// (BMP) and records the outcome in `screenshot_error` ("" on success).
+  std::string pending_screenshot;
+  std::string screenshot_error;
+  int screenshots_saved = 0;
 };
 
 /// Runs a line-based script inside the real application loop (`donkey
@@ -101,6 +106,11 @@ class UiScriptRunner {
   int sweep_max_rows_ = 0;
   std::vector<std::chrono::steady_clock::time_point> pending_inputs_;
   std::size_t storage_baseline_ = 0;
+  int screenshot_expected_ = 0;
+  const Command* debug_command_ = nullptr;
+  bool debug_continue_pending_ = false;
+  std::chrono::steady_clock::time_point debug_deadline_{};
+  const Command* screenshot_command_ = nullptr;
 
   std::vector<std::thread> load_threads_;
   std::shared_ptr<std::atomic<bool>> load_stop_;

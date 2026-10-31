@@ -1,0 +1,28 @@
+# Documentation screenshots (docs/images/screenshots/<platform>/). Run on the
+# demo program with --renderer software and DONKEY_SCREENSHOT_DIR set.
+wait_idle
+frames 10
+assert_no_error
+select_function main
+frames 10
+screenshot 01-workspace
+select_function category_name
+frames 20
+screenshot 02-switch-decompiled
+select_function stock_value
+frames 20
+screenshot 03-loop-and-dwarf
+gallery_open
+frames 10
+screenshot 04-component-gallery
+
+# The native debugger stopped at a breakpoint (Linux and Windows only).
+require_native_debugger
+gallery_close
+select_function stock_value
+debug_run_to stock_value
+focus_window Debugger
+frames 20
+screenshot 05-debugger-breakpoint
+debug_terminate
+end_require
