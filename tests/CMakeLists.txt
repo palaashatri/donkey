@@ -95,6 +95,15 @@ add_test(NAME cli.callgraph_json
 set_tests_properties(cli.callgraph_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"edges\": \\[.*main\".*donkey_debuggee_tick.*\"unresolved\"")
 
+# M0: the headless core never links the desktop shell's libraries.
+add_test(NAME deps.core_has_no_ui_links
+  COMMAND ${CMAKE_COMMAND} -DGRAPH=${CMAKE_BINARY_DIR}/donkey-core-link-graph.txt
+          -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_link_graph.cmake)
+add_test(NAME deps.checker_rejects_ui_link
+  COMMAND ${CMAKE_COMMAND} -DGRAPH=${PROJECT_SOURCE_DIR}/tests/fixtures/manifests/bad-link-graph.txt
+          -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_link_graph.cmake)
+set_tests_properties(deps.checker_rejects_ui_link PROPERTIES WILL_FAIL TRUE)
+
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")
 

@@ -103,6 +103,10 @@ class Session {
   /// replacement has committed.
   void set_restore_post_commit_hook_for_testing(std::function<void()> hook);
 
+  /// Test-only: runs on the open() worker before the file is read, so a test
+  /// can stand in for slow storage. It receives the operation's token.
+  void set_load_hook_for_testing(std::function<void(const CancellationToken&)> hook);
+
   /// Request cooperative cancellation of any running worker task.
   void cancel();
   [[nodiscard]] bool is_cancelled() const;
@@ -172,6 +176,7 @@ class Session {
   std::vector<RetiredWorker> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
   std::function<void()> restore_post_commit_hook_;
+  std::function<void(const CancellationToken&)> load_hook_;
   bool reanalysis_pending_ = false;
 
   CancellationToken current_cancellation_;

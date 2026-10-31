@@ -266,6 +266,7 @@ endif()
 # Install rules and release packaging (CPack)
 # ---------------------------------------------------------------------------
 
+include(DonkeyDependencyGraph)
 include(DonkeyPackaging)
 
 # ---------------------------------------------------------------------------

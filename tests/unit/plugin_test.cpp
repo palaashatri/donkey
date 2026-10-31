@@ -6,6 +6,13 @@
 #include <string>
 #include <vector>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <dlfcn.h>
+#endif
+
 namespace donkey {
 namespace {
 
@@ -43,6 +50,37 @@ TEST(PluginTest, TrustedExecutionFailsWhenCapabilityDenied) {
   EXPECT_FALSE(res.has_value());
   EXPECT_EQ(res.diagnostic().code, "plugin.capability_denied");
   EXPECT_EQ(res.diagnostic().status, Status::PermissionDenied);
+}
+
+bool library_is_loaded(const char* path) {
+#if defined(_WIN32)
+  return GetModuleHandleA(path) != nullptr;
+#else
+  void* handle = dlopen(path, RTLD_NOW | RTLD_NOLOAD);
+  if (handle == nullptr) {
+    return false;
+  }
+  dlclose(handle);  // drop the reference RTLD_NOLOAD just took
+  return true;
+#endif
+}
+
+// M9: a trusted plugin is loaded for one execution and unloaded afterwards,
+// also when it is rejected, and can be loaded again.
+TEST(PluginTest, TrustedPluginIsUnloadedAfterEachExecution) {
+  ASSERT_FALSE(library_is_loaded(TEST_PLUGIN_VALID_PATH));
+  for (int round = 0; round < 3; ++round) {
+    auto res = PluginHost::execute_trusted(TEST_PLUGIN_VALID_PATH, "{}", DONKEY_CAP_ANALYSIS);
+    ASSERT_TRUE(res.has_value()) << res.diagnostic().message;
+    EXPECT_TRUE(res.value().success);
+    EXPECT_FALSE(library_is_loaded(TEST_PLUGIN_VALID_PATH)) << "round " << round;
+  }
+  auto denied = PluginHost::execute_trusted(TEST_PLUGIN_VALID_PATH, "{}", DONKEY_CAP_NONE);
+  EXPECT_FALSE(denied.has_value());
+  EXPECT_FALSE(library_is_loaded(TEST_PLUGIN_VALID_PATH));
+  auto manifest = PluginHost::inspect_manifest(TEST_PLUGIN_VALID_PATH);
+  ASSERT_TRUE(manifest.has_value());
+  EXPECT_FALSE(library_is_loaded(TEST_PLUGIN_VALID_PATH));
 }
 
 TEST(PluginTest, IsolatedExecutionSucceeds) {

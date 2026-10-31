@@ -183,8 +183,16 @@ void Session::open(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex_);
     current_worker_done_ = done;
   }
-  worker_ = std::thread([this, path, generation, token, done]() {
+  std::function<void(const CancellationToken&)> load_hook;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    load_hook = load_hook_;
+  }
+  worker_ = std::thread([this, path, generation, token, done, load_hook]() {
     WorkerDoneGuard done_guard{done};
+    if (load_hook) {
+      load_hook(token);
+    }
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
     load_opts.progress = progress_reporter(generation);
@@ -707,6 +715,11 @@ bool Session::wait_for_retired_workers(const CancellationToken& token) {
     std::this_thread::sleep_for(5ms);
   }
   return false;
+}
+
+void Session::set_load_hook_for_testing(std::function<void(const CancellationToken&)> hook) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  load_hook_ = std::move(hook);
 }
 
 void Session::set_restore_post_commit_hook_for_testing(std::function<void()> hook) {

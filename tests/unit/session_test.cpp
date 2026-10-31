@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -725,6 +727,55 @@ TEST(Session, FunctionBoundaryEditsReanalyseUndoAndPersist) {
   EXPECT_TRUE(has_function(reopened, inside)) << "the edit must survive save and reopen";
   ASSERT_NE(reopened.annotations()->function_edit_at(inside), nullptr);
   EXPECT_EQ(*reopened.annotations()->function_edit_at(inside), "define");
+}
+
+// M1: with an intentionally slow import, every call the render thread makes
+// returns promptly, cancellation ends the import, and the next open works.
+TEST(Session, SlowImportNeverBlocksTheCallerAndCancelsCleanly) {
+  Session session;
+  std::atomic<bool> hook_running{false};
+  session.set_load_hook_for_testing([&](const donkey::CancellationToken& token) {
+    hook_running.store(true);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!token.is_cancelled() && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));  // "slow disk"
+    }
+  });
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  using Clock = std::chrono::steady_clock;
+  const auto started = Clock::now();
+  while (!hook_running.load() && Clock::now() - started < std::chrono::seconds(5)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(hook_running.load());
+
+  // Simulate 120 frames of what the workspace reads each frame.
+  std::chrono::nanoseconds worst{0};
+  for (int frame = 0; frame < 120; ++frame) {
+    const auto t0 = Clock::now();
+    EXPECT_TRUE(session.busy());
+    (void)session.status();
+    EXPECT_EQ(session.document(), nullptr);
+    (void)session.annotations();
+    (void)session.take_error();
+    (void)session.can_undo();
+    worst =
+        std::max(worst, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_LT(worst, std::chrono::milliseconds(25)) << "a render-thread call waited on the import";
+
+  const auto cancel_at = Clock::now();
+  session.cancel();
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_LT(Clock::now() - cancel_at, std::chrono::seconds(2));
+  EXPECT_EQ(session.document(), nullptr);
+  EXPECT_EQ(session.status(), "Cancelled");
+
+  session.set_load_hook_for_testing({});
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_NE(session.document(), nullptr) << "a cancelled import must not wedge the session";
 }
 
 }  // namespace
