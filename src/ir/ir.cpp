@@ -1075,14 +1075,29 @@ void recover_pointer_structs(IrFunction& function) {
   if (calls) {
     return;  // a call may clobber the argument registers
   }
+  // In straight-line code an access made before the register's first write
+  // still uses the incoming pointer; with branches, any write disqualifies.
+  const bool straight_line = function.blocks.size() == 1;
   for (const IrParameter& parameter : function.parameters) {
+    const std::string family = internal::register_family(parameter.abi_register);
+    std::size_t first_write = static_cast<std::size_t>(-1);
+    if (straight_line) {
+      const auto& statements = function.blocks.front().statements;
+      for (std::size_t i = 0; i < statements.size(); ++i) {
+        if (statements[i].dest.kind == IrOperandKind::Register &&
+            internal::register_family(statements[i].dest.reg) == family) {
+          first_write = i;
+          break;
+        }
+      }
+    }
     if (parameter.width != 8 ||
-        std::find(written.begin(), written.end(),
-                  internal::register_family(parameter.abi_register)) != written.end()) {
+        (!straight_line && std::find(written.begin(), written.end(), family) != written.end())) {
       continue;
     }
     std::vector<IrStructField> fields;
     bool usable = true;
+    bool touched = false;
     std::string base;
     auto visit = [&](const IrOperand& operand) {
       if (operand.kind != IrOperandKind::Memory ||
@@ -1090,6 +1105,7 @@ void recover_pointer_structs(IrFunction& function) {
               internal::register_family(parameter.abi_register)) {
         return;
       }
+      touched = true;
       const auto offset = static_cast<std::int64_t>(operand.constant);
       if (!operand.index.empty() || offset < 0 || offset >= 4096 || operand.width == 0) {
         usable = false;  // indexed or far: an array or a computed address
@@ -1107,13 +1123,20 @@ void recover_pointer_structs(IrFunction& function) {
       fields.push_back(IrStructField{offset, operand.width});
     };
     for (const IrBlock& block : function.blocks) {
-      for (const IrStatement& statement : block.statements) {
+      for (std::size_t i = 0; i < block.statements.size(); ++i) {
+        const IrStatement& statement = block.statements[i];
         if (statement.op == IrOp::Lea) {
           continue;  // an address computation, not an access
         }
+        touched = false;
         visit(statement.dest);
         visit(statement.a);
         visit(statement.b);
+        // The writing statement itself may still read the old value; any
+        // access after it goes through the new value.
+        if (straight_line && i > first_write && touched) {
+          usable = false;
+        }
       }
     }
     if (!usable || fields.size() < 2) {

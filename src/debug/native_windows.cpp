@@ -161,6 +161,29 @@ struct LocalDebugAdapter::Impl {
 
   // ---- low level ---------------------------------------------------------
 
+  /// OptionalHeader.SizeOfImage of the image mapped at `base` in the target
+  /// (same offset in PE32 and PE32+). 0 when the header cannot be read.
+  std::uint64_t image_size_from_headers(std::uint64_t base) const {
+    if (process == nullptr || base == 0) {
+      return 0;
+    }
+    auto read32 = [&](std::uint64_t address, std::uint32_t& out) {
+      SIZE_T got = 0;
+      return ReadProcessMemory(process, reinterpret_cast<LPCVOID>(address), &out, sizeof(out),
+                               &got) != 0 &&
+             got == sizeof(out);
+    };
+    std::uint32_t e_lfanew = 0;
+    std::uint32_t signature = 0;
+    std::uint32_t size = 0;
+    if (!read32(base + 0x3C, e_lfanew) || e_lfanew > 0x10000 ||
+        !read32(base + e_lfanew, signature) || signature != 0x00004550U ||
+        !read32(base + e_lfanew + 4 + 20 + 56, size)) {
+      return 0;
+    }
+    return size;
+  }
+
   HANDLE thread() const {
     const auto it = thread_handles.find(current_thread);
     return it == thread_handles.end() ? nullptr : it->second;
@@ -396,8 +419,11 @@ struct LocalDebugAdapter::Impl {
         module.path = path_of_file_handle(info.hFile);
         module.name = std::filesystem::path(module.path).filename().string();
         module.base_address = reinterpret_cast<std::uint64_t>(info.lpBaseOfDll);
+        // At load-event time the loader has not finished registering the
+        // module, so take its mapped size from its own PE header.
+        module.size = image_size_from_headers(module.base_address);
         MODULEINFO mi{};
-        if (process != nullptr &&
+        if (module.size == 0 && process != nullptr &&
             GetModuleInformation(process, reinterpret_cast<HMODULE>(info.lpBaseOfDll), &mi,
                                  sizeof(mi))) {
           module.size = mi.SizeOfImage;

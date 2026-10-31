@@ -20,6 +20,7 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/ir/eval.h"
+#include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
 
 #if defined(_WIN32)
@@ -256,6 +257,16 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
         outcomes.push_back(outcome);
         continue;
       }
+      // Only verified IR is ever shown: IR the verifier rejects is not a
+      // decompilation, and must never be counted as one.
+      auto verified = donkey::verify_ir(lifted.value());
+      if (!verified.has_value()) {
+        outcome.lift = "Rejected";
+        outcome.verdict = "not-evaluated";
+        outcome.detail = verified.diagnostic().code + ": " + verified.diagnostic().message;
+        outcomes.push_back(outcome);
+        continue;
+      }
       const bool complete = !lifted.value().partial;
       outcome.lift = complete ? "Complete" : "Partial";
       const auto native = reinterpret_cast<Native>(symbol);
@@ -408,6 +419,8 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
   }
 
   for (const Outcome& o : outcomes) {
+    EXPECT_NE(o.lift, "Rejected") << o.level << " " << o.function
+                                  << ": the lifter produced IR its verifier rejects: " << o.detail;
     EXPECT_NE(o.verdict, "WRONG") << o.level << " " << o.function
                                   << " is reported Complete but computes something else: "
                                   << o.detail;

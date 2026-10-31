@@ -265,6 +265,34 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
           break;
       }
       parsed.shift_amount = static_cast<std::uint8_t>(operand.shift.value & 0xFFU);
+      switch (operand.ext) {
+        case ARM64_EXT_UXTB:
+          parsed.extend = ExtendKind::Uxtb;
+          break;
+        case ARM64_EXT_UXTH:
+          parsed.extend = ExtendKind::Uxth;
+          break;
+        case ARM64_EXT_UXTW:
+          parsed.extend = ExtendKind::Uxtw;
+          break;
+        case ARM64_EXT_UXTX:
+          parsed.extend = ExtendKind::Uxtx;
+          break;
+        case ARM64_EXT_SXTB:
+          parsed.extend = ExtendKind::Sxtb;
+          break;
+        case ARM64_EXT_SXTH:
+          parsed.extend = ExtendKind::Sxth;
+          break;
+        case ARM64_EXT_SXTW:
+          parsed.extend = ExtendKind::Sxtw;
+          break;
+        case ARM64_EXT_SXTX:
+          parsed.extend = ExtendKind::Sxtx;
+          break;
+        default:
+          break;
+      }
       switch (operand.type) {
         case ARM64_OP_REG:
           parsed.kind = OperandKind::Register;

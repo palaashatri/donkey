@@ -129,6 +129,22 @@ struct Lifter {
     if (statement.width == 0) {
       statement.width = kPointerWidth;
     }
+    // A W register or an immediate used at a narrower width means its low
+    // bits: `cmp w0, #0` compares 32 bits, `strb w1` stores one byte.
+    auto narrow = [](IrOperand& operand, std::uint8_t width) {
+      if ((operand.kind == IrOperandKind::Constant || operand.kind == IrOperandKind::Register) &&
+          operand.width > width && width != 0) {
+        if (operand.kind == IrOperandKind::Constant) {
+          operand.constant &= width >= 8 ? ~0ULL : ((1ULL << (width * 8U)) - 1U);
+        }
+        operand.width = width;
+      }
+    };
+    if (statement.op == IrOp::Compare || statement.op == IrOp::Test) {
+      narrow(statement.b, statement.a.width);
+    } else if (statement.op == IrOp::Store) {
+      narrow(statement.b, statement.width);
+    }
     auto bad_width = [](const IrOperand& operand) {
       if (operand.kind == IrOperandKind::None || operand.kind == IrOperandKind::Block) {
         return false;
@@ -311,9 +327,76 @@ struct Lifter {
   /// Returns a Source operand and whether a temporary was introduced.
   IrOperand shifted_operand(IrBlock& block, const Instruction& instruction, const Operand& operand,
                             std::uint8_t width, bool& failed) {
-    const IrOperand value = to_ir_operand(operand, width);
+    IrOperand value = to_ir_operand(operand, width);
     if (value.kind == IrOperandKind::None) {
       failed = true;
+      return value;
+    }
+    if (operand.kind == OperandKind::Register && operand.extend != ExtendKind::None) {
+      // Extended register: take the low byte/half/word, extend it to the
+      // operation width, then shift.
+      std::uint8_t from = 8;
+      bool sign = false;
+      switch (operand.extend) {
+        case ExtendKind::Uxtb:
+          from = 1;
+          break;
+        case ExtendKind::Uxth:
+          from = 2;
+          break;
+        case ExtendKind::Uxtw:
+          from = 4;
+          break;
+        case ExtendKind::Uxtx:
+          from = 8;
+          break;
+        case ExtendKind::Sxtb:
+          from = 1;
+          sign = true;
+          break;
+        case ExtendKind::Sxth:
+          from = 2;
+          sign = true;
+          break;
+        case ExtendKind::Sxtw:
+          from = 4;
+          sign = true;
+          break;
+        case ExtendKind::Sxtx:
+          from = 8;
+          sign = true;
+          break;
+        case ExtendKind::None:
+          break;
+      }
+      if (from < width) {
+        value.width = from;
+        const std::uint32_t id = temporary_id();
+        IrStatement extend;
+        extend.op = sign ? IrOp::SignExtend : IrOp::ZeroExtend;
+        extend.dest = temp_operand(id, width);
+        extend.a = value;
+        extend.width = width;
+        extend.source_address = instruction.address;
+        push(block, std::move(extend));
+        value = temp_operand(id, width);
+      }
+      if (operand.shift_amount == 0) {
+        return value;
+      }
+      const std::uint32_t shifted = temporary_id();
+      IrStatement shift;
+      shift.op = IrOp::Shl;  // extended operands only take LSL
+      shift.dest = temp_operand(shifted, width);
+      shift.a = value;
+      shift.b = IrOperand::constant_value(operand.shift_amount, width);
+      shift.width = width;
+      shift.source_address = instruction.address;
+      push(block, std::move(shift));
+      return temp_operand(shifted, width);
+    }
+    if (value.width != width) {
+      failed = true;  // a narrower register without an extend is not modelled
       return value;
     }
     if (operand.shift == ShiftKind::None || operand.shift_amount == 0) {
@@ -518,6 +601,8 @@ struct Lifter {
     statement.op = sign ? IrOp::SignExtend : IrOp::ZeroExtend;
     statement.dest = to_ir_operand(operands[0], destination_width);
     statement.a = to_ir_operand(operands[1], source_width);
+    // sxtb/uxtb/sxth/uxth read only the low byte or halfword of the source.
+    statement.a.width = source_width;
     statement.width = destination_width;
     statement.source_address = instruction.address;
     push(block, std::move(statement));

@@ -31,6 +31,10 @@ enum class OperandKind : std::uint8_t { Unknown = 0, Register, Immediate, Memory
 /// `ShiftKind::None`. Only LSL/LSR/ASR are modelled by the lifter.
 enum class ShiftKind : std::uint8_t { None = 0, Lsl, Lsr, Asr, Ror };
 
+/// AArch64 extended-register operand (`w1, sxtw #2`): the low byte, half,
+/// word or doubleword is zero- or sign-extended before the shift.
+enum class ExtendKind : std::uint8_t { None = 0, Uxtb, Uxth, Uxtw, Uxtx, Sxtb, Sxth, Sxtw, Sxtx };
+
 struct MemoryOperand {
   std::string base;
   std::string index;
@@ -56,6 +60,7 @@ struct Operand {
   /// AArch64 shift/extend applied to this operand. Ignored on x86.
   ShiftKind shift = ShiftKind::None;
   std::uint8_t shift_amount = 0;
+  ExtendKind extend = ExtendKind::None;
 };
 
 struct Instruction {
