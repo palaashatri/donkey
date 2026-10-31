@@ -670,6 +670,77 @@ TEST(Ir, AArch64LoadPairSignedWordsSignExtends) {
   EXPECT_EQ(run_aarch64(data, memory), 3U);
 }
 
+// Flags from cmp (with a shifted operand) and subs feed conditional selects
+// in the same block; register-offset loads, mvn, ubfiz and ror. Each input
+// is checked in the interpreter against the same computation in C++.
+TEST(Ir, AArch64SelectsBitfieldsAndRegisterOffsetsComputeTheRealValues) {
+  const auto data = aarch64_bytes({
+      0xb9400008,  // ldr w8, [x0]
+      0xb9400409,  // ldr w9, [x0, #4]
+      0xd280004a,  // mov x10, #2
+      0xb86a780b,  // ldr w11, [x0, x10, lsl #2]
+      0x6b09051f,  // cmp w8, w9, lsl #1
+      0x1a9fd7ec,  // cset w12, gt
+      0x1a89b56d,  // csinc w13, w11, w9, lt
+      0x2a2803ee,  // mvn w14, w8
+      0x531c0d0f,  // ubfiz w15, w8, #4, #4
+      0x13882110,  // ror w16, w8, #8
+      0x6b090111,  // subs w17, w8, w9
+      0x5a892572,  // csneg w18, w11, w9, hs
+      0x0b0d0180,  // add w0, w12, w13
+      0x4a0e0000,  // eor w0, w0, w14
+      0x0b0f0000,  // add w0, w0, w15
+      0x4a100000,  // eor w0, w0, w16
+      0x0b120000,  // add w0, w0, w18
+      0xd65f03c0,  // ret
+  });
+  const std::uint32_t inputs[][3] = {
+      {7, 3, 100}, {5, 3, 9}, {6, 3, 1}, {0x80000001U, 2, 0xdeadbeefU}, {1, 0x40000000U, 4}};
+  for (const auto& in : inputs) {
+    const std::uint32_t a = in[0];
+    const std::uint32_t b = in[1];
+    const std::uint32_t c = in[2];
+    const auto sa = static_cast<std::int32_t>(a);
+    const auto sb2 = static_cast<std::int32_t>(b << 1);
+    const std::uint32_t w12 = sa > sb2 ? 1U : 0U;
+    const std::uint32_t w13 = sa < sb2 ? c : b + 1;
+    const std::uint32_t w14 = ~a;
+    const std::uint32_t w15 = (a & 0xfU) << 4;
+    const std::uint32_t w16 = (a >> 8) | (a << 24);
+    const std::uint32_t w18 = a >= b ? c : 0U - b;
+    const std::uint32_t expected = ((((w12 + w13) ^ w14) + w15) ^ w16) + w18;
+    std::vector<std::uint8_t> memory(16, 0);
+    for (int i = 0; i < 4; ++i) {
+      memory[i] = static_cast<std::uint8_t>(a >> (8 * i));
+      memory[4 + i] = static_cast<std::uint8_t>(b >> (8 * i));
+      memory[8 + i] = static_cast<std::uint8_t>(c >> (8 * i));
+    }
+    EXPECT_EQ(run_aarch64(data, memory) & 0xffffffffU, expected) << "a=" << a << " b=" << b;
+  }
+}
+
+// A branch on flags the lifter does not model must stay Partial: here adds
+// overwrites NZCV between cmp and b.eq.
+TEST(Ir, AArch64BranchAfterAnUnmodelledFlagWriterIsPartial) {
+  const auto data = aarch64_bytes({
+      0x6b01001f,  // cmp w0, w1
+      0x2b010002,  // adds w2, w0, w1
+      0x54000060,  // b.eq +12
+      0x52800020,  // mov w0, #1
+      0xd65f03c0,  // ret
+      0x52800040,  // mov w0, #2
+      0xd65f03c0,  // ret
+  });
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value());
+  EXPECT_TRUE(lifted.value().partial);
+}
+
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {
   const auto data = aarch64_two_argument_function();
   auto image = synthetic_image(data.size());
