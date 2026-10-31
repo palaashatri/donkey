@@ -376,6 +376,9 @@ int run(const AppOptions& options) {
     bool device_lost = false;
     SDL_Event event;
     while (SDL_PollEvent(&event)) {
+      if (scripted && is_foreign_focus_event(event)) {
+        continue;  // only the script's own focus events count in a scripted run
+      }
       ImGui_ImplSDL3_ProcessEvent(&event);
       switch (event.type) {
         case SDL_EVENT_QUIT:

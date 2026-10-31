@@ -43,6 +43,21 @@ struct UiTestHost {
 /// input-to-frame latency and writes p50/p95/p99 to a JSON report.
 ///
 /// The command reference is in docs/UI_TESTING.md.
+/// Marks the window focus events a script pushes (`focus_lost`,
+/// `focus_gained`) in `SDL_WindowEvent::data1`, which focus events do not
+/// otherwise use. During a scripted run the application ignores focus events
+/// without it: another window taking the OS focus (such as a UI test running
+/// in parallel) would otherwise clear Dear ImGui's key state and drop a
+/// scripted key press.
+inline constexpr Sint32 kScriptedFocusMarker = 0x444B4559;  // "DKEY"
+
+/// True for an OS focus event a scripted run should not act on.
+[[nodiscard]] inline bool is_foreign_focus_event(const SDL_Event& event) {
+  return (event.type == SDL_EVENT_WINDOW_FOCUS_LOST ||
+          event.type == SDL_EVENT_WINDOW_FOCUS_GAINED) &&
+         event.window.data1 != kScriptedFocusMarker;
+}
+
 class UiScriptRunner {
  public:
   UiScriptRunner() = default;

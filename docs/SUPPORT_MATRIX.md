@@ -37,7 +37,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 |---|---|---|---|---|---|
 | x86-64 | yes | yes | integer subset: see the corpus below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
-| AArch64 | yes | yes, with ADRP folding | integer subset | no: reported as unresolved indirect branches | Linux |
+| AArch64 | yes | yes, with ADRP folding | integer subset: see the corpus below | no: reported as unresolved indirect branches | Linux |
 | 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
 
 ## Decompiler corpus
@@ -55,16 +55,22 @@ different fails the test. **Partial** results are run too and recorded. The
 full outcome table is `tests/decompiler-corpus-report.json` in the build
 tree.
 
-| Compiler, target | -O0 Complete+verified | -O2 | -O3 | Partial causes |
-|---|---|---|---|---|
-| GCC 13.3, x86-64 Linux (measured locally) | 39/39 | 38/39 (+1 Partial, agrees) | 32/39 (+1 Partial agrees, 6 Partial) | SIMD vectorisation (6 at -O3) |
-| Clang 18.1, x86-64 Linux (measured locally) | 39/39 | 33/39 | 33/39 | SIMD (5), `adc` (1) |
-| GCC, AArch64 Linux | CI: ubuntu-24.04-arm | | | |
-| Apple Clang, AArch64 macOS | CI: macos-15 | | | |
-| MinGW-w64 GCC 13, x86-64 Windows | CI: windows-2022 | | | |
+Each cell counts functions reported **Complete** whose IR, run in the
+interpreter, agreed with the compiled code on all 48 vectors. CI prints the
+counts in each job's "Decompiler corpus results" step. Partial causes are
+listed where the per-function report was read.
 
-In every row measured so far, no Complete result disagrees with the
-compiled code.
+| Compiler, target | Where measured | -O0 | -O2 | -O3 | Partial causes |
+|---|---|---|---|---|---|
+| GCC 13.3, x86-64 Linux | CI ubuntu-24.04 | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
+| Clang 18.1, x86-64 Linux | locally | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
+| MinGW-w64 GCC 14.2, x64 Windows | CI windows-2022 | 39/39 | 36/39 | 30/39 | not itemised |
+| GCC 13.3, AArch64 Linux | CI ubuntu-24.04-arm | 39/39 | 36/39 | 30/39 | SIMD, `ccmp` |
+| Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
+| Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
+| llvm-mingw Clang, arm64 Windows | CI windows-11-arm (package job) | pending | pending | pending | |
+
+On every row, no Complete result disagrees with the compiled code.
 
 ### Fixed by this corpus
 
@@ -72,10 +78,16 @@ Each of these was reported **Complete** and computed the wrong value:
 
 - three-operand `imul` lost its immediate
 - `js`/`jns`/`jo`/`jno` were unmapped
+- AArch64 `sxtb` read the whole register, and extended operands lost
+  their extension
 
 Since fixing them, the lifter also models `neg`, `not`, sign-widening
 (`cdqe` and friends), rotates, `cmov`/`setcc`, and exact flags after
-arithmetic.
+arithmetic on x86. On AArch64 it tracks NZCV within a block: a branch or
+conditional select is exact when the block's last flag writer is `cmp`,
+`tst`, `subs` or `ands`, and Partial otherwise. It also models the `csel`
+family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
+`ubfx`/`sbfx` and `mvn`.
 
 ### Known unsupported classes
 
@@ -83,7 +95,7 @@ arithmetic.
 - Calls' effects on registers and memory: functions that call are
   rendered, but the oracle does not evaluate them.
 - `adc`/`sbb`, double-width `mul`/`imul`/`div`.
-- Flags read across basic blocks.
+- Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
 

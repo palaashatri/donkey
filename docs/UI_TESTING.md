@@ -70,6 +70,11 @@ artifacts keep them per platform.
   keyboard focus. When the test window has none (some headless displays), the
   SDL side of `assert_text_input` is logged as not checked rather than
   passed.
+- During a scripted run the application ignores window focus events that
+  the script did not push (they carry a marker in `data1`). On macOS each
+  UI test that CTest starts in parallel takes the OS focus, and Dear ImGui
+  clears its key state on focus loss, which dropped a scripted key press in
+  CI. `os_focus_lost` checks that such an event no longer does.
 - Screen readers are not covered: Dear ImGui exposes no accessibility tree.
 
 ## Commands
@@ -80,7 +85,8 @@ macOS and Ctrl elsewhere, `ctrl+z`, `alt+left`, `semicolon`,
 `tab`, `pagedown`), `text UTF-8…`, `ime_compose UTF-8…`, `focus_lost`,
 `focus_gained`, `scale F`, `move_window X Y`, `display_removed`,
 `device_lost`, `undock WINDOW`, `gallery_open`, `gallery_close`,
-`focus_window WINDOW`, `select_function NAME`, `screenshot NAME`,
+`focus_window WINDOW`, `os_focus_lost` (an unmarked focus loss in the same
+frame as the next input), `select_function NAME`, `screenshot NAME`,
 `debug_run_to NAME`, `debug_terminate`.
 
 Flow: `frames N`, `wait_idle [ms]`, `measure LABEL FRAMES`,

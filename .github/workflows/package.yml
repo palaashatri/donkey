@@ -269,9 +269,6 @@ jobs:
         run: cmake --build --preset package-windows --parallel
       - name: Test
         run: ctest --preset package-windows --parallel 4
-      - name: Decompiler corpus results
-        if: always()
-        run: cmake "-DREPORT=build/package-windows/tests/decompiler-corpus-report.json" -P cmake/checks/corpus_summary.cmake
       - name: Package
         working-directory: build/package-windows
         shell: pwsh
@@ -316,6 +313,10 @@ jobs:
           name: screenshots-windows-${{ matrix.arch }}
           path: build/package-windows/tests/screenshots/*.bmp
           if-no-files-found: warn
+      # Last, so the counts are at the end of the log (after the installer check).
+      - name: Decompiler corpus results
+        if: always()
+        run: cmake "-DREPORT=build/package-windows/tests/decompiler-corpus-report.json" -P cmake/checks/corpus_summary.cmake
 
   freebsd:
     name: FreeBSD packages (${{ matrix.arch }})

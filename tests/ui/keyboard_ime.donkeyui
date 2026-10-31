@@ -13,7 +13,11 @@ key enter
 assert_selected main
 assert_text_input 0
 
+# Another window taking the OS focus in the same frame as a key press
+# (UI tests run in parallel) must not drop the press.
+os_focus_lost
 key g
+assert_focus Go to
 text donkey_debuggee_tick
 key enter
 assert_selected donkey_debuggee_tick

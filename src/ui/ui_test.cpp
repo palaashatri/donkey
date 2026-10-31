@@ -286,6 +286,9 @@ void UiScriptRunner::push_window_event(SDL_EventType type, UiTestHost& host) {
   SDL_Event event{};
   event.type = type;
   event.window.windowID = SDL_GetWindowID(host.window);
+  if (type == SDL_EVENT_WINDOW_FOCUS_LOST || type == SDL_EVENT_WINDOW_FOCUS_GAINED) {
+    event.window.data1 = kScriptedFocusMarker;
+  }
   SDL_PushEvent(&event);
 }
 
@@ -333,6 +336,16 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     push_text(c.rest, host, c.name == "ime_compose");
     wait_frames_ = kSettleFrames;
     return false;
+  }
+  if (c.name == "os_focus_lost") {
+    // An unmarked focus loss, as when another window takes the OS focus. No
+    // frames pass, so the next input lands in the same frame; a scripted run
+    // must ignore it (is_foreign_focus_event).
+    SDL_Event event{};
+    event.type = SDL_EVENT_WINDOW_FOCUS_LOST;
+    event.window.windowID = SDL_GetWindowID(host.window);
+    SDL_PushEvent(&event);
+    return true;
   }
   if (c.name == "focus_lost" || c.name == "focus_gained") {
     push_window_event(
