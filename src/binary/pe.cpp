@@ -1,9 +1,11 @@
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <optional>
 #include <set>
 #include <string>
 #include <tuple>
+#include <utility>
 
 #include "donkey/core/checked.h"
 #include "parsers.h"
@@ -152,6 +154,36 @@ Result<void> parse_pe(ByteReader reader, BinaryImage& image) {
     directories[i] = DataDirectory{rva.value(), size.value()};
   }
 
+  // COFF string table: it follows the COFF symbol table and holds section
+  // names longer than 8 bytes ("/N" in the header) and long symbol names.
+  // MinGW puts ".debug_info" and friends there.
+  std::uint64_t string_table_offset = 0;
+  std::uint64_t string_table_size = 0;
+  if (symbol_table.value() != 0) {
+    std::uint64_t symbol_bytes = 0;
+    std::uint64_t table_offset = 0;
+    if (!checked::mul_overflow(symbol_count.value(), 18, symbol_bytes) &&
+        !checked::add_overflow(symbol_table.value(), symbol_bytes, table_offset)) {
+      auto declared = reader.u32(table_offset, Endian::Little);
+      if (declared && declared.value() >= 4 &&
+          checked::in_range(table_offset, declared.value(), reader.size())) {
+        string_table_offset = table_offset;
+        string_table_size = declared.value();
+      }
+    }
+  }
+  auto coff_string = [&](std::uint64_t offset) -> std::optional<std::string> {
+    if (string_table_size == 0 || offset < 4 || offset >= string_table_size) {
+      return std::nullopt;
+    }
+    const std::uint64_t limit = std::min<std::uint64_t>(kMaxNameLength, string_table_size - offset);
+    auto text = reader.c_string(string_table_offset + offset, limit);
+    if (!text) {
+      return std::nullopt;
+    }
+    return sanitize_name(text.value());
+  };
+
   if (section_count.value() > kMaxSections) {
     return pe_error(Status::ResourceLimit, "pe.too_many_sections",
                     "section count exceeds the limit", coff + 2);
@@ -197,6 +229,18 @@ Result<void> parse_pe(ByteReader reader, BinaryImage& image) {
     Section section;
     section.id = SectionId{i + 1};
     section.name = sanitize_name(display_name);
+    // "/123": the real name is at offset 123 of the COFF string table.
+    if (display_name.size() > 1 && display_name.size() <= 8 && display_name[0] == '/' &&
+        display_name.substr(1).find_first_not_of("0123456789") == std::string_view::npos) {
+      const std::uint64_t at =
+          std::strtoull(std::string(display_name.substr(1)).c_str(), nullptr, 10);
+      if (auto long_name = coff_string(at); long_name.has_value() && !long_name->empty()) {
+        section.name = *long_name;
+      } else {
+        image.add_diagnostic(Status::Partial, "pe.bad_long_section_name",
+                             "section name refers outside the COFF string table", offset);
+      }
+    }
     section.type = "pe_section";
     section.file_offset = raw_offset.value();
     section.file_size = raw_size.value();
@@ -395,10 +439,89 @@ Result<void> parse_pe(ByteReader reader, BinaryImage& image) {
     }
   }
 
+  // COFF symbol table (MinGW and other GNU toolchains keep it in images):
+  // names for functions and data that are not exported. Records are 18
+  // bytes; auxiliary records are skipped.
   if (symbol_table.value() != 0 && symbol_count.value() != 0) {
-    image.partial = true;
-    image.add_diagnostic(Status::Partial, "pe.coff_symbols_not_loaded",
-                         "PE debug/COFF symbol table is not parsed yet", coff + 8);
+    std::uint64_t table_bytes = 0;
+    if (symbol_count.value() > kMaxSymbols ||
+        checked::mul_overflow(symbol_count.value(), 18, table_bytes) ||
+        !checked::in_range(symbol_table.value(), table_bytes, reader.size())) {
+      image.partial = true;
+      image.add_diagnostic(Status::Partial, "pe.coff_symbols_out_of_bounds",
+                           "COFF symbol table is larger than the file or the symbol limit",
+                           coff + 8);
+    } else {
+      // Exports already named some addresses; do not list them twice.
+      std::set<std::pair<std::uint64_t, std::string>> known;
+      for (const Symbol& existing : image.symbols) {
+        if (!existing.imported) {
+          known.emplace(existing.address, existing.name);
+        }
+      }
+      for (std::uint64_t index = 0; index < symbol_count.value(); ++index) {
+        const std::uint64_t at = symbol_table.value() + index * 18;
+        auto record = reader.slice(at, 18);
+        if (!record) {
+          break;
+        }
+        const auto* bytes = reinterpret_cast<const unsigned char*>(record.value().data());
+        auto le32 = [&](std::size_t o) {
+          return static_cast<std::uint32_t>(bytes[o]) |
+                 (static_cast<std::uint32_t>(bytes[o + 1]) << 8U) |
+                 (static_cast<std::uint32_t>(bytes[o + 2]) << 16U) |
+                 (static_cast<std::uint32_t>(bytes[o + 3]) << 24U);
+        };
+        const std::uint32_t value = le32(8);
+        const auto section_number =
+            static_cast<std::int16_t>(static_cast<std::uint16_t>(bytes[12] | (bytes[13] << 8U)));
+        const std::uint16_t type = static_cast<std::uint16_t>(bytes[14] | (bytes[15] << 8U));
+        const std::uint8_t storage = bytes[16];
+        const std::uint8_t aux = bytes[17];
+        index += aux;
+        // External (2) or static (3) symbols defined in a section.
+        if (section_number <= 0 ||
+            static_cast<std::size_t>(section_number) > image.sections.size() ||
+            (storage != 2 && storage != 3)) {
+          continue;
+        }
+        std::string name;
+        if (le32(0) == 0) {
+          auto long_name = coff_string(le32(4));
+          if (!long_name) {
+            continue;
+          }
+          name = *long_name;
+        } else {
+          std::size_t length = 0;
+          while (length < 8 && bytes[length] != 0) {
+            ++length;
+          }
+          name = sanitize_name(std::string_view(reinterpret_cast<const char*>(bytes), length));
+        }
+        const Section& section = image.sections[static_cast<std::size_t>(section_number - 1)];
+        // Section and file names, and compiler-internal labels, are not symbols.
+        if (name.empty() || name.front() == '.' || (storage == 3 && value == 0 && aux != 0)) {
+          continue;
+        }
+        Symbol symbol;
+        symbol.name = std::move(name);
+        symbol.address = section.address + value;
+        symbol.binding = storage == 2 ? SymbolBinding::Global : SymbolBinding::Local;
+        symbol.kind = (type >> 4U) == 2    ? SymbolKind::Function
+                      : section.executable ? SymbolKind::Unknown
+                                           : SymbolKind::Object;
+        if (!known.emplace(symbol.address, symbol.name).second) {
+          continue;
+        }
+        if (!add_symbol(std::move(symbol))) {
+          image.partial = true;
+          image.add_diagnostic(Status::ResourceLimit, "pe.too_many_symbols",
+                               "symbol count exceeds the limit", at);
+          break;
+        }
+      }
+    }
   }
   image.format_detail += " (" + std::to_string(records.size()) + " sections)";
   return {};

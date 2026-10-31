@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -550,6 +552,109 @@ TEST(Binary, CorruptedHeadersAreRejectedDeterministically) {
       }
     }
   }
+}
+
+namespace pe_patch {
+void put32(std::vector<std::byte>& b, std::size_t at, std::uint32_t v) {
+  for (int i = 0; i < 4; ++i) {
+    b[at + static_cast<std::size_t>(i)] = static_cast<std::byte>((v >> (8 * i)) & 0xFF);
+  }
+}
+std::uint32_t get32(const std::vector<std::byte>& b, std::size_t at) {
+  std::uint32_t v = 0;
+  for (int i = 0; i < 4; ++i) {
+    v |= static_cast<std::uint32_t>(b[at + static_cast<std::size_t>(i)]) << (8 * i);
+  }
+  return v;
+}
+void append(std::vector<std::byte>& b, const void* data, std::size_t size) {
+  const auto* p = static_cast<const std::byte*>(data);
+  b.insert(b.end(), p, p + size);
+}
+}  // namespace pe_patch
+
+// PE images from GNU toolchains keep a COFF symbol table and long section
+// names ("/N") in its string table. Build one from the tiny PE fixture.
+TEST(Binary, PeCoffSymbolsAndLongSectionNamesAreRead) {
+  using namespace pe_patch;
+  auto bytes = read_fixture("tiny-pe-x86_64.exe");
+  const std::size_t pe = get32(bytes, 0x3C);
+  const std::size_t coff = pe + 4;
+  const std::size_t optional_size = static_cast<std::size_t>(bytes[coff + 16]) |
+                                    (static_cast<std::size_t>(bytes[coff + 17]) << 8);
+  const std::size_t first_section = coff + 20 + optional_size;
+  auto baseline = donkey::parse_binary(bytes, "tiny-pe-x86_64.exe");
+  ASSERT_TRUE(baseline.has_value());
+  ASSERT_FALSE(baseline.value().sections.empty());
+  const std::uint64_t text_va = baseline.value().sections[0].address;
+
+  // Section 1 is renamed "/4" -> ".text$long_section_name".
+  const char long_section[] = "/4\0\0\0\0\0";
+  std::memcpy(bytes.data() + first_section, long_section, 8);
+
+  const std::uint32_t symbol_table = static_cast<std::uint32_t>(bytes.size());
+  put32(bytes, coff + 8, symbol_table);
+  put32(bytes, coff + 12, 3);
+  auto emit = [&](const char* short_name, std::uint32_t long_offset, std::uint32_t value,
+                  std::int16_t section, std::uint16_t type, std::uint8_t storage) {
+    unsigned char record[18] = {};
+    if (short_name != nullptr) {
+      std::memcpy(record, short_name, std::strlen(short_name));
+    } else {
+      std::memcpy(record + 4, &long_offset, 4);  // zeros + string table offset
+    }
+    std::memcpy(record + 8, &value, 4);
+    std::memcpy(record + 12, &section, 2);
+    std::memcpy(record + 14, &type, 2);
+    record[16] = storage;
+    record[17] = 0;
+    append(bytes, record, sizeof(record));
+  };
+  // String table: [size][".text$long_section_name\0"]["a_long_static_function\0"]
+  const std::string section_name = ".text$long_section_name";
+  const std::string function_name = "a_long_static_function";
+  const std::uint32_t function_offset = 4 + static_cast<std::uint32_t>(section_name.size()) + 1;
+  emit("short_fn", 0, 0x10, 1, 0x20, 2);             // external function, short name
+  emit(nullptr, function_offset, 0x20, 1, 0x20, 3);  // static function, long name
+  emit(nullptr, 9999, 0x30, 1, 0x20, 3);             // name outside the table: skipped
+  const std::uint32_t table_size =
+      4 + static_cast<std::uint32_t>(section_name.size() + 1 + function_name.size() + 1);
+  append(bytes, &table_size, 4);
+  append(bytes, section_name.c_str(), section_name.size() + 1);
+  append(bytes, function_name.c_str(), function_name.size() + 1);
+
+  auto parsed = donkey::parse_binary(bytes, "coff.exe");
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  EXPECT_EQ(parsed.value().sections[0].name, section_name);
+  auto find = [&](const std::string& name) -> const donkey::Symbol* {
+    for (const auto& symbol : parsed.value().symbols) {
+      if (symbol.name == name) {
+        return &symbol;
+      }
+    }
+    return nullptr;
+  };
+  const donkey::Symbol* short_fn = find("short_fn");
+  ASSERT_NE(short_fn, nullptr);
+  EXPECT_EQ(short_fn->address, text_va + 0x10);
+  EXPECT_EQ(short_fn->kind, donkey::SymbolKind::Function);
+  EXPECT_EQ(short_fn->binding, donkey::SymbolBinding::Global);
+  const donkey::Symbol* long_fn = find(function_name);
+  ASSERT_NE(long_fn, nullptr);
+  EXPECT_EQ(long_fn->address, text_va + 0x20);
+  EXPECT_EQ(long_fn->binding, donkey::SymbolBinding::Local);
+  for (const auto& diagnostic : parsed.value().diagnostics) {
+    EXPECT_NE(diagnostic.code, "pe.coff_symbols_not_loaded");
+  }
+
+  // A symbol table that claims more records than the file holds is reported,
+  // not read past the end.
+  auto truncated = bytes;
+  put32(truncated, coff + 12, 0x00FFFFFF);
+  auto partial = donkey::parse_binary(truncated, "coff-truncated.exe");
+  ASSERT_TRUE(partial.has_value());
+  EXPECT_TRUE(std::any_of(partial.value().diagnostics.begin(), partial.value().diagnostics.end(),
+                          [](const auto& d) { return d.code == "pe.coff_symbols_out_of_bounds"; }));
 }
 
 TEST(Binary, RejectsEmptyAndMissingFiles) {
