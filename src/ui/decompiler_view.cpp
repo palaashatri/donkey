@@ -266,6 +266,14 @@ void decompiler(const Document& document, UiState& state) {
   }
   ImGui::SameLine();
   ImGui::TextDisabled("verified IR only; no string-formatted or model-generated code");
+  // The debug-info prototype is shown beside, not inside, the pseudocode:
+  // the pseudocode stays the engine's canonical output (same as the CLI).
+  if (document.debug_info) {
+    if (const DebugFunction* debug = document.debug_info->function_at(function->address)) {
+      ImGui::TextDisabled("%s prototype: %s", debug->provenance.label().c_str(),
+                          document.debug_info->prototype(*debug).c_str());
+    }
+  }
 
   ImGui::Separator();
   ImGui::BeginChild("##pseudocode", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,

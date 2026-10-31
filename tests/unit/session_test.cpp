@@ -778,4 +778,48 @@ TEST(Session, SlowImportNeverBlocksTheCallerAndCancelsCleanly) {
   EXPECT_NE(session.document(), nullptr) << "a cancelled import must not wedge the session";
 }
 
+// M7: imported DWARF names carry provenance and never replace a user
+// edit; the edit survives save and reopen next to the imported data.
+TEST(Session, DebugInfoNamesNeverReplaceUserRenames) {
+  TempPath db_path("session-dwarf-rename");
+  Session session;
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  auto document = session.document();
+  ASSERT_NE(document, nullptr);
+  if (!document->debug_info) {
+    GTEST_SKIP() << "no DWARF in this build of the debuggee: " << document->debug_info_note;
+  }
+  EXPECT_NE(document->debug_info_note.find("DWARF"), std::string::npos);
+  const donkey::DebugFunction* tick = nullptr;
+  for (const auto& f : document->debug_info->functions) {
+    if (f.name == "donkey_debuggee_tick") {
+      tick = &f;
+    }
+  }
+  ASSERT_NE(tick, nullptr);
+  const std::uint64_t address = tick->address;
+  EXPECT_EQ(tick->provenance.format, "DWARF");
+
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "user_tick");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  Session reopened;
+  reopened.open_project(db_path.str());
+  ASSERT_TRUE(wait_idle(reopened));
+  ASSERT_FALSE(reopened.take_error().has_value());
+  ASSERT_NE(reopened.annotations()->rename_at(address), nullptr);
+  EXPECT_EQ(*reopened.annotations()->rename_at(address), "user_tick")
+      << "the user's name must win over the imported one";
+  auto again = reopened.document();
+  ASSERT_NE(again, nullptr);
+  ASSERT_TRUE(again->debug_info) << "debug info must be read again on reopen";
+  const auto* imported = again->debug_info->function_at(address);
+  ASSERT_NE(imported, nullptr);
+  EXPECT_EQ(imported->name, "donkey_debuggee_tick") << "the imported name is kept, labelled";
+  EXPECT_EQ(again->debug_info->prototype(*imported), "void donkey_debuggee_tick(void)");
+}
+
 }  // namespace

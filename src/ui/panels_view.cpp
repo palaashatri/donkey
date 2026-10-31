@@ -59,7 +59,17 @@ void overview(const Document& document, UiState& state) {
   ImGui::Text("Functions    %zu seeds", analysis.functions.size());
   ImGui::Text("Xrefs        %zu", analysis.xrefs.size());
   ImGui::Text("Strings      %zu", analysis.strings.size());
-  ImGui::TextDisabled("Linear/seeded analysis: no CFG or function extents yet.");
+
+  ImGui::Spacing();
+  components::heading("Debug information");
+  ImGui::TextWrapped(
+      "%s", document.debug_info_note.empty() ? "Not read" : document.debug_info_note.c_str());
+  if (document.debug_info) {
+    for (const std::string& producer : document.debug_info->producers) {
+      ImGui::TextDisabled("%s", producer.c_str());
+    }
+    ImGui::TextDisabled("Imported names never replace your renames.");
+  }
 
   ImGui::Spacing();
   components::heading("Selection");
@@ -235,6 +245,20 @@ void functions(const Document& document, UiState& state) {
     }
     ImGui::TableSetColumnIndex(1);
     ImGui::TextUnformatted(display.c_str());
+    const DebugFunction* debug =
+        document.debug_info ? document.debug_info->function_at(function.address) : nullptr;
+    if (debug != nullptr && ImGui::IsItemHovered()) {
+      std::string tip = document.debug_info->prototype(*debug);
+      if (!debug->file.empty()) {
+        tip += "\n" + debug->file + ":" + std::to_string(debug->line);
+      }
+      tip += "\nfrom " + debug->provenance.label();
+      ImGui::SetTooltip("%s", tip.c_str());
+    }
+    if (debug != nullptr && !function.from_symbol && renamed == nullptr) {
+      ImGui::SameLine();
+      components::badge("dwarf", components::status_color("Partial"));
+    }
     if (renamed != nullptr) {
       ImGui::SameLine();
       components::badge("user", components::status_color("Success"));

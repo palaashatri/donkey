@@ -73,6 +73,43 @@ AnalysisOptions analysis_options_for(const Annotations& annotations) {
   return options;
 }
 
+/// Read DWARF for a freshly loaded document (on the worker) and name the
+/// functions that analysis found without a symbol.
+void attach_debug_info(Document& document, const CancellationToken& token) {
+  DebugInfoOptions options;
+  options.cancellation_token = token;
+  auto info = read_debug_info(document.loaded.image, document.loaded.data, options);
+  if (!info) {
+    document.debug_info_note =
+        info.diagnostic().code == "dwarf.not_present"
+            ? "No DWARF debug information"
+            : info.diagnostic().message + " [" + info.diagnostic().code + "]";
+    return;
+  }
+  document.debug_info_note = "DWARF " + std::to_string(info.value().max_version) + ": " +
+                             std::to_string(info.value().functions.size()) + " functions, " +
+                             std::to_string(info.value().types.size()) + " types" +
+                             (info.value().partial ? " (partial)" : "");
+  document.debug_info = std::make_shared<const DebugInfo>(std::move(info.value()));
+}
+
+/// Debug-info names for functions without a symbol name (user renames are
+/// applied on top by the views, so they always win).
+void apply_debug_names(Document& document) {
+  if (!document.debug_info) {
+    return;
+  }
+  for (Function& function : document.analysis.functions) {
+    if (function.from_symbol) {
+      continue;
+    }
+    if (const DebugFunction* named = document.debug_info->function_at(function.address);
+        named != nullptr && !named->name.empty()) {
+      function.name = named->name;
+    }
+  }
+}
+
 /// First thing on every Session worker: lowers the thread's priority so
 /// loading and analysis never starve the render thread, and marks the
 /// worker done however it exits.
@@ -236,6 +273,8 @@ void Session::open(const std::string& path) {
     auto document = std::make_shared<Document>();
     document->loaded = std::move(loaded.value());
     document->analysis = std::move(analysis.value());
+    attach_debug_info(*document, token);
+    apply_debug_names(*document);
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation_.load() == generation) {
@@ -354,6 +393,8 @@ void Session::open_project(const std::string& path) {
     auto document = std::make_shared<Document>();
     document->loaded = std::move(loaded.value());
     document->analysis = std::move(analysis.value());
+    attach_debug_info(*document, token);
+    apply_debug_names(*document);
 
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation_.load() == generation) {
@@ -682,6 +723,8 @@ void Session::restore_project(const std::string& backup_path) {
       auto document = std::make_shared<Document>();
       document->loaded = std::move(loaded.value());
       document->analysis = std::move(*analysis);
+      attach_debug_info(*document, token);
+      apply_debug_names(*document);
       document_ = std::move(document);
       path_ = image_path;
       status_ = restored_status;
@@ -912,6 +955,9 @@ void Session::reanalyze() {
     auto document = std::make_shared<Document>();
     document->loaded = current->loaded;
     document->analysis = std::move(analysis.value());
+    document->debug_info = current->debug_info;
+    document->debug_info_note = current->debug_info_note;
+    apply_debug_names(*document);
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation_.load() == generation) {
       document_ = std::move(document);

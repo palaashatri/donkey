@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/project/project.h"
@@ -23,6 +24,11 @@ namespace donkey::ui {
 struct Document {
   LoadedBinary loaded;
   AnalysisResult analysis;
+  /// DWARF read from the file (null when it has none or it was unreadable;
+  /// `debug_info_note` says which). Names from it only fill functions that
+  /// have no symbol name, and never replace a user rename.
+  std::shared_ptr<const DebugInfo> debug_info;
+  std::string debug_info_note;
 };
 
 /// Address-keyed user annotations. Snapshots are immutable and swapped under
