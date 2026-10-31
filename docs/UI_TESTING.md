@@ -11,9 +11,10 @@ exits 1.
 
 Scripts live in `tests/ui/*.donkeyui` and run under CTest as
 `ui.script_*` when the build has `-DDONKEY_UI_SMOKE_TEST=ON` (Linux CI runs
-them under Xvfb; the package jobs run them on every platform, except the
-two timing-bound scripts, `virtualization` and `responsiveness`, on FreeBSD
-aarch64, whose CI VM is emulated).
+them under Xvfb; the package jobs run them on every platform. FreeBSD
+aarch64's CI VM is emulated, so there the timing limits are reported but not
+enforced (`DONKEY_UI_NO_TIMING=1`), and the two timing-only scripts,
+`virtualization` and `responsiveness`, are not run).
 
 ```bash
 cmake --preset dev-linux -DDONKEY_UI_SMOKE_TEST=ON
@@ -104,4 +105,5 @@ Assertions: `assert_selected ADDRESS|NAME`,
 `assert_floating WINDOW`, `assert_docked WINDOW`,
 `assert_gallery_rows_max N`, `assert_gallery_selected ROW`,
 `assert_gallery_scrolled_past ROW`, `assert_storage_growth_max N`,
-`assert_p95 LABEL MS`, `assert_p99 LABEL MS`, `assert_no_error`.
+`assert_p95 LABEL MS`, `assert_p99 LABEL MS` (with `DONKEY_UI_NO_TIMING` set:
+printed as a NOTE, not enforced), `assert_no_error`.

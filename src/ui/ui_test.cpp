@@ -689,6 +689,16 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     const double p = c.name == "assert_p95" ? 95.0 : 99.0;
     const double value = percentile(it->second, p);
+    // On an emulated machine (the FreeBSD aarch64 CI VM) frame times say
+    // nothing about Donkey; the job sets DONKEY_UI_NO_TIMING and the
+    // functional assertions still run. The measured value is still printed.
+    if (const char* skip = std::getenv("DONKEY_UI_NO_TIMING"); skip != nullptr && *skip != '\0') {
+      std::fprintf(stderr,
+                   "donkey ui-test: NOTE line %d: timing not checked (DONKEY_UI_NO_TIMING); "
+                   "p%.0f %.2f ms, limit %.2f ms\n",
+                   c.line, p, value, number(1, 0));
+      return true;
+    }
     if (value > number(1, 0)) {
       char buffer[96];
       std::snprintf(buffer, sizeof(buffer), "p%.0f %.2f ms exceeds %.2f ms", p, value,

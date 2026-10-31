@@ -106,6 +106,7 @@ whose package job runs them: keyboard-only navigation, IME commit and
 composition, focus changes, display-scale changes, display removal (where
 the window manager allows an off-screen window), graphics device loss and
 recreation, layout persistence, and a 1,000,000-row virtualised table. On
-FreeBSD aarch64, whose CI VM is emulated, the two timing-bound scripts
-(1,000,000-row table, input latency under load) are not run.
+FreeBSD aarch64, whose CI VM is emulated, timing limits are not enforced and
+the two timing-only scripts (1,000,000-row table, input latency under load)
+are not run.
 Screen readers are not supported: Dear ImGui exposes no accessibility tree.
