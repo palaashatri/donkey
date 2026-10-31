@@ -1,0 +1,32 @@
+# M10 / A22: DPI change, display removal and graphics device loss.
+wait_idle
+frames 5
+scale 2.0
+assert_scale 2.0
+frames 5
+scale 1.25
+assert_scale 1.25
+scale 1.0
+assert_scale 1.0
+assert_window_on_display
+
+# Put the window where no display is, then report the display as removed:
+# the app must move it back onto a connected display.
+move_window 30000 30000
+require_window_off_display
+display_removed
+frames 3
+assert_window_on_display
+end_require
+
+# The device goes away: the renderer and both ImGui backends are recreated
+# and the workspace keeps drawing.
+device_lost
+frames 10
+assert_graphics_resets 1
+device_lost
+frames 10
+assert_graphics_resets 2
+measure after_reset 30
+assert_p95 after_reset 100
+assert_no_error

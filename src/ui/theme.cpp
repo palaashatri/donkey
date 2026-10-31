@@ -49,8 +49,15 @@ bool load_monospace_font(float scale) {
 
 void apply(float scale) {
   ImGuiStyle& style = ImGui::GetStyle();
+  // Start from defaults so re-applying at a new display scale does not
+  // compound the previous scale.
+  style = ImGuiStyle();
   ImGui::StyleColorsDark(&style);
-  load_monospace_font(scale);
+  static bool font_loaded = false;
+  if (!font_loaded) {
+    load_monospace_font(scale);
+    font_loaded = true;
+  }
 
   const ImVec4 accent(0.35f, 0.62f, 0.94f, 1.0f);
   const ImVec4 accent_dim(0.25f, 0.45f, 0.70f, 1.0f);
@@ -121,6 +128,7 @@ void apply(float scale) {
   style.ScrollbarSize = 12.0f;
 
   style.ScaleAllSizes(scale);
+  style.FontScaleDpi = scale;
 }
 
 }  // namespace donkey::ui::theme

@@ -1,0 +1,5 @@
+# A22 part 2 (same --config-dir as layout_save): the saved layout is used
+# instead of the default one.
+frames 5
+assert_floating Strings
+assert_docked Disassembly

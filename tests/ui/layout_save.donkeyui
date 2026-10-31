@@ -1,0 +1,7 @@
+# A22 part 1: float a docked panel; the layout is saved on exit.
+frames 5
+assert_docked Strings
+undock Strings
+frames 5
+assert_floating Strings
+quit

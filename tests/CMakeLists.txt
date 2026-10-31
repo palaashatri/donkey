@@ -202,26 +202,77 @@ set_tests_properties(cli.disasm_rejects_bad_address PROPERTIES WILL_FAIL TRUE)
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   add_test(NAME ui.smoke_loads_elf
            COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
-                   --exit-after-frames 20)
+                   --exit-after-frames 20 --config-dir ${CMAKE_CURRENT_BINARY_DIR}/ui-config/smoke)
   set_tests_properties(ui.smoke_loads_elf PROPERTIES TIMEOUT 120)
 
   # Each format exercises different views (PE code has instruction classes
   # the ELF fixture lacks); debug builds turn ImGui misuse into assertions.
   add_test(NAME ui.smoke_loads_pe
            COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-pe-x86_64.exe
-                   --exit-after-frames 20)
+                   --exit-after-frames 20 --config-dir ${CMAKE_CURRENT_BINARY_DIR}/ui-config/smoke)
   add_test(NAME ui.smoke_loads_macho
            COMMAND donkey ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-macho-arm64
-                   --exit-after-frames 20)
+                   --exit-after-frames 20 --config-dir ${CMAKE_CURRENT_BINARY_DIR}/ui-config/smoke)
   add_test(NAME ui.smoke_software_renderer
            COMMAND donkey --renderer software
                    ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
-                   --exit-after-frames 20)
+                   --exit-after-frames 20 --config-dir ${CMAKE_CURRENT_BINARY_DIR}/ui-config/smoke)
   set_tests_properties(ui.smoke_loads_pe ui.smoke_loads_macho ui.smoke_software_renderer
                        PROPERTIES TIMEOUT 120)
 
   add_test(NAME ui.smoke_rejects_unknown_option COMMAND donkey --nope)
   set_tests_properties(ui.smoke_rejects_unknown_option PROPERTIES WILL_FAIL TRUE)
+
+  # Scripted UI tests (tests/ui/*.donkeyui, docs/UI_TESTING.md): real SDL
+  # input events through the real event loop, with assertions and a timing
+  # report in ui-reports/. Each run gets its own layout directory.
+  set(DONKEY_UI_REPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-reports)
+  set(DONKEY_UI_CONFIG_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-config)
+  file(MAKE_DIRECTORY ${DONKEY_UI_REPORT_DIR})
+  function(donkey_ui_script name)
+    cmake_parse_arguments(ARG "" "CONFIG;RENDERER" "" ${ARGN})
+    if(NOT ARG_CONFIG)
+      set(ARG_CONFIG ${name})
+    endif()
+    if(NOT ARG_RENDERER)
+      set(ARG_RENDERER software)
+    endif()
+    add_test(NAME ui.script_${name}
+             COMMAND donkey --renderer ${ARG_RENDERER}
+                     --config-dir ${DONKEY_UI_CONFIG_DIR}/${ARG_CONFIG}
+                     --ui-script ${CMAKE_CURRENT_SOURCE_DIR}/ui/${name}.donkeyui
+                     --ui-report ${DONKEY_UI_REPORT_DIR}/${name}.json
+                     $<TARGET_FILE:donkey_test_debuggee>)
+    set_tests_properties(ui.script_${name} PROPERTIES
+      TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+      FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
+  endfunction()
+  donkey_ui_script(keyboard_ime)
+  donkey_ui_script(gallery_keyboard)
+  donkey_ui_script(virtualization)
+  donkey_ui_script(display_dpi_device)
+  # Device loss on the default (SDL_GPU where available) renderer too.
+  add_test(NAME ui.script_display_dpi_device_auto
+           COMMAND donkey --renderer auto --config-dir ${DONKEY_UI_CONFIG_DIR}/dpi-auto
+                   --ui-script ${CMAKE_CURRENT_SOURCE_DIR}/ui/display_dpi_device.donkeyui
+                   --ui-report ${DONKEY_UI_REPORT_DIR}/display_dpi_device_auto.json
+                   $<TARGET_FILE:donkey_test_debuggee>)
+  set_tests_properties(ui.script_display_dpi_device_auto PROPERTIES
+    TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+    FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
+  # The responsiveness run starts 8 analysis threads; keep it alone.
+  donkey_ui_script(responsiveness)
+  set_tests_properties(ui.script_responsiveness PROPERTIES RUN_SERIAL TRUE)
+
+  # Layout persistence: clean directory, save a changed layout, reopen.
+  add_test(NAME ui.layout_clean
+           COMMAND ${CMAKE_COMMAND} -E rm -rf ${DONKEY_UI_CONFIG_DIR}/layout)
+  donkey_ui_script(layout_save CONFIG layout)
+  donkey_ui_script(layout_restore CONFIG layout)
+  set_tests_properties(ui.layout_clean PROPERTIES FIXTURES_SETUP ui_layout_clean)
+  set_tests_properties(ui.script_layout_save PROPERTIES
+    FIXTURES_REQUIRED ui_layout_clean FIXTURES_SETUP ui_layout_saved)
+  set_tests_properties(ui.script_layout_restore PROPERTIES FIXTURES_REQUIRED ui_layout_saved)
 endif()
 
 add_test(NAME cli.cfg_elf_json
@@ -276,7 +327,8 @@ set_tests_properties(cli.project_info_elf_json PROPERTIES
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   add_test(NAME ui.smoke_loads_project
-           COMMAND donkey --project ${DONKEY_CLI_PROJECT_DB} --exit-after-frames 20)
+           COMMAND donkey --project ${DONKEY_CLI_PROJECT_DB} --exit-after-frames 20
+                   --config-dir ${CMAKE_CURRENT_BINARY_DIR}/ui-config/smoke)
   set_tests_properties(ui.smoke_loads_project PROPERTIES
     TIMEOUT 120
     DEPENDS cli.project_save_elf_json)

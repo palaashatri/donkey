@@ -1,5 +1,7 @@
 #include "session.h"
 
+#include "donkey/core/thread_priority.h"
+
 #include <chrono>
 #include <cstdint>
 #include <utility>
@@ -71,7 +73,15 @@ AnalysisOptions analysis_options_for(const Annotations& annotations) {
   return options;
 }
 
+/// First thing on every Session worker: lowers the thread's priority so
+/// loading and analysis never starve the render thread, and marks the
+/// worker done however it exits.
 struct WorkerDoneGuard {
+  explicit WorkerDoneGuard(std::shared_ptr<std::atomic<bool>> done) : flag(std::move(done)) {
+    make_current_thread_background();
+  }
+  WorkerDoneGuard(const WorkerDoneGuard&) = delete;
+  WorkerDoneGuard& operator=(const WorkerDoneGuard&) = delete;
   std::shared_ptr<std::atomic<bool>> flag;
   ~WorkerDoneGuard() {
     if (flag) {

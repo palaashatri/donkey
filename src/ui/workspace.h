@@ -66,6 +66,24 @@ struct AsyncDecompileState {
   void reset_cache_for(const Document* document);
 };
 
+inline constexpr const char* kGalleryWindow = "Component gallery";
+
+/// The component gallery / virtualisation test screen (gallery_view.cpp).
+struct GalleryState {
+  bool open = false;
+  long long row_count = 1000000;
+  std::string search;
+  long long search_row = -1;
+  long long selected_row = -1;
+  long long scroll_to_row = -1;
+  int button_presses = 0;
+  int rows_submitted_last_frame = 0;
+  float scroll_y = 0.0f;
+  unsigned int search_id = 0;  ///< ImGui ID of the search field (tests)
+};
+
+void draw_component_gallery(GalleryState& gallery);
+
 /// Selection and filter state shared by every panel. It is render-thread
 /// state only; the parsed document stays immutable.
 struct UiState {
@@ -223,11 +241,24 @@ class Workspace {
 
   void focus_address(std::uint64_t address, const std::string& section);
 
+  /// Skip the built-in dock layout because a saved one was loaded.
+  void set_layout_restored(bool restored) { layout_initialized_ = restored; }
+  /// Rebuild the default dock layout on the next frame.
+  void reset_layout() { layout_initialized_ = false; }
+
+  [[nodiscard]] const UiState& state() const noexcept { return state_; }
+  [[nodiscard]] GalleryState& gallery() noexcept { return gallery_; }
+
+  /// Resolve a "Go to" query: a hex address (0x optional) or a function,
+  /// symbol or user-renamed name. Returns 0 when nothing matches.
+  [[nodiscard]] std::uint64_t resolve_location(const std::string& query) const;
+
  private:
   void draw_menu_bar(bool& quit);
   void draw_dockspace();
   void draw_panels();
   void build_default_layout(ImGuiID dockspace_id);
+  void open_annotation_editor(AnnotationKind kind, std::uint64_t address);
 
   Session& session_;
   const Document* last_document_ = nullptr;
@@ -246,6 +277,10 @@ class Workspace {
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;
+  bool goto_popup_ = false;
+  char goto_buffer_[256] = {};
+  std::string goto_error_;
+  GalleryState gallery_;
   char path_buffer_[1024] = {};
   char project_path_buffer_[1024] = {};
   char backup_path_buffer_[1024] = {};

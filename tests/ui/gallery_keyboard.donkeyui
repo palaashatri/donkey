@@ -1,0 +1,18 @@
+# M0: the shared button/search/table components on a test screen, driven by
+# the keyboard (Tab to the search field, type a row number, Escape).
+frames 3
+gallery_open
+focus_window Component gallery
+assert_focus Component gallery
+# Tab reaches the Reset button, then the search field (badges are skipped).
+key tab
+assert_text_input 0
+key tab
+assert_text_input 1
+text 999999
+frames 3
+assert_gallery_selected 999999
+assert_gallery_scrolled_past 999000
+key escape
+assert_text_input 0
+assert_gallery_rows_max 200

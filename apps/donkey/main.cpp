@@ -16,7 +16,8 @@ void print_usage() {
                "\n"
                "Usage:\n"
                "  donkey [<binary>] [--project <database>] [--renderer auto|gpu|software]\n"
-               "         [--exit-after-frames N] [--version]\n"
+               "         [--exit-after-frames N] [--config-dir DIR] [--version]\n"
+               "         [--ui-script FILE [--ui-report FILE]]\n"
                "\n"
                "Opening a file or project only reads it; nothing is executed.\n");
 }
@@ -58,6 +59,17 @@ int main(int argc, char** argv) {
         return 2;
       }
       options.initial_project = std::string(argv[++i]);
+      continue;
+    }
+    if (argument == "--config-dir" || argument == "--ui-script" || argument == "--ui-report") {
+      if (i + 1 >= argc) {
+        std::fprintf(stderr, "donkey: %s needs a path\n", argv[i]);
+        return 2;
+      }
+      std::string& target = argument == "--config-dir"  ? options.config_dir
+                            : argument == "--ui-script" ? options.ui_script
+                                                        : options.ui_report;
+      target = std::string(argv[++i]);
       continue;
     }
     if (argument == "--exit-after-frames") {

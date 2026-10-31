@@ -1,0 +1,62 @@
+# A23: keyboard-only navigation, Unicode/IME text entry and focus changes.
+# Opens nothing itself: the test passes the debuggee on the command line.
+wait_idle
+frames 5
+assert_no_error
+
+# G opens "Go to"; the field takes the keyboard at once.
+key g
+assert_focus Go to
+assert_text_input 1
+text main
+key enter
+assert_selected main
+assert_text_input 0
+
+key g
+text donkey_debuggee_tick
+key enter
+assert_selected donkey_debuggee_tick
+key alt+left
+assert_selected main
+key alt+right
+assert_selected donkey_debuggee_tick
+key alt+left
+
+# N renames the selected address. An IME composition (TEXT_EDITING) must
+# not be inserted; only committed text (TEXT_INPUT) is, and the edit
+# survives the window losing and regaining focus mid-entry.
+key n
+assert_focus Annotate
+assert_text_input 1
+assert_ime_rect
+ime_compose にほ
+text 日本語_main
+focus_lost
+focus_gained
+assert_focus Annotate
+text _ok
+key enter
+assert_annotation rename main 日本語_main_ok
+
+# ; adds a comment; Escape cancels without saving.
+key semicolon
+assert_focus Annotate
+text discarded
+key escape
+assert_annotation comment main -
+
+# Undo / redo the rename from the keyboard.
+key ctrl+z
+assert_annotation rename main -
+key ctrl+shift+z
+assert_annotation rename main 日本語_main_ok
+
+# Unknown names are reported, not navigated to.
+key g
+text no_such_function_anywhere
+key enter
+assert_focus Go to
+key escape
+assert_selected main
+assert_no_error

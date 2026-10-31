@@ -47,6 +47,7 @@ include(DonkeyStorageDependencies)
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
   src/foundation/scheduler.cpp
+  src/foundation/thread_priority.cpp
   src/foundation/sha256.cpp
   src/foundation/version.cpp
 )
@@ -218,10 +219,12 @@ if(DONKEY_BUILD_UI)
     src/ui/debugger_view.cpp
     src/ui/decompiler_view.cpp
     src/ui/disasm_view.cpp
+    src/ui/gallery_view.cpp
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
     src/ui/theme.cpp
+    src/ui/ui_test.cpp
     src/ui/workspace.cpp
   )
   add_library(donkey::ui ALIAS donkey_ui)

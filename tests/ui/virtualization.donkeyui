@@ -1,0 +1,12 @@
+# M2: 1,000,000-row virtualised table. Jump across the whole table for 300
+# frames: every frame submits only the visible rows, ImGui keeps no state
+# per row, and p95 frame CPU time stays within the 33 ms objective (DESIGN
+# §12.2; frame time excludes present/vsync).
+frames 3
+gallery_open
+frames 5
+storage_baseline
+sweep scroll 300
+assert_gallery_rows_max 200
+assert_storage_growth_max 16
+assert_p95 scroll 33

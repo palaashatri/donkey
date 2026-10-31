@@ -1,5 +1,7 @@
 #include "donkey/core/scheduler.h"
 
+#include "donkey/core/thread_priority.h"
+
 #include <algorithm>
 #include <utility>
 
@@ -126,6 +128,7 @@ std::size_t JobScheduler::peak_running() const {
 }
 
 void JobScheduler::run() {
+  make_current_thread_background();
   while (true) {
     Job job;
     CancellationToken token;

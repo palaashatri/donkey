@@ -99,7 +99,49 @@ void Workspace::draw(bool& quit) {
       state_.nav_forward(session_.document().get());
     } else if (ImGui::IsKeyPressed(ImGuiKey_Escape) && session_.busy()) {
       session_.cancel();
+    } else if (!alt && ImGui::IsKeyPressed(ImGuiKey_G, false) && session_.document()) {
+      // G / Ctrl+G: go to an address or name (keyboard-only navigation).
+      goto_popup_ = true;
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_N, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      open_annotation_editor(AnnotationKind::Rename, state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      open_annotation_editor(AnnotationKind::Comment, state_.selected_address);
     }
+  }
+
+  if (goto_popup_) {
+    ImGui::OpenPopup("Go to");
+    goto_popup_ = false;
+    goto_buffer_[0] = '\0';
+    goto_error_.clear();
+  }
+  if (ImGui::BeginPopupModal("Go to", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    ImGui::TextUnformatted("Address (hex) or function / symbol name");
+    ImGui::SetNextItemWidth(420.0f);
+    if (ImGui::IsWindowAppearing()) {
+      ImGui::SetKeyboardFocusHere();
+    }
+    const bool submitted = ImGui::InputText("##goto", goto_buffer_, sizeof(goto_buffer_),
+                                            ImGuiInputTextFlags_EnterReturnsTrue);
+    if (!goto_error_.empty()) {
+      ImGui::TextColored(components::status_color("Unsupported"), "%s", goto_error_.c_str());
+    }
+    if (submitted || ImGui::Button("Go")) {
+      const std::uint64_t target = resolve_location(goto_buffer_);
+      if (target != 0) {
+        state_.navigate_to(target, session_.document().get());
+        ImGui::CloseCurrentPopup();
+      } else {
+        goto_error_ = std::string("Nothing named or at '") + goto_buffer_ + "'";
+      }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+      ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
   }
 
   if (open_path_popup_) {
@@ -246,6 +288,9 @@ void Workspace::draw(bool& quit) {
     }
     ImGui::Text("%s %s", kind_label, components::format_address(state_.annotation_address).c_str());
     ImGui::SetNextItemWidth(520.0f);
+    if (ImGui::IsWindowAppearing()) {
+      ImGui::SetKeyboardFocusHere();
+    }
     const bool submitted =
         ImGui::InputText("##annotation", state_.annotation_buffer, sizeof(state_.annotation_buffer),
                          ImGuiInputTextFlags_EnterReturnsTrue);
@@ -261,11 +306,13 @@ void Workspace::draw(bool& quit) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Cancel")) {
+    if (ImGui::Button("Cancel") || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
       ImGui::CloseCurrentPopup();
     }
     ImGui::EndPopup();
   }
+
+  draw_component_gallery(gallery_);
 
   if (show_about_) {
     ImGui::Begin("About Donkey", &show_about_, ImGuiWindowFlags_AlwaysAutoResize);
@@ -276,8 +323,10 @@ void Workspace::draw(bool& quit) {
         "decodes x86, x86-64 and AArch64 with Capstone, builds a bounded CFG "
         "with estimated function extents, and lifts x86-64, x86-32 subset and "
         "AArch64 subset functions into verified IR before printing pseudocode. "
-        "Projects save, reopen, back up and restore address-keyed renames and "
-        "comments. The debugger and 32-bit ARM lifting are not implemented.");
+        "Projects save, reopen, back up and restore address-keyed renames, "
+        "comments, bookmarks and function-boundary edits. The native debugger "
+        "runs on Linux (x86-64, AArch64) and Windows (x64); macOS and FreeBSD "
+        "debugging and 32-bit ARM lifting are not implemented.");
     ImGui::Spacing();
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
@@ -363,6 +412,18 @@ void Workspace::draw_menu_bar(bool& quit) {
     if (ImGui::MenuItem("Forward", "Alt+Right", false, state_.can_nav_forward())) {
       state_.nav_forward(session_.document().get());
     }
+    ImGui::Separator();
+    if (ImGui::MenuItem("Go to…", "G", false, session_.document() != nullptr)) {
+      goto_popup_ = true;
+    }
+    if (ImGui::MenuItem("Rename…", "N", false,
+                        state_.selected_address != 0 && session_.document() != nullptr)) {
+      open_annotation_editor(AnnotationKind::Rename, state_.selected_address);
+    }
+    if (ImGui::MenuItem("Comment…", ";", false,
+                        state_.selected_address != 0 && session_.document() != nullptr)) {
+      open_annotation_editor(AnnotationKind::Comment, state_.selected_address);
+    }
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("View")) {
@@ -378,9 +439,14 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kBookmarksWindow, nullptr, &show_bookmarks_);
     ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
+    ImGui::Separator();
+    if (ImGui::MenuItem("Reset Layout")) {
+      reset_layout();
+    }
     ImGui::EndMenu();
   }
   if (ImGui::BeginMenu("Help")) {
+    ImGui::MenuItem("Component Gallery", nullptr, &gallery_.open);
     ImGui::MenuItem("About Donkey", nullptr, &show_about_);
     ImGui::EndMenu();
   }
@@ -417,6 +483,65 @@ void Workspace::draw_menu_bar(bool& quit) {
     components::badge(status_text, components::status_color(status_text));
   }
   ImGui::EndMainMenuBar();
+}
+
+std::uint64_t Workspace::resolve_location(const std::string& query) const {
+  std::string text = query;
+  while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
+    text.pop_back();
+  }
+  while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+    text.erase(text.begin());
+  }
+  const auto document = session_.document();
+  if (text.empty() || !document) {
+    return 0;
+  }
+  const auto annotations = session_.annotations();
+  // Names first: "add" is both a hex number and a plausible name. Mach-O and
+  // 32-bit Windows prefix C names with '_', so "main" also finds "_main".
+  const std::string underscored = "_" + text;
+  for (const std::string* name : {static_cast<const std::string*>(&text), &underscored}) {
+    for (const Function& function : document->analysis.functions) {
+      const std::string* rename = annotations ? annotations->rename_at(function.address) : nullptr;
+      if ((rename != nullptr && *rename == *name) || function.name == *name) {
+        return function.address;
+      }
+    }
+    for (const Symbol& symbol : document->loaded.image.symbols) {
+      if (!symbol.imported && symbol.address != 0 && symbol.name == *name) {
+        return symbol.address;
+      }
+    }
+  }
+  std::string digits = text;
+  if (digits.size() > 2 && digits[0] == '0' && (digits[1] == 'x' || digits[1] == 'X')) {
+    digits = digits.substr(2);
+  }
+  if (digits.empty() || digits.size() > 16 ||
+      digits.find_first_not_of("0123456789abcdefABCDEF") != std::string::npos) {
+    return 0;
+  }
+  const std::uint64_t address = std::stoull(digits, nullptr, 16);
+  // Only addresses inside the image are navigable.
+  return document->loaded.image.section_for_va(address) != nullptr ? address : 0;
+}
+
+void Workspace::open_annotation_editor(AnnotationKind kind, std::uint64_t address) {
+  state_.annotation_kind = kind;
+  state_.annotation_address = address;
+  state_.annotation_buffer[0] = '\0';
+  const auto annotations = session_.annotations();
+  const std::string* existing = nullptr;
+  if (annotations) {
+    existing = kind == AnnotationKind::Comment ? annotations->comment_at(address)
+                                               : annotations->rename_at(address);
+  }
+  if (existing != nullptr) {
+    std::snprintf(state_.annotation_buffer, sizeof(state_.annotation_buffer), "%s",
+                  existing->c_str());
+  }
+  state_.annotation_modal_requested = true;
 }
 
 void Workspace::build_default_layout(ImGuiID dockspace_id) {
