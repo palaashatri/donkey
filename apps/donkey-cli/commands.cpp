@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
@@ -757,6 +758,7 @@ void print_usage(std::FILE* out) {
                " [--max-strings N]\n"
                "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
                "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
+               "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
                "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli xrefs <binary> [--json] [--address A]\n"
@@ -1017,6 +1019,137 @@ int command_callgraph(const std::vector<std::string_view>& arguments) {
     return usage_error("callgraph needs a file path");
   }
   return command_analysis(request, "callgraph");
+}
+
+int command_debuginfo(const std::vector<std::string_view>& arguments) {
+  std::string path;
+  bool json = false;
+  std::size_t max_items = 1000;
+  LoadOptions load_options;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
+    if (argument == "--json") {
+      json = true;
+    } else if (argument == "--max-items") {
+      std::string_view value;
+      std::uint64_t parsed = 0;
+      if (!take_value(arguments, i, value) || !parse_u64(value, parsed) || parsed == 0) {
+        return usage_error("--max-items needs a positive value");
+      }
+      max_items = static_cast<std::size_t>(parsed);
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for debuginfo");
+    } else if (path.empty()) {
+      path = std::string(argument);
+    } else {
+      return usage_error("debuginfo accepts exactly one file");
+    }
+  }
+  if (path.empty()) {
+    return usage_error("debuginfo needs a file path");
+  }
+  LoadedBinary loaded;
+  if (!load(path, loaded, load_options)) {
+    return kExitFailure;
+  }
+  auto result = read_debug_info(loaded.image, loaded.data);
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const DebugInfo& info = result.value();
+  if (!json) {
+    std::printf("DWARF %u-%u, %zu compile units, %zu functions, %zu variables, %zu types%s\n",
+                static_cast<unsigned>(info.min_version), static_cast<unsigned>(info.max_version),
+                info.compile_units, info.functions.size(), info.variables.size(), info.types.size(),
+                info.partial ? " (partial)" : "");
+    for (const std::string& producer : info.producers) {
+      std::printf("producer: %s\n", producer.c_str());
+    }
+    std::size_t shown = 0;
+    for (const DebugFunction& f : info.functions) {
+      if (shown++ >= max_items) {
+        break;
+      }
+      std::printf("%-18s %6llu B  %s", hex(f.address).c_str(),
+                  static_cast<unsigned long long>(f.size), info.prototype(f).c_str());
+      if (!f.file.empty()) {
+        std::printf("  [%s:%u]", f.file.c_str(), f.line);
+      }
+      std::printf("  {%s}\n", f.provenance.label().c_str());
+    }
+    for (const DebugVariable& v : info.variables) {
+      if (shown++ >= max_items) {
+        break;
+      }
+      std::printf("%-18s var      %s %s  {%s}\n", hex(v.address).c_str(),
+                  info.type_name(v.type).c_str(), v.name.c_str(), v.provenance.label().c_str());
+    }
+    for (const Diagnostic& d : info.diagnostics) {
+      std::printf("diagnostic %s: %s\n", d.code.c_str(), d.message.c_str());
+    }
+    return kExitOk;
+  }
+  std::string out;
+  out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+  out += "  \"tool\": \"donkey-cli\",\n";
+  out += "  \"tool_version\": " + quote(version()) + ",\n";
+  out += "  \"status\": " + quote(info.partial ? "Partial" : "Complete") + ",\n";
+  out += "  \"format\": " + quote(info.format) + ",\n";
+  out += "  \"versions\": [" + std::to_string(info.min_version) + ", " +
+         std::to_string(info.max_version) + "],\n";
+  out += "  \"compile_units\": " + std::to_string(info.compile_units) + ",\n";
+  out += "  \"producers\": [";
+  for (std::size_t i = 0; i < info.producers.size(); ++i) {
+    out += (i == 0 ? "" : ", ") + quote(info.producers[i]);
+  }
+  out += "],\n  \"functions\": [";
+  std::size_t written = 0;
+  for (const DebugFunction& f : info.functions) {
+    if (written >= max_items) {
+      break;
+    }
+    out += written == 0 ? "\n" : ",\n";
+    out += "    {\"address\": " + quote(hex(f.address)) + ", \"size\": " + std::to_string(f.size) +
+           ", \"name\": " + quote(f.name) + ", \"prototype\": " + quote(info.prototype(f)) +
+           ", \"return_type\": " + quote(info.type_name(f.return_type)) + ", \"parameters\": [";
+    for (std::size_t p = 0; p < f.parameters.size(); ++p) {
+      out += (p == 0 ? "" : ", ") + std::string("{\"name\": ") + quote(f.parameters[p].name) +
+             ", \"type\": " + quote(info.type_name(f.parameters[p].type)) + "}";
+    }
+    out += "], \"file\": " + quote(f.file) + ", \"line\": " + std::to_string(f.line) +
+           ", \"provenance\": " + quote(f.provenance.label()) + "}";
+    ++written;
+  }
+  out += written == 0 ? "],\n" : "\n  ],\n";
+  out += "  \"variables\": [";
+  written = 0;
+  for (const DebugVariable& v : info.variables) {
+    if (written >= max_items) {
+      break;
+    }
+    out += written == 0 ? "\n" : ",\n";
+    out += "    {\"address\": " + quote(hex(v.address)) + ", \"name\": " + quote(v.name) +
+           ", \"type\": " + quote(info.type_name(v.type)) +
+           ", \"provenance\": " + quote(v.provenance.label()) + "}";
+    ++written;
+  }
+  out += written == 0 ? "],\n" : "\n  ],\n";
+  out += "  \"counts\": {\"functions\": " + std::to_string(info.functions.size()) +
+         ", \"variables\": " + std::to_string(info.variables.size()) +
+         ", \"types\": " + std::to_string(info.types.size()) + "},\n";
+  out += "  \"diagnostics\": [";
+  for (std::size_t i = 0; i < info.diagnostics.size(); ++i) {
+    out += (i == 0 ? "" : ", ") + std::string("{\"code\": ") + quote(info.diagnostics[i].code) +
+           ", \"message\": " + quote(info.diagnostics[i].message) + "}";
+  }
+  out += "]\n}\n";
+  std::fwrite(out.data(), 1, out.size(), stdout);
+  return kExitOk;
 }
 
 int command_xrefs(const std::vector<std::string_view>& arguments) {

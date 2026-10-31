@@ -63,6 +63,9 @@ struct Section {
   bool writable = false;
   bool executable = false;
   bool has_file_data = true;
+  /// ELF SHF_COMPRESSED: the bytes are a compression header plus zlib/zstd
+  /// data, not the section contents.
+  bool compressed = false;
 };
 
 struct Symbol {

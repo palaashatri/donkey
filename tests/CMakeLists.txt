@@ -48,6 +48,7 @@ add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
+  unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
@@ -111,6 +112,19 @@ add_test(NAME deps.checker_rejects_ui_link
   COMMAND ${CMAKE_COMMAND} -DGRAPH=${PROJECT_SOURCE_DIR}/tests/fixtures/manifests/bad-link-graph.txt
           -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_link_graph.cmake)
 set_tests_properties(deps.checker_rejects_ui_link PROPERTIES WILL_FAIL TRUE)
+
+add_test(NAME cli.debuginfo_json
+         COMMAND donkey-cli debuginfo $<TARGET_FILE:donkey_test_module> --json)
+if(APPLE OR MSVC)
+  # No DWARF in the executable with these toolchains: the command says so.
+  set_tests_properties(cli.debuginfo_json PROPERTIES WILL_FAIL TRUE)
+else()
+  set_tests_properties(cli.debuginfo_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"prototype\": \"int donkey_module_answer\\(int value\\)\".*\"provenance\": \"DWARF [2-5] @")
+endif()
+add_test(NAME cli.debuginfo_reports_absence
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.debuginfo_reports_absence PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")

@@ -51,6 +51,9 @@ int main(int argc, char** argv) {
   if (command == "callgraph") {
     return donkey::cli::command_callgraph(rest);
   }
+  if (command == "debuginfo") {
+    return donkey::cli::command_debuginfo(rest);
+  }
   if (command == "cfg") {
     return donkey::cli::command_cfg(rest);
   }

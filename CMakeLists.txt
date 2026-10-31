@@ -67,6 +67,7 @@ donkey_apply_warnings(donkey_foundation)
 add_library(donkey_binary STATIC
   src/binary/byte_buffer.cpp
   src/binary/byte_reader.cpp
+  src/binary/dwarf.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
   src/binary/isolation.cpp
