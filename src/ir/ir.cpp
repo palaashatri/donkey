@@ -121,6 +121,22 @@ class Renderer {
         return buffer;
       }
       case IrOperandKind::Memory: {
+        if (value.index.empty()) {
+          for (const IrPointerStruct& recovered : function_.pointer_structs) {
+            if (recovered.base_register != value.reg) {
+              continue;
+            }
+            for (const IrStructField& field : recovered.fields) {
+              if (field.offset == static_cast<std::int64_t>(value.constant) &&
+                  field.width == value.width) {
+                char buffer[96];
+                std::snprintf(buffer, sizeof(buffer), "%s->f_%llx", recovered.parameter.c_str(),
+                              static_cast<unsigned long long>(field.offset));
+                return buffer;
+              }
+            }
+          }
+        }
         if (!function_.local_variables.empty()) {
           for (const auto& var : function_.local_variables) {
             if (var.base_reg == value.reg &&
@@ -955,6 +971,20 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
     }
   }
 
+  for (const IrPointerStruct& recovered : function.pointer_structs) {
+    append_line("// note: struct " + recovered.type_name + " inferred from accesses through " +
+                recovered.parameter + "; only accessed fields are known");
+    append_line("struct " + recovered.type_name + " {");
+    for (const IrStructField& field : recovered.fields) {
+      char buffer[96];
+      std::snprintf(buffer, sizeof(buffer), "  %s f_%llx;  // +0x%llx", width_type(field.width),
+                    static_cast<unsigned long long>(field.offset),
+                    static_cast<unsigned long long>(field.offset));
+      append_line(buffer);
+    }
+    append_line("};");
+  }
+
   std::string signature;
   signature += function.return_width != 0 ? width_type(function.return_width) : "void";
   signature += " ";
@@ -967,8 +997,18 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
       if (index != 0) {
         signature += ", ";
       }
-      signature += width_type(function.parameters[index].width);
-      signature += " ";
+      const IrPointerStruct* recovered = nullptr;
+      for (const IrPointerStruct& candidate : function.pointer_structs) {
+        if (candidate.parameter == function.parameters[index].name) {
+          recovered = &candidate;
+        }
+      }
+      if (recovered != nullptr) {
+        signature += "struct " + recovered->type_name + " *";
+      } else {
+        signature += width_type(function.parameters[index].width);
+        signature += " ";
+      }
       signature += function.parameters[index].name;
     }
   }
@@ -1018,6 +1058,78 @@ Result<std::string> format_pseudocode(const IrFunction& function) {
                                    res.diagnostic().message, res.diagnostic().offset);
   }
   return res.value().full_text;
+}
+
+void recover_pointer_structs(IrFunction& function) {
+  function.pointer_structs.clear();
+  std::vector<std::string> written;
+  bool calls = false;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      calls = calls || statement.op == IrOp::Call || statement.op == IrOp::Unsupported;
+      if (statement.dest.kind == IrOperandKind::Register) {
+        written.push_back(internal::register_family(statement.dest.reg));
+      }
+    }
+  }
+  if (calls) {
+    return;  // a call may clobber the argument registers
+  }
+  for (const IrParameter& parameter : function.parameters) {
+    if (parameter.width != 8 ||
+        std::find(written.begin(), written.end(),
+                  internal::register_family(parameter.abi_register)) != written.end()) {
+      continue;
+    }
+    std::vector<IrStructField> fields;
+    bool usable = true;
+    std::string base;
+    auto visit = [&](const IrOperand& operand) {
+      if (operand.kind != IrOperandKind::Memory ||
+          internal::register_family(operand.reg) !=
+              internal::register_family(parameter.abi_register)) {
+        return;
+      }
+      const auto offset = static_cast<std::int64_t>(operand.constant);
+      if (!operand.index.empty() || offset < 0 || offset >= 4096 || operand.width == 0) {
+        usable = false;  // indexed or far: an array or a computed address
+        return;
+      }
+      base = operand.reg;
+      for (IrStructField& field : fields) {
+        if (field.offset == offset) {
+          if (field.width != operand.width) {
+            usable = false;  // the same offset read at two widths
+          }
+          return;
+        }
+      }
+      fields.push_back(IrStructField{offset, operand.width});
+    };
+    for (const IrBlock& block : function.blocks) {
+      for (const IrStatement& statement : block.statements) {
+        if (statement.op == IrOp::Lea) {
+          continue;  // an address computation, not an access
+        }
+        visit(statement.dest);
+        visit(statement.a);
+        visit(statement.b);
+      }
+    }
+    if (!usable || fields.size() < 2) {
+      continue;
+    }
+    std::sort(fields.begin(), fields.end(),
+              [](const IrStructField& a, const IrStructField& b) { return a.offset < b.offset; });
+    for (std::size_t i = 1; i < fields.size() && usable; ++i) {
+      usable = fields[i - 1].offset + fields[i - 1].width <= fields[i].offset;
+    }
+    if (!usable) {
+      continue;
+    }
+    function.pointer_structs.push_back(
+        IrPointerStruct{parameter.name, base, parameter.name + "_fields", std::move(fields)});
+  }
 }
 
 void recover_stack_variables(IrFunction& function) {

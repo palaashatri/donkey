@@ -151,6 +151,22 @@ struct IrLocalVariable {
   bool is_parameter = false;
 };
 
+/// A field of a structure reached through a pointer parameter.
+struct IrStructField {
+  std::int64_t offset = 0;
+  std::uint8_t width = 0;
+};
+
+/// A layout inferred from constant-offset accesses through a pointer
+/// parameter the function never reassigns. Only accessed fields are known;
+/// gaps and the total size are not.
+struct IrPointerStruct {
+  std::string parameter;      ///< "a0"
+  std::string base_register;  ///< "rdi", "x0"
+  std::string type_name;      ///< "a0_fields"
+  std::vector<IrStructField> fields;
+};
+
 struct IrFunction {
   std::uint64_t address = 0;
   std::string name;
@@ -166,7 +182,16 @@ struct IrFunction {
   bool signature_inferred = false;
   /// Stack local variables and arguments recovered from stack frames.
   std::vector<IrLocalVariable> local_variables;
+  /// Structures recovered behind pointer parameters (recover_pointer_structs).
+  std::vector<IrPointerStruct> pointer_structs;
 };
+
+/// Infer structure layouts behind pointer parameters: a parameter register
+/// that is never written in the function (and no call clobbers), used as the
+/// base of constant-offset memory accesses at two or more distinct offsets
+/// with no overlapping fields. Rendering then shows `a0->f_8`. The IR itself
+/// is unchanged.
+void recover_pointer_structs(IrFunction& function);
 
 /// Recover local variables and stack arguments from stack frame memory accesses.
 void recover_stack_variables(IrFunction& function);

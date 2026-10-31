@@ -454,4 +454,34 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
   EXPECT_NE(text.value().find("switch ("), std::string::npos) << text.value();
 }
 
+// M8 struct recovery: at -O2 c_point_sum reads every field of
+// struct corpus_point through its untouched pointer argument; the inferred
+// layout must be exactly the real one (offsets and widths).
+TEST(DecompilerCorpus, StructLayoutRecoveredBehindAPointerArgument) {
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& f : analysis.value().functions) {
+    if (f.name == "c_point_sum" || f.name == "_c_point_sum") {
+      function = &f;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+  ASSERT_EQ(lifted.value().pointer_structs.size(), 1U);
+  const auto& fields = lifted.value().pointer_structs.front().fields;
+  const std::vector<std::pair<std::int64_t, std::uint8_t>> real = {{0, 4}, {4, 4}, {8, 8}, {16, 1}};
+  ASSERT_EQ(fields.size(), real.size());
+  for (std::size_t i = 0; i < real.size(); ++i) {
+    EXPECT_EQ(fields[i].offset, real[i].first) << "field " << i;
+    EXPECT_EQ(fields[i].width, real[i].second) << "field " << i;
+  }
+  auto text = donkey::format_pseudocode(lifted.value());
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("->f_8"), std::string::npos) << text.value();
+}
+
 }  // namespace
