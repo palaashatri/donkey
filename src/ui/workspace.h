@@ -9,6 +9,7 @@
 #include <thread>
 #include <vector>
 
+#include "donkey/analysis/graph_layout.h"
 #include "donkey/core/navigation.h"
 #include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
@@ -139,6 +140,21 @@ struct UiState {
   bool graph_user_adjusted = false;
   const Document* graph_document = nullptr;
   std::uint64_t graph_function = 0;
+  /// Layout and node-to-node edges of the shown function, rebuilt only when
+  /// the document or function changes (not every frame).
+  struct GraphCache {
+    const Document* document = nullptr;
+    std::uint64_t function = 0;
+    GraphLayout layout;
+    struct Edge {
+      std::size_t from = 0;  ///< index into layout.nodes
+      std::size_t to = 0;
+      CfgEdgeKind kind = CfgEdgeKind::Unknown;
+    };
+    std::vector<Edge> edges;
+  };
+  std::shared_ptr<GraphCache> graph_cache;
+  char graph_search[128] = {};
 
   // --- Hex editor / patching -------------------------------------------------
   // Edits never touch the opened file: they are staged in a PatchManager,

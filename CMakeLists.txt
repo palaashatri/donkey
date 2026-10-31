@@ -95,6 +95,7 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
 target_include_directories(donkey_analysis

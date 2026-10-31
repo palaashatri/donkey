@@ -44,6 +44,7 @@ add_executable(donkey_unit_tests
   unit/debug_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
+  unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/large_file_test.cpp
   unit/native_debug_test.cpp
