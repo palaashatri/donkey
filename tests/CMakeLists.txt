@@ -152,6 +152,17 @@ add_test(NAME sbom.valid
   COMMAND ${CMAKE_COMMAND} -DSBOM=${PROJECT_BINARY_DIR}/donkey.spdx.json
           -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_sbom.cmake)
 
+# M12: the acceptance manifest names only registered tests and real fixtures.
+set(DONKEY_ACCEPTANCE_UI OFF)
+if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
+  set(DONKEY_ACCEPTANCE_UI ON)
+endif()
+add_test(NAME acceptance.manifest
+  COMMAND ${CMAKE_COMMAND} -DMANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/acceptance/manifest.json
+          -DBUILD_DIR=${PROJECT_BINARY_DIR} -DCTEST=${CMAKE_CTEST_COMMAND}
+          -DUI=${DONKEY_ACCEPTANCE_UI} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_acceptance.cmake)
+
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")
 
