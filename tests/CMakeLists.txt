@@ -148,6 +148,10 @@ add_test(NAME cli.debuginfo_reports_absence
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
 set_tests_properties(cli.debuginfo_reports_absence PROPERTIES WILL_FAIL TRUE)
 
+add_test(NAME sbom.valid
+  COMMAND ${CMAKE_COMMAND} -DSBOM=${PROJECT_BINARY_DIR}/donkey.spdx.json
+          -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_sbom.cmake)
+
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")
 

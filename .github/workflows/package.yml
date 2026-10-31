@@ -78,6 +78,7 @@ jobs:
           cpack
           mkdir -p ../../dist
           cp donkey-*.deb donkey-*.rpm donkey-*.tar.gz donkey-*.sha256 ../../dist/
+          cp donkey.spdx.json "../../dist/donkey-linux-${{ matrix.arch }}.spdx.json"
           ls -l ../../dist
       - uses: actions/upload-artifact@v4
         with:
@@ -181,6 +182,7 @@ jobs:
           cpack
           mkdir -p ../../dist
           cp donkey-*.dmg donkey-*.zip donkey-*.sha256 ../../dist/
+          cp donkey.spdx.json ../../dist/donkey-macos-arm64.spdx.json
           ls -l ../../dist
       - name: Verify the disk image
         run: |
@@ -274,6 +276,7 @@ jobs:
           cpack
           New-Item -ItemType Directory -Force ../../dist | Out-Null
           Copy-Item donkey-*.exe, donkey-*.zip, donkey-*.sha256 ../../dist/
+          Copy-Item donkey.spdx.json "../../dist/donkey-windows-${{ matrix.arch }}.spdx.json"
           Get-ChildItem ../../dist
       - name: Verify the installer
         shell: pwsh
@@ -353,6 +356,7 @@ jobs:
             (cd build/package-freebsd && cpack)
             mkdir -p dist
             cp build/package-freebsd/donkey-*.tar.gz build/package-freebsd/donkey-*.sha256 dist/
+            cp build/package-freebsd/donkey.spdx.json "dist/donkey-freebsd-${{ matrix.arch }}.spdx.json"
             sh packaging/freebsd/make-pkg.sh build/package-freebsd dist
             pkg add dist/donkey-*.pkg
             donkey --version

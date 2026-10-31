@@ -11,10 +11,18 @@
 
 include(GNUInstallDirs)
 
+# SPDX 2.3 software bill of materials for this build's target.
+string(TIMESTAMP DONKEY_SBOM_TIMESTAMP "%Y-%m-%dT%H:%M:%SZ" UTC)
+set(DONKEY_SBOM_TARGET "${CMAKE_SYSTEM_NAME}-${CMAKE_SYSTEM_PROCESSOR}")
+configure_file(${PROJECT_SOURCE_DIR}/packaging/sbom/donkey.spdx.json.in
+               ${PROJECT_BINARY_DIR}/donkey.spdx.json @ONLY)
+
 set(DONKEY_DOC_FILES
   ${PROJECT_SOURCE_DIR}/LICENSE
   ${PROJECT_SOURCE_DIR}/THIRD_PARTY_NOTICES
   ${PROJECT_SOURCE_DIR}/README.md
+  ${PROJECT_SOURCE_DIR}/docs/USER_GUIDE.md
+  ${PROJECT_BINARY_DIR}/donkey.spdx.json
 )
 
 if(APPLE)

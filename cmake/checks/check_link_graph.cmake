@@ -1,3 +1,4 @@
+cmake_minimum_required(VERSION 3.25)
 # cmake -DGRAPH=<file> -P check_link_graph.cmake
 # Fails when a headless core target links SDL, Dear ImGui or the UI library.
 file(STRINGS "${GRAPH}" lines)

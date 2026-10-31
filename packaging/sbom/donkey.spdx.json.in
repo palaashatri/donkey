@@ -1,0 +1,74 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "donkey-@PROJECT_VERSION@",
+  "documentNamespace": "https://github.com/palaashatri/donkey/spdx/donkey-@PROJECT_VERSION@-@DONKEY_SBOM_TARGET@",
+  "creationInfo": {
+    "creators": ["Tool: CMake configure_file (packaging/sbom/donkey.spdx.json.in)"],
+    "created": "@DONKEY_SBOM_TIMESTAMP@"
+  },
+  "documentDescribes": ["SPDXRef-donkey"],
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-donkey",
+      "name": "donkey",
+      "versionInfo": "@PROJECT_VERSION@",
+      "downloadLocation": "https://github.com/palaashatri/donkey",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "filesAnalyzed": false,
+      "comment": "Built for @DONKEY_SBOM_TARGET@; the desktop program links SDL3 and Dear ImGui, both programs link Capstone and SQLite, all statically."
+    },
+    {
+      "SPDXID": "SPDXRef-capstone",
+      "name": "capstone",
+      "versionInfo": "5.0.9",
+      "downloadLocation": "git+https://github.com/capstone-engine/capstone@022575848782a4801fd150fdbc927effcbca0864",
+      "licenseConcluded": "BSD-3-Clause AND NCSA",
+      "licenseDeclared": "BSD-3-Clause AND NCSA",
+      "copyrightText": "NOASSERTION",
+      "filesAnalyzed": false
+    },
+    {
+      "SPDXID": "SPDXRef-sqlite",
+      "name": "sqlite-amalgamation",
+      "versionInfo": "3.46.1",
+      "downloadLocation": "https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip",
+      "checksums": [{"algorithm": "SHA256", "checksumValue": "77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784"}],
+      "licenseConcluded": "blessing",
+      "licenseDeclared": "blessing",
+      "copyrightText": "NONE (public domain)",
+      "filesAnalyzed": false,
+      "comment": "Builds made with DONKEY_USE_SYSTEM_SQLITE=ON link the system SQLite instead."
+    },
+    {
+      "SPDXID": "SPDXRef-sdl3",
+      "name": "SDL3",
+      "versionInfo": "3.4.18",
+      "downloadLocation": "git+https://github.com/libsdl-org/SDL@829a65d769d935c4852f8159e964312c0957260a",
+      "licenseConcluded": "Zlib",
+      "licenseDeclared": "Zlib",
+      "copyrightText": "NOASSERTION",
+      "filesAnalyzed": false
+    },
+    {
+      "SPDXID": "SPDXRef-imgui",
+      "name": "Dear ImGui (docking)",
+      "versionInfo": "1.93.0-docking",
+      "downloadLocation": "git+https://github.com/ocornut/imgui@b916186e66aa3c02b72c6ca17455516512ed8049",
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "copyrightText": "NOASSERTION",
+      "filesAnalyzed": false
+    }
+  ],
+  "relationships": [
+    {"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": "SPDXRef-donkey"},
+    {"spdxElementId": "SPDXRef-donkey", "relationshipType": "STATIC_LINK", "relatedSpdxElement": "SPDXRef-capstone"},
+    {"spdxElementId": "SPDXRef-donkey", "relationshipType": "STATIC_LINK", "relatedSpdxElement": "SPDXRef-sqlite"},
+    {"spdxElementId": "SPDXRef-donkey", "relationshipType": "STATIC_LINK", "relatedSpdxElement": "SPDXRef-sdl3"},
+    {"spdxElementId": "SPDXRef-donkey", "relationshipType": "STATIC_LINK", "relatedSpdxElement": "SPDXRef-imgui"}
+  ]
+}
