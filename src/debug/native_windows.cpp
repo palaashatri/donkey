@@ -1072,6 +1072,10 @@ Result<std::vector<StackFrame>> LocalDebugAdapter::call_stack() {
         return std::string(symbol->Name);
       }
     }
+    // A DLL DbgHelp has no symbols for: use the DLL file's own symbols.
+    if (auto resolved = resolve_address(address)) {
+      return resolved.value().function_name;
+    }
     return std::string();
   };
 

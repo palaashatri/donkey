@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <thread>
@@ -154,6 +155,121 @@ TEST(NativeDebug, LaunchStopsAtTheRealProgramEntry) {
 
   ASSERT_TRUE(adapter->terminate().has_value());
   EXPECT_EQ(adapter->state(), SessionState::Exited);
+}
+
+// A19: under ASLR the executable runs away from its file addresses, and
+// translation still lands on the same bytes and symbols.
+TEST(NativeDebug, RelocatedExecutableTranslatesToItsStaticImage) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  if (translator.runtime_base == translator.static_base) {
+    // A non-PIE build (or ASLR disabled for the process) is not relocated;
+    // the test must not pass by comparing equal addresses.
+    ASSERT_TRUE(adapter->terminate().has_value());
+    GTEST_SKIP() << "debuggee was not relocated on this host (no PIE/ASLR)";
+  }
+  const std::uint64_t tick_static = static_symbol("donkey_debuggee_tick");
+  const std::uint64_t tick_runtime = translator.static_to_runtime(tick_static);
+  EXPECT_NE(tick_runtime, tick_static);
+  auto resolved = adapter->resolve_address(tick_runtime);
+  ASSERT_TRUE(resolved.has_value()) << resolved.diagnostic().message;
+  EXPECT_EQ(resolved.value().static_address, tick_static);
+  EXPECT_NE(resolved.value().function_name.find("donkey_debuggee_tick"), std::string::npos);
+  auto back = adapter->runtime_address(resolved.value().module_name, tick_static);
+  ASSERT_TRUE(back.has_value()) << back.diagnostic().message;
+  EXPECT_EQ(back.value(), tick_runtime);
+  ASSERT_TRUE(adapter->terminate().has_value());
+}
+
+// M7 dynamic-module fixture: a library loaded with dlopen/LoadLibrary after
+// launch shows up as a module, its runtime addresses map to its own static
+// image, a breakpoint set through that mapping hits, and the frame is named
+// from the library's symbols.
+TEST(NativeDebug, ModuleLoadedAfterLaunchMapsToItsStaticImage) {
+  REQUIRE_NATIVE();
+  const std::string module_path = DONKEY_TEST_MODULE_PATH;
+  const std::string module_file = std::filesystem::path(module_path).filename().string();
+  auto module_image = donkey::load_binary(module_path);
+  ASSERT_TRUE(module_image.has_value()) << module_image.diagnostic().message;
+  std::uint64_t answer_static = 0;
+  for (const auto& symbol : module_image.value().image.symbols) {
+    if (!symbol.imported &&
+        (symbol.name == "donkey_module_answer" || symbol.name == "_donkey_module_answer")) {
+      answer_static = symbol.address;
+    }
+  }
+  ASSERT_NE(answer_static, 0U);
+
+  auto adapter = launch_at_entry({"load", module_path});
+  auto before = adapter->modules();
+  ASSERT_TRUE(before.has_value());
+  EXPECT_TRUE(std::none_of(before.value().begin(), before.value().end(), [&](const auto& m) {
+    return m.name == module_file;
+  })) << "the module must not be loaded before the program loads it";
+
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t loaded_hook =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_module_loaded"));
+  ASSERT_TRUE(adapter->set_breakpoint(loaded_hook).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto hit = adapter->wait_for_event(10000);
+  ASSERT_TRUE(hit.has_value());
+  ASSERT_EQ(hit.value().reason, StopReason::Breakpoint);
+  ASSERT_EQ(hit.value().address, loaded_hook);
+
+  auto after = adapter->modules();
+  ASSERT_TRUE(after.has_value());
+  const auto module = std::find_if(after.value().begin(), after.value().end(),
+                                   [&](const auto& m) { return m.name == module_file; });
+  ASSERT_NE(module, after.value().end()) << "loaded module missing from the module list";
+
+  // The program stored dlsym/GetProcAddress's answer in a global.
+  auto stored = adapter->read_memory(
+      translator.static_to_runtime(static_symbol("donkey_debuggee_module_function")), 8);
+  ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+  std::uint64_t answer_runtime = 0;
+  std::memcpy(&answer_runtime, stored.value().data(), 8);
+  ASSERT_NE(answer_runtime, 0U);
+  EXPECT_GE(answer_runtime, module->base_address);
+  EXPECT_LT(answer_runtime, module->base_address + module->size);
+
+  auto resolved = adapter->resolve_address(answer_runtime);
+  ASSERT_TRUE(resolved.has_value()) << resolved.diagnostic().message;
+  EXPECT_EQ(resolved.value().module_name, module_file);
+  EXPECT_EQ(resolved.value().static_address, answer_static);
+  EXPECT_NE(resolved.value().function_name.find("donkey_module_answer"), std::string::npos);
+  auto mapped = adapter->runtime_address(module_file, answer_static);
+  ASSERT_TRUE(mapped.has_value()) << mapped.diagnostic().message;
+  EXPECT_EQ(mapped.value(), answer_runtime);
+
+  // The bytes there are the library file's bytes.
+  auto offset = module_image.value().image.va_to_file_offset(answer_static);
+  ASSERT_TRUE(offset.has_value());
+  auto live = adapter->read_memory(answer_runtime, 8);
+  ASSERT_TRUE(live.has_value());
+  for (std::size_t i = 0; i < 8; ++i) {
+    EXPECT_EQ(live.value()[i], module_image.value().data[offset.value() + i]) << "byte " << i;
+  }
+
+  ASSERT_TRUE(adapter->set_breakpoint(mapped.value()).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto in_module = adapter->wait_for_event(10000);
+  ASSERT_TRUE(in_module.has_value());
+  ASSERT_EQ(in_module.value().reason, StopReason::Breakpoint);
+  EXPECT_EQ(in_module.value().address, answer_runtime);
+  auto stack = adapter->call_stack();
+  ASSERT_TRUE(stack.has_value());
+  ASSERT_FALSE(stack.value().empty());
+  EXPECT_NE(stack.value()[0].function_name.find("donkey_module_answer"), std::string::npos)
+      << "frame 0 is '" << stack.value()[0].function_name << "'";
+  EXPECT_EQ(stack.value()[0].module_name, module_file);
+
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited);
+  EXPECT_EQ(exited.value().exit_code, 42);
 }
 
 TEST(NativeDebug, RunsToExitWithTheRealExitCode) {

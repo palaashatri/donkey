@@ -30,12 +30,19 @@ set_target_properties(
 
 # Native debugger target. Built unoptimised with frame pointers so the call
 # stack and step-out tests have a frame chain to follow.
+# It is compiled with -g: its DWARF is the debug-info fixture (ELF, and PE
+# with MinGW; Apple keeps DWARF out of the executable).
 add_executable(donkey_test_debuggee fixtures/debuggee/debuggee.c)
+# The dynamic-module fixture `debuggee load` opens at run time.
+add_library(donkey_test_module SHARED fixtures/debuggee/module.c)
 if(MSVC)
   target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
+  target_compile_options(donkey_test_module PRIVATE /Od /Oy-)
 else()
-  target_compile_options(donkey_test_debuggee PRIVATE -O0 -fno-omit-frame-pointer)
+  target_compile_options(donkey_test_debuggee PRIVATE -O0 -g -fno-omit-frame-pointer)
+  target_compile_options(donkey_test_module PRIVATE -O0 -g -fno-omit-frame-pointer)
 endif()
+target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS})
 
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
@@ -64,8 +71,9 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_CTOR_CRASH_PATH="$<TARGET_FILE:test_plugin_ctor_crash>"
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
+  DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
 )
-add_dependencies(donkey_unit_tests donkey_test_debuggee test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
+add_dependencies(donkey_unit_tests donkey_test_debuggee donkey_test_module test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)

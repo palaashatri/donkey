@@ -1148,6 +1148,11 @@ Result<std::vector<StackFrame>> LocalDebugAdapter::call_stack() {
     frame.static_address = d.translator.runtime_to_static(ip);
     if (frame.static_address != ip || d.translator.runtime_base == d.translator.static_base) {
       frame.function_name = d.image.function_at(frame.static_address);
+    } else if (auto resolved = resolve_address(ip)) {
+      // A shared library (also one loaded with dlopen after launch): name the
+      // frame from that library's own symbols.
+      frame.static_address = resolved.value().static_address;
+      frame.function_name = resolved.value().function_name;
     }
     return frame;
   };
