@@ -210,6 +210,14 @@ void UiScriptRunner::push_key(const std::string& spec, UiTestHost& host, const C
       mod = static_cast<SDL_Keymod>(mod | SDL_KMOD_LALT);
     } else if (part == "gui" || part == "cmd") {
       mod = static_cast<SDL_Keymod>(mod | SDL_KMOD_LGUI);
+    } else if (part == "shortcut") {
+      // The platform's shortcut key: Command on macOS (Dear ImGui maps it to
+      // ImGuiMod_Ctrl there), Control elsewhere.
+#if defined(__APPLE__)
+      mod = static_cast<SDL_Keymod>(mod | SDL_KMOD_LGUI);
+#else
+      mod = static_cast<SDL_Keymod>(mod | SDL_KMOD_LCTRL);
+#endif
     } else {
       fail(command, "unknown modifier '" + part + "'");
       return;

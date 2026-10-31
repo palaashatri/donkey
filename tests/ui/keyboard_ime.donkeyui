@@ -46,10 +46,10 @@ text discarded
 key escape
 assert_annotation comment main -
 
-# Undo / redo the rename from the keyboard.
-key ctrl+z
+# Undo / redo the rename from the keyboard (Cmd on macOS, Ctrl elsewhere).
+key shortcut+z
 assert_annotation rename main -
-key ctrl+shift+z
+key shortcut+shift+z
 assert_annotation rename main 日本語_main_ok
 
 # Unknown names are reported, not navigated to.

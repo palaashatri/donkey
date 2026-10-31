@@ -27,7 +27,7 @@ xvfb-run -a build/dev-linux/apps/donkey/donkey --renderer software \
 
 | Script | Requirement | What it proves |
 |---|---|---|
-| `keyboard_ime` | A23, M1, M10 | Keyboard-only flow: `G` go-to by name, Enter, Alt+Left/Right history, `N` rename, `;` comment, Escape cancel, Ctrl+Z / Ctrl+Shift+Z. IME composition (`SDL_EVENT_TEXT_EDITING`) is not inserted; committed UTF-8 (`SDL_EVENT_TEXT_INPUT`) is; the IME candidate position lies in the focused field's window; the edit survives a focus loss/gain mid-entry; unknown names are reported, not navigated to. |
+| `keyboard_ime` | A23, M1, M10 | Keyboard-only flow: `G` go-to by name, Enter, Alt+Left/Right history, `N` rename, `;` comment, Escape cancel, Ctrl+Z / Ctrl+Shift+Z (Cmd on macOS). IME composition (`SDL_EVENT_TEXT_EDITING`) is not inserted; committed UTF-8 (`SDL_EVENT_TEXT_INPUT`) is; the IME candidate position lies in the focused field's window; the edit survives a focus loss/gain mid-entry; unknown names are reported, not navigated to. |
 | `gallery_keyboard` | M0 | The shared button, badge, search and table components on a test screen (Help → Component Gallery), reached with Tab (status badges are not tab stops) and driven by typing. |
 | `virtualization` | M2 | A 1,000,000-row table, jumped across in 300 frames: at most 200 rows submitted per frame, Dear ImGui's persistent storage grows by at most 16 entries, p95 frame time ≤ 33 ms. |
 | `display_dpi_device` | M10, A22 | Display-scale changes rebuild style and font scale (2.0, 1.25, 1.0); a window left where no display is gets moved back when a display is removed; a lost graphics device is recreated (twice) with both Dear ImGui backends, and drawing continues. Runs on the software renderer and on the default renderer (SDL_GPU where available). |
@@ -75,7 +75,8 @@ artifacts keep them per platform.
 ## Commands
 
 Input and environment (each waits 6 frames afterwards):
-`key SPEC` (e.g. `g`, `enter`, `ctrl+shift+z`, `alt+left`, `semicolon`,
+`key SPEC` (e.g. `g`, `enter`, `shortcut+shift+z` where `shortcut` is Cmd on
+macOS and Ctrl elsewhere, `ctrl+z`, `alt+left`, `semicolon`,
 `tab`, `pagedown`), `text UTF-8…`, `ime_compose UTF-8…`, `focus_lost`,
 `focus_gained`, `scale F`, `move_window X Y`, `display_removed`,
 `device_lost`, `undock WINDOW`, `gallery_open`, `gallery_close`,
