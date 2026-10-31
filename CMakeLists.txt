@@ -63,6 +63,7 @@ target_compile_definitions(donkey_foundation PRIVATE DONKEY_VERSION="${PROJECT_V
 donkey_apply_warnings(donkey_foundation)
 
 add_library(donkey_binary STATIC
+  src/binary/byte_buffer.cpp
   src/binary/byte_reader.cpp
   src/binary/elf.cpp
   src/binary/image.cpp

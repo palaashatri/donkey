@@ -1,12 +1,14 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "donkey/binary/byte_buffer.h"
 #include "donkey/binary/byte_reader.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/core/ids.h"
@@ -130,13 +132,19 @@ struct LoadOptions {
   bool isolate = false;
   /// Token used to observe cancellation during file loading.
   CancellationToken cancellation_token;
+  /// Files at least this large are memory-mapped read-only instead of copied
+  /// (see ByteBuffer). 0 maps every non-empty file.
+  std::uint64_t map_threshold_bytes = 64ULL << 20;
+  /// Optional progress report while reading and hashing: (bytes done, total).
+  /// Called on the loading thread.
+  std::function<void(std::uint64_t, std::uint64_t)> progress;
 };
 
 /// A parsed image together with the bytes it was parsed from. Callers that
 /// decode or display hex keep one copy; the image never owns mutable state.
 struct LoadedBinary {
   BinaryImage image;
-  std::vector<std::byte> data;
+  ByteBuffer data;
 };
 
 /// Read and parse a file from disk. Opening a binary never executes it.

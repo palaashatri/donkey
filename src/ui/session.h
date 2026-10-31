@@ -132,6 +132,7 @@ class Session {
 
   void retire_worker();
   void reap_retired_workers();
+  std::function<void(std::uint64_t, std::uint64_t)> progress_reporter(std::uint64_t generation);
   bool wait_for_retired_workers(const CancellationToken& token);
   void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);

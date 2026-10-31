@@ -45,6 +45,7 @@ add_executable(donkey_unit_tests
   unit/decode_test.cpp
   unit/foundation_test.cpp
   unit/ir_test.cpp
+  unit/large_file_test.cpp
   unit/native_debug_test.cpp
   unit/patch_test.cpp
   unit/plugin_test.cpp
@@ -66,6 +67,26 @@ add_dependencies(donkey_unit_tests donkey_test_debuggee test_plugin_valid test_p
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
+if(WIN32)
+  target_link_libraries(donkey_unit_tests PRIVATE psapi)
+endif()
+
+# 1 GiB memory-budget test (M10/A24). Release builds only: hashing and
+# scanning a gigabyte takes tens of seconds unoptimised.
+if(CMAKE_BUILD_TYPE STREQUAL "Release")
+  add_executable(donkey_large_tests unit/large_file_test.cpp)
+  target_link_libraries(donkey_large_tests PRIVATE donkey::analysis GTest::gtest_main)
+  if(WIN32)
+    target_link_libraries(donkey_large_tests PRIVATE psapi)
+  endif()
+  target_compile_definitions(donkey_large_tests PRIVATE
+    DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+    DONKEY_LARGE_FILE_TESTS=1)
+  donkey_apply_warnings(donkey_large_tests)
+  add_test(NAME large.load_and_analyse_1gib
+           COMMAND donkey_large_tests --gtest_filter=LargeFile.Mapped1GiB*)
+  set_tests_properties(large.load_and_analyse_1gib PROPERTIES TIMEOUT 600 LABELS large)
+endif()
 
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")

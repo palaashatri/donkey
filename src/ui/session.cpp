@@ -80,6 +80,30 @@ void Session::fail(std::uint64_t generation, const std::string& message,
   busy_.store(false);
 }
 
+std::function<void(std::uint64_t, std::uint64_t)> Session::progress_reporter(
+    std::uint64_t generation) {
+  // Updates the status line at most once per whole percent.
+  auto last = std::make_shared<int>(-1);
+  return [this, generation, last](std::uint64_t done, std::uint64_t total) {
+    if (total == 0) {
+      return;
+    }
+    const int percent = static_cast<int>((done * 100) / total);
+    if (percent == *last) {
+      return;
+    }
+    *last = percent;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation != generation_.load()) {
+      return;
+    }
+    const auto paren = status_.rfind(" (");
+    const std::string base =
+        paren != std::string::npos && status_.back() == ')' ? status_.substr(0, paren) : status_;
+    status_ = base + " (" + std::to_string(percent) + "%)";
+  };
+}
+
 void Session::publish_project(std::string path, std::int64_t image_id) {
   std::lock_guard<std::mutex> lock(mutex_);
   project_path_ = std::move(path);
@@ -110,6 +134,7 @@ void Session::open(const std::string& path) {
     WorkerDoneGuard done_guard{done};
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
+    load_opts.progress = progress_reporter(generation);
     auto loaded = load_binary(path, load_opts);
     if (generation_.load() != generation) {
       return;
@@ -228,6 +253,7 @@ void Session::open_project(const std::string& path) {
 
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
+    load_opts.progress = progress_reporter(generation);
     auto loaded = load_binary(image_path, load_opts);
     if (token.is_cancelled()) {
       fail(generation, "Operation cancelled", "Cancelled");
@@ -587,6 +613,7 @@ void Session::restore_project(const std::string& backup_path) {
 
     LoadOptions load_opts;
     load_opts.cancellation_token = token;
+    load_opts.progress = progress_reporter(generation);
     auto loaded = load_binary(image_path, load_opts);
     std::optional<AnalysisResult> analysis;
     std::string load_failure;
