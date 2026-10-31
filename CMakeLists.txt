@@ -135,6 +135,7 @@ target_compile_features(donkey_project PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_project)
 
 add_library(donkey_debug STATIC
+  src/debug/controller.cpp
   src/debug/debug.cpp
   src/debug/mock_adapter.cpp
   src/debug/native_linux.cpp

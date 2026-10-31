@@ -21,6 +21,7 @@
 #include <vector>
 
 #include "donkey/binary/image.h"
+#include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
 
 #if !defined(_WIN32)
@@ -381,6 +382,91 @@ TEST(NativeDebug, UnsupportedHostsReportNothingAndFabricateNothing) {
   EXPECT_FALSE(adapter->read_memory(0, 1).has_value());
   EXPECT_FALSE(adapter->read_registers().has_value());
   EXPECT_FALSE(adapter->step_into().has_value());
+}
+
+// ---------------------------------------------------------------------------
+// DebugController: the adapter on its own thread, as the GUI uses it.
+// ---------------------------------------------------------------------------
+
+using donkey::debug::DebugController;
+using donkey::debug::DebugSnapshot;
+
+TEST(DebugController, RunsARealTargetWithoutBlockingTheCaller) {
+  REQUIRE_NATIVE();
+  DebugController controller;
+  const std::uint64_t tick = static_symbol("donkey_debuggee_tick");
+  controller.toggle_breakpoint(tick);  // static address, armed at launch
+
+  LaunchConfig config;
+  config.binary_path = kDebuggee;
+  const auto before = std::chrono::steady_clock::now();
+  controller.launch(config);
+  controller.resume();
+  const auto elapsed = std::chrono::steady_clock::now() - before;
+  // Commands only enqueue work; launching and running happen on the worker.
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count(), 50);
+
+  int hits = 0;
+  std::uint64_t last_revision = 0;
+  while (hits < 3) {
+    ASSERT_TRUE(controller.wait_until(
+        [&](const DebugSnapshot& s) {
+          return s.revision > last_revision && !s.busy &&
+                 (s.stop.reason == StopReason::Breakpoint || s.state == SessionState::Exited);
+        },
+        10000))
+        << "no stop after " << hits << " hits";
+    const DebugSnapshot snap = controller.snapshot();
+    last_revision = snap.revision;
+    ASSERT_EQ(snap.stop.reason, StopReason::Breakpoint) << snap.message;
+    EXPECT_EQ(snap.static_pc, tick);
+    EXPECT_FALSE(snap.registers.empty());
+    ASSERT_FALSE(snap.frames.empty());
+    EXPECT_NE(snap.frames.front().function_name.find("donkey_debuggee_tick"), std::string::npos);
+    ++hits;
+    controller.resume();
+  }
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return s.state == SessionState::Exited && !s.busy; }, 10000));
+  const DebugSnapshot done = controller.snapshot();
+  EXPECT_EQ(done.stop.exit_code, 42);
+  EXPECT_TRUE(done.registers.empty()) << "registers of an exited target must not be shown";
+}
+
+TEST(DebugController, NeverPublishesRegistersWhileTheTargetRuns) {
+  REQUIRE_NATIVE();
+  DebugController controller;
+  LaunchConfig config;
+  config.binary_path = kDebuggee;
+  config.arguments = {"spin"};
+  controller.launch(config);
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return s.state == SessionState::Stopped && !s.busy; }, 10000));
+  EXPECT_FALSE(controller.snapshot().registers.empty());
+  controller.resume();
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return s.state == SessionState::Running; }, 10000));
+  const DebugSnapshot running = controller.snapshot();
+  EXPECT_TRUE(running.registers.empty());
+  EXPECT_TRUE(running.frames.empty());
+  controller.pause();
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return s.stop.reason == StopReason::UserPause && !s.busy; },
+      10000));
+  EXPECT_FALSE(controller.snapshot().registers.empty());
+  controller.terminate();
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return s.state == SessionState::Exited; }, 10000));
+}
+
+TEST(DebugController, ReportsFailuresInTheSnapshot) {
+  DebugController controller(/*mock=*/false);
+  LaunchConfig config;
+  config.binary_path = "";
+  controller.launch(config);
+  ASSERT_TRUE(controller.wait_until(
+      [](const DebugSnapshot& s) { return !s.busy && !s.message.empty(); }, 10000));
+  EXPECT_NE(controller.snapshot().message.find("Launch failed"), std::string::npos);
 }
 
 }  // namespace

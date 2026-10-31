@@ -1,0 +1,6 @@
+# Evaluated by CPack once per generator (CPACK_PROJECT_CONFIG_FILE).
+# DEB and RPM install under the system prefix; archives (TGZ, ZIP) stay
+# relocatable, with bin/ and share/ at the top of the extracted folder.
+if(CPACK_GENERATOR MATCHES "^(TGZ|ZIP)$")
+  set(CPACK_PACKAGING_INSTALL_PREFIX "/")
+endif()

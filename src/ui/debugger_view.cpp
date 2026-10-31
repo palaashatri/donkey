@@ -8,7 +8,7 @@
 #include <vector>
 
 #include "components.h"
-#include "donkey/debug/debug.h"
+#include "donkey/debug/controller.h"
 #include "imgui.h"
 #include "views.h"
 
@@ -16,6 +16,7 @@ namespace donkey::ui::views {
 
 namespace {
 
+using debug::DebugSnapshot;
 using debug::SessionState;
 using debug::StopReason;
 
@@ -32,104 +33,23 @@ std::vector<std::string> split_arguments(const char* text) {
   return out;
 }
 
-void ensure_adapter(UiState& state) {
-  if (state.debug_adapter != nullptr) {
-    return;
+debug::DebugController& controller(UiState& state) {
+  if (state.debug_controller == nullptr) {
+    state.debug_controller = std::make_unique<debug::DebugController>(state.debug_simulation);
   }
-  state.debug_adapter = debug::create_debug_adapter(state.debug_simulation);
+  return *state.debug_controller;
 }
 
 bool is_live(SessionState s) {
   return s == SessionState::Stopped || s == SessionState::Running;
 }
 
-/// Refresh the per-stop snapshot and move the code views to the stop.
-void refresh_snapshot(const Document& document, UiState& state, const debug::StopInfo& stop) {
-  auto* adapter = state.debug_adapter.get();
-  UiState::DebugSnapshot snapshot;
-  snapshot.stop = stop;
-  if (adapter->state() == SessionState::Stopped) {
-    if (auto regs = adapter->read_registers()) {
-      snapshot.registers = std::move(regs.value());
-    }
-    if (auto frames = adapter->call_stack()) {
-      snapshot.frames = std::move(frames.value());
-    }
-    if (auto threads = adapter->threads()) {
-      snapshot.threads = std::move(threads.value());
-    }
-    if (auto modules = adapter->modules()) {
-      snapshot.modules = std::move(modules.value());
-    }
-    if (!snapshot.frames.empty()) {
-      snapshot.static_pc = snapshot.frames.front().static_address;
-    } else if (stop.address != 0) {
-      snapshot.static_pc = adapter->address_translator().runtime_to_static(stop.address);
-    }
-    // Follow the target in the disassembly when the stop is inside the image.
-    if (snapshot.static_pc != 0 &&
-        document.loaded.image.section_for_va(snapshot.static_pc) != nullptr) {
-      state.navigate_to(snapshot.static_pc, &document);
-    }
-  }
-  state.debug_snapshot = std::move(snapshot);
-}
-
-void report(UiState& state, const Result<bool>& result, const char* action) {
-  if (result) {
-    state.debug_message.clear();
-  } else {
-    state.debug_message = std::string(action) + " failed: " + result.diagnostic().message + " [" +
-                          result.diagnostic().code + "]";
-  }
-}
-
 void launch(const Document& document, UiState& state) {
-  ensure_adapter(state);
-  auto* adapter = state.debug_adapter.get();
   debug::LaunchConfig config;
   config.binary_path = document.loaded.image.path;
   config.arguments = split_arguments(state.debug_arguments);
   config.stop_at_entry = true;
-  auto launched = adapter->launch(config);
-  report(state, launched, "Launch");
-  if (!launched) {
-    return;
-  }
-  state.debug_target = config.binary_path;
-  const auto& translator = adapter->address_translator();
-  for (std::uint64_t address : state.debug_breakpoints) {
-    auto bp = adapter->set_breakpoint(translator.static_to_runtime(address));
-    if (!bp) {
-      state.debug_message = "Breakpoint at " + components::format_address(address) +
-                            " failed: " + bp.diagnostic().message;
-    }
-  }
-  auto stop = adapter->poll_events();
-  refresh_snapshot(document, state, stop ? stop.value() : debug::StopInfo{});
-}
-
-void toggle_breakpoint(UiState& state, std::uint64_t static_address) {
-  auto& list = state.debug_breakpoints;
-  const auto it = std::find(list.begin(), list.end(), static_address);
-  auto* adapter = state.debug_adapter.get();
-  const bool live = adapter != nullptr && is_live(adapter->state());
-  const std::uint64_t runtime =
-      live ? adapter->address_translator().static_to_runtime(static_address) : 0;
-  if (it != list.end()) {
-    list.erase(it);
-    if (live) {
-      (void)adapter->remove_breakpoint(runtime);
-    }
-    return;
-  }
-  list.push_back(static_address);
-  if (live) {
-    auto bp = adapter->set_breakpoint(runtime);
-    if (!bp) {
-      state.debug_message = "Breakpoint failed: " + bp.diagnostic().message;
-    }
-  }
+  controller(state).launch(std::move(config));
 }
 
 void draw_launch_modal(const Document& document, UiState& state) {
@@ -163,17 +83,13 @@ void draw_launch_modal(const Document& document, UiState& state) {
   }
 }
 
-void draw_controls(const Document& document, UiState& state) {
-  auto* adapter = state.debug_adapter.get();
-  const SessionState s = adapter->state();
-  auto act = [&](const Result<bool>& result, const char* action) {
-    report(state, result, action);
-    auto stop = adapter->poll_events();
-    refresh_snapshot(document, state, stop ? stop.value() : debug::StopInfo{});
-  };
-
-  if (!is_live(s)) {
-    const bool can = adapter->capabilities().can_launch;
+void draw_controls(const Document& document, UiState& state, const DebugSnapshot& snap) {
+  auto& ctl = controller(state);
+  if (snap.busy) {
+    ImGui::BeginDisabled();
+  }
+  if (!is_live(snap.state)) {
+    const bool can = snap.capabilities.can_launch;
     if (!can) {
       ImGui::BeginDisabled();
     }
@@ -187,55 +103,58 @@ void draw_controls(const Document& document, UiState& state) {
     if (!can) {
       ImGui::EndDisabled();
     }
-    return;
-  }
-  if (s == SessionState::Stopped) {
-    if (ImGui::Button("Continue")) {
-      act(adapter->resume(), "Continue");
+  } else {
+    if (snap.state == SessionState::Stopped) {
+      if (ImGui::Button("Continue")) {
+        ctl.resume();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Step Into")) {
+        ctl.step_into();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Step Over")) {
+        ctl.step_over();
+      }
+      ImGui::SameLine();
+      if (ImGui::Button("Step Out")) {
+        ctl.step_out();
+      }
+    } else if (ImGui::Button("Pause")) {
+      ctl.pause();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Step Into")) {
-      act(adapter->step_into(), "Step");
+    if (ImGui::Button("Terminate")) {
+      ctl.terminate();
     }
     ImGui::SameLine();
-    if (ImGui::Button("Step Over")) {
-      act(adapter->step_over(), "Step over");
+    if (ImGui::Button("Detach")) {
+      ctl.detach();
     }
+  }
+  if (snap.busy) {
+    ImGui::EndDisabled();
     ImGui::SameLine();
-    if (ImGui::Button("Step Out")) {
-      act(adapter->step_out(), "Step out");
-    }
-  } else if (ImGui::Button("Pause")) {
-    act(adapter->pause(), "Pause");
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Terminate")) {
-    act(adapter->terminate(), "Terminate");
-  }
-  ImGui::SameLine();
-  if (ImGui::Button("Detach")) {
-    act(adapter->detach(), "Detach");
+    ImGui::TextDisabled("working...");
   }
 }
 
-void draw_breakpoints(const Document& document, UiState& state) {
+void draw_breakpoints(const Document& document, UiState& state, const DebugSnapshot& snap) {
   if (ImGui::Button("Toggle breakpoint at selection") && state.selected_address != 0) {
-    toggle_breakpoint(state, state.selected_address);
+    controller(state).toggle_breakpoint(state.selected_address);
   }
-  if (state.debug_breakpoints.empty()) {
+  if (snap.breakpoints.empty()) {
     ImGui::TextDisabled("No breakpoints. Select an instruction and toggle one.");
     return;
   }
-  const float rows =
-      static_cast<float>(std::min<std::size_t>(state.debug_breakpoints.size(), 4) + 1);
+  const float rows = static_cast<float>(std::min<std::size_t>(snap.breakpoints.size(), 4) + 1);
   const float height = rows * ImGui::GetFrameHeight() + ImGui::GetStyle().CellPadding.y * 2.0f;
   if (ImGui::BeginTable("##breakpoints", 3, kTableFlags, ImVec2(0.0f, height))) {
     ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 140.0f);
     ImGui::TableSetupColumn("Symbol", ImGuiTableColumnFlags_WidthStretch);
     ImGui::TableSetupColumn("", ImGuiTableColumnFlags_WidthFixed, 70.0f);
     ImGui::TableHeadersRow();
-    std::uint64_t remove = 0;
-    for (std::uint64_t address : state.debug_breakpoints) {
+    for (std::uint64_t address : snap.breakpoints) {
       ImGui::PushID(static_cast<int>(address & 0x7fffffff));
       ImGui::TableNextRow();
       ImGui::TableSetColumnIndex(0);
@@ -247,45 +166,29 @@ void draw_breakpoints(const Document& document, UiState& state) {
       ImGui::TextDisabled("%s", symbol != nullptr ? symbol->name.c_str() : "");
       ImGui::TableSetColumnIndex(2);
       if (ImGui::SmallButton("Remove")) {
-        remove = address;
+        controller(state).toggle_breakpoint(address);
       }
       ImGui::PopID();
     }
     ImGui::EndTable();
-    if (remove != 0) {
-      toggle_breakpoint(state, remove);
-    }
   }
 }
 
-void draw_memory(UiState& state) {
-  auto* adapter = state.debug_adapter.get();
+void draw_memory(UiState& state, const DebugSnapshot& snap) {
   ImGui::SetNextItemWidth(180.0f);
   const bool enter = ImGui::InputTextWithHint(
       "##mem_address", "runtime address (hex)", state.debug_memory_address,
       sizeof(state.debug_memory_address), ImGuiInputTextFlags_EnterReturnsTrue);
   ImGui::SameLine();
-  if ((ImGui::Button("Read 256 bytes") || enter) && adapter != nullptr) {
-    state.debug_memory_base = std::strtoull(state.debug_memory_address, nullptr, 16);
-    auto bytes = adapter->read_memory(state.debug_memory_base, 256);
-    if (bytes) {
-      state.debug_memory = std::move(bytes.value());
-      state.debug_memory_error.clear();
-    } else {
-      state.debug_memory.clear();
-      state.debug_memory_error = bytes.diagnostic().message;
-    }
+  if (ImGui::Button("Read 256 bytes") || enter) {
+    controller(state).read_memory(std::strtoull(state.debug_memory_address, nullptr, 16), 256);
   }
-  if (!state.debug_memory_error.empty()) {
-    ImGui::TextColored(components::status_color("Unsupported"), "%s",
-                       state.debug_memory_error.c_str());
-  }
-  for (std::size_t row = 0; row < state.debug_memory.size(); row += 16) {
+  for (std::size_t row = 0; row < snap.memory.size(); row += 16) {
     char line[128];
-    int used = std::snprintf(line, sizeof(line), "%016" PRIx64 "  ", state.debug_memory_base + row);
-    for (std::size_t i = row; i < row + 16 && i < state.debug_memory.size(); ++i) {
+    int used = std::snprintf(line, sizeof(line), "%016" PRIx64 "  ", snap.memory_address + row);
+    for (std::size_t i = row; i < row + 16 && i < snap.memory.size(); ++i) {
       used += std::snprintf(line + used, sizeof(line) - static_cast<std::size_t>(used), "%02x ",
-                            std::to_integer<unsigned>(state.debug_memory[i]));
+                            std::to_integer<unsigned>(snap.memory[i]));
     }
     ImGui::TextUnformatted(line);
   }
@@ -294,24 +197,26 @@ void draw_memory(UiState& state) {
 }  // namespace
 
 void debugger(const Document& document, UiState& state) {
-  ensure_adapter(state);
-  auto* adapter = state.debug_adapter.get();
+  // Reading the snapshot is a copy under a short lock; nothing here waits for
+  // the target.
+  const DebugSnapshot snap = controller(state).snapshot();
 
-  // A running target is polled once per frame without blocking.
-  if (adapter->state() == SessionState::Running) {
-    auto event = adapter->poll_events();
-    if (event && event.value().reason != StopReason::None) {
-      refresh_snapshot(document, state, event.value());
+  // Follow each new stop in the code views once.
+  if (snap.state == SessionState::Stopped && snap.revision != state.debug_followed_revision &&
+      !snap.busy) {
+    state.debug_followed_revision = snap.revision;
+    if (snap.static_pc != 0 && document.loaded.image.section_for_va(snap.static_pc) != nullptr) {
+      state.navigate_to(snap.static_pc, &document);
     }
   }
 
-  const SessionState s = adapter->state();
   components::heading(state.debug_simulation ? "Debugger (simulation)" : "Debugger");
   ImGui::SameLine();
-  components::badge(debug::session_state_name(s),
-                    components::status_color(s == SessionState::Stopped   ? "Complete"
-                                             : s == SessionState::Running ? "Partial"
-                                                                          : "Unsupported"));
+  components::badge(
+      debug::session_state_name(snap.state),
+      components::status_color(snap.state == SessionState::Stopped   ? "Complete"
+                               : snap.state == SessionState::Running ? "Partial"
+                                                                     : "Unsupported"));
 
   static const bool native_available =
       debug::create_debug_adapter(false)->capabilities().can_launch;
@@ -326,52 +231,49 @@ void debugger(const Document& document, UiState& state) {
         "AArch64 and Windows x64). You can explore the controls with the simulation adapter.");
   }
   ImGui::PopTextWrapPos();
-  if (!is_live(s)) {
+  if (!is_live(snap.state) && !snap.busy) {
     bool simulation = state.debug_simulation;
     if (ImGui::Checkbox("Use simulation adapter", &simulation)) {
       state.debug_simulation = simulation;
-      state.debug_adapter.reset();
-      ensure_adapter(state);
-      adapter = state.debug_adapter.get();
+      state.debug_controller.reset();
+      return;
     }
   }
 
-  draw_controls(document, state);
+  draw_controls(document, state, snap);
   draw_launch_modal(document, state);
 
-  const auto& stop = state.debug_snapshot.stop;
-  if (stop.reason != StopReason::None) {
-    ImGui::Text("%s at %s", debug::stop_reason_name(stop.reason),
-                components::format_address(stop.address).c_str());
-    if (state.debug_snapshot.static_pc != 0) {
+  if (snap.stop.reason != StopReason::None) {
+    ImGui::Text("%s at %s", debug::stop_reason_name(snap.stop.reason),
+                components::format_address(snap.stop.address).c_str());
+    if (snap.static_pc != 0) {
       ImGui::SameLine();
-      ImGui::TextDisabled("(static %s)",
-                          components::format_address(state.debug_snapshot.static_pc).c_str());
+      ImGui::TextDisabled("(static %s)", components::format_address(snap.static_pc).c_str());
     }
-    if (!stop.description.empty()) {
+    if (!snap.stop.description.empty()) {
       ImGui::SameLine();
-      ImGui::TextDisabled("- %s", stop.description.c_str());
+      ImGui::TextDisabled("- %s", snap.stop.description.c_str());
     }
   }
-  if (!state.debug_message.empty()) {
+  if (!snap.message.empty()) {
     ImGui::PushTextWrapPos(0.0f);
-    ImGui::TextColored(components::status_color("Unsupported"), "%s", state.debug_message.c_str());
+    ImGui::TextColored(components::status_color("Unsupported"), "%s", snap.message.c_str());
     ImGui::PopTextWrapPos();
   }
 
   ImGui::Separator();
-  draw_breakpoints(document, state);
+  draw_breakpoints(document, state, snap);
   ImGui::Separator();
 
   if (ImGui::BeginTabBar("##debug_tabs")) {
     if (ImGui::BeginTabItem("Registers")) {
-      if (state.debug_snapshot.registers.empty()) {
+      if (snap.registers.empty()) {
         ImGui::TextDisabled("Registers are available while the target is stopped.");
       } else if (ImGui::BeginTable("##registers", 2, kTableFlags, ImVec2(0.0f, 220.0f))) {
         ImGui::TableSetupColumn("Register", ImGuiTableColumnFlags_WidthFixed, 80.0f);
         ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto& reg : state.debug_snapshot.registers) {
+        for (const auto& reg : snap.registers) {
           ImGui::TableNextRow();
           ImGui::TableSetColumnIndex(0);
           ImGui::TextUnformatted(reg.name.c_str());
@@ -383,7 +285,7 @@ void debugger(const Document& document, UiState& state) {
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Call Stack")) {
-      if (state.debug_snapshot.frames.empty()) {
+      if (snap.frames.empty()) {
         ImGui::TextDisabled("The call stack is available while the target is stopped.");
       } else if (ImGui::BeginTable("##frames", 5, kTableFlags, ImVec2(0.0f, 220.0f))) {
         ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 30.0f);
@@ -392,7 +294,7 @@ void debugger(const Document& document, UiState& state) {
         ImGui::TableSetupColumn("Static", ImGuiTableColumnFlags_WidthFixed, 140.0f);
         ImGui::TableSetupColumn("Module", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
-        for (const auto& frame : state.debug_snapshot.frames) {
+        for (const auto& frame : snap.frames) {
           ImGui::TableNextRow();
           ImGui::TableSetColumnIndex(0);
           ImGui::Text("%u", frame.index);
@@ -416,21 +318,21 @@ void debugger(const Document& document, UiState& state) {
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Threads")) {
-      for (const auto& thread : state.debug_snapshot.threads) {
+      for (const auto& thread : snap.threads) {
         ImGui::BulletText("%" PRIu64 "  %s%s", thread.id, thread.name.c_str(),
                           thread.is_current ? "  [current]" : "");
       }
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Modules")) {
-      for (const auto& module : state.debug_snapshot.modules) {
+      for (const auto& module : snap.modules) {
         ImGui::BulletText("%s  %s  (%s)", components::format_address(module.base_address).c_str(),
                           module.name.c_str(), module.path.c_str());
       }
       ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Memory")) {
-      draw_memory(state);
+      draw_memory(state, snap);
       ImGui::EndTabItem();
     }
     ImGui::EndTabBar();

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "donkey/core/navigation.h"
+#include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
 #include "donkey/patch/patch.h"
@@ -159,31 +160,14 @@ struct UiState {
   std::shared_ptr<PatchExportJob> patch_export;
 
   // --- Debugger state -------------------------------------------------------
-  // The adapter is driven from the render thread only (ptrace and the Win32
-  // debug API bind a debuggee to the thread that started it). Every call is
-  // bounded: stepping waits at most a couple of seconds.
-  std::unique_ptr<debug::DebugAdapter> debug_adapter;
-  bool debug_simulation = false;      ///< adapter is the mock, by explicit choice
+  // The controller runs the adapter on its own thread; the render thread only
+  // enqueues commands and draws the latest published snapshot.
+  std::unique_ptr<debug::DebugController> debug_controller;
+  bool debug_simulation = false;      ///< controller uses the mock, by explicit choice
   bool debug_confirm_launch = false;  ///< launch modal requested
   char debug_arguments[512] = {};
-  std::string debug_message;
-  std::string debug_target;  ///< path of the program being debugged
-  /// Static addresses the user wants to break at; applied at every launch.
-  std::vector<std::uint64_t> debug_breakpoints;
-  /// Snapshot taken whenever the target stops, so panels do not query the
-  /// target every frame.
-  struct DebugSnapshot {
-    debug::StopInfo stop;
-    std::uint64_t static_pc = 0;
-    std::vector<debug::RegisterValue> registers;
-    std::vector<debug::StackFrame> frames;
-    std::vector<debug::DebugThread> threads;
-    std::vector<debug::DebugModule> modules;
-  } debug_snapshot;
+  std::uint64_t debug_followed_revision = 0;  ///< last stop the code views jumped to
   char debug_memory_address[32] = {};
-  std::uint64_t debug_memory_base = 0;
-  std::vector<std::byte> debug_memory;
-  std::string debug_memory_error;
 };
 
 class Workspace {

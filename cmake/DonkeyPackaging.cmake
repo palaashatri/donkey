@@ -146,4 +146,8 @@ else()
   endforeach()
 endif()
 
+configure_file(${PROJECT_SOURCE_DIR}/packaging/cpack-options.cmake.in
+               ${PROJECT_BINARY_DIR}/CPackOptions.cmake @ONLY)
+set(CPACK_PROJECT_CONFIG_FILE ${PROJECT_BINARY_DIR}/CPackOptions.cmake)
+
 include(CPack)

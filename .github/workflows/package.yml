@@ -132,6 +132,21 @@ jobs:
           Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
           sleep 2
           DISPLAY=:99 donkey --renderer software "$(command -v donkey-cli)" --exit-after-frames 30
+      - name: Uninstall cleanly
+        run: |
+          set -e
+          case "${{ matrix.kind }}" in
+            deb) apt-get remove -y donkey ;;
+            rpm) dnf remove -y donkey ;;
+            tgz) rm -f /usr/bin/donkey /usr/bin/donkey-cli
+                 rm -rf /usr/share/doc/donkey /usr/share/applications/donkey.desktop
+                 find /usr/share/icons/hicolor -name donkey.png -delete ;;
+          esac
+          if command -v donkey || command -v donkey-cli; then
+            echo "binaries left behind"; exit 1
+          fi
+          leftovers=$(find /usr -name '*donkey*' 2>/dev/null)
+          if [ -n "$leftovers" ]; then echo "files left behind: $leftovers"; exit 1; fi
 
   macos:
     name: macOS packages (universal)
