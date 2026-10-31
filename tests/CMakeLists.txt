@@ -44,8 +44,20 @@ else()
 endif()
 target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS})
 
+# Decompiler differential corpus (M8): the same source at three
+# optimisation levels, built with the host C compiler.
+set(DONKEY_CORPUS_LIBRARIES)
+foreach(level O0 O2 O3)
+  add_library(donkey_corpus_${level} SHARED corpus/corpus.c)
+  if(NOT MSVC)
+    target_compile_options(donkey_corpus_${level} PRIVATE -${level} -fno-stack-protector)
+  endif()
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_${level})
+endforeach()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
+  unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
   unit/debug_info_test.cpp
@@ -73,8 +85,13 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
+  DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
+  DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
+  DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
+  DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
+  DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
-add_dependencies(donkey_unit_tests donkey_test_debuggee donkey_test_module test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
+add_dependencies(donkey_unit_tests donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)

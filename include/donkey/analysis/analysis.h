@@ -93,10 +93,13 @@ struct AnalysisResult {
 
 /// Bounded, deterministic control-flow reconstruction over an existing
 /// instruction stream. Follows direct branches from every seed and never runs
-/// code. Indirect jumps end a path and mark the result partial/estimated.
+/// code. x86 jump tables are recovered when their bounds check and table load
+/// can be evaluated exactly (`file` holds the table bytes); every other
+/// indirect jump ends a path and marks the result partial/estimated.
 [[nodiscard]] Result<ControlFlowGraph> build_control_flow_graph(
     const BinaryImage& image, std::span<const Instruction> instructions,
-    std::span<const Function> seeds, const AnalysisOptions& options = {});
+    std::span<const Function> seeds, const AnalysisOptions& options = {},
+    std::span<const std::byte> file = {});
 
 /// Call graph from the CFG's blocks and the decoded call instructions.
 [[nodiscard]] CallGraph build_call_graph(const ControlFlowGraph& cfg,

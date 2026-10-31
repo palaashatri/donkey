@@ -425,7 +425,8 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
 
   if (options.build_control_flow) {
-    auto graph = build_control_flow_graph(image, result.instructions, result.functions, options);
+    auto graph =
+        build_control_flow_graph(image, result.instructions, result.functions, options, file);
     if (!graph) {
       result.partial = true;
       result.diagnostics.push_back(graph.diagnostic());

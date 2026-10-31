@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "ir_internal.h"
+#include "registers.h"
 
 namespace donkey {
 namespace {
@@ -286,6 +287,9 @@ class Renderer {
         return "/* flags = " + operand(statement.a) + " & " + operand(statement.b) + " */";
       case IrOp::Unsupported:
         return "/* unsupported: " + statement.text + " */";
+      case IrOp::CondAssign:
+        return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
+               operand(statement.a) + ";";
     }
     return "";
   }
@@ -303,6 +307,33 @@ class Renderer {
 }  // namespace
 
 namespace detail {
+
+const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
+  std::vector<std::string> written;
+  for (std::size_t i = index; i-- > 0;) {
+    const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
+      for (const IrOperand* operand : {&candidate.a, &candidate.b}) {
+        const std::string families[] = {internal::register_family(operand->reg),
+                                        internal::register_family(operand->index)};
+        for (const std::string& family : families) {
+          if (!family.empty() &&
+              std::find(written.begin(), written.end(), family) != written.end()) {
+            return nullptr;
+          }
+        }
+      }
+      return &candidate;
+    }
+    if (candidate.dest.kind == IrOperandKind::Register) {
+      written.push_back(internal::register_family(candidate.dest.reg));
+    }
+    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported) {
+      return nullptr;  // flags may have changed in a way the IR does not show
+    }
+  }
+  return nullptr;
+}
 
 std::string render_statement(const IrFunction& function, const IrStatement& statement,
                              const IrStatement* previous) {
@@ -370,6 +401,8 @@ const char* ir_op_name(IrOp op) noexcept {
       return "test";
     case IrOp::Unsupported:
       return "unsupported";
+    case IrOp::CondAssign:
+      return "cond_assign";
   }
   return "unknown";
 }
@@ -568,6 +601,22 @@ Result<bool> verify_ir(const IrFunction& function) {
               statement.a.width > statement.dest.width) {
             return fail("ir.type_width_mismatch",
                         "assign constant source width cannot exceed destination");
+          }
+          break;
+        case IrOp::CondAssign:
+          if (statement.condition == IrCondition::None) {
+            return fail("ir.malformed_cond_assign", "conditional assign needs a condition");
+          }
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None) {
+            return fail("ir.malformed_cond_assign",
+                        "conditional assign needs a register destination and a source");
+          }
+          if (statement.dest.width != statement.width ||
+              (statement.a.kind == IrOperandKind::Register &&
+               statement.a.width != statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "conditional assign source and destination widths must match");
           }
           break;
         case IrOp::Add:
@@ -950,8 +999,7 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
     for (std::size_t statement_index = 0; statement_index < block.statements.size();
          ++statement_index) {
       const IrStatement& statement = block.statements[statement_index];
-      const IrStatement* previous =
-          statement_index == 0 ? nullptr : &block.statements[statement_index - 1];
+      const IrStatement* previous = detail::flags_producer(block, statement_index);
       std::string line = renderer.statement(statement, previous);
       if (line.empty()) {
         continue;

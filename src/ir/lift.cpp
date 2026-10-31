@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -118,7 +119,53 @@ IrCondition branch_condition(const std::string& mnemonic) {
   if (mnemonic == "jle" || mnemonic == "jng") {
     return IrCondition::SignedLessEqual;
   }
+  if (mnemonic == "js") {
+    return IrCondition::Negative;
+  }
+  if (mnemonic == "jns") {
+    return IrCondition::Positive;
+  }
+  if (mnemonic == "jo") {
+    return IrCondition::Overflow;
+  }
+  if (mnemonic == "jno") {
+    return IrCondition::NoOverflow;
+  }
   return IrCondition::None;
+}
+
+/// Condition of a cmovcc / setcc mnemonic, through the jcc table.
+IrCondition suffix_condition(const std::string& mnemonic, std::size_t prefix) {
+  if (mnemonic.size() <= prefix) {
+    return IrCondition::None;
+  }
+  return branch_condition("j" + mnemonic.substr(prefix));
+}
+
+bool is_cmov(const std::string& mnemonic) {
+  return mnemonic.rfind("cmov", 0) == 0 && suffix_condition(mnemonic, 4) != IrCondition::None;
+}
+
+bool is_setcc(const std::string& mnemonic) {
+  return mnemonic.rfind("set", 0) == 0 && suffix_condition(mnemonic, 3) != IrCondition::None;
+}
+
+/// Instructions that leave the flags exactly as they were.
+bool preserves_flags(const std::string& mnemonic) {
+  return mnemonic == "mov" || mnemonic == "movabs" || mnemonic == "movzx" || mnemonic == "movsx" ||
+         mnemonic == "movsxd" || mnemonic == "lea" || mnemonic == "push" || mnemonic == "pop" ||
+         mnemonic == "nop" || mnemonic == "endbr64" || mnemonic == "endbr32" ||
+         mnemonic == "cdqe" || mnemonic == "cdq" || mnemonic == "cqo" || mnemonic == "cwde" ||
+         mnemonic == "cbw" || mnemonic == "cwd" || mnemonic == "not" || is_cmov(mnemonic) ||
+         is_setcc(mnemonic);
+}
+
+/// Conditions that read only ZF and SF, which every flag-setting arithmetic
+/// instruction derives from its result alone.
+bool zero_sign_condition(IrCondition condition) {
+  return condition == IrCondition::Zero || condition == IrCondition::NonZero ||
+         condition == IrCondition::Equal || condition == IrCondition::NotEqual ||
+         condition == IrCondition::Negative || condition == IrCondition::Positive;
 }
 
 bool is_bitwise_or_arithmetic(const std::string& mnemonic) {
@@ -313,31 +360,97 @@ struct Lifter {
     push(block, std::move(statement));
   }
 
-  void lift_arithmetic(IrBlock& block, const Instruction& instruction) {
+  /// What the IR knows about the flags a later jcc / cmovcc / setcc reads.
+  enum class FlagsState { Unknown, Exact, ZeroSign };
+  FlagsState flags_state = FlagsState::Unknown;
+
+  IrStatement flags_test_of(const IrOperand& value, std::uint64_t address) const {
+    IrStatement test;
+    test.op = IrOp::Test;
+    test.a = value;
+    test.b = value;
+    test.width = value.width;
+    test.source_address = address;
+    return test;
+  }
+
+  /// `consumer` is the condition the next flag reader in this block uses (if
+  /// any reads these flags before they are overwritten). Flags are modelled
+  /// only where the IR can state them exactly: logic operations clear CF/OF
+  /// so a test of the result is exact; a subtraction keeps its operands in a
+  /// comparison; other arithmetic gives exact ZF/SF only.
+  void lift_arithmetic(IrBlock& block, const Instruction& instruction,
+                       std::optional<IrCondition> consumer) {
     const std::vector<Operand>& operands = instruction.structured_operands;
-    const IrOp op = arithmetic_op(instruction.mnemonic);
+    const std::string& mnemonic = instruction.mnemonic;
+    const IrOp op = arithmetic_op(mnemonic);
+    flags_state = FlagsState::Unknown;
     if (op == IrOp::Nop || operands.empty()) {
       unsupported(block, instruction);
       return;
     }
-
-    IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
-    IrOperand source;
-    if (operands.size() >= 2) {
-      source = to_ir_operand(operands[1], instruction, pointer_width);
-    } else {
-      source = IrOperand::constant_value(1, destination.width);
+    if (mnemonic == "imul" && operands.size() == 1) {
+      unsupported(block, instruction);  // rdx:rax = rax * src: no double-width result in the IR
+      return;
     }
 
+    IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    IrOperand left = destination;
+    IrOperand source;
+    if (mnemonic == "imul" && operands.size() == 3) {
+      // imul dst, src, imm: dst = src * imm (the destination is not an input).
+      left = to_ir_operand(operands[1], instruction, pointer_width);
+      source = to_ir_operand(operands[2], instruction, pointer_width);
+    } else if (operands.size() >= 2) {
+      source = to_ir_operand(operands[1], instruction, pointer_width);
+    } else {
+      source = IrOperand::constant_value(1, destination.width);  // inc / dec
+    }
+    const bool shift = op == IrOp::Shl || op == IrOp::Shr || op == IrOp::Sar;
+    const bool logic = op == IrOp::And || op == IrOp::Or || op == IrOp::Xor;
+    const bool subtract = mnemonic == "sub";
+    // A shift by a register may be by zero, which leaves the flags alone.
+    const bool flags_defined =
+        mnemonic != "imul" &&
+        (!shift || (source.kind == IrOperandKind::Constant && (source.constant & 0x3F) != 0));
+
     if (destination.kind == IrOperandKind::Register) {
+      std::optional<IrOperand> saved;
+      if (consumer && subtract && !zero_sign_condition(*consumer)) {
+        // Keep the minuend: the condition compares it with the subtrahend.
+        saved = temp_operand(temporary_id(), destination.width);
+        IrStatement copy;
+        copy.op = IrOp::Assign;
+        copy.dest = *saved;
+        copy.a = destination;
+        copy.width = destination.width;
+        copy.source_address = instruction.address;
+        push(block, std::move(copy));
+      }
       IrStatement statement;
       statement.op = op;
       statement.dest = destination;
-      statement.a = destination;
+      statement.a = left;
       statement.b = source;
       statement.width = destination.width;
       statement.source_address = instruction.address;
       push(block, std::move(statement));
+      if (consumer && flags_defined) {
+        if (saved) {
+          IrStatement compare;
+          compare.op = IrOp::Compare;
+          compare.a = *saved;
+          compare.b = source;
+          compare.condition = IrCondition::Equal;
+          compare.width = saved->width;
+          compare.source_address = instruction.address;
+          push(block, std::move(compare));
+          flags_state = FlagsState::Exact;
+        } else {
+          push(block, flags_test_of(destination, instruction.address));
+          flags_state = logic ? FlagsState::Exact : FlagsState::ZeroSign;
+        }
+      }
       return;
     }
 
@@ -369,9 +482,170 @@ struct Lifter {
       store.width = destination.width;
       store.source_address = instruction.address;
       push(block, std::move(store));
+      if (consumer && flags_defined) {
+        push(block, flags_test_of(temp_operand(id, destination.width), instruction.address));
+        flags_state = logic ? FlagsState::Exact : FlagsState::ZeroSign;
+      }
       return;
     }
     unsupported(block, instruction);
+  }
+
+  /// neg / not.
+  void lift_unary(IrBlock& block, const Instruction& instruction,
+                  std::optional<IrCondition> consumer) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const bool negate = instruction.mnemonic == "neg";
+    if (operands.size() != 1 || operands[0].kind != OperandKind::Register) {
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    IrStatement statement;
+    statement.op = negate ? IrOp::Sub : IrOp::Xor;
+    statement.dest = destination;
+    statement.a = negate ? IrOperand::constant_value(0, destination.width) : destination;
+    statement.b = negate ? destination : IrOperand::constant_value(~0ULL, destination.width);
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    if (negate) {
+      // 0 - x: operand `a` must have the destination's width.
+      statement.a.width = destination.width;
+    }
+    push(block, std::move(statement));
+    if (negate) {  // not leaves the flags alone
+      flags_state = FlagsState::Unknown;
+      if (consumer) {
+        push(block, flags_test_of(destination, instruction.address));
+        flags_state = FlagsState::ZeroSign;
+      }
+    }
+  }
+
+  /// cdqe / cwde / cbw (sign-extend in place) and cdq / cqo / cwd (fill the
+  /// high register with the sign of the low one).
+  void lift_sign_widen(IrBlock& block, const Instruction& instruction) {
+    struct Form {
+      const char* mnemonic;
+      const char* dest;
+      std::uint8_t dest_width;
+      const char* source;
+      std::uint8_t source_width;
+      bool fill;
+    };
+    static const Form kForms[] = {
+        {"cdqe", "rax", 8, "eax", 4, false}, {"cwde", "eax", 4, "ax", 2, false},
+        {"cbw", "ax", 2, "al", 1, false},    {"cqo", "rdx", 8, "rax", 8, true},
+        {"cdq", "edx", 4, "eax", 4, true},   {"cwd", "dx", 2, "ax", 2, true},
+    };
+    for (const Form& form : kForms) {
+      if (instruction.mnemonic != form.mnemonic) {
+        continue;
+      }
+      IrStatement statement;
+      statement.dest = IrOperand::register_ref(form.dest, form.dest_width);
+      statement.width = form.dest_width;
+      statement.source_address = instruction.address;
+      if (form.fill) {
+        statement.op = IrOp::Sar;
+        statement.a = IrOperand::register_ref(form.source, form.source_width);
+        statement.b = IrOperand::constant_value(form.source_width * 8U - 1U, 1);
+      } else {
+        statement.op = IrOp::SignExtend;
+        statement.a = IrOperand::register_ref(form.source, form.source_width);
+      }
+      push(block, std::move(statement));
+      return;
+    }
+    unsupported(block, instruction);
+  }
+
+  /// rol / ror by an immediate: two shifts and an or through temporaries.
+  void lift_rotate(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    if (operands.size() != 2 || operands[0].kind != OperandKind::Register ||
+        operands[1].kind != OperandKind::Immediate) {
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand value = to_ir_operand(operands[0], instruction, pointer_width);
+    const unsigned bits = value.width * 8U;
+    const unsigned count = static_cast<unsigned>(operands[1].immediate) % bits;
+    flags_state = FlagsState::Unknown;  // CF/OF change, ZF does not: not modelled
+    if (count == 0) {
+      return;
+    }
+    const bool left = instruction.mnemonic == "rol";
+    const IrOperand high = temp_operand(temporary_id(), value.width);
+    const IrOperand low = temp_operand(temporary_id(), value.width);
+    IrStatement first;
+    first.op = left ? IrOp::Shl : IrOp::Shr;
+    first.dest = high;
+    first.a = value;
+    first.b = IrOperand::constant_value(count, 1);
+    first.width = value.width;
+    first.source_address = instruction.address;
+    push(block, std::move(first));
+    IrStatement second;
+    second.op = left ? IrOp::Shr : IrOp::Shl;
+    second.dest = low;
+    second.a = value;
+    second.b = IrOperand::constant_value(bits - count, 1);
+    second.width = value.width;
+    second.source_address = instruction.address;
+    push(block, std::move(second));
+    IrStatement combine;
+    combine.op = IrOp::Or;
+    combine.dest = value;
+    combine.a = high;
+    combine.b = low;
+    combine.width = value.width;
+    combine.source_address = instruction.address;
+    push(block, std::move(combine));
+  }
+
+  /// cmovcc (dest = src if cond) and setcc (dest = cond ? 1 : 0).
+  void lift_conditional(IrBlock& block, const Instruction& instruction, bool set) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const IrCondition condition = suffix_condition(instruction.mnemonic, set ? 3U : 4U);
+    if (flags_state == FlagsState::Unknown ||
+        (flags_state == FlagsState::ZeroSign && !zero_sign_condition(condition))) {
+      mark_partial("'" + instruction.mnemonic + "' reads flags this lifter does not model");
+    }
+    if ((set && operands.size() != 1) || (!set && operands.size() != 2) ||
+        operands[0].kind != OperandKind::Register) {
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    if (set) {
+      IrStatement clear;
+      clear.op = IrOp::Assign;
+      clear.dest = destination;
+      clear.a = IrOperand::constant_value(0, destination.width);
+      clear.width = destination.width;
+      clear.source_address = instruction.address;
+      push(block, std::move(clear));
+    } else if (destination.width == 4) {
+      // A 32-bit cmov zero-extends its destination even when it does not
+      // move: model that before the conditional part.
+      IrStatement widen;
+      widen.op = IrOp::Assign;
+      widen.dest = destination;
+      widen.a = destination;
+      widen.width = destination.width;
+      widen.source_address = instruction.address;
+      push(block, std::move(widen));
+    }
+    IrStatement statement;
+    statement.op = IrOp::CondAssign;
+    statement.condition = condition;
+    statement.dest = destination;
+    statement.a = set ? IrOperand::constant_value(1, destination.width)
+                      : to_ir_operand(operands[1], instruction, pointer_width);
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    push(block, std::move(statement));
   }
 
   void lift_compare(IrBlock& block, const Instruction& instruction) {
@@ -575,11 +849,36 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
             "not recovered and locals are not recovered"
           : "x86-64 subset; register aliases are not canonicalised and locals are not recovered");
 
-  bool previous_sets_flags = false;
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
-    previous_sets_flags = false;
+    // Flags are only followed within a block.
+    lifter.flags_state = Lifter::FlagsState::Unknown;
+
+    // The condition the next flag reader in this block uses, if one reads the
+    // flags written by instruction `i` before anything else writes them.
+    auto next_consumer = [&](std::uint32_t i) -> std::optional<IrCondition> {
+      for (std::uint32_t j = i + 1; j < block->instruction_count; ++j) {
+        const std::size_t at = static_cast<std::size_t>(block->first_instruction) + j;
+        if (at >= analysis.instructions.size()) {
+          break;
+        }
+        const Instruction& next = analysis.instructions[at];
+        if (next.classification == InstructionClass::ConditionalJump) {
+          return branch_condition(next.mnemonic);
+        }
+        if (is_cmov(next.mnemonic)) {
+          return suffix_condition(next.mnemonic, 4);
+        }
+        if (is_setcc(next.mnemonic)) {
+          return suffix_condition(next.mnemonic, 3);
+        }
+        if (!preserves_flags(next.mnemonic) || next.classification != InstructionClass::Other) {
+          break;  // overwritten, or control leaves the block
+        }
+      }
+      return std::nullopt;
+    };
 
     for (std::uint32_t i = 0; i < block->instruction_count; ++i) {
       const std::size_t index = static_cast<std::size_t>(block->first_instruction) + i;
@@ -598,7 +897,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         statement.width = lifter.pointer_width;
         statement.condition = condition;
         statement.a = IrOperand::register_ref("flags", lifter.pointer_width);
-        if (!previous_sets_flags) {
+        if (lifter.flags_state == Lifter::FlagsState::Unknown ||
+            (lifter.flags_state == Lifter::FlagsState::ZeroSign &&
+             !zero_sign_condition(condition))) {
           lifter.mark_partial("conditional branch depends on flags this lifter does not model");
         }
         if (condition == IrCondition::None) {
@@ -616,7 +917,6 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           statement.b = IrOperand::block_ref(target->second);
         }
         lifter.push(out_block, std::move(statement));
-        previous_sets_flags = false;
         continue;
       }
 
@@ -628,6 +928,52 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
+        const JumpTable* table = nullptr;
+        if (!instruction.direct_target.has_value()) {
+          for (const JumpTable& candidate : analysis.cfg.jump_tables) {
+            if (candidate.jump_address == instruction.address) {
+              table = &candidate;
+            }
+          }
+        }
+        if (table != nullptr) {
+          // A jump table the analysis recovered from the bounds check and the
+          // table bytes: a switch over the compared operand.
+          const auto check =
+              std::find_if(analysis.instructions.begin(), analysis.instructions.end(),
+                           [&](const Instruction& candidate_instruction) {
+                             return candidate_instruction.address == table->check_address;
+                           });
+          bool cases_in_function = check != analysis.instructions.end();
+          IrStatement sw;
+          sw.op = IrOp::Switch;
+          sw.source_address = instruction.address;
+          sw.width = lifter.pointer_width;
+          if (cases_in_function) {
+            sw.dest = to_ir_operand(table->selector, *check, lifter.pointer_width);
+          }
+          for (std::size_t value = 0; value < table->targets.size() && cases_in_function; ++value) {
+            const auto block_it = lifter.block_by_address.find(table->targets[value]);
+            if (block_it == lifter.block_by_address.end()) {
+              cases_in_function = false;
+              break;
+            }
+            sw.switch_cases.push_back(IrSwitchCase{value, block_it->second});
+          }
+          const auto fallback = lifter.block_by_address.find(table->default_target);
+          if (cases_in_function && sw.dest.kind != IrOperandKind::None) {
+            if (fallback != lifter.block_by_address.end()) {
+              sw.a = IrOperand::block_ref(fallback->second);
+            } else {
+              // Out-of-range selectors were sent elsewhere by the bounds check
+              // before this jump, so the default is unreachable here.
+              sw.a = IrOperand::block_ref(sw.switch_cases.front().target_block);
+            }
+            lifter.push(out_block, std::move(sw));
+            continue;
+          }
+          lifter.mark_partial("jump table cases lie outside this function");
+        }
         if (target == lifter.block_by_address.end()) {
           // Tail call or an unmodelled target: stop here instead of inventing
           // a block. Calling the target is the honest reading.
@@ -651,7 +997,6 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           statement.a = IrOperand::block_ref(target->second);
           lifter.push(out_block, std::move(statement));
         }
-        previous_sets_flags = false;
         continue;
       }
 
@@ -662,7 +1007,6 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         statement.width = lifter.pointer_width;
         statement.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
         lifter.push(out_block, std::move(statement));
-        previous_sets_flags = false;
         continue;
       }
 
@@ -673,11 +1017,11 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         statement.source_address = instruction.address;
         statement.width = lifter.pointer_width;
         lifter.push(out_block, std::move(statement));
-        previous_sets_flags = false;
         continue;
       }
 
-      const bool sets_flags = mnemonic == "cmp" || mnemonic == "test";
+      const auto flags_before = lifter.flags_state;
+      bool keeps_flags = preserves_flags(mnemonic);
       if (mnemonic == "mov" || mnemonic == "movabs") {
         lifter.lift_mov(out_block, instruction);
       } else if (mnemonic == "movzx" || mnemonic == "movsx" || mnemonic == "movsxd") {
@@ -686,10 +1030,25 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.lift_lea(out_block, instruction);
       } else if (mnemonic == "cmp") {
         lifter.lift_compare(out_block, instruction);
+        lifter.flags_state = Lifter::FlagsState::Exact;
+        keeps_flags = true;  // state set above
       } else if (mnemonic == "test") {
         lifter.lift_test(out_block, instruction);
+        lifter.flags_state = Lifter::FlagsState::Exact;
+        keeps_flags = true;
       } else if (is_bitwise_or_arithmetic(mnemonic) || mnemonic == "inc" || mnemonic == "dec") {
-        lifter.lift_arithmetic(out_block, instruction);
+        lifter.lift_arithmetic(out_block, instruction, next_consumer(i));
+        keeps_flags = true;  // lift_arithmetic set the state
+      } else if (mnemonic == "neg" || mnemonic == "not") {
+        lifter.lift_unary(out_block, instruction, next_consumer(i));
+        keeps_flags = true;  // lift_unary set the state
+      } else if (mnemonic == "rol" || mnemonic == "ror") {
+        lifter.lift_rotate(out_block, instruction);
+        keeps_flags = true;
+      } else if (is_cmov(mnemonic)) {
+        lifter.lift_conditional(out_block, instruction, false);
+      } else if (is_setcc(mnemonic)) {
+        lifter.lift_conditional(out_block, instruction, true);
       } else if (mnemonic == "push") {
         lifter.lift_push(out_block, instruction);
       } else if (mnemonic == "pop") {
@@ -701,12 +1060,17 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       } else if (mnemonic == "nop" || mnemonic == "endbr64" || mnemonic == "endbr32") {
         // No semantic effect in the IR.
       } else if (mnemonic == "cdqe" || mnemonic == "cqo" || mnemonic == "cdq" ||
-                 mnemonic == "cwd") {
-        lifter.unsupported(out_block, instruction);
+                 mnemonic == "cwd" || mnemonic == "cwde" || mnemonic == "cbw") {
+        lifter.lift_sign_widen(out_block, instruction);
       } else {
         lifter.unsupported(out_block, instruction);
+        keeps_flags = false;
       }
-      previous_sets_flags = sets_flags;
+      if (!keeps_flags) {
+        lifter.flags_state = Lifter::FlagsState::Unknown;
+      } else if (preserves_flags(mnemonic)) {
+        lifter.flags_state = flags_before;
+      }
       if (lifter.limit_reached()) {
         lifter.mark_partial("statement limit reached");
         break;
@@ -715,6 +1079,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
 
     if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
                                          out_block.statements.back().op != IrOp::CondBranch &&
+                                         out_block.statements.back().op != IrOp::Switch &&
                                          out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {

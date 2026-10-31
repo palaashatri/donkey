@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstddef>
+
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -83,6 +85,12 @@ std::string render_statement(const IrFunction& function, const IrStatement& stat
 /// becomes `!=`); conditions without a total complement are wrapped in `!(...)`.
 std::string render_condition(const IrFunction& function, const IrStatement& statement,
                              const IrStatement* previous, bool negate = false);
+
+/// The Compare/Test whose flags the statement at `index` of `block` reads:
+/// the nearest one before it in the block. Null when there is none, or when
+/// a statement in between overwrites a register the comparison names (the
+/// condition would then read as if it tested the new value).
+const IrStatement* flags_producer(const IrBlock& block, std::size_t index);
 
 struct StructuredLine {
   std::string text;

@@ -36,6 +36,7 @@ enum class IrOp : std::uint8_t {
   Compare,      ///< flags = a <condition> b
   Test,         ///< flags = a & b
   Unsupported,  ///< an instruction the lifter does not model; `text` is raw
+  CondAssign,   ///< if (condition over the last Compare/Test) dest = a  (cmovcc, setcc)
 };
 
 const char* ir_op_name(IrOp op) noexcept;

@@ -111,6 +111,7 @@ donkey_apply_warnings(donkey_analysis)
 
 add_library(donkey_ir STATIC
   src/ir/abi.cpp
+  src/ir/eval.cpp
   src/ir/ir.cpp
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp
