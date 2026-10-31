@@ -35,6 +35,10 @@ jobs:
         run: cmake --build --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel
       - name: Test
         run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel 4
+      # Measured decompiler corpus outcomes (docs/SUPPORT_MATRIX.md).
+      - name: Decompiler corpus results
+        if: always()
+        run: cmake -DREPORT=build/headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }}/tests/decompiler-corpus-report.json -P cmake/checks/corpus_summary.cmake
       # Failures again, alone and with their output, at the end of the log.
       - name: Failed tests in detail
         if: failure()
