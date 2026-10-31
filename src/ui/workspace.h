@@ -73,6 +73,10 @@ struct UiState {
   AnnotationKind annotation_kind = AnnotationKind::Rename;
   std::uint64_t annotation_address = 0;
   char annotation_buffer[512] = {};
+  /// Function-boundary edit request ("define", "remove" or "" to clear).
+  bool function_edit_requested = false;
+  std::uint64_t function_edit_address = 0;
+  std::string function_edit_action;
 
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded and executed asynchronously off the render thread.

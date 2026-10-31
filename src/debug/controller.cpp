@@ -94,14 +94,16 @@ void DebugController::run() {
 
 void DebugController::publish(const std::string& message) {
   DebugSnapshot next;
+  // Poll first: polling can itself observe a stop and change the state, and
+  // the snapshot must never pair a stop with a stale "running" state.
+  if (auto stop = adapter_->poll_events()) {
+    next.stop = stop.value();
+  }
   next.state = adapter_->state();
   next.capabilities = capabilities_;
   next.translator = adapter_->address_translator();
   next.breakpoints = breakpoints_;
   next.message = message;
-  if (auto stop = adapter_->poll_events()) {
-    next.stop = stop.value();
-  }
   if (next.state == SessionState::Stopped) {
     if (auto registers = adapter_->read_registers()) {
       next.registers = std::move(registers.value());

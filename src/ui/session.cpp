@@ -18,6 +18,59 @@ AnalysisOptions analysis_options() {
   return options;
 }
 
+std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& rows) {
+  auto annotations = std::make_shared<Annotations>();
+  for (const Annotation& annotation : rows) {
+    switch (annotation.kind) {
+      case AnnotationKind::Rename:
+        annotations->renames[annotation.address] = annotation.text;
+        break;
+      case AnnotationKind::Comment:
+        annotations->comments[annotation.address] = annotation.text;
+        break;
+      case AnnotationKind::Bookmark:
+        annotations->bookmarks[annotation.address] = annotation.text;
+        break;
+      case AnnotationKind::FunctionStart:
+        annotations->functions[annotation.address] = annotation.text;
+        break;
+    }
+  }
+  return annotations;
+}
+
+std::vector<Annotation> rows_from(const Annotations& annotations) {
+  std::vector<Annotation> rows;
+  rows.reserve(annotations.renames.size() + annotations.comments.size() +
+               annotations.bookmarks.size() + annotations.functions.size());
+  for (const auto& [address, text] : annotations.renames) {
+    rows.push_back(Annotation{AnnotationKind::Rename, address, text});
+  }
+  for (const auto& [address, text] : annotations.comments) {
+    rows.push_back(Annotation{AnnotationKind::Comment, address, text});
+  }
+  for (const auto& [address, text] : annotations.bookmarks) {
+    rows.push_back(Annotation{AnnotationKind::Bookmark, address, text});
+  }
+  for (const auto& [address, text] : annotations.functions) {
+    rows.push_back(Annotation{AnnotationKind::FunctionStart, address, text});
+  }
+  return rows;
+}
+
+/// Analysis options with the user's function-boundary edits applied.
+AnalysisOptions analysis_options_for(const Annotations& annotations) {
+  AnalysisOptions options = analysis_options();
+  for (const auto& [address, action] : annotations.functions) {
+    if (action == "define") {
+      options.user_function_starts.push_back(address);
+    } else if (action == "remove") {
+      options.removed_function_starts.push_back(address);
+    }
+  }
+  return options;
+}
+
 struct WorkerDoneGuard {
   std::shared_ptr<std::atomic<bool>> flag;
   ~WorkerDoneGuard() {
@@ -266,7 +319,8 @@ void Session::open_project(const std::string& path) {
            "Failed to load project image");
       return;
     }
-    AnalysisOptions options = analysis_options();
+    auto annotations = annotations_from(stored);
+    AnalysisOptions options = analysis_options_for(*annotations);
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
     if (token.is_cancelled()) {
@@ -277,17 +331,6 @@ void Session::open_project(const std::string& path) {
       fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse project image");
       return;
-    }
-
-    auto annotations = std::make_shared<Annotations>();
-    for (const Annotation& annotation : stored) {
-      if (annotation.kind == AnnotationKind::Rename) {
-        annotations->renames[annotation.address] = annotation.text;
-      } else if (annotation.kind == AnnotationKind::Comment) {
-        annotations->comments[annotation.address] = annotation.text;
-      } else if (annotation.kind == AnnotationKind::Bookmark) {
-        annotations->bookmarks[annotation.address] = annotation.text;
-      }
     }
 
     auto document = std::make_shared<Document>();
@@ -354,18 +397,7 @@ void Session::save_project(const std::string& path) {
         if (!image_id) {
           failure = image_id.diagnostic().message + " [" + image_id.diagnostic().code + "]";
         } else {
-          std::vector<Annotation> rows;
-          rows.reserve(annotations->renames.size() + annotations->comments.size() +
-                       annotations->bookmarks.size());
-          for (const auto& [address, text] : annotations->renames) {
-            rows.push_back(Annotation{AnnotationKind::Rename, address, text});
-          }
-          for (const auto& [address, text] : annotations->comments) {
-            rows.push_back(Annotation{AnnotationKind::Comment, address, text});
-          }
-          for (const auto& [address, text] : annotations->bookmarks) {
-            rows.push_back(Annotation{AnnotationKind::Bookmark, address, text});
-          }
+          const std::vector<Annotation> rows = rows_from(*annotations);
           auto replaced = project.value().replace_annotations(image_id.value(), rows);
           if (!replaced) {
             failure = replaced.diagnostic().message + " [" + replaced.diagnostic().code + "]";
@@ -574,16 +606,7 @@ void Session::restore_project(const std::string& backup_path) {
       }
     }
 
-    auto annotations = std::make_shared<Annotations>();
-    for (const Annotation& annotation : stored) {
-      if (annotation.kind == AnnotationKind::Rename) {
-        annotations->renames[annotation.address] = annotation.text;
-      } else if (annotation.kind == AnnotationKind::Comment) {
-        annotations->comments[annotation.address] = annotation.text;
-      } else if (annotation.kind == AnnotationKind::Bookmark) {
-        annotations->bookmarks[annotation.address] = annotation.text;
-      }
-    }
+    auto annotations = annotations_from(stored);
 
     {
       // A newer operation started after the commit owns the workspace; it
@@ -622,7 +645,7 @@ void Session::restore_project(const std::string& backup_path) {
         load_failure = "could not load '" + image_path + "': " + loaded.diagnostic().message +
                        " [" + loaded.diagnostic().code + "]";
       } else {
-        AnalysisOptions options = analysis_options();
+        AnalysisOptions options = analysis_options_for(*annotations);
         options.cancellation_token = token;
         auto analysed = analyze(loaded.value().image, loaded.value().data, options);
         if (analysed) {
@@ -757,6 +780,10 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
     if (const auto* s = annotations_->bookmark_at(address)) {
       old_text = *s;
     }
+  } else if (kind == AnnotationKind::FunctionStart) {
+    if (const auto* s = annotations_->function_edit_at(address)) {
+      old_text = *s;
+    }
   }
 
   if (old_text == text) {
@@ -769,9 +796,10 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
   }
 
   auto next = std::make_shared<Annotations>(*annotations_);
-  auto& target = (kind == AnnotationKind::Rename)
-                     ? next->renames
-                     : (kind == AnnotationKind::Comment ? next->comments : next->bookmarks);
+  auto& target = kind == AnnotationKind::Rename     ? next->renames
+                 : kind == AnnotationKind::Comment  ? next->comments
+                 : kind == AnnotationKind::Bookmark ? next->bookmarks
+                                                    : next->functions;
   if (text.empty()) {
     target.erase(address);
   } else {
@@ -782,8 +810,93 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
 }
 
 void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    apply_annotation_edit_locked(kind, address, text, true);
+  }
+  after_annotation_change(kind);
+}
+
+void Session::set_function_edit(std::uint64_t address, const std::string& action) {
+  set_annotation(AnnotationKind::FunctionStart, address, action);
+}
+
+void Session::after_annotation_change(AnnotationKind kind) {
+  // Function boundaries change the analysis; every other annotation is
+  // display-only.
+  if (kind == AnnotationKind::FunctionStart) {
+    reanalyze();
+  }
+}
+
+bool Session::reanalysis_pending() const {
   std::lock_guard<std::mutex> lock(mutex_);
-  apply_annotation_edit_locked(kind, address, text, true);
+  return reanalysis_pending_;
+}
+
+void Session::reanalyze() {
+  std::shared_ptr<const Document> current;
+  std::shared_ptr<const Annotations> annotations;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (busy_.load()) {
+      // Never cancel a load or save for this; the workspace retries when
+      // the worker is free.
+      reanalysis_pending_ = true;
+      return;
+    }
+    reanalysis_pending_ = false;
+    current = document_;
+    annotations = annotations_;
+  }
+  if (current == nullptr) {
+    return;
+  }
+  retire_worker();
+  const std::uint64_t generation = generation_.fetch_add(1) + 1;
+  CancellationToken token;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_cancellation_ = token;
+    status_ =
+        "Re-analysing with " + std::to_string(annotations->functions.size()) + " function edit(s)";
+    error_.reset();
+  }
+  busy_.store(true);
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, current, annotations, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
+    AnalysisOptions options = analysis_options_for(*annotations);
+    options.cancellation_token = token;
+    auto analysis = analyze(current->loaded.image, current->loaded.data, options);
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
+      return;
+    }
+    if (!analysis) {
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+           "Failed to re-analyse");
+      return;
+    }
+    // The loaded bytes are shared, not copied (ByteBuffer storage).
+    auto document = std::make_shared<Document>();
+    document->loaded = current->loaded;
+    document->analysis = std::move(analysis.value());
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (generation_.load() == generation) {
+      document_ = std::move(document);
+      status_ =
+          "Re-analysed (" + std::to_string(document_->analysis.functions.size()) + " functions)";
+      busy_.store(false);
+    }
+  });
 }
 
 void Session::toggle_bookmark(std::uint64_t address, const std::string& note) {
@@ -793,26 +906,32 @@ void Session::toggle_bookmark(std::uint64_t address, const std::string& note) {
 }
 
 bool Session::undo() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   if (undo_stack_.empty()) {
     return false;
   }
   AnnotationEdit edit = std::move(undo_stack_.back());
   undo_stack_.pop_back();
   apply_annotation_edit_locked(edit.kind, edit.address, edit.old_text, false);
+  const AnnotationKind kind = edit.kind;
   redo_stack_.push_back(std::move(edit));
+  lock.unlock();
+  after_annotation_change(kind);
   return true;
 }
 
 bool Session::redo() {
-  std::lock_guard<std::mutex> lock(mutex_);
+  std::unique_lock<std::mutex> lock(mutex_);
   if (redo_stack_.empty()) {
     return false;
   }
   AnnotationEdit edit = std::move(redo_stack_.back());
   redo_stack_.pop_back();
   apply_annotation_edit_locked(edit.kind, edit.address, edit.new_text, false);
+  const AnnotationKind kind = edit.kind;
   undo_stack_.push_back(std::move(edit));
+  lock.unlock();
+  after_annotation_change(kind);
   return true;
 }
 

@@ -48,6 +48,9 @@ int main(int argc, char** argv) {
   if (command == "functions") {
     return donkey::cli::command_functions(rest);
   }
+  if (command == "callgraph") {
+    return donkey::cli::command_callgraph(rest);
+  }
   if (command == "cfg") {
     return donkey::cli::command_cfg(rest);
   }

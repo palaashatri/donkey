@@ -89,6 +89,11 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set_tests_properties(large.load_and_analyse_1gib PROPERTIES TIMEOUT 600 LABELS large)
 endif()
 
+add_test(NAME cli.callgraph_json
+         COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
+set_tests_properties(cli.callgraph_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"edges\": \\[.*main\".*donkey_debuggee_tick.*\"unresolved\"")
+
 add_test(NAME cli.version COMMAND donkey-cli --version)
 set_tests_properties(cli.version PROPERTIES PASS_REGULAR_EXPRESSION "donkey-cli ${PROJECT_VERSION}")
 
@@ -251,12 +256,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 4.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 4.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
@@ -290,7 +295,7 @@ add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 3.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 4.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -341,14 +346,14 @@ add_test(NAME cli.project_backup_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_backup_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 3"
+  PASS_REGULAR_EXPRESSION "\"schema\": 4"
   DEPENDS cli.project_annotations_after_clear)
 
 add_test(NAME cli.project_backup_json
          COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
                  --json)
 set_tests_properties(cli.project_backup_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 3.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 4.*\"integrity\": true"
   DEPENDS cli.project_backup_save)
 
 add_test(NAME cli.project_backup_refuses_overwrite
@@ -365,7 +370,7 @@ set_tests_properties(cli.project_backup_force PROPERTIES
 add_test(NAME cli.project_restore_json
          COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
 set_tests_properties(cli.project_restore_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 3.*\"integrity\": true.*\"images\": 1"
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 4.*\"integrity\": true.*\"images\": 1"
   DEPENDS cli.project_backup_force)
 
 add_test(NAME cli.project_restore_rejects_non_database

@@ -338,7 +338,7 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
 
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 3);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto images = reopened.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -396,7 +396,7 @@ TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
   // Opening must migrate from v2 to v3, preserve existing annotations, and allow Bookmark
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 3);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto annotations = reopened.value().annotations(image_id);
   ASSERT_TRUE(annotations.has_value());
   ASSERT_EQ(annotations.value().size(), 1U);
@@ -979,6 +979,65 @@ TEST(Project, RestoreChecksCancellationBeforeCreatingTemporaryCopy) {
   EXPECT_EQ(restored.diagnostic().code, "io.cancelled");
   EXPECT_FALSE(hook_called);
   EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
+}
+
+TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
+  TempPath path("migrate-v3");
+  const std::int64_t image_id = make_project(path.str(), "kept");
+  // Recreate the exact v3 annotations table (narrower CHECK) with a row.
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "DROP TABLE annotations;"
+                           "CREATE TABLE annotations ("
+                           "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+                           "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
+                           "  address INTEGER NOT NULL, text TEXT NOT NULL,"
+                           "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                           "  PRIMARY KEY (image_id, kind, address));"
+                           "INSERT INTO annotations(image_id, kind, address, text) "
+                           "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
+                           "PRAGMA user_version=3;",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    // The old constraint really rejects the new kind.
+    EXPECT_NE(sqlite3_exec(db,
+                           "INSERT INTO annotations(image_id, kind, address, text) "
+                           "VALUES (1, 'function', 48, 'define')",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  {
+    auto project = Project::open(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    EXPECT_EQ(project.value().schema_version(), 4);
+    auto stored = project.value().annotations(image_id);
+    ASSERT_TRUE(stored.has_value());
+    ASSERT_EQ(stored.value().size(), 2U);
+    ASSERT_TRUE(
+        project.value()
+            .replace_annotations(image_id, {{AnnotationKind::Comment, 16, "kept"},
+                                            {AnnotationKind::FunctionStart, 0x1060, "define"}})
+            .has_value());
+    auto integrity = project.value().check_integrity();
+    ASSERT_TRUE(integrity.has_value());
+    EXPECT_TRUE(integrity.value());
+  }
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value());
+  auto stored = reopened.value().annotations(image_id);
+  ASSERT_TRUE(stored.has_value());
+  bool found = false;
+  for (const Annotation& annotation : stored.value()) {
+    if (annotation.kind == AnnotationKind::FunctionStart) {
+      EXPECT_EQ(annotation.address, 0x1060U);
+      EXPECT_EQ(annotation.text, "define");
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
 }
 
 }  // namespace

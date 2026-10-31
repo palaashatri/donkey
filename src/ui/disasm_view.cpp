@@ -116,6 +116,39 @@ void disassembly(const Document& document, UiState& state) {
         }
       }
       if (ImGui::BeginPopupContextItem("##disasmcontext")) {
+        {
+          // Function boundaries: define a start here, or remove the
+          // discovered one. Either re-runs analysis on the worker.
+          const std::string* edit = state.annotations != nullptr
+                                        ? state.annotations->function_edit_at(instruction.address)
+                                        : nullptr;
+          bool is_start = false;
+          for (const Function& function : document.analysis.functions) {
+            if (function.address == instruction.address) {
+              is_start = true;
+              break;
+            }
+          }
+          const char* label = nullptr;
+          std::string action;
+          if (edit != nullptr) {
+            label =
+                *edit == "define" ? "Undefine function (user-defined)" : "Restore removed function";
+            action.clear();
+          } else if (is_start) {
+            label = "Remove function here";
+            action = "remove";
+          } else {
+            label = "Define function here";
+            action = "define";
+          }
+          if (ImGui::MenuItem(label)) {
+            state.function_edit_requested = true;
+            state.function_edit_address = instruction.address;
+            state.function_edit_action = action;
+          }
+          ImGui::Separator();
+        }
         if (ImGui::MenuItem(bookmarked ? "Remove bookmark" : "Add bookmark")) {
           state.annotation_kind = AnnotationKind::Bookmark;
           state.annotation_address = instruction.address;

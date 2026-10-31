@@ -41,6 +41,8 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
       return "comment";
     case AnnotationKind::Bookmark:
       return "bookmark";
+    case AnnotationKind::FunctionStart:
+      return "function";
   }
   return "unknown";
 }
@@ -111,6 +113,25 @@ CREATE TABLE annotations (
   updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
   PRIMARY KEY (image_id, kind, address)
 );
+)sql";
+
+/// v4 allows user-defined function boundaries ('function': text "define" or
+/// "remove") in the annotations table. SQLite cannot change a CHECK
+/// constraint in place, so the table is rebuilt and its rows copied.
+constexpr const char* kMigrateV3ToV4 = R"sql(
+ALTER TABLE annotations RENAME TO annotations_v3_old;
+CREATE TABLE annotations (
+  image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark', 'function')),
+  address    INTEGER NOT NULL,
+  text       TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (image_id, kind, address)
+);
+INSERT INTO annotations (image_id, kind, address, text, updated_at)
+  SELECT image_id, kind, address, text, updated_at FROM annotations_v3_old;
+DROP TABLE annotations_v3_old;
+PRAGMA user_version=4;
 )sql";
 
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
@@ -352,6 +373,20 @@ Result<Project> Project::open(const std::string& path) {
                 std::string(sqlite3_errstr(rc_commit)) + " msg=" + sqlite3_errmsg(db));
       }
       schema = 3;
+    }
+    if (schema == 3) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV3ToV4, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v3->v4: " + message);
+      }
+      schema = 4;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -701,6 +736,8 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
       annotation.kind = AnnotationKind::Rename;
     } else if (kind == "comment") {
       annotation.kind = AnnotationKind::Comment;
+    } else if (kind == "function") {
+      annotation.kind = AnnotationKind::FunctionStart;
     } else if (kind == "bookmark") {
       annotation.kind = AnnotationKind::Bookmark;
     } else {

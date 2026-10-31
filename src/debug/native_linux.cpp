@@ -45,7 +45,7 @@ using NativeRegs = user_regs_struct;
 constexpr std::array<std::byte, 1> kTrap{std::byte{0xcc}};
 constexpr Architecture kHostArch = Architecture::X86_64;
 #else
-using NativeRegs = user_pt_regs;
+using NativeRegs = user_regs_struct;  // glibc <sys/user.h>: regs[31], sp, pc, pstate
 // BRK #0, little endian.
 constexpr std::array<std::byte, 4> kTrap{std::byte{0x00}, std::byte{0x00}, std::byte{0x20},
                                          std::byte{0xd4}};
@@ -600,8 +600,11 @@ struct LocalDebugAdapter::Impl {
     if (!decoder) {
       return std::nullopt;
     }
+#if defined(__x86_64__)
     std::uint64_t sp_delta = 0;  // bytes pushed since entry
-    bool saved_link = false;     // AArch64: x30 stored at [sp + 8]
+#else
+    bool saved_link = false;  // x30 stored at [sp + 8] by the pre-indexed stp
+#endif
     std::size_t offset = 0;
     while (offset < code.size()) {
       auto insn = decoder.value().decode_one(std::span<const std::byte>(code).subspan(offset),
@@ -625,7 +628,6 @@ struct LocalDebugAdapter::Impl {
       if (i.mnemonic == "stp" && ops.size() >= 3 && ops[0].reg == "x29" && ops[1].reg == "x30" &&
           ops[2].kind == OperandKind::Memory && ops[2].memory.base == "sp") {
         saved_link = true;
-        sp_delta = 0;  // pre-indexed: x30 now sits at [sp + 8]
       } else if (i.mnemonic == "mov" && i.operands.find("x29, sp") != std::string::npos) {
         return std::nullopt;
       }
@@ -646,7 +648,6 @@ struct LocalDebugAdapter::Impl {
       value = regs.regs[30];
     }
 #endif
-    (void)saved_link;
     // Process entry points (_start) have no caller: what sits at [sp] is argc.
     return is_code_address(value) ? std::optional<std::uint64_t>(value) : std::nullopt;
   }

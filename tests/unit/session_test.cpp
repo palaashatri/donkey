@@ -646,4 +646,83 @@ TEST(Session, BackupOverOpenProjectIsRejected) {
   EXPECT_TRUE(Project::open(db_path.str()).has_value());
 }
 
+bool has_function(const Session& session, std::uint64_t address) {
+  const auto document = session.document();
+  if (document == nullptr) {
+    return false;
+  }
+  for (const auto& function : document->analysis.functions) {
+    if (function.address == address) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TEST(Session, FunctionBoundaryEditsReanalyseUndoAndPersist) {
+  TempPath db_path("session-function-edits");
+  Session session;
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  const auto document = session.document();
+  ASSERT_NE(document, nullptr);
+
+  // An instruction inside main that is not a function start, and a
+  // discovered function to remove.
+  std::uint64_t main_address = 0;
+  std::uint64_t tick_address = 0;
+  for (const auto& function : document->analysis.functions) {
+    if (function.name == "main") {
+      main_address = function.address;
+    } else if (function.name == "donkey_debuggee_tick") {
+      tick_address = function.address;
+    }
+  }
+  ASSERT_NE(main_address, 0U);
+  ASSERT_NE(tick_address, 0U);
+  std::uint64_t inside = 0;
+  for (const auto& instruction : document->analysis.instructions) {
+    if (instruction.address > main_address + 4 && !has_function(session, instruction.address)) {
+      inside = instruction.address;
+      break;
+    }
+  }
+  ASSERT_NE(inside, 0U);
+
+  session.set_function_edit(inside, "define");
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_TRUE(has_function(session, inside));
+  EXPECT_NE(session.document(), document) << "analysis must be recomputed, not reused";
+  EXPECT_TRUE(session.dirty());
+
+  session.set_function_edit(tick_address, "remove");
+  ASSERT_TRUE(wait_idle(session));
+  // A user removal wins over discovery, even for a call target.
+  EXPECT_FALSE(has_function(session, tick_address));
+  ASSERT_NE(session.annotations()->function_edit_at(tick_address), nullptr);
+
+  ASSERT_TRUE(session.undo());  // undo the removal
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->function_edit_at(tick_address), nullptr);
+  EXPECT_TRUE(has_function(session, tick_address));
+  ASSERT_TRUE(session.undo());  // undo the definition
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_FALSE(has_function(session, inside));
+  ASSERT_TRUE(session.redo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_TRUE(has_function(session, inside));
+
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  Session reopened;
+  reopened.open_project(db_path.str());
+  ASSERT_TRUE(wait_idle(reopened));
+  ASSERT_FALSE(reopened.take_error().has_value());
+  EXPECT_TRUE(has_function(reopened, inside)) << "the edit must survive save and reopen";
+  ASSERT_NE(reopened.annotations()->function_edit_at(inside), nullptr);
+  EXPECT_EQ(*reopened.annotations()->function_edit_at(inside), "define");
+}
+
 }  // namespace

@@ -41,6 +41,15 @@ void Workspace::focus_address(std::uint64_t address, const std::string& section)
 void Workspace::draw(bool& quit) {
   draw_menu_bar(quit);
 
+  if (state_.function_edit_requested) {
+    state_.function_edit_requested = false;
+    session_.set_function_edit(state_.function_edit_address, state_.function_edit_action);
+  }
+  // A boundary edit made while the worker was busy runs once it is free.
+  if (!session_.busy() && session_.reanalysis_pending()) {
+    session_.reanalyze();
+  }
+
   ImGuiViewport* viewport = ImGui::GetMainViewport();
   ImGui::SetNextWindowPos(viewport->WorkPos);
   ImGui::SetNextWindowSize(viewport->WorkSize);

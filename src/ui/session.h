@@ -31,6 +31,9 @@ struct Annotations {
   std::unordered_map<std::uint64_t, std::string> renames;
   std::unordered_map<std::uint64_t, std::string> comments;
   std::unordered_map<std::uint64_t, std::string> bookmarks;
+  /// User function-boundary edits: "define" adds a start, "remove" drops a
+  /// discovered one. Changing them re-runs analysis.
+  std::unordered_map<std::uint64_t, std::string> functions;
 
   [[nodiscard]] const std::string* rename_at(std::uint64_t address) const {
     const auto it = renames.find(address);
@@ -43,6 +46,10 @@ struct Annotations {
   [[nodiscard]] const std::string* bookmark_at(std::uint64_t address) const {
     const auto it = bookmarks.find(address);
     return it == bookmarks.end() ? nullptr : &it->second;
+  }
+  [[nodiscard]] const std::string* function_edit_at(std::uint64_t address) const {
+    const auto it = functions.find(address);
+    return it == functions.end() ? nullptr : &it->second;
   }
   [[nodiscard]] bool has_bookmark(std::uint64_t address) const {
     return bookmarks.contains(address);
@@ -115,6 +122,16 @@ class Session {
   /// Persistence happens on the next explicit save.
   void set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text);
 
+  /// Define a function starting at `address`, remove the discovered one, or
+  /// (with an empty action) drop the edit. Re-runs analysis on the worker.
+  void set_function_edit(std::uint64_t address, const std::string& action);
+
+  /// True when a function-boundary edit is waiting for the worker to be free.
+  [[nodiscard]] bool reanalysis_pending() const;
+  /// Re-analyse the open document with the current function edits. Deferred
+  /// (see reanalysis_pending) while another operation runs.
+  void reanalyze();
+
   /// Toggle bookmark at address. Clears it if already present.
   void toggle_bookmark(std::uint64_t address, const std::string& note = "Bookmark");
 
@@ -132,6 +149,7 @@ class Session {
 
   void retire_worker();
   void reap_retired_workers();
+  void after_annotation_change(AnnotationKind kind);
   std::function<void(std::uint64_t, std::uint64_t)> progress_reporter(std::uint64_t generation);
   bool wait_for_retired_workers(const CancellationToken& token);
   void fail(std::uint64_t generation, const std::string& message, const std::string& status);
@@ -154,6 +172,7 @@ class Session {
   std::vector<RetiredWorker> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
   std::function<void()> restore_post_commit_hook_;
+  bool reanalysis_pending_ = false;
 
   CancellationToken current_cancellation_;
   std::vector<AnnotationEdit> undo_stack_;

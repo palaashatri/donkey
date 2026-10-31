@@ -109,12 +109,88 @@ void sections(const Document& document, UiState& state) {
   ImGui::EndTable();
 }
 
+namespace {
+
+const Function* function_containing(const Document& document, std::uint64_t address) {
+  const Function* best = nullptr;
+  for (const Function& function : document.analysis.functions) {
+    if (function.address == address) {
+      return &function;
+    }
+    if (function.has_extent && address >= function.address && address < function.end_address &&
+        (best == nullptr || function.address > best->address)) {
+      best = &function;
+    }
+  }
+  return best;
+}
+
+std::string function_label(const Document& document, std::uint64_t address) {
+  for (const Function& function : document.analysis.functions) {
+    if (function.address == address) {
+      return function.name;
+    }
+  }
+  return components::format_address(address);
+}
+
+/// Callers and callees of the selected function, from the call graph.
+void call_graph_panel(const Document& document, UiState& state) {
+  const Function* function = function_containing(document, state.selected_address);
+  if (function == nullptr) {
+    ImGui::TextDisabled("Select a function to see its calls.");
+    return;
+  }
+  const CallGraph& graph = document.analysis.call_graph;
+  const auto callees = graph.callees_of(function->address);
+  const auto callers = graph.callers_of(function->address);
+  std::size_t indirect = 0;
+  for (const auto& site : graph.unresolved) {
+    indirect += site.caller == function->address ? 1 : 0;
+  }
+  ImGui::TextDisabled("%s: calls %zu, called by %zu%s", function->name.c_str(), callees.size(),
+                      callers.size(),
+                      indirect != 0 ? (", " + std::to_string(indirect) + " indirect").c_str() : "");
+  if (ImGui::BeginChild("##calls", ImVec2(0.0f, 0.0f))) {
+    if (ImGui::TreeNodeEx("Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
+      for (const CallGraphEdge& edge : callees) {
+        ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
+        const std::string label = function_label(document, edge.callee) + "  (at " +
+                                  components::format_address(edge.site) + ")";
+        if (ImGui::Selectable(label.c_str())) {
+          state.navigate_to(edge.callee, &document);
+        }
+        ImGui::PopID();
+      }
+      ImGui::TreePop();
+    }
+    if (ImGui::TreeNodeEx("Called by", ImGuiTreeNodeFlags_DefaultOpen)) {
+      for (const CallGraphEdge& edge : callers) {
+        ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
+        const std::string label = function_label(document, edge.caller) + "  (at " +
+                                  components::format_address(edge.site) + ")";
+        if (ImGui::Selectable(label.c_str())) {
+          state.navigate_to(edge.site, &document);
+        }
+        ImGui::PopID();
+      }
+      ImGui::TreePop();
+    }
+  }
+  ImGui::EndChild();
+}
+
+}  // namespace
+
 void functions(const Document& document, UiState& state) {
   components::search_field("##functionfilter", state.function_filter, "Filter functions");
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
-  if (!ImGui::BeginTable("##functions", 4, flags)) {
+  // Leave room under the table for the selected function's calls.
+  const float calls_height = ImGui::GetTextLineHeightWithSpacing() * 9.0f;
+  const float table_height = std::max(ImGui::GetContentRegionAvail().y - calls_height, 80.0f);
+  if (!ImGui::BeginTable("##functions", 4, flags, ImVec2(0.0f, table_height))) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
@@ -185,6 +261,7 @@ void functions(const Document& document, UiState& state) {
     ImGui::Text("%u", function.block_count);
   }
   ImGui::EndTable();
+  call_graph_panel(document, state);
 }
 
 void strings(const Document& document, UiState& state) {

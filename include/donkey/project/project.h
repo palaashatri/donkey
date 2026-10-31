@@ -15,11 +15,18 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 3;
+constexpr int kProjectSchemaVersion = 4;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
-enum class AnnotationKind : std::uint8_t { Rename = 0, Comment = 1, Bookmark = 2 };
+/// FunctionStart records a user edit of function boundaries at `address`:
+/// text "define" adds a function start, "remove" deletes a discovered one.
+enum class AnnotationKind : std::uint8_t {
+  Rename = 0,
+  Comment = 1,
+  Bookmark = 2,
+  FunctionStart = 3
+};
 const char* annotation_kind_name(AnnotationKind kind) noexcept;
 
 struct Annotation {

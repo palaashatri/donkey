@@ -31,6 +31,29 @@ struct StringLiteral {
   std::string encoding;
 };
 
+/// One call site: the function containing it calls `callee`.
+struct CallGraphEdge {
+  std::uint64_t caller = 0;  ///< entry of the calling function
+  std::uint64_t callee = 0;  ///< direct call target
+  std::uint64_t site = 0;    ///< address of the call instruction
+};
+
+/// Direct calls between functions. Indirect calls are listed as unresolved
+/// sites instead of being given guessed targets.
+struct CallGraph {
+  std::vector<CallGraphEdge> edges;  ///< sorted by caller, then site
+  struct Unresolved {
+    std::uint64_t caller = 0;
+    std::uint64_t site = 0;
+  };
+  std::vector<Unresolved> unresolved;
+  /// Call sites in functions the CFG did not cover (caller unknown).
+  std::size_t orphan_sites = 0;
+
+  [[nodiscard]] std::vector<CallGraphEdge> callers_of(std::uint64_t function) const;
+  [[nodiscard]] std::vector<CallGraphEdge> callees_of(std::uint64_t function) const;
+};
+
 struct AnalysisOptions {
   std::size_t max_instructions = 1'000'000;
   std::size_t max_strings = 100'000;
@@ -43,6 +66,10 @@ struct AnalysisOptions {
   CancellationToken cancellation_token = CancellationToken::none();
   /// Configured limits and budget.
   ResourceBudget budget;
+  /// Function starts the user defined (seeded in addition to discovered ones)
+  /// and discovered starts the user removed. Both come from the project.
+  std::vector<std::uint64_t> user_function_starts;
+  std::vector<std::uint64_t> removed_function_starts;
 };
 
 struct AnalysisResult {
@@ -52,6 +79,7 @@ struct AnalysisResult {
   /// `build_control_flow` is enabled.
   std::vector<Function> functions;
   ControlFlowGraph cfg;
+  CallGraph call_graph;
   std::vector<Xref> xrefs;
   std::vector<StringLiteral> strings;
   bool partial = false;
@@ -69,6 +97,10 @@ struct AnalysisResult {
 [[nodiscard]] Result<ControlFlowGraph> build_control_flow_graph(
     const BinaryImage& image, std::span<const Instruction> instructions,
     std::span<const Function> seeds, const AnalysisOptions& options = {});
+
+/// Call graph from the CFG's blocks and the decoded call instructions.
+[[nodiscard]] CallGraph build_call_graph(const ControlFlowGraph& cfg,
+                                         std::span<const Instruction> instructions);
 
 /// Linear disassembly of executable sections plus seeded function discovery.
 /// When `build_control_flow` is set, basic blocks, CFG edges and estimated

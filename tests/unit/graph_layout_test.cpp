@@ -9,8 +9,11 @@
 #include <chrono>
 #include <cstdint>
 #include <map>
+#include <string>
 
+#include "donkey/analysis/analysis.h"
 #include "donkey/analysis/graph_layout.h"
+#include "donkey/binary/image.h"
 
 namespace {
 
@@ -106,6 +109,62 @@ TEST(GraphLayout, OtherFunctionsAndEmptyFunctionsAreHandled) {
   const ControlFlowGraph cfg = synthetic_function(10);
   EXPECT_TRUE(donkey::layout_function_graph(cfg, FunctionId{2}).nodes.empty());
   EXPECT_TRUE(donkey::layout_function_graph(ControlFlowGraph{}, FunctionId{1}).nodes.empty());
+}
+
+}  // namespace
+
+// ---------------------------------------------------------------------------
+// Call graph (M3) over the debuggee built from source on every platform.
+// ---------------------------------------------------------------------------
+
+namespace {
+
+TEST(CallGraph, MainCallsTickDirectlyAndIndirectCallsStayUnresolved) {
+  auto loaded = donkey::load_binary(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(analysis.has_value());
+  const auto& result = analysis.value();
+  std::uint64_t main_address = 0;
+  std::uint64_t tick_address = 0;
+  for (const auto& function : result.functions) {
+    if (function.name == "main" || function.name == "_main") {
+      main_address = function.address;
+    } else if (function.name.find("donkey_debuggee_tick") != std::string::npos) {
+      tick_address = function.address;
+    }
+  }
+  ASSERT_NE(main_address, 0U);
+  ASSERT_NE(tick_address, 0U);
+
+  const auto callees = result.call_graph.callees_of(main_address);
+  EXPECT_TRUE(std::any_of(callees.begin(), callees.end(),
+                          [&](const auto& edge) { return edge.callee == tick_address; }));
+  const auto callers = result.call_graph.callers_of(tick_address);
+  ASSERT_FALSE(callers.empty());
+  for (const auto& edge : callers) {
+    EXPECT_EQ(edge.caller, main_address);
+    // The site is inside main and decodes as a call to tick.
+    EXPECT_GT(edge.site, main_address);
+  }
+  // Every edge's target comes from a decoded direct call, never a guess.
+  for (const auto& edge : result.call_graph.edges) {
+    bool found = false;
+    for (const auto& instruction : result.instructions) {
+      if (instruction.address == edge.site) {
+        EXPECT_EQ(instruction.direct_target.value_or(0), edge.callee);
+        found = true;
+      }
+    }
+    EXPECT_TRUE(found);
+  }
+  for (const auto& site : result.call_graph.unresolved) {
+    for (const auto& instruction : result.instructions) {
+      if (instruction.address == site.site) {
+        EXPECT_FALSE(instruction.direct_target.has_value());
+      }
+    }
+  }
 }
 
 }  // namespace

@@ -108,6 +108,7 @@ struct AnalysisRequest {
   std::size_t max_strings = 100000;
   std::size_t min_string_length = 4;
   std::size_t max_items = 1000;
+  std::vector<std::uint64_t> function_starts;
   LoadOptions load_options;
 };
 
@@ -508,6 +509,7 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   options.max_instructions = request.max_instructions;
   options.max_strings = request.max_strings;
   options.min_string_length = request.min_string_length;
+  options.user_function_starts = request.function_starts;
   auto result = analyze(loaded.image, loaded.data, options);
   if (!result) {
     return fail(result.diagnostic());
@@ -545,6 +547,58 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                     literal.encoding.c_str(), literal.text.c_str());
       }
       std::printf("(%zu strings)\n", analysis.strings.size());
+    }
+    return kExitOk;
+  }
+
+  if (mode == "callgraph") {
+    auto name_of = [&](std::uint64_t address) {
+      for (const Function& function : analysis.functions) {
+        if (function.address == address) {
+          return function.name;
+        }
+      }
+      return std::string();
+    };
+    const CallGraph& graph = analysis.call_graph;
+    if (request.json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"partial\": " + std::string(analysis.cfg.partial ? "true" : "false") + ",\n";
+      out += "  \"edges\": [";
+      for (std::size_t i = 0; i < graph.edges.size(); ++i) {
+        const CallGraphEdge& edge = graph.edges[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"caller\": " + quote(hex(edge.caller)) +
+               ", \"caller_name\": " + quote(name_of(edge.caller)) +
+               ", \"callee\": " + quote(hex(edge.callee)) +
+               ", \"callee_name\": " + quote(name_of(edge.callee)) +
+               ", \"site\": " + quote(hex(edge.site)) + "}";
+      }
+      out += graph.edges.empty() ? "],\n" : "\n  ],\n";
+      out += "  \"unresolved\": [";
+      for (std::size_t i = 0; i < graph.unresolved.size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"caller\": " + quote(hex(graph.unresolved[i].caller)) +
+               ", \"site\": " + quote(hex(graph.unresolved[i].site)) + "}";
+      }
+      out += graph.unresolved.empty() ? "],\n" : "\n  ],\n";
+      out += "  \"orphan_sites\": " + std::to_string(graph.orphan_sites) + "\n}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      for (const CallGraphEdge& edge : graph.edges) {
+        std::printf("%-18s %-28s -> %-18s %s (at %s)\n", hex(edge.caller).c_str(),
+                    name_of(edge.caller).c_str(), hex(edge.callee).c_str(),
+                    name_of(edge.callee).c_str(), hex(edge.site).c_str());
+      }
+      for (const auto& unresolved : graph.unresolved) {
+        std::printf("%-18s %-28s -> <indirect>         (at %s)\n", hex(unresolved.caller).c_str(),
+                    name_of(unresolved.caller).c_str(), hex(unresolved.site).c_str());
+      }
+      std::printf("(%zu direct calls, %zu indirect, %zu outside known functions)\n",
+                  graph.edges.size(), graph.unresolved.size(), graph.orphan_sites);
     }
     return kExitOk;
   }
@@ -701,7 +755,8 @@ void print_usage(std::FILE* out) {
                " [--section NAME]\n"
                "  donkey-cli strings <binary> [--json] [--min-length N]"
                " [--max-strings N]\n"
-               "  donkey-cli functions <binary> [--json] [--max-instructions N]\n"
+               "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
+               "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
                "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli xrefs <binary> [--json] [--address A]\n"
@@ -897,6 +952,13 @@ int command_functions(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (argument == "--function") {
+      std::string_view value;
+      std::uint64_t parsed = 0;
+      if (!take_value(arguments, i, value) || !parse_u64(value, parsed)) {
+        return usage_error("--function needs an address");
+      }
+      request.function_starts.push_back(parsed);
     } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
       if (flag_error != nullptr) {
         return usage_error(flag_error);
@@ -913,6 +975,48 @@ int command_functions(const std::vector<std::string_view>& arguments) {
     return usage_error("functions needs a file path");
   }
   return command_analysis(request, "functions");
+}
+
+int command_callgraph(const std::vector<std::string_view>& arguments) {
+  AnalysisRequest request;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
+    if (argument == "--json") {
+      request.json = true;
+    } else if (argument == "--max-instructions") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--max-instructions needs a value");
+      }
+      std::uint64_t parsed = 0;
+      if (!parse_u64(value, parsed) || parsed == 0) {
+        return usage_error("invalid --max-instructions value");
+      }
+      request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (argument == "--function") {
+      std::string_view value;
+      std::uint64_t parsed = 0;
+      if (!take_value(arguments, i, value) || !parse_u64(value, parsed)) {
+        return usage_error("--function needs an address");
+      }
+      request.function_starts.push_back(parsed);
+    } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for callgraph");
+    } else if (request.path.empty()) {
+      request.path = std::string(argument);
+    } else {
+      return usage_error("callgraph accepts exactly one file");
+    }
+  }
+  if (request.path.empty()) {
+    return usage_error("callgraph needs a file path");
+  }
+  return command_analysis(request, "callgraph");
 }
 
 int command_xrefs(const std::vector<std::string_view>& arguments) {
