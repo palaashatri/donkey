@@ -6,6 +6,10 @@ Donkey is a planned free, open-source, native binary reverse-engineering suite (
 
 The full design — architecture, module rules, decompiler pipeline, debugger model, milestones M0–M12, acceptance tests and backlog — is in [`docs/DESIGN.md`](docs/DESIGN.md). This file is the short instruction sheet.
 
+## Beyond v1.0: the IDA Pro gap ledger
+
+Work past the v1.0 scope is planned in [`docs/IDA_GAP_LEDGER.md`](docs/IDA_GAP_LEDGER.md): gaps G01-G19 with task-sized plans, the tests that prove each task, and the order to take them in. Read its sections 1-3 (rules, workflow, verification) before taking a task, and update its status row in the same PR. It is a plan, not a capability list: never cite it as something Donkey does.
+
 ## Where to start
 
 Implement the first-wave backlog in order (`docs/DESIGN.md` §16):
