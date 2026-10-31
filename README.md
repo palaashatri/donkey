@@ -10,13 +10,14 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 |---|---|---|
 | ELF / PE / Mach-O import (32/64-bit, fat Mach-O, raw) | Implemented | Bounds-checked; malformed input gives diagnostics, never crashes (fuzzed). Optional OS-process isolation (`--isolate`) on POSIX hosts. |
 | Disassembly (x86, x86-64, AArch64) | Implemented | Capstone 5.0.9; call/jump/return classes, xrefs, RIP-relative and ADRP data refs. |
-| Functions, CFG, strings, xrefs | Implemented | Bounded and deterministic; indirect branches are marked `Partial`. |
-| Decompiler | Partial | Verified-IR subset of x86-64, x86-32 and AArch64 with structuring, ABI signatures, stack locals and switch recovery. Floating point/SIMD, stack-passed arguments, varargs, struct recovery and 32-bit ARM are not implemented; unsupported instructions are shown, never guessed. |
-| Projects (SQLite) | Implemented | Renames, comments, bookmarks, undo/redo, crash-safe backup/restore (fault-injection tested). |
+| Functions, CFG, call graph, strings, xrefs | Implemented | Bounded and deterministic. x86 jump tables are recovered from the bounds check and the table bytes; other indirect branches are marked `Partial`. Function boundaries can be defined or removed and persist in projects. |
+| Decompiler | Partial (integer subset) | Verified-IR subset of x86-64, x86-32 and AArch64: structuring, switches, ABI signatures, stack locals, conditional moves, structs behind pointer arguments. Checked against the compiled code on a 39-function corpus at -O0/-O2/-O3 (`docs/SUPPORT_MATRIX.md`): no Complete result disagrees. Floating point, SIMD, varargs and 32-bit ARM are not implemented; they show as Partial or Unsupported, never guessed. |
+| Projects (SQLite) | Implemented | Renames, comments, bookmarks, function-boundary edits, undo/redo, schema migrations, crash-safe backup/restore (fault-injection tested). |
 | Patching | Implemented | Hex-view editor in the GUI and `donkey-cli patch apply`; original-byte checks, overlap rejection, export to a new file, signature-invalidation warnings. |
-| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS, FreeBSD and Windows arm64** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules, ASLR-aware static↔runtime mapping. Single traced thread; no hardware breakpoints or remote targets. |
+| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS, FreeBSD and Windows arm64** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules (including libraries loaded after launch, named from their own symbols), ASLR-aware static↔runtime mapping, explanatory permission errors. Single traced thread; no hardware breakpoints or remote targets. |
+| Debug information | DWARF 2-5 | Functions, prototypes, parameters, variables and types from ELF and MinGW PE, each labelled with its provenance; user renames always win. PDB and Apple .dSYM bundles are not read. |
 | Plugins | Implemented on POSIX; isolation unsupported on Windows | Versioned C ABI; untrusted plugins run in a forked worker. On Windows, untrusted inspection fails closed. |
-| Desktop app | Implemented | Dear ImGui + SDL3: docked overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics. Falls back to a software renderer when no Vulkan/D3D12/Metal device is available. |
+| Desktop app | Implemented | Dear ImGui + SDL3: docked overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics. Keyboard-only use (G go to, N rename, ; comment), saved layouts, DPI changes, display removal and graphics-device loss are handled and tested by scripted UI tests (`docs/UI_TESTING.md`). Falls back to a software renderer when no Vulkan/D3D12/Metal device is available. No screen-reader support. |
 
 ### Platforms
 
@@ -27,7 +28,7 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 | Windows 10/11 x64 and arm64 | `setup.exe` (NSIS), portable `.zip` | CI on Windows Server 2022 (silent install, run, uninstall) and local wine runs |
 | FreeBSD 14 amd64 and arm64 | `.pkg`, `.tar.gz` | CI in a FreeBSD 14.3 VM (CLI and software-rendered GUI); no native debugger |
 
-Not done yet: native debugging on macOS (Mach task ports and entitlements) and FreeBSD, remote debug protocols, hardware breakpoints, decompiler breadth listed above, streamed/mmap loading of very large files, screen-reader accessibility, multi-image project tabs, notarised macOS builds and signed Windows installers.
+Not done yet: native debugging on macOS (Mach task ports and entitlements), FreeBSD and Windows on Arm; PDB and .dSYM debug information; remote debug protocols and hardware breakpoints; floating-point/SIMD decompilation and AArch64 jump tables; user-entered type edits; resolving imports across images; screen-reader accessibility; multi-image project tabs; notarised macOS builds and signed Windows installers. Files of 64 MiB and more are memory-mapped, and a 1 GiB file stays inside a 48 MiB memory budget (tested).
 
 ## Install
 
@@ -44,7 +45,12 @@ The desktop app is `donkey`; the scriptable tool is `donkey-cli`. Opening a file
 
 ## Workbench Showcase
 
-Donkey provides a fast, native Dear ImGui + SDL3 docked desktop workbench with synchronised disassembly, control flow graphs, an SSA-based decompiler, hex editor, debugger panel, and SQLite project annotations:
+[docs/images/screenshots](docs/images/screenshots/README.md) has screenshots of every platform. The app captured them itself, driven by `tests/ui/screenshots.donkeyui` on a small demo program built with each platform's own compiler: the workspace, a jump-table switch, a DWARF prototype, the component gallery and, where a native debugger exists, a breakpoint stop.
+
+![Workspace on Linux x86-64](docs/images/screenshots/linux-x86_64/03-loop-and-dwarf.png)
+*Linux x86-64: the demo program's `stock_value` with its DWARF prototype beside verified pseudocode.*
+
+Older captures:
 
 ### Mach-O AArch64 Reverse Engineering Workspace
 ![Mach-O AArch64 Workspace](docs/images/donkey-overview-macho.png)
@@ -88,17 +94,11 @@ cd build/package-linux && cpack
 
 `-DDONKEY_USE_SYSTEM_SQLITE=ON` links the system SQLite instead of the pinned amalgamation (for distribution packagers).
 
-## Roadmap
+## Status
 
-The first useful release is a fast native **binary viewer**, not a decompiler. In order:
+Milestones M0-M11 of [docs/DESIGN.md](docs/DESIGN.md) are implemented for the platforms and features listed above. The truth table (§17.2) gives the evidence for each and states what is not claimed. The 26 end-to-end acceptance projects are in [tests/acceptance/manifest.json](tests/acceptance/manifest.json): 23 pass, and 3 are partial with their gaps stated. Measured decompiler coverage per compiler and ISA is in [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md), and the [user guide](docs/USER_GUIDE.md) ships in every package.
 
-1. **Project skeleton** (milestone M0): CMake presets, CI on Linux, macOS, Windows and FreeBSD, a window that opens, and `donkey-cli --version`.
-2. **Open any executable safely** (M1): ELF, PE and Mach-O files show their format, architecture, sections, entry point and hash; malformed files produce a clear error instead of a crash.
-3. **Read the code** (M2): Capstone disassembly for x86-64 and AArch64, a hex view, strings, imports/exports and cross-references, all navigable, plus `donkey-cli info` / `analyze` with JSON output.
-4. **Follow the control flow** (M3): function discovery, control-flow and call graphs, renaming and comments that survive save and reopen.
-5. **First honest decompiler output** (M4–M5) for a documented subset of x86-64, clearly marking anything it can't handle.
-
-Ghidra, Cutter/Rizin, ImHex and Binary Ninja's free tier already cover milestones 2–4; Donkey's reason to exist is a faster native UI and, later, a better decompiler. Keep that in view when deciding how much to invest.
+Donkey is a fast native workbench with an honest, tested decompiler subset. It is not a replacement for IDA Pro, Ghidra or Binary Ninja: their decompilers, type libraries, signature databases and processor coverage are far broader.
 
 ## Licence
 
