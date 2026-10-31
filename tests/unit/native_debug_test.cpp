@@ -488,6 +488,48 @@ TEST(NativeDebug, AttachAndDetachLeaveTheProcessRunning) {
 }
 #endif
 
+// M7: a refused attach explains which permission is missing, and neither
+// the debugger nor static analysis is left unusable.
+TEST(NativeDebug, RefusedAttachExplainsItselfAndNothingElseBreaks) {
+  REQUIRE_NATIVE();
+#if defined(_WIN32)
+  const std::uint32_t protected_pid = 4;  // the System process
+#else
+  if (::geteuid() == 0) {
+    // Root may attach to init; never stop init to prove a point.
+    GTEST_SKIP() << "running as root: attach would be permitted";
+  }
+  const std::uint32_t protected_pid = 1;
+#endif
+  auto adapter = native_adapter();
+  auto refused = adapter->attach(protected_pid);
+  ASSERT_FALSE(refused.has_value()) << "attach to a protected process unexpectedly succeeded";
+  EXPECT_EQ(adapter->state(), SessionState::Error);
+  EXPECT_FALSE(refused.diagnostic().message.empty());
+#if defined(_WIN32)
+  if (refused.diagnostic().status == donkey::Status::PermissionDenied) {
+    EXPECT_EQ(refused.diagnostic().code, "debug.permission_denied");
+  }
+#else
+  EXPECT_EQ(refused.diagnostic().status, donkey::Status::PermissionDenied);
+  EXPECT_EQ(refused.diagnostic().code, "debug.permission_denied");
+  EXPECT_NE(refused.diagnostic().message.find("ptrace_scope"), std::string::npos)
+      << "the message must say what to change: " << refused.diagnostic().message;
+#endif
+
+  // The same adapter still launches and runs our own program...
+  LaunchConfig config;
+  config.binary_path = kDebuggee;
+  config.stop_at_entry = true;
+  ASSERT_TRUE(adapter->launch(config).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().exit_code, 42);
+  // ...and static analysis of the file never depended on the debugger.
+  EXPECT_FALSE(debuggee_image().image.symbols.empty());
+}
+
 TEST(NativeDebug, UnsupportedHostsReportNothingAndFabricateNothing) {
   if (native_supported()) {
     GTEST_SKIP() << "this host has a native debugger";
