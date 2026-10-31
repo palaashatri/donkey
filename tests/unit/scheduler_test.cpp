@@ -49,8 +49,8 @@ class Gate {
 };
 
 TEST(JobScheduler, VisibleWorkRunsBeforeQueuedBackgroundWork) {
+  Gate gate;  // declared first: outlives the scheduler's workers
   JobScheduler scheduler(1);
-  Gate gate;
   std::mutex order_mutex;
   std::vector<std::string> order;
   auto record = [&](std::string name) {
@@ -96,8 +96,8 @@ TEST(JobScheduler, NeverRunsMoreJobsThanWorkers) {
 }
 
 TEST(JobScheduler, NewerRequestWithTheSameKeySupersedesAQueuedOne) {
+  Gate gate;  // declared first: outlives the scheduler's workers
   JobScheduler scheduler(1);
-  Gate gate;
   scheduler.submit(JobPriority::Normal, [&](const CancellationToken&) { gate.wait(); });
   gate.wait_entered();
   std::atomic<bool> old_ran{false};
@@ -144,8 +144,8 @@ TEST(JobScheduler, DestructionCancelsQueuedWorkAndJoins) {
   std::vector<std::atomic<bool>> ran(kJobs);
   std::vector<CancellationToken> tokens;
   {
+    Gate gate;  // declared first: outlives the scheduler's workers
     JobScheduler scheduler(1);
-    Gate gate;
     scheduler.submit(JobPriority::Normal, [&](const CancellationToken&) { gate.wait(); });
     gate.wait_entered();
     for (int i = 0; i < kJobs; ++i) {
