@@ -11,15 +11,17 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # Windows uses the MinGW-w64 GCC on the runner's PATH here; the release
-  # packages (package.yml) are built with MSVC, so both toolchains are covered.
+  # Windows uses the MinGW-w64 GCC on the runner's PATH here. Windows arm64
+  # (llvm-mingw) is built and tested in package.yml.
   build:
     name: ${{ matrix.os }} headless
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-24.04, macos-15, windows-2022]
+        # ubuntu-24.04-arm runs the AArch64 native debugger tests on real
+        # hardware.
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-15, windows-2022]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

@@ -14,7 +14,7 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 | Decompiler | Partial | Verified-IR subset of x86-64, x86-32 and AArch64 with structuring, ABI signatures, stack locals and switch recovery. Floating point/SIMD, stack-passed arguments, varargs, struct recovery and 32-bit ARM are not implemented; unsupported instructions are shown, never guessed. |
 | Projects (SQLite) | Implemented | Renames, comments, bookmarks, undo/redo, crash-safe backup/restore (fault-injection tested). |
 | Patching | Implemented | Hex-view editor in the GUI and `donkey-cli patch apply`; original-byte checks, overlap rejection, export to a new file, signature-invalidation warnings. |
-| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS and FreeBSD** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules, ASLR-aware static↔runtime mapping. Single traced thread; no hardware breakpoints or remote targets. |
+| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS, FreeBSD and Windows arm64** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules, ASLR-aware static↔runtime mapping. Single traced thread; no hardware breakpoints or remote targets. |
 | Plugins | Implemented on POSIX; isolation unsupported on Windows | Versioned C ABI; untrusted plugins run in a forked worker. On Windows, untrusted inspection fails closed. |
 | Desktop app | Implemented | Dear ImGui + SDL3: docked overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics. Falls back to a software renderer when no Vulkan/D3D12/Metal device is available. |
 
@@ -22,10 +22,10 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 
 | Platform | Packages | Verified by |
 |---|---|---|
-| Linux x86-64 | `.deb`, `.rpm`, `.tar.gz` (glibc ≥ 2.35) | CI (Ubuntu 22.04 build; install-and-run on Ubuntu 22.04/24.04, Debian 12, Fedora 41, Arch) and local GUI automation under Xvfb |
-| macOS 11+ (universal arm64/x86_64) | `.dmg`, `.zip` | CI on macOS 15 (arm64) and earlier manual testing on macOS arm64; ad-hoc signed, not notarised |
-| Windows 10/11 x64 | `setup.exe` (NSIS), portable `.zip` | CI on Windows Server 2022 (silent install, run, uninstall) and local wine runs |
-| FreeBSD 14 amd64 | `.pkg`, `.tar.gz` | CI in a FreeBSD 14.3 VM (CLI and software-rendered GUI); no native debugger |
+| Linux x86-64 and arm64 | `.deb`, `.rpm`, `.tar.gz` (glibc ≥ 2.35) | CI (Ubuntu 22.04 build; install-and-run on Ubuntu 22.04/24.04, Debian 12, Fedora 41, Arch) and local GUI automation under Xvfb |
+| macOS 11+ (Apple silicon, arm64) | `.dmg`, `.zip` | CI on macOS 15 (arm64) and earlier manual testing on macOS arm64; ad-hoc signed, not notarised |
+| Windows 10/11 x64 and arm64 | `setup.exe` (NSIS), portable `.zip` | CI on Windows Server 2022 (silent install, run, uninstall) and local wine runs |
+| FreeBSD 14 amd64 and arm64 | `.pkg`, `.tar.gz` | CI in a FreeBSD 14.3 VM (CLI and software-rendered GUI); no native debugger |
 
 Not done yet: native debugging on macOS (Mach task ports and entitlements) and FreeBSD, remote debug protocols, hardware breakpoints, decompiler breadth listed above, streamed/mmap loading of very large files, screen-reader accessibility, multi-image project tabs, notarised macOS builds and signed Windows installers.
 

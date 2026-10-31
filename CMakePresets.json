@@ -182,14 +182,14 @@
     {
       "name": "package-macos",
       "inherits": "base",
-      "displayName": "macOS universal release packages (DMG, ZIP)",
+      "displayName": "macOS arm64 release packages (DMG, ZIP)",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "DONKEY_BUILD_UI": "ON",
         "DONKEY_STATIC_RUNTIME": "ON",
         "DONKEY_WARNINGS_AS_ERRORS": "ON",
         "DONKEY_UI_SMOKE_TEST": "ON",
-        "CMAKE_OSX_ARCHITECTURES": "arm64;x86_64",
+        "CMAKE_OSX_ARCHITECTURES": "arm64",
         "CMAKE_OSX_DEPLOYMENT_TARGET": "11.0"
       },
       "condition": {
