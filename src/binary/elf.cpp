@@ -390,9 +390,9 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
     section.virtual_size = raw.size;
     section.alignment = raw.alignment;
     section.has_file_data = raw.type != 8;
-    section.readable = (raw.flags & 0x2U) != 0;    // SHF_ALLOC
-    section.writable = (raw.flags & 0x1U) != 0;    // SHF_WRITE
-    section.executable = (raw.flags & 0x4U) != 0;  // SHF_EXECINSTR
+    section.readable = (raw.flags & 0x2U) != 0;      // SHF_ALLOC
+    section.writable = (raw.flags & 0x1U) != 0;      // SHF_WRITE
+    section.executable = (raw.flags & 0x4U) != 0;    // SHF_EXECINSTR
     section.compressed = (raw.flags & 0x800U) != 0;  // SHF_COMPRESSED
     image.sections.push_back(std::move(section));
   }
