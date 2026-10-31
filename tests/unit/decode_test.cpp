@@ -213,7 +213,8 @@ TEST(Analysis, PeSeedsExportedFunction) {
   EXPECT_EQ(result.value().functions[0].address, 0x140001000U);
   EXPECT_EQ(result.value().functions[0].name, "tiny_export");
   EXPECT_TRUE(result.value().functions[0].exported);
-  EXPECT_FALSE(result.value().functions[0].from_symbol);
+  // Exports in executable code are function seeds (named by the export).
+  EXPECT_TRUE(result.value().functions[0].from_symbol);
   EXPECT_EQ(result.value().functions[1].address, 0x140001009U);
   EXPECT_EQ(result.value().functions[1].name, "sub_140001009");
 

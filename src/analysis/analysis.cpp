@@ -377,7 +377,11 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
   std::set<std::uint64_t> named;
   for (const Symbol& symbol : image.symbols) {
-    if (symbol.imported || symbol.kind != SymbolKind::Function || symbol.address == 0) {
+    // Typed function symbols, and exports in executable code (PE export
+    // tables carry no type: an export in .text is an entry point).
+    const bool code_symbol = symbol.kind == SymbolKind::Function ||
+                             (symbol.kind == SymbolKind::Export && symbol.exported);
+    if (symbol.imported || !code_symbol || symbol.address == 0) {
       continue;
     }
     if (executable_contains(image, symbol.address)) {

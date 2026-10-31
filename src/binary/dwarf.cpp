@@ -28,7 +28,6 @@ constexpr std::uint16_t kTagFormalParameter = 0x05;
 constexpr std::uint16_t kTagMember = 0x0d;
 constexpr std::uint16_t kTagPointerType = 0x0f;
 constexpr std::uint16_t kTagReferenceType = 0x10;
-constexpr std::uint16_t kTagCompileUnit = 0x11;
 constexpr std::uint16_t kTagStructureType = 0x13;
 constexpr std::uint16_t kTagSubroutineType = 0x15;
 constexpr std::uint16_t kTagTypedef = 0x16;
@@ -42,7 +41,6 @@ constexpr std::uint16_t kTagVariable = 0x34;
 constexpr std::uint16_t kTagVolatileType = 0x35;
 constexpr std::uint16_t kTagRestrictType = 0x37;
 constexpr std::uint16_t kTagUnspecifiedType = 0x3b;
-constexpr std::uint16_t kTagPartialUnit = 0x3c;
 constexpr std::uint16_t kTagRvalueReferenceType = 0x42;
 
 constexpr std::uint16_t kAtLocation = 0x02;

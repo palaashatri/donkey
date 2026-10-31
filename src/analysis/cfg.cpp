@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -71,9 +72,16 @@ bool same_memory(const MemoryOperand& a, const MemoryOperand& b) {
 /// table dispatch uses are understood; anything else stops the evaluation.
 class TableSlice {
  public:
+  /// `guard_selector`: the compared register must keep the index until the
+  /// jump (false when the index is kept in a stack slot instead).
   TableSlice(const BinaryImage& image, std::span<const std::byte> file, const Operand& selector,
-             std::uint64_t value, bool x86_64)
-      : image_(image), file_(file), selector_(selector), value_(value), x86_64_(x86_64) {
+             std::uint64_t value, bool x86_64, bool guard_selector = true)
+      : image_(image),
+        file_(file),
+        selector_(selector),
+        value_(value),
+        x86_64_(x86_64),
+        guard_selector_(guard_selector) {
     if (selector.kind == OperandKind::Register) {
       registers_[x86_family(selector.reg)] = value & width_mask(selector.size);
     }
@@ -94,11 +102,21 @@ class TableSlice {
           "rax", 8,
           static_cast<std::uint64_t>(static_cast<std::int64_t>(static_cast<std::int32_t>(*eax))));
     }
+    if (ops.size() == 2 && ops[0].kind == OperandKind::Memory && m == "mov" &&
+        is_stack_slot(ops[0].memory)) {
+      // A spill to the stack (clang -O0 keeps the index in a slot).
+      auto value = value_of(ops[1], instruction);
+      if (!value) {
+        return false;
+      }
+      slots_[slot_key(ops[0].memory)] = *value & width_mask(ops[0].size == 0 ? 8 : ops[0].size);
+      return true;
+    }
     if (ops.size() != 2 || ops[0].kind != OperandKind::Register) {
       return false;
     }
     const Operand& dest = ops[0];
-    const bool writes_selector = selector_.kind == OperandKind::Register &&
+    const bool writes_selector = guard_selector_ && selector_.kind == OperandKind::Register &&
                                  x86_family(dest.reg) == x86_family(selector_.reg);
     if (m == "lea") {
       auto address = address_of(ops[1], instruction);
@@ -221,6 +239,13 @@ class TableSlice {
             same_memory(operand.memory, selector_.memory)) {
           return value_ & width_mask(operand.size);
         }
+        if (is_stack_slot(operand.memory)) {
+          const auto slot = slots_.find(slot_key(operand.memory));
+          if (slot == slots_.end()) {
+            return std::nullopt;  // a stack value from before the slice
+          }
+          return slot->second & width_mask(operand.size == 0 ? 8 : operand.size);
+        }
         auto address = address_of(operand, at);
         if (!address) {
           return std::nullopt;
@@ -261,7 +286,18 @@ class TableSlice {
   const Operand& selector_;
   std::uint64_t value_;
   bool x86_64_;
+  bool guard_selector_ = true;
   std::unordered_map<std::string, std::uint64_t> registers_;
+  std::map<std::pair<std::string, std::int64_t>, std::uint64_t> slots_;
+
+ public:
+  static bool is_stack_slot(const MemoryOperand& memory) {
+    const std::string base = x86_family(memory.base);
+    return memory.index.empty() && (base == "rbp" || base == "rsp");
+  }
+  static std::pair<std::string, std::int64_t> slot_key(const MemoryOperand& memory) {
+    return {x86_family(memory.base), memory.displacement};
+  }
 };
 
 bool flags_writer(const std::string& m) {
@@ -303,8 +339,8 @@ std::optional<JumpTable> resolve_jump_table(
   std::size_t compare = check;
   for (std::size_t i = check; i-- > 0;) {
     const Instruction& candidate = instructions[run[i]];
-    if (candidate.mnemonic == "cmp") {
-      compare = i;
+    if (candidate.mnemonic == "cmp" || candidate.mnemonic == "sub") {
+      compare = i;  // sub X, N sets the flags exactly as cmp X, N does
       break;
     }
     if (flags_writer(candidate.mnemonic) || candidate.classification != InstructionClass::Other) {
@@ -322,7 +358,54 @@ std::optional<JumpTable> resolve_jump_table(
       !branch.direct_target.has_value()) {
     return std::nullopt;
   }
+  const bool subtracts = cmp.mnemonic == "sub";
+  if (subtracts && cmp.structured_operands[0].kind != OperandKind::Register) {
+    return std::nullopt;
+  }
   const Operand& selector = cmp.structured_operands[0];
+  // Evaluation starts just after the compare or, when the check subtracts in
+  // place, just after the selector register's last definition (so the slice
+  // carries any spill of the original index).
+  std::size_t first = check + 1;
+  Operand switch_selector = selector;
+  if (subtracts) {
+    std::size_t definition = compare;
+    for (std::size_t i = compare; i-- > 0;) {
+      const auto& ops = instructions[run[i]].structured_operands;
+      if (!ops.empty() && ops[0].kind == OperandKind::Register &&
+          x86_family(ops[0].reg) == x86_family(selector.reg)) {
+        definition = i;
+        break;
+      }
+    }
+    if (definition == compare) {
+      return std::nullopt;
+    }
+    first = definition + 1;
+    // The switch reads the index from the stack slot it was spilled to; the
+    // register itself no longer holds it.
+    bool found = false;
+    for (std::size_t i = first; i < compare; ++i) {
+      const Instruction& spill = instructions[run[i]];
+      const auto& ops = spill.structured_operands;
+      if (spill.mnemonic == "mov" && ops.size() == 2 && ops[0].kind == OperandKind::Memory &&
+          TableSlice::is_stack_slot(ops[0].memory) && ops[1].kind == OperandKind::Register &&
+          x86_family(ops[1].reg) == x86_family(selector.reg)) {
+        switch_selector = ops[0];
+        found = true;
+      }
+    }
+    for (std::size_t i = compare + 1; found && i + 1 < run.size(); ++i) {
+      const auto& ops = instructions[run[i]].structured_operands;
+      if (!ops.empty() && ops[0].kind == OperandKind::Memory &&
+          TableSlice::slot_key(ops[0].memory) == TableSlice::slot_key(switch_selector.memory)) {
+        found = false;  // overwritten before the jump
+      }
+    }
+    if (!found) {
+      return std::nullopt;
+    }
+  }
   const std::uint64_t bound = static_cast<std::uint64_t>(cmp.structured_operands[1].immediate) &
                               width_mask(selector.size == 0 ? 4 : selector.size);
   const std::uint64_t count = branch.mnemonic == "ja" ? bound + 1 : bound;
@@ -333,10 +416,13 @@ std::optional<JumpTable> resolve_jump_table(
   table.jump_address = jump.address;
   table.check_address = cmp.address;
   table.default_target = branch.direct_target.value();
-  table.selector = selector;
+  table.selector = switch_selector;
   for (std::uint64_t value = 0; value < count; ++value) {
-    TableSlice slice(image, file, selector, value, x86_64);
-    for (std::size_t i = check + 1; i + 1 < run.size(); ++i) {
+    TableSlice slice(image, file, selector, value, x86_64, !subtracts);
+    for (std::size_t i = first; i + 1 < run.size(); ++i) {
+      if (i == check || (subtracts && i == compare)) {
+        continue;  // the bounds check itself
+      }
       if (!slice.step(instructions[run[i]])) {
         return std::nullopt;
       }

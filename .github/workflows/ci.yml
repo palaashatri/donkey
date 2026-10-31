@@ -35,6 +35,10 @@ jobs:
         run: cmake --build --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel
       - name: Test
         run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel 4
+      # Failures again, alone and with their output, at the end of the log.
+      - name: Failed tests in detail
+        if: failure()
+        run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --rerun-failed --output-on-failure
 
   gui-linux:
     name: ubuntu-24.04 desktop shell (Xvfb)
