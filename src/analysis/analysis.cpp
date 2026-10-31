@@ -353,6 +353,16 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         }
         result.instructions.push_back(instruction);
       }
+      if (stream.value().invalid_bytes != 0) {
+        // Data in code or encodings the decoder does not know: skipped, so
+        // the code after them is still decoded, but the sweep is Partial.
+        result.partial = true;
+        result.diagnostics.push_back(Diagnostic::make(
+            Status::Partial, "analysis.undecodable_bytes",
+            std::to_string(stream.value().invalid_bytes) + " undecodable byte(s) skipped in '" +
+                section.name + "'",
+            section.file_offset + (stream.value().first_invalid_address - section.address)));
+      }
       if (stream.value().truncated) {
         result.partial = true;
         result.diagnostics.push_back(Diagnostic::make(

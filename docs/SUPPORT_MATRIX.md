@@ -68,7 +68,7 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | CI ubuntu-24.04-arm | 39/39 | 36/39 | 30/39 | SIMD, `ccmp` |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
-| llvm-mingw Clang, arm64 Windows | CI windows-11-arm (package job) | pending | pending | pending | |
+| llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
 
 On every row, no Complete result disagrees with the compiled code.
 
@@ -105,5 +105,7 @@ Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform
 whose package job runs them: keyboard-only navigation, IME commit and
 composition, focus changes, display-scale changes, display removal (where
 the window manager allows an off-screen window), graphics device loss and
-recreation, layout persistence, and a 1,000,000-row virtualised table.
+recreation, layout persistence, and a 1,000,000-row virtualised table. On
+FreeBSD aarch64, whose CI VM is emulated, the two timing-bound scripts
+(1,000,000-row table, input latency under load) are not run.
 Screen readers are not supported: Dear ImGui exposes no accessibility tree.

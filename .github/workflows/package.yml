@@ -352,9 +352,20 @@ jobs:
             git config --global --add safe.directory '*'
             cmake --preset package-freebsd
             cmake --build --preset package-freebsd --parallel
+            # What analysis reports about the test debuggee (status, diagnostics).
+            build/package-freebsd/apps/donkey-cli/donkey-cli analyze \
+              build/package-freebsd/tests/donkey_test_debuggee --json \
+              | grep -E '"status"|"code"' || true
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             sleep 2
-            DISPLAY=:99 ctest --preset package-freebsd --parallel 2
+            # The aarch64 VM runs without hardware virtualisation (about 70 min
+            # against 7 for amd64), so frame-time limits mean nothing there: the
+            # two timing-bound UI scripts run on amd64 only. Everything else runs.
+            exclude=''
+            if [ "${{ matrix.vm_arch }}" = aarch64 ]; then
+              exclude='ui[.]script_(virtualization|responsiveness)'
+            fi
+            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 ${exclude:+-E "$exclude"}
             mkdir -p screenshots
             cp build/package-freebsd/tests/screenshots/*.bmp screenshots/ || true
             (cd build/package-freebsd && cpack)

@@ -11,7 +11,9 @@ exits 1.
 
 Scripts live in `tests/ui/*.donkeyui` and run under CTest as
 `ui.script_*` when the build has `-DDONKEY_UI_SMOKE_TEST=ON` (Linux CI runs
-them under Xvfb; the package jobs run them on every platform).
+them under Xvfb; the package jobs run them on every platform, except the
+two timing-bound scripts, `virtualization` and `responsiveness`, on FreeBSD
+aarch64, whose CI VM is emulated).
 
 ```bash
 cmake --preset dev-linux -DDONKEY_UI_SMOKE_TEST=ON

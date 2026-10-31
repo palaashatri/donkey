@@ -331,13 +331,38 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
 Result<DecodeStream> Decoder::decode(std::span<const std::byte> bytes, std::uint64_t address,
                                      std::size_t max_instructions) const {
   DecodeStream stream;
+  // The smallest instruction slot: fixed 4-byte words on AArch64 and 32-bit
+  // ARM, 2 for Thumb/compressed RISC-V, 1 byte for variable-length x86.
+  std::size_t slot = 1;
+  if (impl_ != nullptr) {
+    switch (impl_->architecture) {
+      case Architecture::AArch64:
+      case Architecture::Arm:
+        slot = 4;
+        break;
+      case Architecture::RiscV64:
+        slot = 2;
+        break;
+      default:
+        break;
+    }
+  }
   std::size_t offset = 0;
   while (offset < bytes.size() && stream.instructions.size() < max_instructions) {
     auto instruction = decode_one(bytes.subspan(offset), address + offset);
     if (!instruction) {
-      stream.truncated = true;
-      stream.stop_reason = instruction.diagnostic().code;
-      break;
+      if (instruction.diagnostic().code != "decode.invalid_instruction") {
+        stream.truncated = true;
+        stream.stop_reason = instruction.diagnostic().code;
+        break;
+      }
+      const std::size_t skip = std::min(slot, bytes.size() - offset);
+      if (stream.invalid_bytes == 0) {
+        stream.first_invalid_address = address + offset;
+      }
+      stream.invalid_bytes += skip;
+      offset += skip;
+      continue;
     }
     offset += instruction.value().length;
     stream.instructions.push_back(std::move(instruction.value()));

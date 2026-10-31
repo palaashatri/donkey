@@ -80,10 +80,15 @@ struct Instruction {
 
 struct DecodeStream {
   std::vector<Instruction> instructions;
-  /// True when decoding stopped before the requested count because of invalid
-  /// bytes or a caller-supplied limit. The reason is machine-readable.
+  /// True when decoding stopped before the end of the input because of the
+  /// caller's instruction limit. The reason is machine-readable.
   bool truncated = false;
   std::string stop_reason;
+  /// Bytes that decode as no instruction (data in code, an encoding the
+  /// decoder does not know). The sweep skips one instruction slot (4 bytes on
+  /// AArch64, 1 on x86) and continues, so code after them is still found.
+  std::uint64_t invalid_bytes = 0;
+  std::uint64_t first_invalid_address = 0;
 };
 
 /// A single architecture decoder. Capstone handles are not thread-safe, so one

@@ -109,7 +109,7 @@ TEST(Decode, AArch64KnownPrologueAndReturn) {
   EXPECT_EQ(instructions[4].classification, donkey::InstructionClass::Return);
 }
 
-TEST(Decode, InvalidBytesReturnDiagnosticAndStopTheStream) {
+TEST(Decode, InvalidBytesAreSkippedAndCounted) {
   auto decoder = donkey::Decoder::create(donkey::Architecture::X86_64, donkey::Endian::Little);
   ASSERT_TRUE(decoder.has_value());
 
@@ -118,12 +118,40 @@ TEST(Decode, InvalidBytesReturnDiagnosticAndStopTheStream) {
   ASSERT_FALSE(single.has_value());
   EXPECT_EQ(single.diagnostic().code, "decode.invalid_instruction");
 
-  const std::vector<std::byte> data = {std::byte{0x90}, std::byte{0xFF}};
+  // The sweep skips the undecodable byte and still finds the code after it.
+  // 0x06 (push es) is not an instruction in 64-bit mode.
+  const std::vector<std::byte> data = {std::byte{0x90}, std::byte{0x06}, std::byte{0xC3}};
   auto stream = decoder.value().decode(data, 0x1000, 10);
   ASSERT_TRUE(stream.has_value());
-  ASSERT_EQ(stream.value().instructions.size(), 1U);
-  EXPECT_TRUE(stream.value().truncated);
-  EXPECT_EQ(stream.value().stop_reason, "decode.invalid_instruction");
+  ASSERT_EQ(stream.value().instructions.size(), 2U);
+  EXPECT_EQ(stream.value().instructions[1].address, 0x1002U);
+  EXPECT_EQ(stream.value().instructions[1].mnemonic, "ret");
+  EXPECT_FALSE(stream.value().truncated);
+  EXPECT_EQ(stream.value().invalid_bytes, 1U);
+  EXPECT_EQ(stream.value().first_invalid_address, 0x1001U);
+}
+
+// AArch64 is fixed-width: an undecodable word costs exactly one 4-byte slot,
+// so the instructions after it stay aligned. (A FreeBSD aarch64 binary lost
+// every function after its startup code when the sweep stopped here.)
+TEST(Decode, AArch64SkipsOneWordPastInvalidBytes) {
+  auto decoder = donkey::Decoder::create(donkey::Architecture::AArch64, donkey::Endian::Little);
+  ASSERT_TRUE(decoder.has_value());
+  const std::uint8_t raw[] = {0x1f, 0x20, 0x03, 0xd5,   // nop
+                              0xff, 0xff, 0xff, 0xff,   // not an instruction
+                              0x1f, 0x20, 0x03, 0xd5,   // nop
+                              0xc0, 0x03, 0x5f, 0xd6};  // ret
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto stream = decoder.value().decode(data, 0x4000, 10);
+  ASSERT_TRUE(stream.has_value());
+  ASSERT_EQ(stream.value().instructions.size(), 3U);
+  EXPECT_EQ(stream.value().instructions[1].address, 0x4008U);
+  EXPECT_EQ(stream.value().instructions[2].mnemonic, "ret");
+  EXPECT_EQ(stream.value().invalid_bytes, 4U);
+  EXPECT_EQ(stream.value().first_invalid_address, 0x4004U);
 }
 
 TEST(Decode, HonorsInstructionLimit) {
