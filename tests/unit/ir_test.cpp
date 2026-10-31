@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/ir/abi.h"
+#include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
 #include "test_io.h"
@@ -612,6 +614,60 @@ TEST(Ir, LiftsX86_32FrameFunction) {
   EXPECT_NE(code.find("ebp = esp;"), std::string::npos) << code;
   EXPECT_NE(code.find("eax = *(u32 *)(ebp + 0x8);"), std::string::npos) << code;
   EXPECT_NE(code.find("return eax;"), std::string::npos) << code;
+}
+
+/// AArch64 load pairs, checked in the IR interpreter against what the
+/// instructions compute.
+std::vector<std::byte> aarch64_bytes(std::initializer_list<std::uint32_t> words) {
+  std::vector<std::byte> out;
+  for (const std::uint32_t word : words) {
+    for (int shift = 0; shift < 32; shift += 8) {
+      out.push_back(static_cast<std::byte>((word >> shift) & 0xFF));
+    }
+  }
+  return out;
+}
+
+std::uint64_t run_aarch64(const std::vector<std::byte>& data, std::vector<std::uint8_t> memory) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return 0;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  if (!lifted.has_value()) {
+    return 0;
+  }
+  EXPECT_FALSE(lifted.value().partial);
+  donkey::IrEvalMemory eval_memory;
+  constexpr std::uint64_t kData = 0x200000;
+  eval_memory.add_region(kData, std::move(memory));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::AArch64;
+  options.convention = donkey::IrCallingConvention::Aapcs64;
+  const std::uint64_t arguments[] = {kData};
+  auto result = donkey::evaluate_ir(lifted.value(), arguments, eval_memory, options);
+  EXPECT_TRUE(result.has_value());
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, AArch64LoadPairIntoItsOwnBaseUsesTheOriginalAddress) {
+  // ldp x0, x1, [x0]; sub x0, x0, x1; ret
+  const auto data = aarch64_bytes({0xa9400400, 0xcb010000, 0xd65f03c0});
+  std::vector<std::uint8_t> memory(16, 0);
+  memory[0] = 100;  // x0 = 100
+  memory[8] = 30;   // x1 = 30
+  EXPECT_EQ(run_aarch64(data, memory), 70U);
+}
+
+TEST(Ir, AArch64LoadPairSignedWordsSignExtends) {
+  // ldpsw x8, x9, [x0]; add x0, x8, x9; ret
+  const auto data = aarch64_bytes({0x69402408, 0x8b090100, 0xd65f03c0});
+  std::vector<std::uint8_t> memory = {0xfe, 0xff, 0xff, 0xff, 5, 0, 0, 0};  // -2, 5
+  EXPECT_EQ(run_aarch64(data, memory), 3U);
 }
 
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {

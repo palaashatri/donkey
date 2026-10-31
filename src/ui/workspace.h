@@ -133,6 +133,9 @@ struct UiState {
     if (address == 0 || selected_address == address) {
       return;
     }
+    // The selection may have been set without history (the entry point at
+    // load, a click in Functions or Xrefs): keep it so Back returns there.
+    nav_history.record_location(selected_address);
     nav_history.navigate_to(address);
     selected_address = address;
     if (doc != nullptr) {

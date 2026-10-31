@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -461,6 +462,26 @@ TEST(Session, NavigationHistory) {
   auto back3 = nav.nav_back();
   ASSERT_TRUE(back3.has_value());
   EXPECT_EQ(*back3, 0x2000U);
+}
+
+// The entry point selected at load (on Mach-O that is main itself) and
+// clicks in lists set the selection without navigating; Back must still
+// return to them.
+TEST(Session, NavigationHistoryReturnsToSelectionsMadeOutsideIt) {
+  donkey::NavigationHistory nav;
+  nav.record_location(0x100);  // entry point selected at load
+  nav.navigate_to(0x200);      // "Go to"
+  ASSERT_TRUE(nav.can_nav_back());
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x100));
+  EXPECT_EQ(nav.nav_forward(), std::optional<std::uint64_t>(0x200));
+
+  nav.record_location(0x300);  // a click in the Functions list
+  nav.navigate_to(0x400);
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x300));
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x200));
+  // Recording the current entry again changes nothing.
+  nav.record_location(0x200);
+  EXPECT_EQ(nav.nav_forward(), std::optional<std::uint64_t>(0x300));
 }
 
 TEST(Session, CancellationStopsRunningTask) {

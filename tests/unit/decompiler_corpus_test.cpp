@@ -204,10 +204,12 @@ struct Outcome {
 };
 
 IrCallingConvention host_convention() {
-#if defined(_WIN32)
-  return IrCallingConvention::Win64;
-#elif defined(__aarch64__) || defined(_M_ARM64)
+  // Windows on Arm uses AAPCS64 for integer arguments, like every other
+  // AArch64 platform; only Windows x64 has its own convention.
+#if defined(__aarch64__) || defined(_M_ARM64)
   return IrCallingConvention::Aapcs64;
+#elif defined(_WIN32)
+  return IrCallingConvention::Win64;
 #else
   return IrCallingConvention::SysV64;
 #endif

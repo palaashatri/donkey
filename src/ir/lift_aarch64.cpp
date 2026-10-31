@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
+#include "registers.h"
 
 namespace donkey::internal {
 namespace {
@@ -757,23 +758,56 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
-    const bool is_load = instruction.mnemonic == "ldp";
+    const bool is_load = instruction.mnemonic == "ldp" || instruction.mnemonic == "ldpsw";
     if (is_load) {
-      IrStatement first;
-      first.op = IrOp::Load;
-      first.dest = to_ir_operand(operands[0], width);
-      first.a = memory_at(*access.memory, width, 0);
-      first.width = width;
-      first.source_address = instruction.address;
-      push(block, std::move(first));
-
-      IrStatement second;
-      second.op = IrOp::Load;
-      second.dest = to_ir_operand(operands[1], width);
-      second.a = memory_at(*access.memory, width, static_cast<std::int64_t>(width));
-      second.width = width;
-      second.source_address = instruction.address;
-      push(block, std::move(second));
+      // ldpsw loads two signed 32-bit words into 64-bit registers.
+      const bool sign_words = instruction.mnemonic == "ldpsw";
+      const std::uint8_t element = sign_words ? std::uint8_t{4} : width;
+      if (sign_words && width != 8) {
+        unsupported(block, instruction);
+        return;
+      }
+      // Both addresses use the base as it was before the instruction:
+      // when the first destination is the base (ldp x0, x1, [x0]), load the
+      // second register first so its address is not computed from the
+      // value just loaded.
+      const std::string base_family = internal::register_family(access.memory->memory.base);
+      const bool first_is_base = internal::register_family(operands[0].reg) == base_family;
+      const auto load_one = [&](std::size_t index) {
+        const std::int64_t offset = static_cast<std::int64_t>(index) * element;
+        if (!sign_words) {
+          IrStatement load;
+          load.op = IrOp::Load;
+          load.dest = to_ir_operand(operands[index], width);
+          load.a = memory_at(*access.memory, width, offset);
+          load.width = width;
+          load.source_address = instruction.address;
+          push(block, std::move(load));
+          return;
+        }
+        const std::uint32_t id = temporary_id();
+        IrStatement load;
+        load.op = IrOp::Load;
+        load.dest = temp_operand(id, element);
+        load.a = memory_at(*access.memory, element, offset);
+        load.width = element;
+        load.source_address = instruction.address;
+        push(block, std::move(load));
+        IrStatement extend;
+        extend.op = IrOp::SignExtend;
+        extend.dest = to_ir_operand(operands[index], width);
+        extend.a = temp_operand(id, element);
+        extend.width = width;
+        extend.source_address = instruction.address;
+        push(block, std::move(extend));
+      };
+      if (first_is_base) {
+        load_one(1);
+        load_one(0);
+      } else {
+        load_one(0);
+        load_one(1);
+      }
     } else if (instruction.mnemonic == "stp") {
       IrStatement first;
       first.op = IrOp::Store;
@@ -993,7 +1027,7 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_extend(out_block, instruction);
       } else if (mnemonic == "adr" || mnemonic == "adrp") {
         lifter.lift_address(out_block, instruction);
-      } else if (mnemonic == "ldp" || mnemonic == "stp") {
+      } else if (mnemonic == "ldp" || mnemonic == "ldpsw" || mnemonic == "stp") {
         lifter.lift_pair(out_block, instruction);
       } else if (mnemonic == "ldr" || mnemonic == "str" || mnemonic == "ldur" ||
                  mnemonic == "stur" || mnemonic == "ldrb" || mnemonic == "strb" ||
