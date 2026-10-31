@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <thread>
@@ -9,101 +10,122 @@
 
 namespace donkey::ui {
 
-AsyncDecompileState::AsyncDecompileState() {
-  worker = std::thread([this]() {
-    while (true) {
-      std::shared_ptr<const Document> doc;
-      Function target;
-      std::uint64_t gen = 0;
+namespace {
 
-      {
-        std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this]() { return stop || has_pending; });
-        if (stop) {
-          break;
-        }
-        doc = std::move(pending_doc);
-        target = std::move(pending_target);
-        gen = pending_gen;
-        has_pending = false;
-      }
-
-      if (!doc) {
-        continue;
-      }
-
-      // Check if generation superseded before starting CPU-heavy lifting
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (current_generation != gen || stop) {
-          continue;
-        }
-      }
-
-      auto lifted = lift_function(doc->loaded.image, doc->analysis, target);
-      std::string status;
-      std::string code;
-      std::string full_text;
-      std::vector<PseudocodeLine> lines;
-
-      if (!lifted) {
-        status = "Unsupported";
-        code = lifted.diagnostic().code;
-        full_text = lifted.diagnostic().message;
-      } else {
-        auto text = format_pseudocode_lines(lifted.value());
-        if (!text) {
-          status = "InvalidIR";
-          code = text.diagnostic().code;
-          full_text = text.diagnostic().code + ": " + text.diagnostic().message;
-        } else {
-          status = lifted.value().partial ? "Partial" : "Complete";
-          full_text = std::move(text.value().full_text);
-          lines = std::move(text.value().lines);
-        }
-      }
-
-      {
-        std::lock_guard<std::mutex> lock(mutex);
-        if (current_generation == gen && !stop) {
-          ready_status = std::move(status);
-          ready_code = std::move(code);
-          ready_text = std::move(full_text);
-          ready_lines = std::move(lines);
-          ready_address = target.address;
-          ready_name = target.name;
-          ready = true;
-        }
-      }
-    }
-  });
+AsyncDecompileState::Output lift_and_format(const Document& document, const Function& target) {
+  AsyncDecompileState::Output out;
+  auto lifted = lift_function(document.loaded.image, document.analysis, target);
+  if (!lifted) {
+    out.status = "Unsupported";
+    out.code = lifted.diagnostic().code;
+    out.text = lifted.diagnostic().message;
+    return out;
+  }
+  auto text = format_pseudocode_lines(lifted.value());
+  if (!text) {
+    out.status = "InvalidIR";
+    out.code = text.diagnostic().code;
+    out.text = text.diagnostic().code + ": " + text.diagnostic().message;
+    return out;
+  }
+  out.status = lifted.value().partial ? "Partial" : "Complete";
+  out.text = std::move(text.value().full_text);
+  out.lines = std::move(text.value().lines);
+  return out;
 }
 
-AsyncDecompileState::~AsyncDecompileState() {
-  {
-    std::lock_guard<std::mutex> lock(mutex);
-    stop = true;
-    has_pending = false;
-    pending_doc.reset();
-  }
-  cv.notify_one();
-  if (worker.joinable()) {
-    worker.join();
+std::string cache_key(const Function& target) {
+  return std::to_string(target.address) + ":" + target.name;
+}
+
+}  // namespace
+
+void AsyncDecompileState::reset_cache_for(const Document* document) {
+  // Caller holds `mutex`.
+  if (cache_document != document) {
+    cache_document = document;
+    cache.clear();
+    scheduler.cancel_all();  // nothing queued for the old document is useful
   }
 }
 
 void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc,
                                        Function target) {
+  if (!doc) {
+    return;
+  }
   {
     std::lock_guard<std::mutex> lock(mutex);
     current_generation = gen;
-    pending_gen = gen;
-    pending_doc = std::move(doc);
-    pending_target = std::move(target);
-    has_pending = true;
     ready = false;
+    reset_cache_for(doc.get());
+    const auto hit = cache.find(cache_key(target));
+    if (hit != cache.end()) {
+      ready_status = hit->second.status;
+      ready_code = hit->second.code;
+      ready_text = hit->second.text;
+      ready_lines = hit->second.lines;
+      ready_address = target.address;
+      ready_name = target.name;
+      ready = true;
+      return;
+    }
   }
-  cv.notify_one();
+  scheduler.submit(
+      JobPriority::Visible,
+      [this, gen, doc, target](const CancellationToken& token) {
+        {
+          std::lock_guard<std::mutex> lock(mutex);
+          if (current_generation != gen || token.is_cancelled()) {
+            return;  // superseded before the CPU-heavy part
+          }
+        }
+        Output out = lift_and_format(*doc, target);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (cache_document == doc.get()) {
+          cache[cache_key(target)] = out;
+        }
+        if (current_generation == gen) {
+          ready_status = std::move(out.status);
+          ready_code = std::move(out.code);
+          ready_text = std::move(out.text);
+          ready_lines = std::move(out.lines);
+          ready_address = target.address;
+          ready_name = target.name;
+          ready = true;
+        }
+      },
+      "visible");
+}
+
+void AsyncDecompileState::prefetch(const std::shared_ptr<const Document>& doc,
+                                   std::vector<Function> targets) {
+  if (!doc) {
+    return;
+  }
+  for (Function& target : targets) {
+    const std::string key = cache_key(target);
+    {
+      std::lock_guard<std::mutex> lock(mutex);
+      reset_cache_for(doc.get());
+      if (cache.count(key) != 0) {
+        continue;
+      }
+    }
+    scheduler.submit(
+        JobPriority::Background,
+        [this, doc, target = std::move(target), key](const CancellationToken& token) {
+          if (token.is_cancelled()) {
+            return;
+          }
+          Output out = lift_and_format(*doc, target);
+          std::lock_guard<std::mutex> lock(mutex);
+          if (cache_document == doc.get() && !token.is_cancelled()) {
+            cache.emplace(key, std::move(out));
+          }
+        },
+        "prefetch:" + key);
+  }
 }
 
 }  // namespace donkey::ui
@@ -194,6 +216,30 @@ void refresh(UiState& state, const Document& document, const Function& function)
   }
 
   state.async_decompile->request_lift(gen, state.pseudocode_document_owner, std::move(target));
+
+  // Callees are the likeliest next stop; lift a few in the background.
+  constexpr std::size_t kPrefetch = 4;
+  std::vector<Function> next;
+  for (const CallGraphEdge& edge : document.analysis.call_graph.callees_of(function.address)) {
+    if (next.size() >= kPrefetch) {
+      break;
+    }
+    for (const Function& candidate : document.analysis.functions) {
+      if (candidate.address == edge.callee &&
+          std::none_of(next.begin(), next.end(),
+                       [&](const Function& f) { return f.address == candidate.address; })) {
+        Function callee = candidate;
+        if (state.annotations != nullptr) {
+          if (const std::string* rename = state.annotations->rename_at(candidate.address)) {
+            callee.name = *rename;
+          }
+        }
+        next.push_back(std::move(callee));
+        break;
+      }
+    }
+  }
+  state.async_decompile->prefetch(state.pseudocode_document_owner, std::move(next));
 }
 
 }  // namespace

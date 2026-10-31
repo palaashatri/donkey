@@ -51,6 +51,7 @@ add_executable(donkey_unit_tests
   unit/patch_test.cpp
   unit/plugin_test.cpp
   unit/project_test.cpp
+  unit/scheduler_test.cpp
   unit/session_test.cpp
 )
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)

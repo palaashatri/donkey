@@ -46,6 +46,7 @@ include(DonkeyStorageDependencies)
 
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
+  src/foundation/scheduler.cpp
   src/foundation/sha256.cpp
   src/foundation/version.cpp
 )

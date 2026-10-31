@@ -7,10 +7,12 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "donkey/analysis/graph_layout.h"
 #include "donkey/core/navigation.h"
+#include "donkey/core/scheduler.h"
 #include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
@@ -21,24 +23,28 @@
 namespace donkey::ui {
 
 struct AsyncDecompileState {
-  AsyncDecompileState();
-  ~AsyncDecompileState();
+  AsyncDecompileState() = default;
+  ~AsyncDecompileState() = default;
 
   AsyncDecompileState(const AsyncDecompileState&) = delete;
   AsyncDecompileState& operator=(const AsyncDecompileState&) = delete;
 
+  /// Lift the function the user is looking at (Visible priority; a newer
+  /// request supersedes a queued older one). Served from the cache when the
+  /// same function of the same document was already lifted.
   void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, Function target);
+  /// Lift functions the user is likely to open next (Background priority).
+  void prefetch(const std::shared_ptr<const Document>& doc, std::vector<Function> targets);
+
+  struct Output {
+    std::string status;
+    std::string code;
+    std::string text;
+    std::vector<PseudocodeLine> lines;
+  };
 
   std::mutex mutex;
-  std::condition_variable cv;
-  bool stop = false;
-  std::thread worker;
-
   std::uint64_t current_generation = 0;
-  std::shared_ptr<const Document> pending_doc;
-  Function pending_target;
-  std::uint64_t pending_gen = 0;
-  bool has_pending = false;
 
   bool ready = false;
   std::uint64_t ready_address = 0;
@@ -47,6 +53,17 @@ struct AsyncDecompileState {
   std::string ready_code;
   std::string ready_text;
   std::vector<PseudocodeLine> ready_lines;
+
+  /// Results for one document, keyed by "address:name" (renames change the
+  /// printed name, so they are separate entries).
+  const Document* cache_document = nullptr;
+  std::unordered_map<std::string, Output> cache;
+
+  /// Declared last: destroyed first, so no job outlives the state it uses.
+  JobScheduler scheduler{2};
+
+ private:
+  void reset_cache_for(const Document* document);
 };
 
 /// Selection and filter state shared by every panel. It is render-thread
