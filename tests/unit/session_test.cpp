@@ -672,9 +672,11 @@ TEST(Session, FunctionBoundaryEditsReanalyseUndoAndPersist) {
   std::uint64_t main_address = 0;
   std::uint64_t tick_address = 0;
   for (const auto& function : document->analysis.functions) {
-    if (function.name == "main") {
+    // Mach-O symbols carry a leading underscore.
+    if (function.name == "main" || function.name == "_main") {
       main_address = function.address;
-    } else if (function.name == "donkey_debuggee_tick") {
+    } else if (function.name == "donkey_debuggee_tick" ||
+               function.name == "_donkey_debuggee_tick") {
       tick_address = function.address;
     }
   }

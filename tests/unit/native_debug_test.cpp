@@ -269,7 +269,11 @@ TEST(NativeDebug, WriteRegisterIsVisibleToTheTarget) {
   REQUIRE_NATIVE();
   auto adapter = launch_at_entry();
   const std::uint64_t before = pc(*adapter);
-  const std::string name = register_value(*adapter, {"rip"}) != 0 ? "rip" : "pc";
+  auto registers = adapter->read_registers();
+  ASSERT_TRUE(registers.has_value());
+  const bool x86 = std::any_of(registers.value().begin(), registers.value().end(),
+                               [](const auto& reg) { return reg.name == "rip"; });
+  const std::string name = x86 ? "rip" : "pc";
   ASSERT_TRUE(adapter->write_register(name, before).has_value());
   EXPECT_EQ(pc(*adapter), before);
   auto bad = adapter->write_register("no_such_register", 1);

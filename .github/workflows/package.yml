@@ -343,7 +343,10 @@ jobs:
             donkey-cli info /usr/local/bin/donkey-cli | head -6
             DISPLAY=:99 donkey --renderer software /usr/local/bin/donkey-cli --exit-after-frames 30
             pkg delete -y donkey
-            if command -v donkey; then echo "binaries left behind"; exit 1; fi
+            # sh caches command paths, so test the files rather than `command -v`.
+            for f in /usr/local/bin/donkey /usr/local/bin/donkey-cli /usr/local/share/doc/donkey/LICENSE; do
+              if [ -e "$f" ]; then echo "left behind: $f"; exit 1; fi
+            done
             (cd dist && for f in *.pkg; do sha256 -q "$f" > "$f.sha256"; done)
             ls -l dist
       - uses: actions/upload-artifact@v4

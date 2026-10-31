@@ -499,6 +499,13 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
       if (terminator == 0) {
         continue;
       }
+      // ARM/AArch64/RISC-V mapping symbols ($x, $d, $a, $t, optionally
+      // ".suffix") mark code/data transitions; they are not names.
+      if (symbol_type == 0 && (info >> 4U) == 0 && terminator >= 2 && raw_name[0] == '$' &&
+          (raw_name[1] == 'x' || raw_name[1] == 'd' || raw_name[1] == 'a' || raw_name[1] == 't') &&
+          (terminator == 2 || raw_name[2] == '.')) {
+        continue;
+      }
       Symbol symbol;
       symbol.name = sanitize_name(raw_name.substr(0, terminator));
       symbol.address = value;
