@@ -384,6 +384,7 @@ struct Lifter {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const std::string& mnemonic = instruction.mnemonic;
     const IrOp op = arithmetic_op(mnemonic);
+    const FlagsState prior_flags = flags_state;
     flags_state = FlagsState::Unknown;
     if (op == IrOp::Nop || operands.empty()) {
       unsupported(block, instruction);
@@ -409,10 +410,21 @@ struct Lifter {
     const bool shift = op == IrOp::Shl || op == IrOp::Shr || op == IrOp::Sar;
     const bool logic = op == IrOp::And || op == IrOp::Or || op == IrOp::Xor;
     const bool subtract = mnemonic == "sub";
-    // A shift by a register may be by zero, which leaves the flags alone.
+    if (shift && source.kind == IrOperandKind::Constant) {
+      // x86 masks the count to 5 bits (6 for 64-bit operands): `shl eax, 32`
+      // shifts by 0. Emit the effective count.
+      source.constant &= destination.width >= 8 ? 0x3FU : 0x1FU;
+    }
+    // A shift by an effective count of zero (a register may hold one) changes
+    // neither the destination nor the flags, so its flags are not defined here.
     const bool flags_defined =
         mnemonic != "imul" &&
-        (!shift || (source.kind == IrOperandKind::Constant && (source.constant & 0x3F) != 0));
+        (!shift || (source.kind == IrOperandKind::Constant && source.constant != 0));
+    if (shift && source.kind == IrOperandKind::Constant && source.constant == 0) {
+      // Known not to touch the flags: the previous flag writer's Compare/Test
+      // is still the last one in the block, so whatever it modelled holds.
+      flags_state = prior_flags;
+    }
 
     if (destination.kind == IrOperandKind::Register) {
       std::optional<IrOperand> saved;

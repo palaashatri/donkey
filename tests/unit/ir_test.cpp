@@ -741,6 +741,48 @@ TEST(Ir, AArch64BranchAfterAnUnmodelledFlagWriterIsPartial) {
   EXPECT_TRUE(lifted.value().partial);
 }
 
+// `shl eax, 32` shifts by 0 (x86 masks a 32-bit count to 5 bits) and leaves
+// the flags alone, so the jz below tests esi from `test esi, esi`. Treating
+// the shift as a flag writer branched on eax instead and was reported
+// Complete.
+TEST(Ir, X86ZeroEffectiveShiftKeepsThePriorFlags) {
+  const std::uint8_t raw[] = {0x89, 0xf8,                           // mov eax, edi
+                              0x85, 0xf6,                           // test esi, esi
+                              0xc1, 0xe0, 0x20,                     // shl eax, 32
+                              0x74, 0x06,                           // je +6
+                              0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,   // mov eax, 1; ret
+                              0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3};  // mov eax, 2; ret
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value());
+  // The count is a known 0, so the flags of `test esi, esi` still hold.
+  EXPECT_FALSE(lifted.value().partial);
+  struct Case {
+    std::uint64_t edi;
+    std::uint64_t esi;
+    std::uint64_t expected;
+  };
+  for (const Case c : {Case{5, 0, 2}, Case{0, 7, 1}, Case{0, 0, 2}, Case{9, 9, 1}}) {
+    donkey::IrEvalMemory memory;
+    donkey::IrEvalOptions options;
+    options.architecture = Architecture::X86_64;
+    options.convention = donkey::IrCallingConvention::SysV64;
+    const std::uint64_t arguments[] = {c.edi, c.esi};
+    auto result = donkey::evaluate_ir(lifted.value(), arguments, memory, options);
+    ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+    EXPECT_EQ(result.value().return_value & 0xffffffffU, c.expected)
+        << "edi=" << c.edi << " esi=" << c.esi;
+  }
+}
+
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {
   const auto data = aarch64_two_argument_function();
   auto image = synthetic_image(data.size());
