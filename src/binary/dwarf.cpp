@@ -57,6 +57,7 @@ constexpr std::uint16_t kAtDataMemberLocation = 0x38;
 constexpr std::uint16_t kAtDeclFile = 0x3a;
 constexpr std::uint16_t kAtDeclLine = 0x3b;
 constexpr std::uint16_t kAtDeclaration = 0x3c;
+constexpr std::uint16_t kAtRanges = 0x55;
 constexpr std::uint16_t kAtExternal = 0x3f;
 constexpr std::uint16_t kAtSpecification = 0x47;
 constexpr std::uint16_t kAtType = 0x49;
@@ -316,6 +317,12 @@ class Reader {
       if (!read_unit(info)) {
         break;
       }
+    }
+    if (ranged_functions_ != 0) {
+      diag(Status::Partial, "dwarf.ranges_unsupported",
+           std::to_string(ranged_functions_) +
+               " function(s) described by DW_AT_ranges were not read",
+           first_ranged_function_);
     }
     // Units read before a stop are kept: resolve and sort them either way.
     resolve_references();
@@ -708,6 +715,7 @@ class Reader {
     std::uint32_t decl_line = 0;
     bool external = false;
     bool declaration = false;
+    bool has_ranges = false;  // DW_AT_ranges: code in range lists, not low_pc/high_pc
   };
 
   bool read_unit(Cursor& info) {
@@ -948,6 +956,9 @@ class Reader {
       case kAtDeclaration:
         e.declaration = v.u != 0;
         break;
+      case kAtRanges:
+        e.has_ranges = true;
+        break;
       default:
         break;
     }
@@ -981,8 +992,19 @@ class Reader {
 
     switch (e.tag) {
       case kTagSubprogram: {
-        if (!e.low_pc.has_value() || e.declaration) {
-          return;  // a declaration, or code given by ranges (not read yet)
+        if (e.declaration) {
+          return;
+        }
+        if (!e.low_pc.has_value()) {
+          // Code given by DW_AT_ranges (common in optimised builds) is not read
+          // yet: count it so the result is reported Partial, never Complete.
+          if (e.has_ranges) {
+            if (ranged_functions_ == 0) {
+              first_ranged_function_ = e.offset;
+            }
+            ++ranged_functions_;
+          }
+          return;
         }
         if (out_.functions.size() >= options_.max_functions) {
           diag(Status::ResourceLimit, "dwarf.function_limit", "too many functions", e.offset);
@@ -1222,6 +1244,8 @@ class Reader {
   std::size_t entries_ = 0;
   std::map<std::uint64_t, AbbrevTable> abbrev_cache_;
   std::map<std::uint64_t, std::string> names_;
+  std::uint64_t ranged_functions_ = 0;
+  std::uint64_t first_ranged_function_ = 0;
   std::map<std::uint64_t, std::string> linkage_;
   std::map<std::uint64_t, std::uint64_t> links_;
   std::map<std::uint64_t, std::uint64_t> die_types_;

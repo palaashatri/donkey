@@ -170,6 +170,34 @@ TEST(DebugInfo, MalformedSectionsAreBoundedAndDeterministic) {
   }
 }
 
+// A function whose code is described by DW_AT_ranges (GCC's hot/cold
+// split at -O2) is either read or reported: the result is never Complete
+// with the function silently missing.
+TEST(DebugInfo, FunctionsGivenByRangesAreReadOrReportedPartial) {
+#if !defined(DONKEY_RANGES_FIXTURE_PATH)
+  GTEST_SKIP() << "the ranges fixture is not built with this compiler";
+#else
+  auto loaded = donkey::load_binary(DONKEY_RANGES_FIXTURE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  if (!info && info.diagnostic().code == "dwarf.not_present") {
+    // macOS keeps DWARF in a .dSYM bundle, which is not read.
+    GTEST_SKIP() << "no DWARF in the fixture binary on this platform";
+  }
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  bool split_read = false;
+  for (const auto& f : info.value().functions) {
+    split_read = split_read || f.name == "donkey_ranges_split";
+  }
+  bool reported = false;
+  for (const auto& d : info.value().diagnostics) {
+    reported = reported || d.code == "dwarf.ranges_unsupported";
+  }
+  EXPECT_TRUE(split_read || (info.value().partial && reported))
+      << "donkey_ranges_split was dropped without a diagnostic";
+#endif
+}
+
 TEST(DebugInfo, TypeRenderingIsBoundedOnCycles) {
   donkey::DebugInfo info;
   donkey::DebugType a;
