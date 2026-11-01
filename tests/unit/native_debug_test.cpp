@@ -346,10 +346,17 @@ TEST(NativeDebug, BreakpointInACreatedThreadStopsTheProcessOnThatThread) {
   const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
   const std::uint64_t counter =
       translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  // The thread stopped at the entry point runs main. (Windows may already
+  // have loader worker threads at this point, so it is not the only one.)
   auto initial = adapter->threads();
   ASSERT_TRUE(initial.has_value());
-  ASSERT_EQ(initial.value().size(), 1U);
-  const std::uint64_t main_thread = initial.value().front().id;
+  std::uint64_t main_thread = 0;
+  for (const auto& thread : initial.value()) {
+    if (thread.is_current) {
+      main_thread = thread.id;
+    }
+  }
+  ASSERT_NE(main_thread, 0U);
 
   auto bp = adapter->set_breakpoint(tick);
   ASSERT_TRUE(bp.has_value()) << bp.diagnostic().message;
