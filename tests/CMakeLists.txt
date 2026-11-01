@@ -47,7 +47,12 @@ else()
   target_compile_options(donkey_test_debuggee PRIVATE -O0 -g -fno-omit-frame-pointer)
   target_compile_options(donkey_test_module PRIVATE -O0 -g -fno-omit-frame-pointer)
 endif()
-target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS})
+target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
+# Functions described by DW_AT_ranges (GCC hot/cold splitting at -O2).
+if(NOT MSVC)
+  add_library(donkey_ranges_fixture SHARED fixtures/dwarf/ranges.c)
+  target_compile_options(donkey_ranges_fixture PRIVATE -O2 -g)
+endif()
 
 # Decompiler differential corpus (M8): the same source at three
 # optimisation levels, built with the host C compiler.
@@ -90,12 +95,16 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_RANGES_FIXTURE_PATH="$<TARGET_FILE:donkey_ranges_fixture>">
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
+if(NOT MSVC)
+  add_dependencies(donkey_unit_tests donkey_ranges_fixture)
+endif()
 add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 

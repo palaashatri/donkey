@@ -104,7 +104,8 @@ macOS, FreeBSD and Windows on Arm cannot debug yet, and the Debugger panel
 says so.
 
 **Launch…** asks for confirmation, because debugging runs the program with
-your permissions. Breakpoints are set on static addresses and follow ASLR
+your permissions. When any thread stops, every thread of the program stops,
+and the Debugger panel shows the thread that stopped. Breakpoints are set on static addresses and follow ASLR
 and libraries loaded later. Registers, stack, threads, modules and memory are
 shown only while the program is stopped, never stale.
 

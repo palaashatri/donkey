@@ -127,11 +127,14 @@ TEST(CallGraph, MainCallsTickDirectlyAndIndirectCallsStayUnresolved) {
   const auto& result = analysis.value();
   std::uint64_t main_address = 0;
   std::uint64_t tick_address = 0;
+  std::uint64_t ticker_address = 0;  // the debuggee's thread function
   for (const auto& function : result.functions) {
     if (function.name == "main" || function.name == "_main") {
       main_address = function.address;
     } else if (function.name.find("donkey_debuggee_tick") != std::string::npos) {
       tick_address = function.address;
+    } else if (function.name == "ticker" || function.name == "_ticker") {
+      ticker_address = function.address;
     }
   }
   ASSERT_NE(main_address, 0U);
@@ -140,13 +143,20 @@ TEST(CallGraph, MainCallsTickDirectlyAndIndirectCallsStayUnresolved) {
   const auto callees = result.call_graph.callees_of(main_address);
   EXPECT_TRUE(std::any_of(callees.begin(), callees.end(),
                           [&](const auto& edge) { return edge.callee == tick_address; }));
+  // tick is called from main and, in `thread` mode, from the thread
+  // function; nothing else calls it.
   const auto callers = result.call_graph.callers_of(tick_address);
   ASSERT_FALSE(callers.empty());
+  bool from_main = false;
   for (const auto& edge : callers) {
-    EXPECT_EQ(edge.caller, main_address);
-    // The site is inside main and decodes as a call to tick.
-    EXPECT_GT(edge.site, main_address);
+    from_main = from_main || edge.caller == main_address;
+    const bool known =
+        edge.caller == main_address || (ticker_address != 0 && edge.caller == ticker_address);
+    EXPECT_TRUE(known) << "unexpected caller of tick at 0x" << std::hex << edge.caller;
+    // The site is inside its caller and decodes as a call to tick.
+    EXPECT_GT(edge.site, edge.caller);
   }
+  EXPECT_TRUE(from_main);
   // Every edge's target comes from a decoded direct call, never a guess.
   for (const auto& edge : result.call_graph.edges) {
     bool found = false;

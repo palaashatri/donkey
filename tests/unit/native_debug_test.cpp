@@ -336,6 +336,50 @@ TEST(NativeDebug, BreakpointsHitAndMemoryWritesChangeTheTarget) {
   EXPECT_EQ(exited.value().exit_code, 30);  // 3 ticks of 10, not 42
 }
 
+// A breakpoint hit in a thread the program created stops the whole process
+// and is reported on that thread; the other threads stay stopped meanwhile,
+// and the program still runs to its real exit code.
+TEST(NativeDebug, BreakpointInACreatedThreadStopsTheProcessOnThatThread) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry({"thread"});
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
+  const std::uint64_t counter =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  auto initial = adapter->threads();
+  ASSERT_TRUE(initial.has_value());
+  ASSERT_EQ(initial.value().size(), 1U);
+  const std::uint64_t main_thread = initial.value().front().id;
+
+  auto bp = adapter->set_breakpoint(tick);
+  ASSERT_TRUE(bp.has_value()) << bp.diagnostic().message;
+  for (int hit = 1; hit <= 3; ++hit) {
+    ASSERT_TRUE(adapter->resume().has_value());
+    auto event = adapter->wait_for_event(10000);
+    ASSERT_TRUE(event.has_value());
+    ASSERT_EQ(event.value().reason, StopReason::Breakpoint) << event.value().description;
+    EXPECT_EQ(event.value().address, tick);
+    EXPECT_NE(event.value().thread_id, main_thread) << "the hit is on the worker thread";
+    EXPECT_EQ(pc(*adapter), tick);
+    EXPECT_EQ(read_int(*adapter, counter), hit - 1);
+    auto threads = adapter->threads();
+    ASSERT_TRUE(threads.has_value());
+    EXPECT_GE(threads.value().size(), 2U);
+    bool current_is_worker = false;
+    for (const auto& thread : threads.value()) {
+      current_is_worker =
+          current_is_worker || (thread.is_current && thread.id == event.value().thread_id);
+    }
+    EXPECT_TRUE(current_is_worker);
+  }
+  ASSERT_TRUE(adapter->remove_breakpoint(bp.value().id).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited) << exited.value().description;
+  EXPECT_EQ(exited.value().exit_code, 42);
+}
+
 TEST(NativeDebug, SingleStepAndStepOutMoveTheRealProgramCounter) {
   REQUIRE_NATIVE();
   auto adapter = launch_at_entry();

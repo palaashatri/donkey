@@ -9,6 +9,8 @@
  *                   LoadLibrary), call donkey_debuggee_module_loaded(), then
  *                   exit with donkey_module_answer(21) (42) -- the dynamic
  *                   module fixture
+ *   debuggee thread a worker thread ticks three times; the main thread
+ *                   waits for it and exits 42 when the counter is 3
  */
 #include <stdint.h>
 #include <string.h>
@@ -18,6 +20,7 @@
 #include <windows.h>
 #else
 #include <dlfcn.h>
+#include <pthread.h>
 #endif
 
 #if defined(_WIN32)
@@ -69,7 +72,42 @@ static int run_module(const char* path) {
   return answer(21);
 }
 
+#if defined(_WIN32)
+static DWORD WINAPI ticker(LPVOID unused) {
+  (void)unused;
+#else
+static void* ticker(void* unused) {
+  (void)unused;
+#endif
+  for (int i = 0; i < 3; ++i) {
+    donkey_debuggee_tick();
+  }
+  return 0;
+}
+
+/* Breakpoints on donkey_debuggee_tick hit in a thread the program created. */
+static int run_thread(void) {
+#if defined(_WIN32)
+  HANDLE thread = CreateThread(0, 0, ticker, 0, 0, 0);
+  if (thread == 0) {
+    return 5;
+  }
+  WaitForSingleObject(thread, INFINITE);
+  CloseHandle(thread);
+#else
+  pthread_t thread;
+  if (pthread_create(&thread, 0, ticker, 0) != 0) {
+    return 5;
+  }
+  pthread_join(thread, 0);
+#endif
+  return donkey_debuggee_counter == 3 ? 42 : donkey_debuggee_counter;
+}
+
 DEBUGGEE_EXPORT int main(int argc, char** argv) {
+  if (argc > 1 && strcmp(argv[1], "thread") == 0) {
+    return run_thread();
+  }
   if (argc > 2 && strcmp(argv[1], "load") == 0) {
     return run_module(argv[2]);
   }

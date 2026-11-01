@@ -11,6 +11,7 @@
 #include <elf.h>
 #include <fcntl.h>
 #include <sys/ptrace.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/user.h>
@@ -27,6 +28,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <sstream>
 #include <thread>
 
@@ -64,7 +66,7 @@ static_assert(sizeof(RegWord) == 8);
 
 struct RegisterSlot {
   const char* name;
-  RegWord NativeRegs::* field;
+  RegWord NativeRegs::*field;
 };
 
 #if defined(__x86_64__)
@@ -168,7 +170,14 @@ struct LocalDebugAdapter::Impl {
   std::vector<SoftwareBreakpoint> breakpoints;
   std::uint64_t next_breakpoint_id = 1;
   StopInfo stop;
-  int pending_signal = 0;  ///< signal to deliver on the next resume
+  // Threads. The session is all-stop: when one thread stops, every other
+  // traced thread is stopped before the stop is reported, and a resume
+  // continues them all. New threads are traced through PTRACE_O_TRACECLONE.
+  pid_t current = -1;                ///< the thread the session reports and steps
+  std::set<pid_t> tids;              ///< every traced thread, leader included
+  std::set<pid_t> stopped;           ///< traced threads in a ptrace stop
+  std::map<pid_t, int> pending;      ///< signal to deliver to a thread on resume
+  std::set<pid_t> sigstop_expected;  ///< threads with a SIGSTOP of ours still to swallow
   bool pause_requested = false;
   bool stepping = false;
   std::uint64_t page_size = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
@@ -177,13 +186,192 @@ struct LocalDebugAdapter::Impl {
 
   // ---- low level ---------------------------------------------------------
 
-  bool get_regs(NativeRegs& regs) const {
+  [[nodiscard]] pid_t cur() const { return current > 0 ? current : pid; }
+
+  static bool get_regs_of(pid_t thread, NativeRegs& regs) {
     iovec io{&regs, sizeof(regs)};
-    return ::ptrace(PTRACE_GETREGSET, pid, reinterpret_cast<void*>(NT_PRSTATUS), &io) == 0;
+    return ::ptrace(PTRACE_GETREGSET, thread, reinterpret_cast<void*>(NT_PRSTATUS), &io) == 0;
   }
-  bool set_regs(NativeRegs& regs) const {
+  static bool set_regs_of(pid_t thread, NativeRegs& regs) {
     iovec io{&regs, sizeof(regs)};
-    return ::ptrace(PTRACE_SETREGSET, pid, reinterpret_cast<void*>(NT_PRSTATUS), &io) == 0;
+    return ::ptrace(PTRACE_SETREGSET, thread, reinterpret_cast<void*>(NT_PRSTATUS), &io) == 0;
+  }
+  bool get_regs(NativeRegs& regs) const { return get_regs_of(cur(), regs); }
+  bool set_regs(NativeRegs& regs) const { return set_regs_of(cur(), regs); }
+
+  // ---- threads -----------------------------------------------------------
+
+  int take_pending(pid_t thread) {
+    const auto it = pending.find(thread);
+    if (it == pending.end()) {
+      return 0;
+    }
+    const int sig = it->second;
+    pending.erase(it);
+    return sig;
+  }
+
+  bool resume_thread(pid_t thread) {
+    const int sig = take_pending(thread);
+    if (::ptrace(PTRACE_CONT, thread, nullptr,
+                 reinterpret_cast<void*>(static_cast<std::intptr_t>(sig))) != 0) {
+      return false;
+    }
+    stopped.erase(thread);
+    return true;
+  }
+
+  void forget_thread(pid_t thread) {
+    tids.erase(thread);
+    stopped.erase(thread);
+    pending.erase(thread);
+    sigstop_expected.erase(thread);
+    if (current == thread) {
+      current = pid;
+    }
+  }
+
+  static bool is_event(int status, int event) { return (status >> 16) == event; }
+
+  /// A traced thread called clone(): trace the new thread. It starts with a
+  /// SIGSTOP, which is swallowed when it arrives.
+  void note_clone(pid_t parent) {
+    unsigned long message = 0;
+    if (::ptrace(PTRACE_GETEVENTMSG, parent, nullptr, &message) == 0 && message != 0) {
+      const auto thread = static_cast<pid_t>(message);
+      tids.insert(thread);
+      sigstop_expected.insert(thread);
+    }
+  }
+
+  /// A thread trapped on one of our breakpoints while the others were being
+  /// stopped: move it back onto the trap so it reports the hit when resumed.
+  /// (AArch64's BRK leaves the PC on the trap already.)
+  void rewind_trap(pid_t thread) {
+    if (kTrap.size() != 1) {
+      return;
+    }
+    NativeRegs regs{};
+    if (!get_regs_of(thread, regs)) {
+      return;
+    }
+    const std::uint64_t trap = reg_pc(regs) - 1;
+    if (SoftwareBreakpoint* bp = breakpoint_at(trap); bp != nullptr && bp->inserted) {
+      reg_pc(regs) = trap;
+      set_regs_of(thread, regs);
+    }
+  }
+
+  /// Record what a thread reported while it was being stopped, other than
+  /// the SIGSTOP we sent (which then stays pending and is swallowed later).
+  void absorb_side_stop(pid_t thread, int status) {
+    const int sig = WSTOPSIG(status);
+    if (sig == SIGTRAP && is_event(status, PTRACE_EVENT_CLONE)) {
+      note_clone(thread);
+    } else if (sig == SIGSTOP && sigstop_expected.count(thread) != 0) {
+      sigstop_expected.erase(thread);
+    } else if (sig == SIGTRAP) {
+      rewind_trap(thread);
+    } else {
+      pending[thread] = sig;
+    }
+  }
+
+  /// All-stop: stop every traced thread other than `current`. Bounded.
+  void stop_others() {
+    for (pid_t thread : std::vector<pid_t>(tids.begin(), tids.end())) {
+      if (thread != current && stopped.count(thread) == 0 && sigstop_expected.count(thread) == 0 &&
+          ::syscall(SYS_tgkill, pid, thread, SIGSTOP) == 0) {
+        sigstop_expected.insert(thread);
+      }
+    }
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+      bool all_stopped = true;
+      for (pid_t thread : std::vector<pid_t>(tids.begin(), tids.end())) {
+        if (thread == current || stopped.count(thread) != 0) {
+          continue;
+        }
+        all_stopped = false;
+        int status = 0;
+        const pid_t result = ::waitpid(thread, &status, WNOHANG | __WALL);
+        if (result == 0) {
+          continue;
+        }
+        if (result < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
+          if (thread != pid) {
+            forget_thread(thread);
+          }
+          continue;
+        }
+        if (WIFSTOPPED(status)) {
+          stopped.insert(thread);
+          absorb_side_stop(thread, status);
+        }
+      }
+      if (all_stopped) {
+        return;
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+  }
+
+  /// Let threads that still have one of our SIGSTOPs pending take it now, so
+  /// it cannot stop the process after a detach. Bounded.
+  void drain_expected_sigstops() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!sigstop_expected.empty() && std::chrono::steady_clock::now() < deadline) {
+      for (pid_t thread : std::vector<pid_t>(sigstop_expected.begin(), sigstop_expected.end())) {
+        if (stopped.count(thread) != 0) {
+          if (::ptrace(PTRACE_CONT, thread, nullptr, nullptr) != 0) {
+            forget_thread(thread);
+            continue;
+          }
+          stopped.erase(thread);
+        }
+        int status = 0;
+        const pid_t result = ::waitpid(thread, &status, WNOHANG | __WALL);
+        if (result == 0) {
+          continue;
+        }
+        if (result < 0 || WIFEXITED(status) || WIFSIGNALED(status)) {
+          forget_thread(thread);
+          continue;
+        }
+        if (WIFSTOPPED(status)) {
+          stopped.insert(thread);
+          absorb_side_stop(thread, status);
+        }
+      }
+      std::this_thread::sleep_for(std::chrono::microseconds(200));
+    }
+  }
+
+  /// Attach every thread of the process that is not traced yet. Returns how
+  /// many were attached; each stops with a SIGSTOP that is swallowed.
+  int attach_untraced_threads() {
+    int attached = 0;
+    std::error_code ec;
+    for (const auto& entry :
+         std::filesystem::directory_iterator("/proc/" + std::to_string(pid) + "/task", ec)) {
+      const auto thread =
+          static_cast<pid_t>(std::strtol(entry.path().filename().c_str(), nullptr, 10));
+      if (thread <= 0 || tids.count(thread) != 0) {
+        continue;
+      }
+      if (::ptrace(PTRACE_ATTACH, thread, nullptr, nullptr) == 0) {
+        tids.insert(thread);
+        sigstop_expected.insert(thread);
+        ++attached;
+      }
+    }
+    return attached;
+  }
+
+  void set_thread_options(long options) const {
+    for (pid_t thread : tids) {
+      ::ptrace(PTRACE_SETOPTIONS, thread, nullptr, reinterpret_cast<void*>(options));
+    }
   }
   std::optional<std::uint64_t> pc() const {
     NativeRegs regs{};
@@ -301,6 +489,11 @@ struct LocalDebugAdapter::Impl {
   void forget_process() {
     close_memory();
     pid = -1;
+    current = -1;
+    tids.clear();
+    stopped.clear();
+    pending.clear();
+    sigstop_expected.clear();
     launched = false;
     breakpoints.erase(std::remove_if(breakpoints.begin(), breakpoints.end(),
                                      [](const SoftwareBreakpoint& bp) { return bp.internal; }),
@@ -317,7 +510,14 @@ struct LocalDebugAdapter::Impl {
     if (launched) {
       ::kill(pid, SIGKILL);
       int status = 0;
-      while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+      // Reap the other threads first: the leader is reported last.
+      for (pid_t thread : std::vector<pid_t>(tids.begin(), tids.end())) {
+        if (thread != pid) {
+          while (::waitpid(thread, &status, __WALL) < 0 && errno == EINTR) {
+          }
+        }
+      }
+      while (::waitpid(pid, &status, __WALL) < 0 && errno == EINTR) {
       }
     } else {
       (void)detach_now();
@@ -362,17 +562,33 @@ struct LocalDebugAdapter::Impl {
   bool wait(int timeout_ms) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (true) {
-      int status = 0;
-      const pid_t result = ::waitpid(pid, &status, timeout_ms < 0 ? __WALL : (WNOHANG | __WALL));
-      if (result == pid) {
-        handle_status(status);
-        return true;
+      for (pid_t thread : std::vector<pid_t>(tids.begin(), tids.end())) {
+        if (pid <= 0) {
+          return true;
+        }
+        // Stopped threads are polled too: they report nothing more until
+        // resumed, except dying (SIGKILL from terminate()).
+        int status = 0;
+        const pid_t result = ::waitpid(thread, &status, WNOHANG | __WALL);
+        if (result == thread) {
+          if (process_event(thread, status)) {
+            return true;
+          }
+          continue;
+        }
+        if (result < 0 && errno != EINTR) {
+          if (thread != pid) {
+            forget_thread(thread);
+            continue;
+          }
+          stop = StopInfo{StopReason::Exited, static_cast<std::uint64_t>(pid), 0,
+                          std::string("lost the target: ") + std::strerror(errno), 0};
+          state = SessionState::Exited;
+          forget_process();
+          return true;
+        }
       }
-      if (result < 0 && errno != EINTR) {
-        stop = StopInfo{StopReason::Exited, static_cast<std::uint64_t>(pid), 0,
-                        std::string("lost the target: ") + std::strerror(errno), 0};
-        state = SessionState::Exited;
-        forget_process();
+      if (pid <= 0 || tids.empty()) {
         return true;
       }
       if (timeout_ms >= 0 && std::chrono::steady_clock::now() >= deadline) {
@@ -382,8 +598,66 @@ struct LocalDebugAdapter::Impl {
     }
   }
 
+  /// One wait status from `thread`. Returns true when the session stopped or
+  /// ended (and `stop` says why); false for events handled internally.
+  bool process_event(pid_t thread, int status) {
+    if (WIFEXITED(status) || WIFSIGNALED(status)) {
+      if (thread == pid) {
+        current = pid;
+        handle_status(status);
+        return true;
+      }
+      forget_thread(thread);
+      return false;
+    }
+    if (!WIFSTOPPED(status)) {
+      return false;
+    }
+    stopped.insert(thread);
+    const int sig = WSTOPSIG(status);
+    if (sig == SIGTRAP && is_event(status, PTRACE_EVENT_CLONE)) {
+      note_clone(thread);
+      if (stepping && thread == current) {
+        if (::ptrace(PTRACE_SINGLESTEP, thread, nullptr, nullptr) == 0) {
+          stopped.erase(thread);
+        }
+      } else if (state == SessionState::Running) {
+        resume_thread(thread);
+      }
+      return false;
+    }
+    if (sig == SIGSTOP && sigstop_expected.count(thread) != 0) {
+      sigstop_expected.erase(thread);
+      if (state == SessionState::Running && !stepping) {
+        resume_thread(thread);
+      }
+      return false;
+    }
+    if (sig == SIGTRAP && is_event(status, PTRACE_EVENT_EXEC)) {
+      // After exec only the thread group leader is left.
+      for (pid_t other : std::vector<pid_t>(tids.begin(), tids.end())) {
+        if (other != pid) {
+          forget_thread(other);
+        }
+      }
+      thread = pid;
+      stopped.insert(pid);
+    }
+    if (stepping && thread != current) {
+      // Only the stepping thread runs during a step; keep this for later.
+      absorb_side_stop(thread, status);
+      return false;
+    }
+    current = thread;
+    handle_status(status);
+    if (pid > 0 && state == SessionState::Stopped) {
+      stop_others();
+    }
+    return true;
+  }
+
   void handle_status(int status) {
-    const auto tid = static_cast<std::uint64_t>(pid);
+    const auto tid = static_cast<std::uint64_t>(cur());
     if (WIFEXITED(status)) {
       stop = StopInfo{StopReason::Exited, tid, 0,
                       "process exited with code " + std::to_string(WEXITSTATUS(status)),
@@ -455,7 +729,7 @@ struct LocalDebugAdapter::Impl {
       return;
     }
     // Any other signal belongs to the target; deliver it when resumed.
-    pending_signal = sig;
+    pending[cur()] = sig;
     stop = StopInfo{StopReason::Signal, tid, at, std::string("signal ") + strsignal(sig), sig};
   }
 
@@ -473,12 +747,14 @@ struct LocalDebugAdapter::Impl {
       uninsert(*bp);
     }
     stepping = true;
-    const int sig = pending_signal;
-    pending_signal = 0;
-    if (::ptrace(PTRACE_SINGLESTEP, pid, nullptr, reinterpret_cast<void*>(sig)) != 0) {
+    const pid_t thread = cur();
+    const int sig = take_pending(thread);
+    if (::ptrace(PTRACE_SINGLESTEP, thread, nullptr,
+                 reinterpret_cast<void*>(static_cast<std::intptr_t>(sig))) != 0) {
       stepping = false;
       return false;
     }
+    stopped.erase(thread);
     state = SessionState::Running;
     const bool finished = wait(timeout_ms);
     if (pid > 0 && state == SessionState::Stopped) {
@@ -503,10 +779,12 @@ struct LocalDebugAdapter::Impl {
         return true;  // something more interesting happened during the step
       }
     }
-    const int sig = pending_signal;
-    pending_signal = 0;
-    if (::ptrace(PTRACE_CONT, pid, nullptr, reinterpret_cast<void*>(sig)) != 0) {
+    // Resume the current thread first, then every other stopped thread.
+    if (!resume_thread(cur())) {
       return errno_error("debug.resume_failed", "could not resume the target");
+    }
+    for (pid_t thread : std::vector<pid_t>(stopped.begin(), stopped.end())) {
+      resume_thread(thread);  // a thread that just exited cannot be resumed
     }
     state = SessionState::Running;
     stop = StopInfo{};
@@ -547,19 +825,26 @@ struct LocalDebugAdapter::Impl {
     }
     if (state == SessionState::Running) {
       pause_requested = true;
-      ::kill(pid, SIGSTOP);
+      ::syscall(SYS_tgkill, pid, cur(), SIGSTOP);
       if (!wait(kStepTimeoutMs) || pid <= 0) {
         return pid <= 0 ? Result<bool>(true)
                         : make_error<bool>(Status::InternalError, "debug.detach_failed",
                                            "target did not stop for detach");
       }
     }
+    drain_expected_sigstops();
     for (auto& bp : breakpoints) {
       uninsert(bp);
     }
-    const int sig = pending_signal;
-    pending_signal = 0;
-    if (::ptrace(PTRACE_DETACH, pid, nullptr, reinterpret_cast<void*>(sig)) != 0) {
+    for (pid_t thread : std::vector<pid_t>(tids.begin(), tids.end())) {
+      if (thread == pid) {
+        continue;
+      }
+      ::ptrace(PTRACE_DETACH, thread, nullptr,
+               reinterpret_cast<void*>(static_cast<std::intptr_t>(take_pending(thread))));
+    }
+    if (::ptrace(PTRACE_DETACH, pid, nullptr,
+                 reinterpret_cast<void*>(static_cast<std::intptr_t>(take_pending(pid)))) != 0) {
       return errno_error("debug.detach_failed", "could not detach from the target");
     }
     forget_process();
@@ -703,7 +988,6 @@ Result<bool> LocalDebugAdapter::launch(const LaunchConfig& config) {
   Impl& d = *impl_;
   d.teardown();
   d.stop = StopInfo{};
-  d.pending_signal = 0;
   if (config.binary_path.empty()) {
     d.state = SessionState::Error;
     return make_error<bool>(Status::InvalidInput, "debug.invalid_path",
@@ -773,9 +1057,13 @@ Result<bool> LocalDebugAdapter::launch(const LaunchConfig& config) {
                             "the target did not reach exec (exit status " +
                                 std::to_string(WIFEXITED(status) ? WEXITSTATUS(status) : -1) + ")");
   }
-  // Kill the debuggee if the debugger dies, and keep exec stops distinct.
+  d.current = child;
+  d.tids = {child};
+  d.stopped = {child};
+  // Kill the debuggee if the debugger dies, keep exec stops distinct, and
+  // trace every thread the program creates (inherited by new threads).
   ::ptrace(PTRACE_SETOPTIONS, child, nullptr,
-           reinterpret_cast<void*>(PTRACE_O_EXITKILL | PTRACE_O_TRACEEXEC));
+           reinterpret_cast<void*>(PTRACE_O_EXITKILL | PTRACE_O_TRACEEXEC | PTRACE_O_TRACECLONE));
   d.open_memory();
   d.state = SessionState::Stopped;
   d.update_translator();
@@ -838,12 +1126,23 @@ Result<bool> LocalDebugAdapter::attach(std::uint32_t pid) {
     return errno_error("debug.attach_failed", "could not attach");
   }
   d.pid = static_cast<pid_t>(pid);
+  d.current = d.pid;
+  d.tids = {d.pid};
   d.launched = false;
   d.pause_requested = true;  // PTRACE_ATTACH stops the target with SIGSTOP
+  d.attach_untraced_threads();
   if (!d.wait(kEntryTimeoutMs) || d.pid <= 0) {
     d.state = SessionState::Error;
     return make_error<bool>(Status::InternalError, "debug.attach_failed",
                             "the target did not stop after attach");
+  }
+  // Trace threads created from now on; then attach any created before the
+  // options took effect, until there are none left.
+  constexpr long kAttachOptions = PTRACE_O_TRACEEXEC | PTRACE_O_TRACECLONE;
+  d.set_thread_options(kAttachOptions);
+  for (int round = 0; round < 8 && d.attach_untraced_threads() > 0; ++round) {
+    d.stop_others();
+    d.set_thread_options(kAttachOptions);
   }
   std::error_code ec;
   d.executable = std::filesystem::read_symlink("/proc/" + std::to_string(pid) + "/exe", ec);
@@ -896,7 +1195,7 @@ Result<bool> LocalDebugAdapter::pause() {
     return native::invalid_state("cannot pause unless the target is running");
   }
   d.pause_requested = true;
-  if (::kill(d.pid, SIGSTOP) != 0) {
+  if (::syscall(SYS_tgkill, d.pid, d.cur(), SIGSTOP) != 0) {
     d.pause_requested = false;
     return errno_error("debug.pause_failed", "could not stop the target");
   }
@@ -1196,7 +1495,7 @@ Result<std::vector<DebugThread>> LocalDebugAdapter::threads() {
     thread.id = std::strtoull(name.c_str(), nullptr, 10);
     std::ifstream comm(entry.path() / "comm");
     std::getline(comm, thread.name);
-    thread.is_current = thread.id == static_cast<std::uint64_t>(d.pid);
+    thread.is_current = thread.id == static_cast<std::uint64_t>(d.cur());
     thread.stop_reason = thread.is_current ? d.stop.reason : StopReason::None;
     list.push_back(thread);
   }
