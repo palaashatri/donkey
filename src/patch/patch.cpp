@@ -4,6 +4,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 
 #include "donkey/core/sha256.h"
 
@@ -13,9 +14,45 @@ Result<uint64_t> PatchManager::stage_patch(uint64_t file_offset, std::span<const
                                            std::span<const uint8_t> replacement,
                                            std::string comment, std::string author,
                                            std::optional<uint64_t> va) {
+  if (original.empty()) {
+    return Diagnostic::make(Status::InvalidInput, "patch.empty_original",
+                            "Patch original bytes cannot be empty", file_offset);
+  }
+
   if (replacement.empty()) {
     return Diagnostic::make(Status::InvalidInput, "patch.empty_replacement",
                             "Patch replacement bytes cannot be empty", file_offset);
+  }
+
+  if (original.size() != replacement.size()) {
+    return Diagnostic::make(Status::InvalidInput, "patch.size_mismatch",
+                            "Original bytes size (" + std::to_string(original.size()) +
+                                ") must equal replacement bytes size (" +
+                                std::to_string(replacement.size()) + ")",
+                            file_offset);
+  }
+
+  // Safe overflow check: file_offset + replacement.size()
+  if (replacement.size() > std::numeric_limits<uint64_t>::max() - file_offset) {
+    return Diagnostic::make(Status::InvalidInput, "patch.offset_overflow",
+                            "Patch offset and size cause integer overflow", file_offset);
+  }
+
+  // Detect overlapping patches
+  const uint64_t patch_start = file_offset;
+  const uint64_t patch_end = file_offset + replacement.size();
+  for (const auto& existing : history_) {
+    if (existing.reverted) {
+      continue;
+    }
+    const uint64_t exist_start = existing.file_offset;
+    const uint64_t exist_end = existing.file_offset + existing.replacement_bytes.size();
+    if (patch_start < exist_end && exist_start < patch_end) {
+      return Diagnostic::make(
+          Status::InvalidInput, "patch.overlap",
+          "Patch range overlaps with existing patch ID " + std::to_string(existing.id),
+          file_offset);
+    }
   }
 
   uint64_t id = next_id_++;
@@ -33,6 +70,7 @@ Result<uint64_t> PatchManager::stage_patch(uint64_t file_offset, std::span<const
       .author = std::move(author),
       .timestamp = static_cast<uint64_t>(now),
       .applied = false,
+      .reverted = false,
   };
 
   if (!entry.virtual_address && image_) {
@@ -66,19 +104,25 @@ Result<void> PatchManager::apply_patch(uint64_t patch_id, std::span<uint8_t> fil
     return Result<void>{};
   }
 
-  if (it->file_offset + it->original_bytes.size() > file_bytes.size() ||
-      it->file_offset + it->replacement_bytes.size() > file_bytes.size()) {
+  if (it->reverted) {
+    return Diagnostic::make(
+        Status::InvalidInput, "patch.retired",
+        "Patch ID " + std::to_string(patch_id) + " has been reverted and cannot be reapplied",
+        it->file_offset);
+  }
+
+  // Safe overflow and range check
+  if (it->file_offset > file_bytes.size() ||
+      it->replacement_bytes.size() > file_bytes.size() - it->file_offset) {
     return Diagnostic::make(Status::InvalidInput, "patch.out_of_bounds",
                             "Patch offset is out of bounds of the file buffer", it->file_offset);
   }
 
-  if (!it->original_bytes.empty()) {
-    if (std::memcmp(file_bytes.data() + it->file_offset, it->original_bytes.data(),
-                    it->original_bytes.size()) != 0) {
-      return Diagnostic::make(Status::InvalidInput, "patch.original_bytes_mismatch",
-                              "Original bytes at target offset do not match expected patch bytes",
-                              it->file_offset);
-    }
+  if (std::memcmp(file_bytes.data() + it->file_offset, it->original_bytes.data(),
+                  it->original_bytes.size()) != 0) {
+    return Diagnostic::make(Status::InvalidInput, "patch.original_bytes_mismatch",
+                            "Original bytes at target offset do not match expected patch bytes",
+                            it->file_offset);
   }
 
   std::memcpy(file_bytes.data() + it->file_offset, it->replacement_bytes.data(),
@@ -103,7 +147,9 @@ Result<void> PatchManager::revert_patch(uint64_t patch_id, std::span<uint8_t> fi
     return Result<void>{};
   }
 
-  if (it->file_offset + it->replacement_bytes.size() > file_bytes.size()) {
+  // Safe overflow and range check
+  if (it->file_offset > file_bytes.size() ||
+      it->replacement_bytes.size() > file_bytes.size() - it->file_offset) {
     return Diagnostic::make(Status::InvalidInput, "patch.out_of_bounds",
                             "Patch offset is out of bounds of the file buffer", it->file_offset);
   }
@@ -118,6 +164,7 @@ Result<void> PatchManager::revert_patch(uint64_t patch_id, std::span<uint8_t> fi
   std::memcpy(file_bytes.data() + it->file_offset, it->original_bytes.data(),
               it->original_bytes.size());
   it->applied = false;
+  it->reverted = true;
 
   if (invalidation_callback_) {
     invalidation_callback_(it->file_offset, it->original_bytes.size());
@@ -158,7 +205,8 @@ static bool detect_macho_code_signature(std::span<const uint8_t> bytes) {
   std::memcpy(&ncmds, bytes.data() + 16, 4);
 
   size_t offset = header_size;
-  for (uint32_t i = 0; i < ncmds && offset + 8 <= bytes.size(); ++i) {
+  for (uint32_t i = 0; i < ncmds; ++i) {
+    if (offset > bytes.size() || bytes.size() - offset < 8) break;
     uint32_t cmd = 0;
     uint32_t cmdsize = 0;
     std::memcpy(&cmd, bytes.data() + offset, 4);
@@ -167,7 +215,9 @@ static bool detect_macho_code_signature(std::span<const uint8_t> bytes) {
     if (cmd == 0x1d) {  // LC_CODE_SIGNATURE
       return true;
     }
-    offset += cmdsize;
+    const size_t cmdsize_st = static_cast<size_t>(cmdsize);
+    if (offset > bytes.size() || bytes.size() - offset < cmdsize_st) break;
+    offset += cmdsize_st;
   }
   return false;
 }
@@ -176,22 +226,33 @@ static bool detect_pe_signature(std::span<const uint8_t> bytes) {
   if (bytes.size() < 64) return false;
   if (bytes[0] != 'M' || bytes[1] != 'Z') return false;
 
-  uint32_t pe_offset = 0;
-  std::memcpy(&pe_offset, bytes.data() + 0x3c, 4);
-  if (pe_offset + 24 + 128 > bytes.size()) return false;
+  uint32_t pe_offset_raw = 0;
+  std::memcpy(&pe_offset_raw, bytes.data() + 0x3c, 4);
+  const size_t pe_offset = static_cast<size_t>(pe_offset_raw);
+
+  // Cast to size_t and use subtraction-based bounds guards before every dereference
+  if (pe_offset > bytes.size() || bytes.size() - pe_offset < 24) return false;
   if (std::memcmp(bytes.data() + pe_offset, "PE\0\0", 4) != 0) return false;
 
-  uint16_t magic = 0;
-  std::memcpy(&magic, bytes.data() + pe_offset + 24, 2);
-  bool pe32plus = (magic == 0x20b);
+  const size_t opt_offset = pe_offset + 24;
+  if (opt_offset > bytes.size() || bytes.size() - opt_offset < 2) return false;
 
-  size_t sec_dir_offset = pe_offset + 24 + (pe32plus ? 112 : 96) + (4 * 8);
-  if (sec_dir_offset + 8 <= bytes.size()) {
-    uint32_t sec_size = 0;
-    std::memcpy(&sec_size, bytes.data() + sec_dir_offset + 4, 4);
-    if (sec_size > 0) return true;
-  }
-  return false;
+  uint16_t magic = 0;
+  std::memcpy(&magic, bytes.data() + opt_offset, 2);
+  const bool pe32plus = (magic == 0x20b);
+
+  const size_t dir_base_offset = pe32plus ? 112 : 96;
+  const size_t cert_entry_offset = 4 * 8;  // Entry 4: IMAGE_DIRECTORY_ENTRY_SECURITY
+  const size_t sec_dir_offset_within_opt = dir_base_offset + cert_entry_offset;
+
+  if (opt_offset > bytes.size() || bytes.size() - opt_offset < sec_dir_offset_within_opt)
+    return false;
+  const size_t sec_dir_offset = opt_offset + sec_dir_offset_within_opt;
+  if (sec_dir_offset > bytes.size() || bytes.size() - sec_dir_offset < 8) return false;
+
+  uint32_t sec_size = 0;
+  std::memcpy(&sec_size, bytes.data() + sec_dir_offset + 4, 4);
+  return sec_size > 0;
 }
 
 Result<ExportResult> PatchManager::export_patched_binary(const std::string& source_path,

@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "donkey/binary/byte_reader.h"
+#include "donkey/core/cancellation.h"
 #include "donkey/core/ids.h"
 #include "donkey/core/result.h"
 #include "donkey/core/status.h"
@@ -127,6 +128,8 @@ struct LoadOptions {
   bool has_raw_entry_point = false;
   /// Treat the file as untrusted and parse within an isolated OS process boundary.
   bool isolate = false;
+  /// Token used to observe cancellation during file loading.
+  CancellationToken cancellation_token;
 };
 
 /// A parsed image together with the bytes it was parsed from. Callers that

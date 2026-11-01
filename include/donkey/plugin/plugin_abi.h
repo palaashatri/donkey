@@ -38,6 +38,18 @@ typedef struct DonkeyPluginDescriptor {
 #define DONKEY_PLUGIN_ENTRY_SYMBOL "donkey_plugin_entry"
 typedef const DonkeyPluginDescriptor* (*DonkeyPluginEntryFn)(void);
 
+#if defined(_WIN32) || defined(__CYGWIN__)
+#if defined(__GNUC__)
+#define DONKEY_PLUGIN_EXPORT __attribute__((dllexport))
+#else
+#define DONKEY_PLUGIN_EXPORT __declspec(dllexport)
+#endif
+#elif defined(__GNUC__) && __GNUC__ >= 4
+#define DONKEY_PLUGIN_EXPORT __attribute__((visibility("default")))
+#else
+#define DONKEY_PLUGIN_EXPORT
+#endif
+
 #ifdef __cplusplus
 }
 #endif

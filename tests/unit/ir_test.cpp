@@ -678,6 +678,37 @@ TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
   EXPECT_EQ(function.return_width, 0);
 }
 
+TEST(Ir, SignatureInferenceDistinguishesSystemVAndWindowsX64) {
+  // Read rcx and rdi before write
+  IrFunction func_sysv = single_block_function();
+  IrStatement read_rdi;
+  read_rdi.op = IrOp::Assign;
+  read_rdi.dest = IrOperand::register_ref("rax", 8);
+  read_rdi.a = IrOperand::register_ref("rdi", 8);
+  read_rdi.width = 8;
+  func_sysv.blocks[0].statements.insert(func_sysv.blocks[0].statements.begin(), read_rdi);
+
+  IrStatement read_rcx;
+  read_rcx.op = IrOp::Assign;
+  read_rcx.dest = IrOperand::register_ref("rbx", 8);
+  read_rcx.a = IrOperand::register_ref("rcx", 8);
+  read_rcx.width = 8;
+  func_sysv.blocks[0].statements.insert(func_sysv.blocks[0].statements.begin() + 1, read_rcx);
+
+  IrFunction func_pe = func_sysv;
+
+  // System V: rdi is 1st arg, rcx is 4th arg
+  donkey::infer_signature(func_sysv, Architecture::X86_64, donkey::BinaryFormat::Elf);
+  ASSERT_EQ(func_sysv.parameters.size(), 2U);
+  EXPECT_EQ(func_sysv.parameters[0].abi_register, "rdi");
+  EXPECT_EQ(func_sysv.parameters[1].abi_register, "rcx");
+
+  // Windows x64 PE: rcx is 1st arg, rdi is non-volatile/callee-saved, NOT an argument
+  donkey::infer_signature(func_pe, Architecture::X86_64, donkey::BinaryFormat::Pe);
+  ASSERT_EQ(func_pe.parameters.size(), 1U);
+  EXPECT_EQ(func_pe.parameters[0].abi_register, "rcx");
+}
+
 TEST(Ir, VerifierRejectsBadSignatureWidth) {
   IrFunction function = single_block_function();
   function.parameters.push_back(IrParameter{"a0", 3, "rdi"});

@@ -12,6 +12,22 @@ target_include_directories(test_plugin_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
 add_library(test_plugin_hang MODULE fixtures/plugins/hang_plugin.c)
 target_include_directories(test_plugin_hang PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
+add_library(test_plugin_ctor_crash MODULE fixtures/plugins/ctor_crash_plugin.c)
+target_include_directories(test_plugin_ctor_crash PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+add_library(test_plugin_non_terminated MODULE fixtures/plugins/non_terminated_plugin.c)
+target_include_directories(test_plugin_non_terminated PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+
+set_target_properties(
+  test_plugin_valid
+  test_plugin_bad_abi
+  test_plugin_crash
+  test_plugin_hang
+  test_plugin_ctor_crash
+  test_plugin_non_terminated
+  PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON
+)
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/binary_test.cpp
@@ -32,8 +48,10 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
   TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
   TEST_PLUGIN_HANG_PATH="$<TARGET_FILE:test_plugin_hang>"
+  TEST_PLUGIN_CTOR_CRASH_PATH="$<TARGET_FILE:test_plugin_ctor_crash>"
+  TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
 )
-add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang)
+add_dependencies(donkey_unit_tests test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
 
 gtest_discover_tests(donkey_unit_tests DISCOVERY_TIMEOUT 30)
@@ -52,10 +70,12 @@ add_test(NAME cli.info_elf_json
 set_tests_properties(cli.info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
 
-add_test(NAME cli.info_isolated_json
-         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --isolate --json)
-set_tests_properties(cli.info_isolated_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
+if(NOT WIN32)
+  add_test(NAME cli.info_isolated_json
+           COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --isolate --json)
+  set_tests_properties(cli.info_isolated_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
+endif()
 
 add_test(NAME cli.info_pe_human
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-pe-x86_64.exe)
@@ -349,16 +369,54 @@ set_tests_properties(cli.patch_refuses_overwrite_without_force PROPERTIES WILL_F
 # Plugin CLI
 # ---------------------------------------------------------------------------
 
-add_test(NAME cli.plugin_info_json
-         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_valid> --json)
-set_tests_properties(cli.plugin_info_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"id\": \"org.donkey.test.valid\".*\"abi_version\": \\{\"major\": 1, \"minor\": 0\\}")
+if(NOT WIN32)
+  add_test(NAME cli.plugin_info_json
+           COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_valid> --json)
+  set_tests_properties(cli.plugin_info_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"id\": \"org.donkey.test.valid\".*\"abi_version\": \\{\"major\": 1, \"minor\": 0\\}")
 
-add_test(NAME cli.plugin_run_isolated_json
-         COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
-set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
+  add_test(NAME cli.plugin_run_isolated_json
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_json PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": true.*status.*ok")
 
-add_test(NAME cli.plugin_rejects_bad_abi
-         COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_bad_abi>)
-set_tests_properties(cli.plugin_rejects_bad_abi PROPERTIES WILL_FAIL TRUE)
+  add_test(NAME cli.plugin_info_catches_ctor_crash
+           COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_ctor_crash>)
+  set_tests_properties(cli.plugin_info_catches_ctor_crash PROPERTIES
+    PASS_REGULAR_EXPRESSION "plugin\\.crashed")
+
+  add_test(NAME cli.plugin_run_isolated_catches_crash
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_crash> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_catches_crash PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": false.*\"error_code\": \"plugin.crashed\"")
+
+  add_test(NAME cli.plugin_run_isolated_non_terminated
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_non_terminated> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_non_terminated PROPERTIES
+    PASS_REGULAR_EXPRESSION "\"success\": true")
+
+  add_test(NAME cli.plugin_rejects_bad_abi
+           COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_bad_abi>)
+  set_tests_properties(cli.plugin_rejects_bad_abi PROPERTIES
+    PASS_REGULAR_EXPRESSION "plugin\\.abi_version_mismatch")
+else()
+  add_test(NAME cli.plugin_info_fails_closed_on_windows
+           COMMAND donkey-cli plugin info $<TARGET_FILE:test_plugin_ctor_crash>)
+  set_tests_properties(cli.plugin_info_fails_closed_on_windows PROPERTIES
+    PASS_REGULAR_EXPRESSION "plugin\\.isolation_unavailable")
+
+  add_test(NAME cli.plugin_run_isolated_fails_closed_on_windows
+           COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_valid> --isolate --json)
+  set_tests_properties(cli.plugin_run_isolated_fails_closed_on_windows PROPERTIES
+    PASS_REGULAR_EXPRESSION "plugin\\.isolation_unavailable")
+
+  add_test(NAME cli.binary_isolated_fails_closed_on_windows
+           COMMAND donkey-cli info $<TARGET_FILE:test_plugin_valid> --isolate --json)
+  set_tests_properties(cli.binary_isolated_fails_closed_on_windows PROPERTIES
+    PASS_REGULAR_EXPRESSION "binary\\.isolation_unavailable")
+endif()
+
+add_test(NAME cli.plugin_run_trusted_non_terminated
+         COMMAND donkey-cli plugin run $<TARGET_FILE:test_plugin_non_terminated> --json)
+set_tests_properties(cli.plugin_run_trusted_non_terminated PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"success\": true")

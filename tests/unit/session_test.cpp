@@ -440,4 +440,109 @@ TEST(Session, CancellationStopsRunningTask) {
   EXPECT_FALSE(session.busy());
 }
 
+TEST(Session, SupersededWorkerDoesNotPublishFailure) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  session.cancel();
+  session.open(fixture_path("tiny-pe-x86_64.exe"));
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
+TEST(Session, RapidInterleavedOpenCancelOpenMaintainsConsistentState) {
+  Session session;
+  for (int i = 0; i < 20; ++i) {
+    session.open(fixture_path("tiny-elf-x86_64"));
+    session.cancel();
+    session.open(fixture_path("tiny-pe-x86_64.exe"));
+  }
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
+TEST(Session, SupersededRestoreAtCommitBoundaryDoesNotMutateDatabase) {
+  TempPath db_path("session-restore-supersede");
+  TempPath backup_path("session-restore-backup");
+  TempPath other_source("session-other-source");
+
+  // Project A has ELF
+  {
+    Session s;
+    s.open(fixture_path("tiny-elf-x86_64"));
+    ASSERT_TRUE(wait_idle(s));
+    s.save_project(db_path.str());
+    ASSERT_TRUE(wait_idle(s));
+  }
+
+  // Backup has PE
+  {
+    Session s;
+    s.open(fixture_path("tiny-pe-x86_64.exe"));
+    ASSERT_TRUE(wait_idle(s));
+    s.save_project(other_source.str());
+    ASSERT_TRUE(wait_idle(s));
+    s.backup_project(backup_path.str());
+    ASSERT_TRUE(wait_idle(s));
+  }
+
+  std::string orig_db_content;
+  {
+    std::ifstream in(db_path.str(), std::ios::binary);
+    orig_db_content =
+        std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  }
+
+  Session session;
+  session.open_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+
+  // Trigger restore into db_path, then immediately supersede it with open()
+  session.restore_project(backup_path.str());
+  session.open(fixture_path("tiny-macho-arm64"));
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-macho-arm64"));
+
+  // Verify that on-disk db_path was not mutated by the superseded restore
+  {
+    std::ifstream in(db_path.str(), std::ios::binary);
+    std::string current_content((std::istreambuf_iterator<char>(in)),
+                                std::istreambuf_iterator<char>());
+    EXPECT_EQ(current_content, orig_db_content);
+  }
+}
+
+TEST(Session, ReapsCompletedRetiredWorkersDuringNormalOperation) {
+  Session session;
+  // Trigger several worker tasks that get retired
+  for (int i = 0; i < 5; ++i) {
+    session.open(fixture_path("tiny-elf-x86_64"));
+  }
+  ASSERT_TRUE(wait_idle(session));
+
+  // Starting a new task calls retire_worker() which reaps finished retired workers
+  session.open(fixture_path("tiny-pe-x86_64.exe"));
+  ASSERT_TRUE(wait_idle(session));
+
+  EXPECT_FALSE(session.busy());
+  EXPECT_FALSE(session.take_error().has_value());
+  auto doc = session.document();
+  ASSERT_NE(doc, nullptr);
+  EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
 }  // namespace

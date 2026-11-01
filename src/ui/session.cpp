@@ -17,20 +17,63 @@ AnalysisOptions analysis_options() {
   return options;
 }
 
+struct WorkerDoneGuard {
+  std::shared_ptr<std::atomic<bool>> flag;
+  ~WorkerDoneGuard() {
+    if (flag) {
+      flag->store(true);
+    }
+  }
+};
+
 }  // namespace
 
 Session::~Session() {
-  join_worker();
-}
-
-void Session::join_worker() {
+  cancel();
   if (worker_.joinable()) {
     worker_.join();
   }
+  std::vector<RetiredWorker> retired;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retired = std::move(retired_workers_);
+  }
+  for (auto& rw : retired) {
+    if (rw.thread.joinable()) {
+      rw.thread.join();
+    }
+  }
 }
 
-void Session::fail(const std::string& message, const std::string& status) {
+void Session::reap_retired_workers() {
   std::lock_guard<std::mutex> lock(mutex_);
+  for (auto it = retired_workers_.begin(); it != retired_workers_.end();) {
+    if (it->done && it->done->load()) {
+      if (it->thread.joinable()) {
+        it->thread.join();
+      }
+      it = retired_workers_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+}
+
+void Session::retire_worker() {
+  cancel();
+  if (worker_.joinable()) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    retired_workers_.push_back({std::move(worker_), current_worker_done_});
+  }
+  reap_retired_workers();
+}
+
+void Session::fail(std::uint64_t generation, const std::string& message,
+                   const std::string& status) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (generation != generation_.load()) {
+    return;
+  }
   error_ = message;
   status_ = status;
   busy_.store(false);
@@ -44,7 +87,7 @@ void Session::publish_project(std::string path, std::int64_t image_id) {
 }
 
 void Session::open(const std::string& path) {
-  join_worker();
+  retire_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
   CancellationToken token;
   {
@@ -57,16 +100,25 @@ void Session::open(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation, token]() {
-    auto loaded = load_binary(path);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(path, load_opts);
+    if (generation_.load() != generation) {
+      return;
+    }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail(loaded.diagnostic().message + " [" + loaded.diagnostic().code + "]",
+      fail(generation, loaded.diagnostic().message + " [" + loaded.diagnostic().code + "]",
            "Failed to load " + path);
       return;
     }
@@ -74,14 +126,12 @@ void Session::open(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse " + path);
       return;
     }
@@ -105,7 +155,7 @@ void Session::open(const std::string& path) {
 }
 
 void Session::open_project(const std::string& path) {
-  join_worker();
+  retire_worker();
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
   CancellationToken token;
   {
@@ -117,7 +167,13 @@ void Session::open_project(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, generation, token]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
     // Read everything the project owns first, then close the database before
     // the (slower) binary load and analysis. busy_ is only cleared after the
     // connection is released, so an observer that sees "idle" knows the
@@ -129,10 +185,8 @@ void Session::open_project(const std::string& path) {
     std::string failure_status;
     {
       auto project = Project::open(path);
-      if (generation_.load() != generation || token.is_cancelled()) {
-        if (token.is_cancelled()) {
-          fail("Operation cancelled", "Cancelled");
-        }
+      if (token.is_cancelled()) {
+        fail(generation, "Operation cancelled", "Cancelled");
         return;
       }
       if (!project) {
@@ -162,26 +216,25 @@ void Session::open_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!failure.empty()) {
-      fail(failure, failure_status);
+      fail(generation, failure, failure_status);
       return;
     }
 
-    auto loaded = load_binary(image_path);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(image_path, load_opts);
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail("could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
+      fail(generation,
+           "could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
                loaded.diagnostic().code + "]",
            "Failed to load project image");
       return;
@@ -189,14 +242,12 @@ void Session::open_project(const std::string& path) {
     AnalysisOptions options = analysis_options();
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
-    if (generation_.load() != generation || token.is_cancelled()) {
-      if (token.is_cancelled()) {
-        fail("Operation cancelled", "Cancelled");
-      }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse project image");
       return;
     }
@@ -231,7 +282,7 @@ void Session::open_project(const std::string& path) {
 }
 
 void Session::save_project(const std::string& path) {
-  join_worker();
+  retire_worker();
   std::shared_ptr<const Document> document;
   std::shared_ptr<const Annotations> annotations;
   {
@@ -253,7 +304,13 @@ void Session::save_project(const std::string& path) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, path, document, annotations, generation]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, path, document, annotations, generation, done]() {
+    WorkerDoneGuard done_guard{done};
     // Everything that touches the database happens in this scope so the
     // connection (and its WAL checkpoint) is released before busy_ is cleared.
     std::string failure;
@@ -298,11 +355,8 @@ void Session::save_project(const std::string& path) {
         }
       }
     }
-    if (generation_.load() != generation) {
-      return;
-    }
     if (!failure.empty()) {
-      fail(failure, "Failed to save project " + path);
+      fail(generation, failure, "Failed to save project " + path);
       return;
     }
 
@@ -318,7 +372,7 @@ void Session::save_project(const std::string& path) {
 }
 
 void Session::backup_project(const std::string& destination, bool overwrite) {
-  join_worker();
+  retire_worker();
   std::string source_path;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -344,7 +398,13 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, source_path, destination, overwrite, generation]() {
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, source_path, destination, overwrite, generation, done]() {
+    WorkerDoneGuard done_guard{done};
     std::string failure;
     {
       auto project = Project::open(source_path);
@@ -360,11 +420,8 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
         }
       }
     }
-    if (generation_.load() != generation) {
-      return;
-    }
     if (!failure.empty()) {
-      fail(failure, "Failed to back up project to " + destination);
+      fail(generation, failure, "Failed to back up project to " + destination);
       return;
     }
 
@@ -377,7 +434,7 @@ void Session::backup_project(const std::string& destination, bool overwrite) {
 }
 
 void Session::restore_project(const std::string& backup_path) {
-  join_worker();
+  retire_worker();
   std::string target_path;
   {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -397,19 +454,46 @@ void Session::restore_project(const std::string& backup_path) {
   }
 
   const std::uint64_t generation = generation_.fetch_add(1) + 1;
+  CancellationToken token;
   {
     std::lock_guard<std::mutex> lock(mutex_);
+    current_cancellation_ = token;
     status_ = "Restoring project from " + backup_path;
     error_.reset();
   }
   busy_.store(true);
-  worker_ = std::thread([this, target_path, backup_path, generation]() {
-    auto restored = Project::restore(target_path, backup_path);
+  auto done = std::make_shared<std::atomic<bool>>(false);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_worker_done_ = done;
+  }
+  worker_ = std::thread([this, target_path, backup_path, generation, token, done]() {
+    WorkerDoneGuard done_guard{done};
     if (generation_.load() != generation) {
       return;
     }
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
+      return;
+    }
+
+    auto commit_hook = [this, generation](const std::string& temp,
+                                          const std::string& dest) -> Result<void> {
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (generation != generation_.load() || current_cancellation_.is_cancelled()) {
+        return make_error<void>(Status::Cancelled, "io.cancelled",
+                                "restore was superseded or cancelled before commit");
+      }
+      auto replaced = Project::replace_file_atomically(temp, dest);
+      if (replaced) {
+        committed_generation_ = generation;
+      }
+      return replaced;
+    };
+
+    auto restored = Project::restore(target_path, backup_path, token, commit_hook);
     if (!restored) {
-      fail(restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
+      fail(generation, restored.diagnostic().message + " [" + restored.diagnostic().code + "]",
            "Failed to restore project from " + backup_path);
       return;
     }
@@ -421,9 +505,6 @@ void Session::restore_project(const std::string& backup_path) {
     std::string failure_status;
     {
       auto project = Project::open(target_path);
-      if (generation_.load() != generation) {
-        return;
-      }
       if (!project) {
         failure = project.diagnostic().message + " [" + project.diagnostic().code + "]";
         failure_status = "Failed to open restored project " + target_path;
@@ -451,30 +532,38 @@ void Session::restore_project(const std::string& backup_path) {
         }
       }
     }
-    if (generation_.load() != generation) {
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!failure.empty()) {
-      fail(failure, failure_status);
+      fail(generation, failure, failure_status);
       return;
     }
 
-    auto loaded = load_binary(image_path);
-    if (generation_.load() != generation) {
+    LoadOptions load_opts;
+    load_opts.cancellation_token = token;
+    auto loaded = load_binary(image_path, load_opts);
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!loaded) {
-      fail("could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
+      fail(generation,
+           "could not load '" + image_path + "': " + loaded.diagnostic().message + " [" +
                loaded.diagnostic().code + "]",
            "Failed to load restored project image");
       return;
     }
-    auto analysis = analyze(loaded.value().image, loaded.value().data, analysis_options());
-    if (generation_.load() != generation) {
+    AnalysisOptions options = analysis_options();
+    options.cancellation_token = token;
+    auto analysis = analyze(loaded.value().image, loaded.value().data, options);
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
       return;
     }
     if (!analysis) {
-      fail(analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
+      fail(generation, analysis.diagnostic().message + " [" + analysis.diagnostic().code + "]",
            "Failed to analyse restored project image");
       return;
     }

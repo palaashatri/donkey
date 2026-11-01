@@ -23,6 +23,7 @@ struct PatchEntry {
   std::string author;
   uint64_t timestamp = 0;
   bool applied = false;
+  bool reverted = false;
 };
 
 struct PatchDiff {

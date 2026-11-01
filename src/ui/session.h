@@ -118,8 +118,14 @@ class Session {
   [[nodiscard]] bool can_redo() const;
 
  private:
-  void join_worker();
-  void fail(const std::string& message, const std::string& status);
+  struct RetiredWorker {
+    std::thread thread;
+    std::shared_ptr<std::atomic<bool>> done;
+  };
+
+  void retire_worker();
+  void reap_retired_workers();
+  void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
                                     const std::string& text, bool record_undo);
@@ -135,7 +141,10 @@ class Session {
   bool dirty_ = false;
   std::atomic<bool> busy_{false};
   std::thread worker_;
+  std::shared_ptr<std::atomic<bool>> current_worker_done_;
+  std::vector<RetiredWorker> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
+  std::uint64_t committed_generation_ = 0;
 
   CancellationToken current_cancellation_;
   std::vector<AnnotationEdit> undo_stack_;

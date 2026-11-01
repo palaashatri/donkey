@@ -18,7 +18,7 @@ ImVec4 status_color(std::string_view status) {
   if (status == "Complete" || status == "Success") {
     return ImVec4(0.36f, 0.75f, 0.51f, 1.0f);
   }
-  if (status == "Partial") {
+  if (status == "Partial" || status == "Lifting" || status == "Loading") {
     return ImVec4(0.93f, 0.72f, 0.29f, 1.0f);
   }
   if (status == "Unsupported") {

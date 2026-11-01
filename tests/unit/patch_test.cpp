@@ -2,6 +2,7 @@
 
 #include <gtest/gtest.h>
 
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 
@@ -84,7 +85,7 @@ TEST(PatchTest, ExportPatchedBinaryVerifiesA21) {
   auto src_bytes = read_file_bytes(src);
   std::string orig_sha256 = Sha256::hex(std::as_bytes(std::span(src_bytes)));
 
-  std::string temp_out = std::filesystem::temp_directory_path() / "test_patched_macho";
+  std::string temp_out = (std::filesystem::temp_directory_path() / "test_patched_macho").string();
   std::error_code ec;
   std::filesystem::remove(temp_out, ec);
 
@@ -135,6 +136,134 @@ TEST(PatchTest, ExportPatchedBinaryVerifiesA21) {
   EXPECT_EQ(std::memcmp(patched_bytes.data() + 4, orig_bytes.data() + 4, orig_bytes.size() - 4), 0);
 
   // Clean up
+  std::filesystem::remove(temp_out, ec);
+}
+
+TEST(PatchTest, RejectsEmptyOriginal) {
+  PatchManager manager;
+  const uint8_t repl[] = {0x90};
+  auto res = manager.stage_patch(0x10, {}, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.empty_original");
+}
+
+TEST(PatchTest, RejectsSizeMismatch) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90};
+  const uint8_t repl[] = {0xCC, 0xCC, 0xCC, 0xCC};
+  auto res = manager.stage_patch(0x10, orig, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.size_mismatch");
+}
+
+TEST(PatchTest, RejectsOverflowingOffset) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl[] = {0xCC, 0xCC};
+  auto res = manager.stage_patch(std::numeric_limits<uint64_t>::max() - 1, orig, repl);
+  EXPECT_FALSE(res.has_value());
+  EXPECT_EQ(res.diagnostic().code, "patch.offset_overflow");
+}
+
+TEST(PatchTest, RejectsOverlappingPatches) {
+  PatchManager manager;
+  const uint8_t orig1[] = {0x90, 0x90, 0x90, 0x90};
+  const uint8_t repl1[] = {0xCC, 0xCC, 0xCC, 0xCC};
+  auto res1 = manager.stage_patch(0x10, orig1, repl1);
+  ASSERT_TRUE(res1.has_value());
+
+  // Overlap start: 0x12..0x16 overlaps with 0x10..0x14
+  const uint8_t orig2[] = {0x90, 0x90, 0x90, 0x90};
+  const uint8_t repl2[] = {0x00, 0x00, 0x00, 0x00};
+  auto res2 = manager.stage_patch(0x12, orig2, repl2);
+  EXPECT_FALSE(res2.has_value());
+  EXPECT_EQ(res2.diagnostic().code, "patch.overlap");
+}
+
+TEST(PatchTest, SafeOutOfBoundsCheckOnApplyAndRevert) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl[] = {0xCC, 0xCC};
+  auto stage_res = manager.stage_patch(10, orig, repl);
+  ASSERT_TRUE(stage_res.has_value());
+
+  // Buffer smaller than offset + size on apply
+  std::vector<uint8_t> short_buffer = {0x90, 0x90, 0x90};
+  auto apply_res = manager.apply_patch(stage_res.value(), short_buffer);
+  EXPECT_FALSE(apply_res.has_value());
+  EXPECT_EQ(apply_res.diagnostic().code, "patch.out_of_bounds");
+
+  // Apply to a sufficiently large buffer
+  std::vector<uint8_t> valid_buffer(20, 0x90);
+  auto valid_apply = manager.apply_patch(stage_res.value(), valid_buffer);
+  ASSERT_TRUE(valid_apply.has_value());
+
+  // Buffer smaller than offset + size on revert
+  auto revert_res = manager.revert_patch(stage_res.value(), short_buffer);
+  EXPECT_FALSE(revert_res.has_value());
+  EXPECT_EQ(revert_res.diagnostic().code, "patch.out_of_bounds");
+}
+
+TEST(PatchTest, ReplacedPatchAfterRevert) {
+  PatchManager manager;
+  const uint8_t orig[] = {0x90, 0x90};
+  const uint8_t repl1[] = {0xAA, 0xAA};
+  const uint8_t repl2[] = {0xBB, 0xBB};
+
+  auto p1 = manager.stage_patch(5, orig, repl1);
+  ASSERT_TRUE(p1.has_value());
+
+  std::vector<uint8_t> buf(20, 0x90);
+  ASSERT_TRUE(manager.apply_patch(p1.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0xAA);
+
+  // Revert patch 1
+  ASSERT_TRUE(manager.revert_patch(p1.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0x90);
+
+  // Stage replacement patch 2 at the same offset succeeds without overlap error
+  auto p2 = manager.stage_patch(5, orig, repl2);
+  ASSERT_TRUE(p2.has_value());
+
+  // Apply patch 2 succeeds
+  ASSERT_TRUE(manager.apply_patch(p2.value(), buf).has_value());
+  EXPECT_EQ(buf[5], 0xBB);
+
+  // Re-applying reverted patch 1 is rejected as retired
+  auto reapply = manager.apply_patch(p1.value(), buf);
+  EXPECT_FALSE(reapply.has_value());
+  EXPECT_EQ(reapply.diagnostic().code, "patch.retired");
+}
+
+TEST(PatchTest, PeSignatureDetectionWithCraftedNearMaxOffsetDoesNotOverflowOrReadOutOfBounds) {
+  // Construct a synthetic MZ file of 256 bytes with e_lfanew = 0xfffffff0.
+  // In 32-bit arithmetic: 0xfffffff0 + 24 + 128 = 136 <= 256, which previously bypassed
+  // the bounds check and caused an out-of-bounds pointer dereference.
+  std::vector<uint8_t> crafted(256, 0);
+  crafted[0] = 'M';
+  crafted[1] = 'Z';
+  uint32_t near_max_lfanew = 0xfffffff0;
+  std::memcpy(crafted.data() + 0x3c, &near_max_lfanew, 4);
+
+  std::string temp_crafted = "pe_crafted_near_max_lfanew.bin";
+  std::ofstream out(temp_crafted, std::ios::binary);
+  out.write(reinterpret_cast<const char*>(crafted.data()), crafted.size());
+  out.close();
+
+  PatchManager manager;
+  const uint8_t orig[] = {0x00};
+  const uint8_t repl[] = {0x01};
+  auto stage = manager.stage_patch(10, orig, repl);
+  ASSERT_TRUE(stage.has_value());
+
+  std::string temp_out = "pe_crafted_patched.bin";
+  // Export patched binary calls detect_pe_signature internally; must not crash or ASan-abort!
+  auto export_res = manager.export_patched_binary(temp_crafted, temp_out, true);
+  ASSERT_TRUE(export_res.has_value());
+  EXPECT_FALSE(export_res.value().signature_invalidated);
+
+  std::error_code ec;
+  std::filesystem::remove(temp_crafted, ec);
   std::filesystem::remove(temp_out, ec);
 }
 

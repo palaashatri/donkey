@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <fstream>
 #include <limits>
 #include <optional>
 #include <span>
@@ -717,7 +718,8 @@ void print_usage(std::FILE* out) {
                "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
                "<hex>] --output <out> [--force] [--json]\n"
                "  donkey-cli plugin info <plugin-lib> [--json]\n"
-               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--json]\n"
+               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
+               "<mask|name>] [--json]\n"
                "\n"
                "All commands only read the file; nothing is executed.\n",
                std::string(version()).c_str());
@@ -1837,6 +1839,19 @@ int command_patch(const std::vector<std::string_view>& arguments) {
     return usage_error("patch apply needs --output <destination>");
   }
 
+  if (original_bytes.empty()) {
+    std::ifstream src_file(source_path, std::ios::binary);
+    if (src_file) {
+      src_file.seekg(static_cast<std::streamoff>(offset));
+      original_bytes.resize(replacement_bytes.size());
+      src_file.read(reinterpret_cast<char*>(original_bytes.data()),
+                    static_cast<std::streamsize>(replacement_bytes.size()));
+      if (src_file.gcount() != static_cast<std::streamsize>(replacement_bytes.size())) {
+        original_bytes.clear();
+      }
+    }
+  }
+
   PatchManager manager;
   auto stage_res = manager.stage_patch(offset, original_bytes, replacement_bytes);
   if (!stage_res) {
@@ -1902,6 +1917,7 @@ int command_plugin(const std::vector<std::string_view>& arguments) {
   std::string input_json = "{}";
   bool isolate = false;
   bool json = false;
+  std::optional<uint64_t> explicit_caps;
 
   for (size_t i = 1; i < arguments.size(); ++i) {
     std::string_view arg = arguments[i];
@@ -1909,6 +1925,26 @@ int command_plugin(const std::vector<std::string_view>& arguments) {
       json = true;
     } else if (arg == "--isolate") {
       isolate = true;
+    } else if (arg == "--allow-all-caps") {
+      explicit_caps = 0xFFFFFFFFFFFFFFFFULL;
+    } else if (arg == "--caps") {
+      std::string_view val;
+      if (!take_value(arguments, i, val)) {
+        return usage_error("--caps needs a value ('all', 'none', 'analysis', or hex integer)");
+      }
+      if (val == "all") {
+        explicit_caps = 0xFFFFFFFFFFFFFFFFULL;
+      } else if (val == "none") {
+        explicit_caps = 0;
+      } else if (val == "analysis") {
+        explicit_caps = DONKEY_CAP_ANALYSIS;
+      } else {
+        uint64_t parsed = 0;
+        if (!parse_u64(val, parsed)) {
+          return usage_error(("--caps invalid number: " + std::string(val)).c_str());
+        }
+        explicit_caps = parsed;
+      }
     } else if (arg == "--input") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
@@ -1929,7 +1965,10 @@ int command_plugin(const std::vector<std::string_view>& arguments) {
   }
 
   if (subcommand == "info") {
-    auto manifest_res = PluginHost::inspect_manifest(lib_path);
+    // Safely inspect manifest in isolated process so hostile constructors never run in host
+    // process. Fails closed on platforms lacking process isolation (Windows) to prevent unvetted
+    // static init.
+    auto manifest_res = PluginHost::inspect_manifest_isolated(lib_path);
     if (!manifest_res) {
       return fail(manifest_res.diagnostic());
     }
@@ -1962,15 +2001,15 @@ int command_plugin(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
-  auto manifest_res = PluginHost::inspect_manifest(lib_path);
-  if (!manifest_res) {
-    return fail(manifest_res.diagnostic());
-  }
-
-  uint64_t granted_caps = manifest_res.value().requested_capabilities;
-  Result<PluginExecutionResult> exec_res =
-      isolate ? PluginHost::execute_isolated(lib_path, input_json, granted_caps)
-              : PluginHost::execute_trusted(lib_path, input_json, granted_caps);
+  uint64_t granted_caps = explicit_caps.value_or(DONKEY_CAP_ANALYSIS);
+  auto exec_res = isolate ? PluginHost::execute_isolated(lib_path, input_json, granted_caps)
+                          : [&]() -> Result<PluginExecutionResult> {
+    auto manifest_res = PluginHost::inspect_manifest(lib_path);
+    if (!manifest_res) {
+      return manifest_res.diagnostic();
+    }
+    return PluginHost::execute_trusted(lib_path, input_json, granted_caps);
+  }();
 
   if (!exec_res) {
     return fail(exec_res.diagnostic());

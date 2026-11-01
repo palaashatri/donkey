@@ -1,5 +1,7 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -547,7 +549,25 @@ TEST(Binary, CorruptedHeadersAreRejectedDeterministically) {
 }
 
 TEST(Binary, RejectsEmptyAndMissingFiles) {
-  auto empty = donkey::load_binary_file("/dev/null");
+  struct ScopedTempFile {
+    std::filesystem::path path;
+    ~ScopedTempFile() {
+      std::error_code ec;
+      std::filesystem::remove(path, ec);
+    }
+  };
+  static std::atomic<std::uint64_t> test_counter{0};
+  const std::string empty_path =
+      (std::filesystem::temp_directory_path() /
+       ("test_empty_bin_" +
+        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+        std::to_string(test_counter.fetch_add(1))))
+          .string();
+  ScopedTempFile cleaner{empty_path};
+  {
+    std::ofstream ofs(empty_path, std::ios::binary | std::ios::trunc);
+  }
+  auto empty = donkey::load_binary_file(empty_path);
   EXPECT_FALSE(empty.has_value());
   EXPECT_EQ(empty.diagnostic().code, "image.empty_file");
 
@@ -623,6 +643,35 @@ TEST(Binary, IsolatedLoaderEnforcesTimeoutOnWorkerHang) {
   ASSERT_FALSE(result.has_value());
   EXPECT_EQ(result.diagnostic().code, "binary.worker_timeout");
   EXPECT_EQ(result.diagnostic().status, donkey::Status::ResourceLimit);
+}
+
+TEST(Binary, IsolatedLoaderHonorsCancellation) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+
+  donkey::LoadOptions options;
+  options.cancellation_token.cancel();
+  donkey::IsolationConfig config;
+  config.force_worker_hang = true;
+  config.timeout_seconds = 30;
+
+  auto result = donkey::load_binary_isolated(fixture_path("tiny-elf-x86_64"), options, config);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "io.cancelled");
+  EXPECT_EQ(result.diagnostic().status, donkey::Status::Cancelled);
+}
+
+TEST(Binary, IsolatedLoaderFailsClosedWhenIsolationUnavailable) {
+  if (donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation is supported on this platform";
+  }
+
+  const std::string path = fixture_path("tiny-elf-x86_64");
+  auto result = donkey::load_binary_isolated(path);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "binary.isolation_unavailable");
+  EXPECT_EQ(result.diagnostic().status, donkey::Status::Unsupported);
 }
 
 }  // namespace

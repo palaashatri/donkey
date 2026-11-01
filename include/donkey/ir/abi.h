@@ -14,6 +14,7 @@ namespace donkey {
 /// the architecture are ignored. This is deliberately conservative: a false
 /// parameter would be worse than a missing one, so configurable/tail-called
 /// values simply do not appear.
-void infer_signature(IrFunction& function, Architecture architecture);
+void infer_signature(IrFunction& function, Architecture architecture,
+                     BinaryFormat format = BinaryFormat::Unknown);
 
 }  // namespace donkey
