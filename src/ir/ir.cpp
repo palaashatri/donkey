@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "donkey/ir/abi.h"
 #include "ir_internal.h"
 #include "registers.h"
 
@@ -1228,6 +1229,17 @@ void recover_stack_variables(IrFunction& function) {
               }
               return a.offset < b.offset;
             });
+}
+
+void run_ir_passes(IrFunction& function, const PassOptions& options) {
+  infer_signature(function, options.architecture, options.format);
+  if (options.after_pass) {
+    options.after_pass("infer_signature", function);
+  }
+  recover_pointer_structs(function);
+  if (options.after_pass) {
+    options.after_pass("recover_pointer_structs", function);
+  }
 }
 
 }  // namespace donkey

@@ -72,6 +72,12 @@ listed where the per-function report was read.
 
 On every row, no Complete result disagrees with the compiled code.
 
+The passes that run after lifting (signature inference and pointer-structure
+recovery) are checked separately. `DecompilerCorpus.EveryPassPreservesSemantics`
+interprets the IR before and after each pass on all 48 vectors, for every
+function at every level, and requires identical results. These passes only
+annotate the function, so the table above does not change.
+
 ### Fixed by this corpus
 
 Each of these was reported **Complete** and computed the wrong value:
