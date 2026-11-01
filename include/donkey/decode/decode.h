@@ -31,6 +31,10 @@ enum class OperandKind : std::uint8_t { Unknown = 0, Register, Immediate, Memory
 /// `ShiftKind::None`. Only LSL/LSR/ASR are modelled by the lifter.
 enum class ShiftKind : std::uint8_t { None = 0, Lsl, Lsr, Asr, Ror };
 
+/// AArch64 extended-register operand (`w1, sxtw #2`): the low byte, half,
+/// word or doubleword is zero- or sign-extended before the shift.
+enum class ExtendKind : std::uint8_t { None = 0, Uxtb, Uxth, Uxtw, Uxtx, Sxtb, Sxth, Sxtw, Sxtx };
+
 struct MemoryOperand {
   std::string base;
   std::string index;
@@ -56,6 +60,7 @@ struct Operand {
   /// AArch64 shift/extend applied to this operand. Ignored on x86.
   ShiftKind shift = ShiftKind::None;
   std::uint8_t shift_amount = 0;
+  ExtendKind extend = ExtendKind::None;
 };
 
 struct Instruction {
@@ -75,10 +80,15 @@ struct Instruction {
 
 struct DecodeStream {
   std::vector<Instruction> instructions;
-  /// True when decoding stopped before the requested count because of invalid
-  /// bytes or a caller-supplied limit. The reason is machine-readable.
+  /// True when decoding stopped before the end of the input because of the
+  /// caller's instruction limit. The reason is machine-readable.
   bool truncated = false;
   std::string stop_reason;
+  /// Bytes that decode as no instruction (data in code, an encoding the
+  /// decoder does not know). The sweep skips one instruction slot (4 bytes on
+  /// AArch64, 1 on x86) and continues, so code after them is still found.
+  std::uint64_t invalid_bytes = 0;
+  std::uint64_t first_invalid_address = 0;
 };
 
 /// A single architecture decoder. Capstone handles are not thread-safe, so one

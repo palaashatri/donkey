@@ -214,7 +214,7 @@ struct Structurer {
                                   ? body.statements.size()
                                   : body.statements.size() - 1;
     for (std::size_t index = 0; index < limit; ++index) {
-      const IrStatement* previous = index == 0 ? nullptr : &body.statements[index - 1];
+      const IrStatement* previous = flags_producer(body, index);
       const std::string text = render_statement(function_, body.statements[index], previous);
       if (!text.empty()) {
         line(text, body.statements[index].source_address);
@@ -373,8 +373,7 @@ struct Structurer {
   std::string condition_of(BlockId branch_block, bool negate) const {
     const IrBlock& block = function_.blocks[branch_block];
     const IrStatement& branch = block.statements.back();
-    const IrStatement* previous =
-        block.statements.size() >= 2 ? &block.statements[block.statements.size() - 2] : nullptr;
+    const IrStatement* previous = flags_producer(block, block.statements.size() - 1);
     return render_condition(function_, branch, previous, negate);
   }
 
@@ -399,6 +398,40 @@ struct Structurer {
       const IrStatement& terminator = block.statements.back();
       if (terminator.op == IrOp::Switch) {
         const BlockId join = immediate_post_dominator_[index];
+        // Each case's body runs from its target up to the next case target
+        // (or the join). It must leave through the join or a return: a case
+        // that falls into the next one is not rendered as structured code.
+        std::vector<BlockId> starts;
+        for (const auto& sc : terminator.switch_cases) {
+          starts.push_back(sc.target_block);
+        }
+        if (terminator.a.kind == IrOperandKind::Block) {
+          starts.push_back(terminator.a.block);
+        }
+        std::sort(starts.begin(), starts.end());
+        starts.erase(std::unique(starts.begin(), starts.end()), starts.end());
+        auto case_end = [&](BlockId start) {
+          BlockId end = join == kNoBlock ? static_cast<BlockId>(function_.blocks.size()) : join;
+          for (const BlockId other : starts) {
+            if (other > start && other < end) {
+              end = other;
+            }
+          }
+          return end;
+        };
+        for (const BlockId start : starts) {
+          const BlockId end = case_end(start);
+          if (start >= end || end > function_.blocks.size()) {
+            continue;
+          }
+          const IrStatement& exit = function_.blocks[end - 1].statements.back();
+          const bool leaves = exit.op == IrOp::Return ||
+                              (exit.op == IrOp::Branch && join != kNoBlock && exit.a.block == join);
+          if (!leaves && end != join) {
+            ok_ = false;  // fallthrough between cases: labels/goto are honest
+            return;
+          }
+        }
         emit_statements(index, false);
         line("switch (" + render_operand(function_, terminator.dest) + ") {");
         ++indent_;
@@ -413,7 +446,7 @@ struct Structurer {
               !function_.blocks[sc.target_block].statements.empty() &&
               function_.blocks[sc.target_block].statements.back().op == IrOp::Return;
           if (join != kNoBlock && sc.target_block < join) {
-            emit_range(sc.target_block, join, loop_header);
+            emit_range(sc.target_block, case_end(sc.target_block), loop_header, join);
           } else if (sc.target_block < function_.blocks.size()) {
             emit_statements(sc.target_block, true);
           }
@@ -430,7 +463,7 @@ struct Structurer {
               !function_.blocks[terminator.a.block].statements.empty() &&
               function_.blocks[terminator.a.block].statements.back().op == IrOp::Return;
           if (join != kNoBlock && terminator.a.block < join) {
-            emit_range(terminator.a.block, join, loop_header);
+            emit_range(terminator.a.block, case_end(terminator.a.block), loop_header, join);
           } else if (terminator.a.block < function_.blocks.size()) {
             emit_statements(terminator.a.block, true);
           }

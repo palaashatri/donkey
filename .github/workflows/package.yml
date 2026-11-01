@@ -1,0 +1,457 @@
+name: package
+
+# Builds, tests and packages the desktop app and CLI on every supported OS
+# and architecture, verifies each package by installing and running it, and
+# attaches the packages to a GitHub Release when a v* tag is pushed.
+#
+#   Linux    .deb, .rpm, .tar.gz  x86_64 and arm64 (built on Ubuntu 22.04: glibc >= 2.35)
+#   macOS    .dmg, .zip           arm64 (macOS >= 11)
+#   Windows  setup .exe (NSIS), portable .zip   x86_64 (MinGW-w64 GCC) and
+#            arm64 (llvm-mingw), fully static
+#   FreeBSD  .pkg, .tar.gz        x86_64 (amd64) and arm64 (aarch64)
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: package-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    name: Linux packages (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    container:
+      image: ubuntu:22.04
+      # ptrace for the native debugger tests.
+      options: --cap-add=SYS_PTRACE --security-opt seccomp=unconfined
+    env:
+      # GCC 13 (Ubuntu toolchain PPA): GCC 12 reports false -Wrestrict and
+      # -Wmaybe-uninitialized errors inside libstdc++ at -O3. libstdc++ is
+      # linked statically, so the packages still only need glibc >= 2.35.
+      CC: gcc-13
+      CXX: g++-13
+      DEBIAN_FRONTEND: noninteractive
+      XDG_RUNTIME_DIR: /tmp/xdg-runtime
+    steps:
+      - name: Install toolchain and SDL3 build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends software-properties-common gpg-agent
+          add-apt-repository -y ppa:ubuntu-toolchain-r/test
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates git build-essential gcc-13 g++-13 python3-pip ninja-build \
+            pkg-config file rpm dpkg-dev xvfb xauth mesa-vulkan-drivers fonts-dejavu-core \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev libxss-dev \
+            libxtst-dev libxfixes-dev libxkbcommon-dev libwayland-dev libdecor-0-dev \
+            libegl1-mesa-dev libgl1-mesa-dev libvulkan-dev libdbus-1-dev libudev-dev
+          python3 -m pip install --upgrade "cmake>=3.28" ninja
+          git config --global --add safe.directory '*'
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake --preset package-linux
+      - name: Build
+        run: cmake --build --preset package-linux --parallel
+      - name: Test (including UI smoke tests on Xvfb)
+        run: |
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4
+      - name: Package
+        working-directory: build/package-linux
+        run: |
+          cpack
+          mkdir -p ../../dist
+          cp donkey-*.deb donkey-*.rpm donkey-*.tar.gz donkey-*.sha256 ../../dist/
+          cp donkey.spdx.json "../../dist/donkey-linux-${{ matrix.arch }}.spdx.json"
+          ls -l ../../dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-linux-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-linux-${{ matrix.arch }}
+          path: build/package-linux/tests/screenshots/*.bmp
+          if-no-files-found: warn
+
+  linux-verify:
+    name: Install on ${{ matrix.image }} (${{ matrix.arch }})
+    needs: linux
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+        image: ["ubuntu:22.04", "ubuntu:24.04", "debian:12", "fedora:41", "archlinux:latest"]
+        exclude:
+          # Arch Linux publishes no official arm64 container image.
+          - arch: arm64
+            image: "archlinux:latest"
+    container:
+      image: ${{ matrix.image }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      XDG_RUNTIME_DIR: /tmp/xdg-runtime
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: donkey-linux-${{ matrix.arch }}
+          path: dist
+      - name: Install the package and an X server
+        run: |
+          set -e
+          case "${{ matrix.image }}" in
+            ubuntu*|debian*)
+              apt-get update
+              apt-get install -y --no-install-recommends xvfb xauth fonts-dejavu-core
+              apt-get install -y ./dist/donkey-*.deb ;;
+            fedora*)
+              dnf install -y xorg-x11-server-Xvfb xorg-x11-xauth dejavu-sans-mono-fonts which
+              dnf install -y ./dist/donkey-*.rpm ;;
+            archlinux*)
+              pacman -Sy --noconfirm xorg-server-xvfb xorg-xauth ttf-dejavu which
+              tar -xzf dist/donkey-*.tar.gz -C /tmp
+              cp -r /tmp/donkey-*/* /usr/ ;;
+          esac
+      - name: Run the installed programs
+        run: |
+          set -e
+          command -v donkey donkey-cli
+          donkey --version
+          donkey-cli --version
+          donkey-cli info "$(command -v donkey-cli)"
+          donkey-cli functions "$(command -v donkey-cli)" | head -5
+          mkdir -p -m 700 "$XDG_RUNTIME_DIR"
+          Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+          sleep 2
+          DISPLAY=:99 donkey --renderer software "$(command -v donkey-cli)" --exit-after-frames 30
+      - name: Uninstall cleanly
+        run: |
+          set -e
+          case "${{ matrix.image }}" in
+            ubuntu*|debian*) apt-get remove -y donkey ;;
+            fedora*) dnf remove -y donkey ;;
+            archlinux*) rm -f /usr/bin/donkey /usr/bin/donkey-cli
+                        rm -rf /usr/share/doc/donkey /usr/share/applications/donkey.desktop
+                        find /usr/share/icons/hicolor -name donkey.png -delete ;;
+          esac
+          if command -v donkey || command -v donkey-cli; then
+            echo "binaries left behind"; exit 1
+          fi
+          leftovers=$(find /usr -name '*donkey*' 2>/dev/null)
+          if [ -n "$leftovers" ]; then echo "files left behind: $leftovers"; exit 1; fi
+
+  macos:
+    name: macOS packages (arm64)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake and Ninja
+        run: python -m pip install --upgrade "cmake>=3.28" ninja
+      - name: Configure
+        run: cmake --preset package-macos
+      - name: Build
+        run: cmake --build --preset package-macos --parallel
+      - name: Test
+        run: ctest --preset package-macos --parallel 4
+      - name: Package
+        working-directory: build/package-macos
+        env:
+          DONKEY_CODESIGN_IDENTITY: ${{ secrets.DONKEY_CODESIGN_IDENTITY }}
+        run: |
+          cpack
+          mkdir -p ../../dist
+          cp donkey-*.dmg donkey-*.zip donkey-*.sha256 ../../dist/
+          cp donkey.spdx.json ../../dist/donkey-macos-arm64.spdx.json
+          ls -l ../../dist
+      - name: Verify the disk image
+        run: |
+          set -e
+          mount=$(mktemp -d)
+          hdiutil attach dist/donkey-*.dmg -mountpoint "$mount" -nobrowse -readonly
+          app="$mount/Donkey.app"
+          test "$(lipo -archs "$app/Contents/MacOS/Donkey")" = arm64
+          test "$(lipo -archs "$app/Contents/MacOS/donkey-cli")" = arm64
+          codesign --verify --deep --strict "$app"
+          "$app/Contents/MacOS/Donkey" --version
+          "$app/Contents/MacOS/donkey-cli" --version
+          "$app/Contents/MacOS/donkey-cli" info "$app/Contents/MacOS/Donkey" | head -8
+          "$app/Contents/MacOS/Donkey" "$app/Contents/MacOS/donkey-cli" --exit-after-frames 30
+          hdiutil detach "$mount"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-macos-arm64
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-macos-arm64
+          path: build/package-macos/tests/screenshots/*.bmp
+          if-no-files-found: warn
+
+  windows:
+    name: Windows packages (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # MinGW-w64 GCC from the runner image (the same toolchain as the
+          # ci.yml Windows job).
+          - arch: x86_64
+            runner: windows-2022
+          # llvm-mingw: the runner image has no arm64 GNU toolchain.
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake and Ninja
+        run: python -m pip install --upgrade "cmake>=3.28" ninja
+      - name: Install llvm-mingw (arm64)
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $release = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } `
+            https://api.github.com/repos/mstorsjo/llvm-mingw/releases/latest
+          $asset = $release.assets | Where-Object { $_.name -like '*-ucrt-aarch64.zip' } |
+            Select-Object -First 1
+          Write-Host "llvm-mingw $($release.tag_name): $($asset.name)"
+          Invoke-WebRequest $asset.browser_download_url -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\
+          $root = Get-ChildItem C:\ -Directory -Filter 'llvm-mingw-*' | Select-Object -First 1
+          Add-Content $env:GITHUB_PATH "$($root.FullName)\bin"
+      - name: Ensure NSIS is available
+        shell: pwsh
+        run: |
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            choco install nsis -y --no-progress
+          }
+          $nsis = "${env:ProgramFiles(x86)}\NSIS"
+          if (Test-Path $nsis) { Add-Content $env:GITHUB_PATH $nsis }
+      # Both toolchains link fully statically: the .exe files need no DLLs
+      # beyond Windows itself.
+      - name: Configure
+        shell: pwsh
+        run: |
+          if ('${{ matrix.arch }}' -eq 'arm64') {
+            cmake --preset package-windows -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
+          } else {
+            cmake --preset package-windows -DCMAKE_C_COMPILER=gcc -DCMAKE_CXX_COMPILER=g++
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build
+        run: cmake --build --preset package-windows --parallel
+      - name: Test
+        run: ctest --preset package-windows --parallel 4
+      - name: Package
+        working-directory: build/package-windows
+        shell: pwsh
+        run: |
+          cpack
+          New-Item -ItemType Directory -Force ../../dist | Out-Null
+          Copy-Item donkey-*.exe, donkey-*.zip, donkey-*.sha256 ../../dist/
+          Copy-Item donkey.spdx.json "../../dist/donkey-windows-${{ matrix.arch }}.spdx.json"
+          Get-ChildItem ../../dist
+      - name: Verify the installer
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $setup = Get-ChildItem dist/donkey-*.exe | Select-Object -First 1
+          $target = 'C:\DonkeyVerify'
+          Start-Process $setup.FullName -ArgumentList '/S', "/D=$target" -Wait
+          if (-not (Test-Path "$target\donkey.exe")) { throw 'donkey.exe was not installed' }
+          if (-not (Test-Path "$target\donkey-cli.exe")) { throw 'donkey-cli.exe was not installed' }
+          & "$target\donkey-cli.exe" --version
+          if ($LASTEXITCODE -ne 0) { throw 'donkey-cli failed' }
+          & "$target\donkey-cli.exe" info "$target\donkey.exe"
+          if ($LASTEXITCODE -ne 0) { throw 'donkey-cli info failed' }
+          $p = Start-Process "$target\donkey.exe" -ArgumentList '--version' -Wait -PassThru `
+                 -RedirectStandardOutput version.txt
+          Get-Content version.txt
+          if ($p.ExitCode -ne 0) { throw 'donkey.exe --version failed' }
+          $p = Start-Process "$target\donkey.exe" `
+                 -ArgumentList "`"$target\donkey-cli.exe`"", '--exit-after-frames', '30' `
+                 -Wait -PassThru -RedirectStandardError gui.txt
+          Get-Content gui.txt
+          if ($p.ExitCode -ne 0) { throw 'the desktop app did not start' }
+          Start-Process "$target\Uninstall.exe" -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path "$target\donkey.exe") { throw 'uninstall left donkey.exe behind' }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-windows-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-windows-${{ matrix.arch }}
+          path: build/package-windows/tests/screenshots/*.bmp
+          if-no-files-found: warn
+      # Last, so the counts are at the end of the log (after the installer check).
+      - name: Decompiler corpus results
+        if: always()
+        run: cmake "-DREPORT=build/package-windows/tests/decompiler-corpus-report.json" -P cmake/checks/corpus_summary.cmake
+
+  freebsd:
+    name: FreeBSD packages (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            vm_arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            vm_arch: aarch64
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build, test and package in a FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.3"
+          arch: ${{ matrix.vm_arch }}
+          usesh: true
+          prepare: |
+            pkg install -y cmake ninja git pkgconf python3 xorg-vfbserver xauth dejavu
+            for p in libX11 libXext libXrandr libXcursor libXi libXScrnSaver libXfixes \
+                     libXtst libxkbcommon wayland wayland-protocols vulkan-headers \
+                     vulkan-loader evdev-proto libinotify; do
+              pkg install -y "$p" || echo "optional package $p unavailable"
+            done
+          run: |
+            set -e
+            git config --global --add safe.directory '*'
+            cmake --preset package-freebsd
+            cmake --build --preset package-freebsd --parallel
+            # What analysis reports about the test debuggee (status, diagnostics).
+            build/package-freebsd/apps/donkey-cli/donkey-cli analyze \
+              build/package-freebsd/tests/donkey_test_debuggee --json \
+              | grep -E '"status"|"code"' || true
+            Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+            sleep 2
+            # The aarch64 VM runs without hardware virtualisation (about 70 min
+            # against 7 for amd64), so frame-time limits mean nothing there. The
+            # UI scripts' timing limits are reported but not enforced
+            # (DONKEY_UI_NO_TIMING), and the two scripts that only measure
+            # timing exceed CTest's timeout, so they run on amd64 only.
+            # Every other test and assertion runs.
+            exclude=''
+            if [ "${{ matrix.vm_arch }}" = aarch64 ]; then
+              exclude='ui[.]script_(virtualization|responsiveness)'
+              export DONKEY_UI_NO_TIMING=1
+            fi
+            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 ${exclude:+-E "$exclude"}
+            mkdir -p screenshots
+            cp build/package-freebsd/tests/screenshots/*.bmp screenshots/ || true
+            (cd build/package-freebsd && cpack)
+            mkdir -p dist
+            cp build/package-freebsd/donkey-*.tar.gz build/package-freebsd/donkey-*.sha256 dist/
+            cp build/package-freebsd/donkey.spdx.json "dist/donkey-freebsd-${{ matrix.arch }}.spdx.json"
+            sh packaging/freebsd/make-pkg.sh build/package-freebsd dist
+            pkg add dist/donkey-*.pkg
+            donkey --version
+            donkey-cli --version
+            donkey-cli info /usr/local/bin/donkey-cli | head -6
+            DISPLAY=:99 donkey --renderer software /usr/local/bin/donkey-cli --exit-after-frames 30
+            pkg delete -y donkey
+            # sh caches command paths, so test the files rather than `command -v`.
+            for f in /usr/local/bin/donkey /usr/local/bin/donkey-cli /usr/local/share/doc/donkey/LICENSE; do
+              if [ -e "$f" ]; then echo "left behind: $f"; exit 1; fi
+            done
+            (cd dist && for f in *.pkg; do sha256 -q "$f" > "$f.sha256"; done)
+            ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: donkey-freebsd-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-freebsd-${{ matrix.arch }}
+          path: screenshots/*.bmp
+          if-no-files-found: warn
+
+  # On manual runs only: commit the screenshots every platform captured to
+  # docs/images/screenshots/ on the branch that was built. Pushes made with
+  # GITHUB_TOKEN do not start new workflow runs.
+  screenshots:
+    name: Commit documentation screenshots
+    if: always() && github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/')
+    needs: [linux, macos, windows, freebsd]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: screenshots-*
+          path: shots
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Convert to PNG and commit
+        run: |
+          set -e
+          python -m pip install --quiet pillow==11.0.0
+          python tools/screenshots_to_png.py shots docs/images/screenshots "$GITHUB_SHA" "$GITHUB_RUN_ID"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/images/screenshots
+          if git diff --cached --quiet; then echo "screenshots unchanged"; exit 0; fi
+          git commit -m "docs: screenshots from package run $GITHUB_RUN_ID (${GITHUB_SHA::12})"
+          for attempt in 1 2 3; do
+            git pull --rebase origin "$GITHUB_REF_NAME" && git push origin "HEAD:$GITHUB_REF_NAME" && exit 0
+            sleep 10
+          done
+          exit 1
+
+  release:
+    name: Publish GitHub release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, linux-verify, macos, windows, freebsd]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          prerelease: true
+          generate_release_notes: true

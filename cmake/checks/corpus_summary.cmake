@@ -1,0 +1,45 @@
+# Print the decompiler corpus outcome table (tests/decompiler-corpus-report.json)
+# as counts per optimisation level, for CI logs:
+#   cmake -DREPORT=<build>/tests/decompiler-corpus-report.json -P corpus_summary.cmake
+# A missing report (the corpus test was skipped on this host) is reported, not
+# treated as an error.
+cmake_minimum_required(VERSION 3.25)
+
+if(NOT DEFINED REPORT OR NOT EXISTS "${REPORT}")
+  message(STATUS "corpus: no report at '${REPORT}' (corpus test not run on this host)")
+  return()
+endif()
+
+file(READ "${REPORT}" json)
+string(JSON compiler GET "${json}" compiler)
+string(JSON count LENGTH "${json}" outcomes)
+message(STATUS "corpus: ${compiler}, ${count} outcomes")
+if(count EQUAL 0)
+  return()
+endif()
+
+set(levels "")
+math(EXPR last "${count} - 1")
+foreach(i RANGE ${last})
+  string(JSON level GET "${json}" outcomes ${i} level)
+  string(JSON lift GET "${json}" outcomes ${i} lift)
+  string(JSON verdict GET "${json}" outcomes ${i} verdict)
+  if(NOT level IN_LIST levels)
+    list(APPEND levels "${level}")
+  endif()
+  set(key "${level}_${lift}_${verdict}")
+  if(NOT DEFINED n_${key})
+    set(n_${key} 0)
+    list(APPEND keys_${level} "${lift}/${verdict}")
+  endif()
+  math(EXPR n_${key} "${n_${key}} + 1")
+endforeach()
+
+foreach(level IN LISTS levels)
+  set(line "corpus ${level}:")
+  foreach(kind IN LISTS keys_${level})
+    string(REPLACE "/" "_" suffix "${kind}")
+    string(APPEND line " ${kind}=${n_${level}_${suffix}}")
+  endforeach()
+  message(STATUS "${line}")
+endforeach()

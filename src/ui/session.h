@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -11,6 +12,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/project/project.h"
@@ -22,6 +24,11 @@ namespace donkey::ui {
 struct Document {
   LoadedBinary loaded;
   AnalysisResult analysis;
+  /// DWARF read from the file (null when it has none or it was unreadable;
+  /// `debug_info_note` says which). Names from it only fill functions that
+  /// have no symbol name, and never replace a user rename.
+  std::shared_ptr<const DebugInfo> debug_info;
+  std::string debug_info_note;
 };
 
 /// Address-keyed user annotations. Snapshots are immutable and swapped under
@@ -30,6 +37,9 @@ struct Annotations {
   std::unordered_map<std::uint64_t, std::string> renames;
   std::unordered_map<std::uint64_t, std::string> comments;
   std::unordered_map<std::uint64_t, std::string> bookmarks;
+  /// User function-boundary edits: "define" adds a start, "remove" drops a
+  /// discovered one. Changing them re-runs analysis.
+  std::unordered_map<std::uint64_t, std::string> functions;
 
   [[nodiscard]] const std::string* rename_at(std::uint64_t address) const {
     const auto it = renames.find(address);
@@ -42,6 +52,10 @@ struct Annotations {
   [[nodiscard]] const std::string* bookmark_at(std::uint64_t address) const {
     const auto it = bookmarks.find(address);
     return it == bookmarks.end() ? nullptr : &it->second;
+  }
+  [[nodiscard]] const std::string* function_edit_at(std::uint64_t address) const {
+    const auto it = functions.find(address);
+    return it == functions.end() ? nullptr : &it->second;
   }
   [[nodiscard]] bool has_bookmark(std::uint64_t address) const {
     return bookmarks.contains(address);
@@ -65,10 +79,10 @@ class Session {
   Session(const Session&) = delete;
   Session& operator=(const Session&) = delete;
 
-  /// Start loading `path`. The previous worker (if any) is joined first, so
-  /// re-entrant calls block the caller rather than running two loads at once.
-  /// Callers must not invoke this while `busy()` (the desktop shell disables
-  /// its menu items accordingly).
+  /// Start loading `path`. The previous worker (if any) is cancelled and
+  /// retired while the new one starts; it may finish asynchronously, and its
+  /// results are discarded because its generation is obsolete. The desktop
+  /// shell still disables its menu items while `busy()`.
   void open(const std::string& path);
 
   /// Open a project database, load the single image it references and its
@@ -86,8 +100,27 @@ class Session {
 
   /// Replace the currently open project database with `backup_path` after
   /// validating the backup, then reload the restored document and annotations
-  /// on the worker thread.
+  /// on the worker thread. Cancellation is honoured up to the atomic database
+  /// replacement; after it the restore is reported as completed, and a later
+  /// cancel only stops the image reload.
   void restore_project(const std::string& backup_path);
+
+  /// Test-only: runs on the restore worker immediately after the database
+  /// replacement has committed.
+  void set_restore_post_commit_hook_for_testing(std::function<void()> hook);
+
+  /// Test-only: runs on the open() worker before the file is read, so a test
+  /// can stand in for slow storage. It receives the operation's token.
+  void set_load_hook_for_testing(std::function<void(const CancellationToken&)> hook);
+
+  /// Test-only: runs on the open() and open_project() workers just before
+  /// DWARF is read, so a test can cancel at that point.
+  void set_debug_info_hook_for_testing(std::function<void()> hook);
+
+  /// Test-only: runs on the restore worker inside the database replacement,
+  /// after the session lock is released, so a test can stand in for slow
+  /// storage and check the session stays responsive.
+  void set_restore_replace_hook_for_testing(std::function<void()> hook);
 
   /// Request cooperative cancellation of any running worker task.
   void cancel();
@@ -108,6 +141,16 @@ class Session {
   /// Persistence happens on the next explicit save.
   void set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text);
 
+  /// Define a function starting at `address`, remove the discovered one, or
+  /// (with an empty action) drop the edit. Re-runs analysis on the worker.
+  void set_function_edit(std::uint64_t address, const std::string& action);
+
+  /// True when a function-boundary edit is waiting for the worker to be free.
+  [[nodiscard]] bool reanalysis_pending() const;
+  /// Re-analyse the open document with the current function edits. Deferred
+  /// (see reanalysis_pending) while another operation runs.
+  void reanalyze();
+
   /// Toggle bookmark at address. Clears it if already present.
   void toggle_bookmark(std::uint64_t address, const std::string& note = "Bookmark");
 
@@ -125,6 +168,9 @@ class Session {
 
   void retire_worker();
   void reap_retired_workers();
+  void after_annotation_change(AnnotationKind kind);
+  std::function<void(std::uint64_t, std::uint64_t)> progress_reporter(std::uint64_t generation);
+  bool wait_for_retired_workers(const CancellationToken& token);
   void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
@@ -144,7 +190,11 @@ class Session {
   std::shared_ptr<std::atomic<bool>> current_worker_done_;
   std::vector<RetiredWorker> retired_workers_;
   std::atomic<std::uint64_t> generation_{0};
-  std::uint64_t committed_generation_ = 0;
+  std::function<void()> restore_post_commit_hook_;
+  std::function<void(const CancellationToken&)> load_hook_;
+  std::function<void()> debug_info_hook_;
+  std::function<void()> restore_replace_hook_;
+  bool reanalysis_pending_ = false;
 
   CancellationToken current_cancellation_;
   std::vector<AnnotationEdit> undo_stack_;

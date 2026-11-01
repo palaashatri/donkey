@@ -16,7 +16,12 @@ if(DONKEY_BUILD_TESTS)
   )
   set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
   set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
-  set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  # Match the runtime the rest of the build uses (see DONKEY_STATIC_RUNTIME).
+  if(DONKEY_STATIC_RUNTIME)
+    set(gtest_force_shared_crt OFF CACHE BOOL "" FORCE)
+  else()
+    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+  endif()
   FetchContent_MakeAvailable(googletest)
 endif()
 

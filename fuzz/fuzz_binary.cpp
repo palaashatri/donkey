@@ -1,5 +1,5 @@
 // libFuzzer entry point for the untrusted-input pipeline: raw bytes are
-// parsed as ELF/PE/Mach-O, analysed with tight bounds, and every discovered
+// parsed as ELF/PE/Mach-O, their DWARF read, analysed with tight bounds, and every discovered
 // function is lifted, verified and printed. The harness asserts the core
 // invariant that a successfully lifted function always verifies, and that a
 // verified function always renders; violations become fuzz crashes.
@@ -13,6 +13,7 @@
 #include <span>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
@@ -34,6 +35,18 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   auto image = donkey::parse_binary(bytes, "<fuzz>");
   if (!image) {
     return 0;  // Rejection is a valid, deterministic outcome.
+  }
+
+  // DWARF reader: bounded, and every type it reports must render.
+  donkey::DebugInfoOptions debug_options;
+  debug_options.max_entries = 200'000;
+  if (auto debug = donkey::read_debug_info(image.value(), bytes, debug_options)) {
+    for (const auto& function : debug.value().functions) {
+      (void)debug.value().prototype(function);
+    }
+    for (const auto& [offset, type] : debug.value().types) {
+      (void)debug.value().type_name(offset);
+    }
   }
 
   donkey::AnalysisOptions options;

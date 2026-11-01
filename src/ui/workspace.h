@@ -7,35 +7,44 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
+#include "donkey/analysis/graph_layout.h"
 #include "donkey/core/navigation.h"
+#include "donkey/core/scheduler.h"
+#include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
+#include "donkey/patch/patch.h"
 #include "imgui.h"
 #include "session.h"
 
 namespace donkey::ui {
 
 struct AsyncDecompileState {
-  AsyncDecompileState();
-  ~AsyncDecompileState();
+  AsyncDecompileState() = default;
+  ~AsyncDecompileState() = default;
 
   AsyncDecompileState(const AsyncDecompileState&) = delete;
   AsyncDecompileState& operator=(const AsyncDecompileState&) = delete;
 
+  /// Lift the function the user is looking at (Visible priority; a newer
+  /// request supersedes a queued older one). Served from the cache when the
+  /// same function of the same document was already lifted.
   void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, Function target);
+  /// Lift functions the user is likely to open next (Background priority).
+  void prefetch(const std::shared_ptr<const Document>& doc, std::vector<Function> targets);
+
+  struct Output {
+    std::string status;
+    std::string code;
+    std::string text;
+    std::vector<PseudocodeLine> lines;
+  };
 
   std::mutex mutex;
-  std::condition_variable cv;
-  bool stop = false;
-  std::thread worker;
-
   std::uint64_t current_generation = 0;
-  std::shared_ptr<const Document> pending_doc;
-  Function pending_target;
-  std::uint64_t pending_gen = 0;
-  bool has_pending = false;
 
   bool ready = false;
   std::uint64_t ready_address = 0;
@@ -44,7 +53,36 @@ struct AsyncDecompileState {
   std::string ready_code;
   std::string ready_text;
   std::vector<PseudocodeLine> ready_lines;
+
+  /// Results for one document, keyed by "address:name" (renames change the
+  /// printed name, so they are separate entries).
+  const Document* cache_document = nullptr;
+  std::unordered_map<std::string, Output> cache;
+
+  /// Declared last: destroyed first, so no job outlives the state it uses.
+  JobScheduler scheduler{2};
+
+ private:
+  void reset_cache_for(const Document* document);
 };
+
+inline constexpr const char* kGalleryWindow = "Component gallery";
+
+/// The component gallery / virtualisation test screen (gallery_view.cpp).
+struct GalleryState {
+  bool open = false;
+  long long row_count = 1000000;
+  std::string search;
+  long long search_row = -1;
+  long long selected_row = -1;
+  long long scroll_to_row = -1;
+  int button_presses = 0;
+  int rows_submitted_last_frame = 0;
+  float scroll_y = 0.0f;
+  unsigned int search_id = 0;  ///< ImGui ID of the search field (tests)
+};
+
+void draw_component_gallery(GalleryState& gallery);
 
 /// Selection and filter state shared by every panel. It is render-thread
 /// state only; the parsed document stays immutable.
@@ -70,6 +108,10 @@ struct UiState {
   AnnotationKind annotation_kind = AnnotationKind::Rename;
   std::uint64_t annotation_address = 0;
   char annotation_buffer[512] = {};
+  /// Function-boundary edit request ("define", "remove" or "" to clear).
+  bool function_edit_requested = false;
+  std::uint64_t function_edit_address = 0;
+  std::string function_edit_action;
 
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded and executed asynchronously off the render thread.
@@ -91,6 +133,9 @@ struct UiState {
     if (address == 0 || selected_address == address) {
       return;
     }
+    // The selection may have been set without history (the entry point at
+    // load, a click in Functions or Xrefs): keep it so Back returns there.
+    nav_history.record_location(selected_address);
     nav_history.navigate_to(address);
     selected_address = address;
     if (doc != nullptr) {
@@ -137,9 +182,50 @@ struct UiState {
   bool graph_user_adjusted = false;
   const Document* graph_document = nullptr;
   std::uint64_t graph_function = 0;
+  /// Layout and node-to-node edges of the shown function, rebuilt only when
+  /// the document or function changes (not every frame).
+  struct GraphCache {
+    const Document* document = nullptr;
+    std::uint64_t function = 0;
+    GraphLayout layout;
+    struct Edge {
+      std::size_t from = 0;  ///< index into layout.nodes
+      std::size_t to = 0;
+      CfgEdgeKind kind = CfgEdgeKind::Unknown;
+    };
+    std::vector<Edge> edges;
+  };
+  std::shared_ptr<GraphCache> graph_cache;
+  char graph_search[128] = {};
+
+  // --- Hex editor / patching -------------------------------------------------
+  // Edits never touch the opened file: they are staged in a PatchManager,
+  // shown on a copy of the bytes and written only by an explicit export to a
+  // new file (on a worker thread).
+  const Document* patch_document = nullptr;
+  std::string patch_document_sha;
+  std::shared_ptr<PatchManager> patches;
+  std::vector<std::uint8_t> patched_bytes;
+  std::uint64_t hex_cursor = ~std::uint64_t{0};  ///< file offset of the edit cursor
+  char patch_hex[160] = {};
+  char patch_export_path[1024] = {};
+  std::string patch_message;
+  struct PatchExportJob {
+    std::mutex mutex;
+    bool done = false;
+    std::string message;
+  };
+  std::shared_ptr<PatchExportJob> patch_export;
 
   // --- Debugger state -------------------------------------------------------
-  std::unique_ptr<debug::DebugAdapter> debug_adapter;
+  // The controller runs the adapter on its own thread; the render thread only
+  // enqueues commands and draws the latest published snapshot.
+  std::unique_ptr<debug::DebugController> debug_controller;
+  bool debug_simulation = false;      ///< controller uses the mock, by explicit choice
+  bool debug_confirm_launch = false;  ///< launch modal requested
+  char debug_arguments[512] = {};
+  std::uint64_t debug_followed_revision = 0;  ///< last stop the code views jumped to
+  char debug_memory_address[32] = {};
 };
 
 class Workspace {
@@ -157,12 +243,36 @@ class Workspace {
   }
 
   void focus_address(std::uint64_t address, const std::string& section);
+  /// UI-script hooks for the debugger (the consent dialog's Run button does
+  /// the same launch). `debug_supported_for_testing` is false on hosts
+  /// without a native debugger.
+  bool debug_supported_for_testing();
+  void debug_launch_for_testing(std::uint64_t break_static_address);
+  void debug_continue_for_testing();
+  void debug_terminate_for_testing();
+  [[nodiscard]] bool debug_stopped_for_testing() const;
+
+  /// Navigate like "Go to" does (history, section, view scrolling).
+  void go_to(std::uint64_t address) { state_.navigate_to(address, session_.document().get()); }
+
+  /// Skip the built-in dock layout because a saved one was loaded.
+  void set_layout_restored(bool restored) { layout_initialized_ = restored; }
+  /// Rebuild the default dock layout on the next frame.
+  void reset_layout() { layout_initialized_ = false; }
+
+  [[nodiscard]] const UiState& state() const noexcept { return state_; }
+  [[nodiscard]] GalleryState& gallery() noexcept { return gallery_; }
+
+  /// Resolve a "Go to" query: a hex address (0x optional) or a function,
+  /// symbol or user-renamed name. Returns 0 when nothing matches.
+  [[nodiscard]] std::uint64_t resolve_location(const std::string& query) const;
 
  private:
   void draw_menu_bar(bool& quit);
   void draw_dockspace();
   void draw_panels();
   void build_default_layout(ImGuiID dockspace_id);
+  void open_annotation_editor(AnnotationKind kind, std::uint64_t address);
 
   Session& session_;
   const Document* last_document_ = nullptr;
@@ -181,6 +291,10 @@ class Workspace {
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;
+  bool goto_popup_ = false;
+  char goto_buffer_[256] = {};
+  std::string goto_error_;
+  GalleryState gallery_;
   char path_buffer_[1024] = {};
   char project_path_buffer_[1024] = {};
   char backup_path_buffer_[1024] = {};

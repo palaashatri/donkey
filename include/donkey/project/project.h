@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,11 +15,18 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 3;
+constexpr int kProjectSchemaVersion = 4;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
-enum class AnnotationKind : std::uint8_t { Rename = 0, Comment = 1, Bookmark = 2 };
+/// FunctionStart records a user edit of function boundaries at `address`:
+/// text "define" adds a function start, "remove" deletes a discovered one.
+enum class AnnotationKind : std::uint8_t {
+  Rename = 0,
+  Comment = 1,
+  Bookmark = 2,
+  FunctionStart = 3
+};
 const char* annotation_kind_name(AnnotationKind kind) noexcept;
 
 struct Annotation {
@@ -46,6 +54,15 @@ struct ProjectImage {
 /// SQLite-backed project storage. Every mutation is transactional and the
 /// storage schema is migrated forward with `PRAGMA user_version`. The original
 /// binary is referenced by path and SHA-256, never copied silently.
+/// Boundaries inside `Project::replace_file_atomically`, exposed so tests can
+/// inject a simulated crash at each one.
+enum class ReplaceStage : std::uint8_t {
+  Quiesced = 0,  ///< target WAL folded, nothing renamed yet
+  Synced = 1,    ///< replacement flushed, rename not yet issued
+  Renamed = 2,   ///< rename done, directory entry not yet flushed
+};
+using ReplaceFaultHook = std::function<bool(ReplaceStage)>;
+
 class Project {
  public:
   Project() = default;
@@ -96,13 +113,24 @@ class Project {
   /// `destination` using SQLite's online backup API (so WAL content is
   /// included). The copy is written to a temporary file first and renamed into
   /// place, so a failed backup never damages an existing destination. Refuses
-  /// to replace an existing file unless `overwrite` is true.
+  /// to replace an existing file unless `overwrite` is true, and always
+  /// refuses a destination that is the open database itself (including
+  /// through symlinks or hard links) with `project.backup_is_source`.
   [[nodiscard]] Result<void> backup(const std::string& destination, bool overwrite = false) const;
 
-  /// Atomically replace `target_path` with `temp_path`, preserving existing
-  /// destination file and sidecars if replacement fails or is interrupted.
+  /// Replace the database at `target_path` with the self-contained file at
+  /// `temp_path` (same volume). The target's WAL is folded into it first,
+  /// which fails with `project.replace_busy` if any other connection still
+  /// has it open; then one atomic rename swaps the files. An interruption at
+  /// any point leaves either the complete old database or the complete new
+  /// one. On failure `temp_path` is left for the caller to remove.
   [[nodiscard]] static Result<void> replace_file_atomically(const std::string& temp_path,
                                                             const std::string& target_path);
+
+  /// Test-only: called at each boundary of `replace_file_atomically`; when it
+  /// returns true the replacement stops there with no cleanup, as if the
+  /// process had died. Pass an empty function to remove it.
+  static void set_replace_fault_hook_for_testing(ReplaceFaultHook hook);
 
   using RestoreCommitHook =
       std::function<Result<void>(const std::string& temp_path, const std::string& target_path)>;

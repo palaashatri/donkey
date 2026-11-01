@@ -1,16 +1,34 @@
 #include <gtest/gtest.h>
 #include <sqlite3.h>
 
+#include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <limits>
 #include <string>
 #include <utility>
+#include <vector>
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <sys/wait.h>
+#include <unistd.h>
+#endif
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/project/project.h"
+#include "test_io.h"
 
 namespace {
 
@@ -22,13 +40,25 @@ std::string fixture_path(const std::string& name) {
   return std::string(DONKEY_FIXTURE_DIR) + "/binaries/" + name;
 }
 
+std::uint64_t current_process_id() {
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+  return static_cast<std::uint64_t>(getpid());
+#endif
+}
+
 /// Unique database path that removes itself and its SQLite sidecars.
 class TempPath {
  public:
   explicit TempPath(const std::string& name) {
+    // CTest runs each test in its own process, possibly in parallel, so the
+    // name must be unique across processes, not only within one.
     static std::uint64_t counter = 0;
+    const auto unique = std::to_string(current_process_id()) + "-" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     path_ = std::filesystem::temp_directory_path() /
-            ("donkey-" + name + "-" + std::to_string(++counter) + ".db");
+            ("donkey-" + name + "-" + unique + "-" + std::to_string(++counter) + ".db");
   }
   ~TempPath() { remove(); }
   TempPath(const TempPath&) = delete;
@@ -308,7 +338,7 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
 
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 3);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto images = reopened.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -366,7 +396,7 @@ TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
   // Opening must migrate from v2 to v3, preserve existing annotations, and allow Bookmark
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 3);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto annotations = reopened.value().annotations(image_id);
   ASSERT_TRUE(annotations.has_value());
   ASSERT_EQ(annotations.value().size(), 1U);
@@ -622,7 +652,9 @@ TEST(Project, RestoreHonorsCancellationBeforeReplacingDatabase) {
   EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
 }
 
-TEST(Project, FailedReplacePreservesExistingDatabaseAndSidecars) {
+// Covers only the restore path's cleanup when its commit step fails; the real
+// replacement routine is exercised by the Replace* tests below.
+TEST(Project, RestoreRemovesTemporaryCopyWhenCommitHookFails) {
   TempPath source("restore-fail-source");
   TempPath destination("restore-fail-destination");
   TempPath backup("restore-fail-backup");
@@ -677,13 +709,335 @@ TEST(Project, FailedReplacePreservesExistingDatabaseAndSidecars) {
   }
 
   EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
-  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-db"));
-  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-wal"));
-  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-old-shm"));
 
   std::error_code ec;
   std::filesystem::remove(destination.str() + "-wal", ec);
   std::filesystem::remove(destination.str() + "-shm", ec);
+}
+
+// ---------------------------------------------------------------------------
+// Real replacement routine: exclusivity, sidecars and interruption.
+// ---------------------------------------------------------------------------
+
+using donkey::Annotation;
+using donkey::AnnotationKind;
+using donkey::ReplaceStage;
+
+[[maybe_unused]] std::uintmax_t file_size_or_zero(const std::string& path) {
+  std::error_code ec;
+  const auto size = std::filesystem::file_size(path, ec);
+  return ec ? 0 : size;
+}
+
+std::string read_bytes(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  return donkey_test::read_stream<std::string>(in);
+}
+
+/// Create a project at `path` holding the ELF fixture and one comment.
+std::int64_t make_project(const std::string& path, const std::string& comment) {
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  EXPECT_TRUE(analysis.has_value());
+  auto project = Project::create(path);
+  EXPECT_TRUE(project.has_value());
+  auto id = project.value().import(loaded, analysis.value());
+  EXPECT_TRUE(id.has_value());
+  EXPECT_TRUE(project.value()
+                  .replace_annotations(id.value(), {{AnnotationKind::Comment, 0x10, comment}})
+                  .has_value());
+  return id.value();
+}
+
+/// All annotation texts of the single image, sorted, or {"<unreadable>"}.
+std::vector<std::string> annotation_texts(const std::string& path) {
+  auto project = Project::open(path);
+  if (!project) {
+    return {"<unreadable: " + project.diagnostic().code + ">"};
+  }
+  auto integrity = project.value().check_integrity();
+  if (!integrity || !integrity.value()) {
+    return {"<integrity failure>"};
+  }
+  auto images = project.value().images();
+  if (!images || images.value().size() != 1) {
+    return {"<bad image count>"};
+  }
+  auto annotations = project.value().annotations(images.value().front().id);
+  if (!annotations) {
+    return {"<no annotations>"};
+  }
+  std::vector<std::string> texts;
+  for (const Annotation& annotation : annotations.value()) {
+    texts.push_back(annotation.text);
+  }
+  std::sort(texts.begin(), texts.end());
+  return texts;
+}
+
+#if !defined(_WIN32)
+/// Commit one more annotation and kill the process before the connection is
+/// closed, so the committed transaction exists only in `path`-wal.
+void commit_into_wal_and_die(const std::string& path, std::int64_t image_id,
+                             const std::string& comment, const std::string& wal_comment) {
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    auto project = Project::open(path);
+    if (!project) {
+      _exit(2);
+    }
+    const bool ok =
+        project.value()
+            .replace_annotations(image_id, {{AnnotationKind::Comment, 0x10, comment},
+                                            {AnnotationKind::Comment, 0x20, wal_comment}})
+            .has_value();
+    _exit(ok ? 0 : 3);
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_EQ(WEXITSTATUS(status), 0);
+}
+#endif
+
+TEST(Project, ReplaceRefusesWhileAnotherConnectionIsOpen) {
+  TempPath destination("replace-busy-destination");
+  TempPath replacement("replace-busy-replacement");
+  make_project(destination.str(), "old");
+  make_project(replacement.str(), "new");
+
+  auto holder = Project::open(destination.str());
+  ASSERT_TRUE(holder.has_value());
+  auto replaced = Project::replace_file_atomically(replacement.str(), destination.str());
+  ASSERT_FALSE(replaced.has_value());
+  EXPECT_EQ(replaced.diagnostic().code, "project.replace_busy") << replaced.diagnostic().message;
+  EXPECT_TRUE(std::filesystem::exists(replacement.str()));
+  holder = donkey::make_error<Project>(donkey::Status::InvalidInput, "closed", "closed");
+
+  EXPECT_EQ(annotation_texts(destination.str()), std::vector<std::string>{"old"});
+}
+
+TEST(Project, ReplaceKeepsUnreadableDatabaseThatHasAWal) {
+  TempPath destination("replace-garbage-destination");
+  TempPath replacement("replace-garbage-replacement");
+  make_project(replacement.str(), "new");
+  {
+    std::ofstream db(destination.str(), std::ios::binary | std::ios::trunc);
+    db << "not a database";
+    std::ofstream wal(destination.str() + "-wal", std::ios::binary | std::ios::trunc);
+    wal << "not a wal";
+  }
+  auto replaced = Project::replace_file_atomically(replacement.str(), destination.str());
+  ASSERT_FALSE(replaced.has_value());
+  EXPECT_EQ(read_bytes(destination.str()), "not a database");
+  EXPECT_EQ(read_bytes(destination.str() + "-wal"), "not a wal");
+}
+
+TEST(Project, ReplaceFoldsCommittedWalBeforeSwappingFiles) {
+#if defined(_WIN32)
+  GTEST_SKIP() << "needs fork() to leave committed frames in a WAL";
+#else
+  TempPath destination("replace-wal-destination");
+  TempPath backup("replace-wal-backup");
+  const auto id = make_project(destination.str(), "old");
+  make_project(backup.str(), "new");
+  commit_into_wal_and_die(destination.str(), id, "old", "old-in-wal");
+  ASSERT_GT(file_size_or_zero(destination.str() + "-wal"), 0U);
+
+  auto restored = Project::restore(destination.str(), backup.str());
+  ASSERT_TRUE(restored.has_value()) << restored.diagnostic().message;
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + "-wal"));
+  EXPECT_EQ(annotation_texts(destination.str()), std::vector<std::string>{"new"});
+#endif
+}
+
+/// Run a restore of `backup` over `destination` that dies at `stage`. On POSIX
+/// the restore runs in a forked child that calls _exit() at the boundary, so
+/// no destructor or cleanup runs; elsewhere the hook aborts the routine.
+void interrupted_restore(const std::string& destination, const std::string& backup,
+                         ReplaceStage stage) {
+#if !defined(_WIN32)
+  const pid_t child = fork();
+  ASSERT_GE(child, 0);
+  if (child == 0) {
+    Project::set_replace_fault_hook_for_testing([stage](ReplaceStage at) {
+      if (at == stage) {
+        _exit(0);
+      }
+      return false;
+    });
+    (void)Project::restore(destination, backup);
+    _exit(1);  // The fault point was never reached.
+  }
+  int status = 0;
+  ASSERT_EQ(waitpid(child, &status, 0), child);
+  ASSERT_TRUE(WIFEXITED(status));
+  ASSERT_EQ(WEXITSTATUS(status), 0) << "fault point not reached";
+#else
+  Project::set_replace_fault_hook_for_testing([stage](ReplaceStage at) { return at == stage; });
+  auto restored = Project::restore(destination, backup);
+  Project::set_replace_fault_hook_for_testing({});
+  ASSERT_FALSE(restored.has_value());
+  EXPECT_EQ(restored.diagnostic().code, "project.replace_interrupted");
+#endif
+}
+
+class InterruptedReplace : public ::testing::TestWithParam<ReplaceStage> {};
+
+TEST_P(InterruptedReplace, LeavesEitherCompleteOldOrCompleteNewDatabase) {
+  const ReplaceStage stage = GetParam();
+  TempPath destination("interrupt-destination");
+  TempPath backup("interrupt-backup");
+  const auto id = make_project(destination.str(), "old");
+  make_project(backup.str(), "new");
+  const std::string backup_bytes = read_bytes(backup.str());
+
+  std::vector<std::string> expected_old{"old"};
+#if !defined(_WIN32)
+  // The old database's newest committed transaction lives only in its WAL.
+  commit_into_wal_and_die(destination.str(), id, "old", "old-in-wal");
+  ASSERT_GT(file_size_or_zero(destination.str() + "-wal"), 0U);
+  expected_old = {"old", "old-in-wal"};
+#else
+  (void)id;
+#endif
+
+  interrupted_restore(destination.str(), backup.str(), stage);
+
+  // "Restart": a fresh open must see one complete database.
+  const auto texts = annotation_texts(destination.str());
+  if (stage == ReplaceStage::Renamed) {
+    EXPECT_EQ(texts, std::vector<std::string>{"new"});
+  } else {
+    EXPECT_EQ(texts, expected_old);
+  }
+  // The backup itself is never touched, and a retry completes the restore.
+  EXPECT_EQ(read_bytes(backup.str()), backup_bytes);
+  auto retried = Project::restore(destination.str(), backup.str());
+  ASSERT_TRUE(retried.has_value()) << retried.diagnostic().message;
+  EXPECT_EQ(annotation_texts(destination.str()), std::vector<std::string>{"new"});
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
+}
+
+INSTANTIATE_TEST_SUITE_P(Stages, InterruptedReplace,
+                         ::testing::Values(ReplaceStage::Quiesced, ReplaceStage::Synced,
+                                           ReplaceStage::Renamed));
+
+TEST(Project, BackupRefusesToOverwriteItsOwnDatabase) {
+  TempPath path("backup-self");
+  make_project(path.str(), "keep");
+  const std::string before = read_bytes(path.str());
+  {
+    auto project = Project::open(path.str());
+    ASSERT_TRUE(project.has_value());
+    for (const bool overwrite : {false, true}) {
+      auto same = project.value().backup(path.str(), overwrite);
+      ASSERT_FALSE(same.has_value());
+      EXPECT_EQ(same.diagnostic().code, "project.backup_is_source");
+    }
+    const std::filesystem::path p(path.str());
+    auto dotted = project.value().backup((p.parent_path() / "." / p.filename()).string(), true);
+    ASSERT_FALSE(dotted.has_value());
+    EXPECT_EQ(dotted.diagnostic().code, "project.backup_is_source");
+
+    std::error_code ec;
+    const std::string hard = path.str() + ".hardlink";
+    std::filesystem::create_hard_link(path.str(), hard, ec);
+    if (!ec) {
+      auto linked = project.value().backup(hard, true);
+      ASSERT_FALSE(linked.has_value());
+      EXPECT_EQ(linked.diagnostic().code, "project.backup_is_source");
+      std::filesystem::remove(hard, ec);
+    }
+    const std::string sym = path.str() + ".symlink";
+    std::filesystem::create_symlink(path.str(), sym, ec);
+    if (!ec) {
+      auto linked = project.value().backup(sym, true);
+      ASSERT_FALSE(linked.has_value());
+      EXPECT_EQ(linked.diagnostic().code, "project.backup_is_source");
+      std::filesystem::remove(sym, ec);
+    }
+  }
+  EXPECT_EQ(annotation_texts(path.str()), std::vector<std::string>{"keep"});
+}
+
+TEST(Project, RestoreChecksCancellationBeforeCreatingTemporaryCopy) {
+  TempPath destination("restore-early-cancel");
+  TempPath backup("restore-early-cancel-backup");
+  make_project(destination.str(), "old");
+  make_project(backup.str(), "new");
+  donkey::CancellationToken token;
+  token.cancel();
+  bool hook_called = false;
+  auto restored = Project::restore(destination.str(), backup.str(), token,
+                                   [&](const std::string&, const std::string&) {
+                                     hook_called = true;
+                                     return donkey::Result<void>();
+                                   });
+  ASSERT_FALSE(restored.has_value());
+  EXPECT_EQ(restored.diagnostic().code, "io.cancelled");
+  EXPECT_FALSE(hook_called);
+  EXPECT_FALSE(std::filesystem::exists(destination.str() + ".restore-tmp"));
+}
+
+TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
+  TempPath path("migrate-v3");
+  const std::int64_t image_id = make_project(path.str(), "kept");
+  // Recreate the exact v3 annotations table (narrower CHECK) with a row.
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "DROP TABLE annotations;"
+                           "CREATE TABLE annotations ("
+                           "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+                           "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
+                           "  address INTEGER NOT NULL, text TEXT NOT NULL,"
+                           "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+                           "  PRIMARY KEY (image_id, kind, address));"
+                           "INSERT INTO annotations(image_id, kind, address, text) "
+                           "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
+                           "PRAGMA user_version=3;",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    // The old constraint really rejects the new kind.
+    EXPECT_NE(sqlite3_exec(db,
+                           "INSERT INTO annotations(image_id, kind, address, text) "
+                           "VALUES (1, 'function', 48, 'define')",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  {
+    auto project = Project::open(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    EXPECT_EQ(project.value().schema_version(), 4);
+    auto stored = project.value().annotations(image_id);
+    ASSERT_TRUE(stored.has_value());
+    ASSERT_EQ(stored.value().size(), 2U);
+    ASSERT_TRUE(
+        project.value()
+            .replace_annotations(image_id, {{AnnotationKind::Comment, 16, "kept"},
+                                            {AnnotationKind::FunctionStart, 0x1060, "define"}})
+            .has_value());
+    auto integrity = project.value().check_integrity();
+    ASSERT_TRUE(integrity.has_value());
+    EXPECT_TRUE(integrity.value());
+  }
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value());
+  auto stored = reopened.value().annotations(image_id);
+  ASSERT_TRUE(stored.has_value());
+  bool found = false;
+  for (const Annotation& annotation : stored.value()) {
+    if (annotation.kind == AnnotationKind::FunctionStart) {
+      EXPECT_EQ(annotation.address, 0x1060U);
+      EXPECT_EQ(annotation.text, "define");
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
 }
 
 }  // namespace

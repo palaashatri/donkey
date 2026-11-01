@@ -9,6 +9,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "test_io.h"
 
 namespace {
 
@@ -141,8 +142,7 @@ TEST(Cfg, LinearFunctionHasOneBlockAndNoBranches) {
   ASSERT_TRUE(loaded.has_value());
   auto data = [&]() {
     std::ifstream file(fixture_path("tiny-elf-x86_64"), std::ios::binary);
-    const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                  std::istreambuf_iterator<char>());
+    const auto chars = donkey_test::read_stream<std::vector<char>>(file);
     std::vector<std::byte> bytes(chars.size());
     for (std::size_t i = 0; i < chars.size(); ++i) {
       bytes[i] = static_cast<std::byte>(static_cast<unsigned char>(chars[i]));
@@ -166,8 +166,7 @@ TEST(Cfg, LinearFunctionHasOneBlockAndNoBranches) {
 
 TEST(Cfg, TruncatedInputsNeverHangOrCrash) {
   std::ifstream file(fixture_path("tiny-elf-x86_64"), std::ios::binary);
-  const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
+  const auto chars = donkey_test::read_stream<std::vector<char>>(file);
   std::vector<std::byte> full(chars.size());
   for (std::size_t i = 0; i < chars.size(); ++i) {
     full[i] = static_cast<std::byte>(static_cast<unsigned char>(chars[i]));

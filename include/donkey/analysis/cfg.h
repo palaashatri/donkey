@@ -6,6 +6,7 @@
 
 #include "donkey/core/ids.h"
 #include "donkey/core/status.h"
+#include "donkey/decode/decode.h"
 
 namespace donkey {
 
@@ -44,6 +45,7 @@ enum class CfgEdgeKind : std::uint8_t {
   ConditionalFalse,
   Indirect,
   Call,
+  JumpTable,  ///< one recovered target of a jump table
 };
 
 const char* cfg_edge_kind_name(CfgEdgeKind kind) noexcept;
@@ -56,11 +58,27 @@ struct CfgEdge {
   CfgEdgeKind kind = CfgEdgeKind::Unknown;
 };
 
+/// A jump table recovered from the code that indexes it: the bounds check
+/// `cmp selector, N` + `ja/jae default`, then straight-line code that loads
+/// a target from a table in the image and jumps to it. Every target was
+/// computed by evaluating that code for each index with the table's bytes and
+/// lands on a decoded instruction in executable code.
+struct JumpTable {
+  std::uint64_t jump_address = 0;    ///< the indirect jmp
+  std::uint64_t check_address = 0;   ///< the cmp that bounds the selector
+  std::uint64_t default_target = 0;  ///< where an out-of-range selector goes
+  /// The compared operand (register or memory) as the decoder reported it;
+  /// nothing between the check and the jump writes it.
+  Operand selector;
+  std::vector<std::uint64_t> targets;  ///< targets[i] for selector == i
+};
+
 struct ControlFlowGraph {
   /// Seeded functions with estimated extents, in the order they were seeded.
   std::vector<Function> functions;
   std::vector<BasicBlock> blocks;
   std::vector<CfgEdge> edges;
+  std::vector<JumpTable> jump_tables;
   /// True when a limit was hit, code overlapped, or an indirect branch left
   /// successors unknown. Extents are then lower bounds, never exact.
   bool partial = false;

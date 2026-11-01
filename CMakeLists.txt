@@ -17,6 +17,21 @@ option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
 option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
+option(DONKEY_STATIC_RUNTIME
+       "Link the C/C++ runtime statically (self-contained release executables)" OFF)
+
+if(DONKEY_STATIC_RUNTIME)
+  if(MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+  elseif(MINGW)
+    # Fully static: no libstdc++, libgcc or libwinpthread DLLs to ship.
+    add_link_options(-static)
+  elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    # glibc stays dynamic (it cannot be linked statically in a portable way);
+    # libstdc++ and libgcc travel with the executable.
+    add_link_options(-static-libstdc++ -static-libgcc)
+  endif()
+endif()
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -31,6 +46,8 @@ include(DonkeyStorageDependencies)
 
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
+  src/foundation/scheduler.cpp
+  src/foundation/thread_priority.cpp
   src/foundation/sha256.cpp
   src/foundation/version.cpp
 )
@@ -40,11 +57,17 @@ target_include_directories(donkey_foundation
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
 )
 target_compile_features(donkey_foundation PUBLIC cxx_std_20)
+# Workers, SQLite's sorter threads and std::thread users need the platform
+# thread library (a separate libpthread on FreeBSD and older glibc).
+find_package(Threads REQUIRED)
+target_link_libraries(donkey_foundation PUBLIC Threads::Threads)
 target_compile_definitions(donkey_foundation PRIVATE DONKEY_VERSION="${PROJECT_VERSION}")
 donkey_apply_warnings(donkey_foundation)
 
 add_library(donkey_binary STATIC
+  src/binary/byte_buffer.cpp
   src/binary/byte_reader.cpp
+  src/binary/dwarf.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
   src/binary/isolation.cpp
@@ -75,6 +98,7 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
 target_include_directories(donkey_analysis
@@ -87,6 +111,7 @@ donkey_apply_warnings(donkey_analysis)
 
 add_library(donkey_ir STATIC
   src/ir/abi.cpp
+  src/ir/eval.cpp
   src/ir/ir.cpp
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp
@@ -116,9 +141,12 @@ target_compile_features(donkey_project PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_project)
 
 add_library(donkey_debug STATIC
+  src/debug/controller.cpp
   src/debug/debug.cpp
   src/debug/mock_adapter.cpp
-  src/debug/local_adapter.cpp
+  src/debug/native_linux.cpp
+  src/debug/native_unsupported.cpp
+  src/debug/native_windows.cpp
 )
 add_library(donkey::debug ALIAS donkey_debug)
 target_include_directories(donkey_debug
@@ -127,6 +155,9 @@ target_include_directories(donkey_debug
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/src/debug>
 )
 target_link_libraries(donkey_debug PUBLIC donkey::foundation donkey::analysis)
+if(WIN32)
+  target_link_libraries(donkey_debug PRIVATE dbghelp psapi)
+endif()
 target_compile_features(donkey_debug PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_debug)
 
@@ -190,10 +221,12 @@ if(DONKEY_BUILD_UI)
     src/ui/debugger_view.cpp
     src/ui/decompiler_view.cpp
     src/ui/disasm_view.cpp
+    src/ui/gallery_view.cpp
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
     src/ui/theme.cpp
+    src/ui/ui_test.cpp
     src/ui/workspace.cpp
   )
   add_library(donkey::ui ALIAS donkey_ui)
@@ -203,6 +236,7 @@ if(DONKEY_BUILD_UI)
   )
   target_link_libraries(donkey_ui
     PUBLIC donkey::analysis donkey::session
+    PUBLIC donkey::patch
     PRIVATE donkey::ir donkey::project donkey::debug donkey_imgui
   )
   target_compile_features(donkey_ui PUBLIC cxx_std_20)
@@ -232,6 +266,13 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
+
+# ---------------------------------------------------------------------------
+# Install rules and release packaging (CPack)
+# ---------------------------------------------------------------------------
+
+include(DonkeyDependencyGraph)
+include(DonkeyPackaging)
 
 # ---------------------------------------------------------------------------
 # Tests

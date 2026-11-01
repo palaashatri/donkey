@@ -87,12 +87,29 @@ namespace {
 
 constexpr size_t kMaxPluginOutputBytes = 1024 * 1024;  // 1 MiB hard ceiling
 
-void write_string(int fd, const std::string& s) {
-  uint32_t len = static_cast<uint32_t>(s.size());
-  (void)write(fd, &len, sizeof(len));
-  if (len > 0) {
-    (void)write(fd, s.data(), len);
+bool write_all(int fd, const void* data, size_t size) {
+  const char* ptr = static_cast<const char*>(data);
+  size_t remaining = size;
+  while (remaining > 0) {
+    ssize_t n = write(fd, ptr, remaining);
+    if (n > 0) {
+      ptr += n;
+      remaining -= static_cast<size_t>(n);
+    } else if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return false;
+    } else {
+      return false;
+    }
   }
+  return true;
+}
+
+bool write_string(int fd, const std::string& s) {
+  const uint32_t len = static_cast<uint32_t>(s.size());
+  return write_all(fd, &len, sizeof(len)) && (len == 0 || write_all(fd, s.data(), len));
 }
 
 bool read_exact(int fd, void* dest, size_t size,
@@ -174,26 +191,6 @@ bool reap_child_bounded(pid_t pid, const std::chrono::steady_clock::time_point& 
   }
 }
 
-bool write_all(int fd, const void* data, size_t size) {
-  const char* ptr = static_cast<const char*>(data);
-  size_t remaining = size;
-  while (remaining > 0) {
-    ssize_t n = write(fd, ptr, remaining);
-    if (n > 0) {
-      ptr += n;
-      remaining -= static_cast<size_t>(n);
-    } else if (n < 0) {
-      if (errno == EINTR) {
-        continue;
-      }
-      return false;
-    } else {
-      return false;
-    }
-  }
-  return true;
-}
-
 }  // namespace
 
 Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& library_path,
@@ -234,30 +231,29 @@ Result<PluginManifest> PluginHost::inspect_manifest_isolated(const std::string& 
 #endif
 
     auto manifest_res = inspect_manifest(library_path);
+    const int fd = pipe_fds[1];
     if (!manifest_res) {
-      uint8_t status_byte = 1;  // Error
-      (void)write(pipe_fds[1], &status_byte, 1);
-      int st = static_cast<int>(manifest_res.diagnostic().status);
-      (void)write(pipe_fds[1], &st, sizeof(st));
-      write_string(pipe_fds[1], manifest_res.diagnostic().code);
-      write_string(pipe_fds[1], manifest_res.diagnostic().message);
-      close(pipe_fds[1]);
-      _exit(1);
+      const uint8_t status_byte = 1;  // Error
+      const int st = static_cast<int>(manifest_res.diagnostic().status);
+      const bool ok = write_all(fd, &status_byte, 1) && write_all(fd, &st, sizeof(st)) &&
+                      write_string(fd, manifest_res.diagnostic().code) &&
+                      write_string(fd, manifest_res.diagnostic().message);
+      close(fd);
+      _exit(ok ? 1 : 3);
     }
 
-    uint8_t status_byte = 0;  // Success
-    (void)write(pipe_fds[1], &status_byte, 1);
+    // A short write leaves an incomplete frame; the parent's checked reads
+    // then report a protocol error instead of partial fields.
+    const uint8_t status_byte = 0;  // Success
     const auto& m = manifest_res.value();
-    write_string(pipe_fds[1], m.id);
-    write_string(pipe_fds[1], m.name);
-    write_string(pipe_fds[1], m.version);
-    write_string(pipe_fds[1], m.author);
-    write_string(pipe_fds[1], m.description);
-    (void)write(pipe_fds[1], &m.abi_version_major, sizeof(m.abi_version_major));
-    (void)write(pipe_fds[1], &m.abi_version_minor, sizeof(m.abi_version_minor));
-    (void)write(pipe_fds[1], &m.requested_capabilities, sizeof(m.requested_capabilities));
-    close(pipe_fds[1]);
-    _exit(0);
+    const bool ok = write_all(fd, &status_byte, 1) && write_string(fd, m.id) &&
+                    write_string(fd, m.name) && write_string(fd, m.version) &&
+                    write_string(fd, m.author) && write_string(fd, m.description) &&
+                    write_all(fd, &m.abi_version_major, sizeof(m.abi_version_major)) &&
+                    write_all(fd, &m.abi_version_minor, sizeof(m.abi_version_minor)) &&
+                    write_all(fd, &m.requested_capabilities, sizeof(m.requested_capabilities));
+    close(fd);
+    _exit(ok ? 0 : 3);
   }
 
   // Parent supervisor process

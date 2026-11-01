@@ -125,9 +125,24 @@ struct AddressTranslator {
   }
 };
 
+/// A runtime address mapped back to the static image of the loaded module
+/// (executable or shared library) that contains it.
+struct ResolvedAddress {
+  std::string module_name;
+  std::string module_path;
+  std::uint64_t module_base = 0;     ///< runtime load address of the module
+  std::uint64_t static_address = 0;  ///< the same byte in the module's file image
+  std::string function_name;         ///< from the module's own symbols; "" if unknown
+};
+
+class ModuleImageCache;
+
 class DebugAdapter {
  public:
-  virtual ~DebugAdapter() = default;
+  DebugAdapter();
+  virtual ~DebugAdapter();
+  DebugAdapter(const DebugAdapter&) = delete;
+  DebugAdapter& operator=(const DebugAdapter&) = delete;
 
   [[nodiscard]] virtual DebugCapabilities capabilities() const noexcept = 0;
   [[nodiscard]] virtual Result<bool> launch(const LaunchConfig& config) = 0;
@@ -151,13 +166,34 @@ class DebugAdapter {
   [[nodiscard]] virtual Result<std::vector<StackFrame>> call_stack() = 0;
   [[nodiscard]] virtual Result<std::vector<DebugThread>> threads() = 0;
   [[nodiscard]] virtual Result<std::vector<DebugModule>> modules() = 0;
+  /// Non-blocking. While stopped, returns why the target is stopped; while
+  /// running, checks for a new stop or exit and returns reason `None` if
+  /// there is none yet.
   [[nodiscard]] virtual Result<StopInfo> poll_events() = 0;
+  /// Poll until the target stops or exits, or `timeout_ms` elapses (then the
+  /// result has reason `None` and the target keeps running).
+  [[nodiscard]] virtual Result<StopInfo> wait_for_event(int timeout_ms);
   [[nodiscard]] virtual SessionState state() const noexcept = 0;
   [[nodiscard]] virtual const AddressTranslator& address_translator() const noexcept = 0;
+
+  /// Map a runtime address in any loaded module (including libraries loaded
+  /// after launch) to that module's static image, reading the module's file
+  /// on first use. `debug.address_not_in_module` when no module contains it;
+  /// `debug.module_image_unavailable` when the file cannot be read.
+  [[nodiscard]] virtual Result<ResolvedAddress> resolve_address(std::uint64_t runtime_va);
+  /// Runtime address of `static_va` inside the loaded module whose file name
+  /// or path is `module`.
+  [[nodiscard]] virtual Result<std::uint64_t> runtime_address(const std::string& module,
+                                                              std::uint64_t static_va);
+
+ private:
+  std::unique_ptr<ModuleImageCache> module_images_;
 };
 
-/// Create a debug adapter. When `mock` is true, returns a deterministic in-process
-/// simulation adapter suitable for automated CI and hermetic acceptance tests (A18, A19).
+/// Create a debug adapter. With `mock` false this is the native debugger for
+/// the host (see `capabilities()`: it reports nothing where native debugging
+/// is not implemented). With `mock` true it is a deterministic in-process
+/// simulation for hermetic tests of callers; it never runs a real target.
 [[nodiscard]] std::unique_ptr<DebugAdapter> create_debug_adapter(
     bool mock = false, std::uint64_t simulated_aslr_base = 0);
 

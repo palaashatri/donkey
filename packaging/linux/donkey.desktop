@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Donkey
+GenericName=Binary Reverse-Engineering Workbench
+Comment=Disassemble, analyse, decompile, patch and debug native binaries
+Exec=donkey %f
+Icon=donkey
+Terminal=false
+Categories=Development;Debugger;
+Keywords=disassembler;decompiler;debugger;reverse;engineering;binary;elf;pe;macho;
+StartupWMClass=Donkey

@@ -432,8 +432,8 @@ Result<LoadedBinary> load_binary_isolated(const std::string& path, const LoadOpt
 
     // Hostile QA hooks
     if (config.force_worker_crash) {
-      volatile int* crash_ptr = nullptr;
-      *crash_ptr = 42;
+      // A real SIGSEGV, without relying on undefined behaviour.
+      ::raise(SIGSEGV);
     }
     if (config.force_worker_hang) {
       while (true) {

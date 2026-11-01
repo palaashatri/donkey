@@ -14,6 +14,7 @@ struct DisassemblyCache {
   const Document* document = nullptr;
   std::string filter;
   std::vector<std::uint32_t> indices;
+  std::uint64_t scrolled_to = 0;  ///< selection the view last scrolled to
 };
 
 bool contains_lower(std::string_view haystack, std::string_view needle) {
@@ -92,8 +93,28 @@ void disassembly(const Document& document, UiState& state) {
   ImGui::TableSetupColumn("Comment", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableHeadersRow();
 
+  // When the selection changes elsewhere (Go to, Functions, Xrefs, history),
+  // bring its row into view; clicks inside this table do not jump.
+  const float row_height = ImGui::GetTextLineHeightWithSpacing();
+  if (state.selected_address != cache.scrolled_to) {
+    cache.scrolled_to = state.selected_address;
+    const auto row_of =
+        std::lower_bound(cache.indices.begin(), cache.indices.end(), state.selected_address,
+                         [&](std::uint32_t index, std::uint64_t address) {
+                           return instructions[index].address < address;
+                         });
+    if (row_of != cache.indices.end()) {
+      const float row = static_cast<float>(row_of - cache.indices.begin());
+      const float top = ImGui::GetScrollY();
+      const float visible = ImGui::GetWindowHeight() - 2.0f * row_height;
+      if (row * row_height < top || row * row_height > top + visible) {
+        ImGui::SetScrollY(std::max(0.0f, row * row_height - visible / 3.0f));
+      }
+    }
+  }
+
   ImGuiListClipper clipper;
-  clipper.Begin(static_cast<int>(cache.indices.size()));
+  clipper.Begin(static_cast<int>(cache.indices.size()), row_height);
   while (clipper.Step()) {
     for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
       const Instruction& instruction = instructions[cache.indices[static_cast<std::size_t>(row)]];
@@ -107,6 +128,7 @@ void disassembly(const Document& document, UiState& state) {
           (bookmarked ? "[*] " : "") + components::format_address(instruction.address);
       if (ImGui::Selectable(address.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
         state.navigate_to(instruction.address, &document);
+        cache.scrolled_to = instruction.address;  // already on screen
       }
       if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
         if (instruction.direct_target.has_value()) {
@@ -116,6 +138,39 @@ void disassembly(const Document& document, UiState& state) {
         }
       }
       if (ImGui::BeginPopupContextItem("##disasmcontext")) {
+        {
+          // Function boundaries: define a start here, or remove the
+          // discovered one. Either re-runs analysis on the worker.
+          const std::string* edit = state.annotations != nullptr
+                                        ? state.annotations->function_edit_at(instruction.address)
+                                        : nullptr;
+          bool is_start = false;
+          for (const Function& function : document.analysis.functions) {
+            if (function.address == instruction.address) {
+              is_start = true;
+              break;
+            }
+          }
+          const char* label = nullptr;
+          std::string action;
+          if (edit != nullptr) {
+            label =
+                *edit == "define" ? "Undefine function (user-defined)" : "Restore removed function";
+            action.clear();
+          } else if (is_start) {
+            label = "Remove function here";
+            action = "remove";
+          } else {
+            label = "Define function here";
+            action = "define";
+          }
+          if (ImGui::MenuItem(label)) {
+            state.function_edit_requested = true;
+            state.function_edit_address = instruction.address;
+            state.function_edit_action = action;
+          }
+          ImGui::Separator();
+        }
         if (ImGui::MenuItem(bookmarked ? "Remove bookmark" : "Add bookmark")) {
           state.annotation_kind = AnnotationKind::Bookmark;
           state.annotation_address = instruction.address;
@@ -155,6 +210,9 @@ void disassembly(const Document& document, UiState& state) {
 
       ImGui::TableSetColumnIndex(2);
       const std::string text = instruction.mnemonic + " " + instruction.operands;
+      // Unknown and Interrupt instructions keep the default colour, so pop
+      // only what was pushed.
+      bool coloured = true;
       if (instruction.classification == InstructionClass::Call) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.55f, 0.82f, 0.62f, 1.0f));
       } else if (instruction.classification == InstructionClass::Return) {
@@ -162,9 +220,11 @@ void disassembly(const Document& document, UiState& state) {
       } else if (instruction.classification == InstructionClass::Jump ||
                  instruction.classification == InstructionClass::ConditionalJump) {
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.80f, 0.50f, 1.0f));
+      } else {
+        coloured = false;
       }
       ImGui::TextUnformatted(text.c_str());
-      if (instruction.classification != InstructionClass::Other) {
+      if (coloured) {
         ImGui::PopStyleColor();
       }
 

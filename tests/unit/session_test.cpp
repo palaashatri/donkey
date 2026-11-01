@@ -1,9 +1,12 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -12,6 +15,19 @@
 #include "donkey/core/navigation.h"
 #include "donkey/project/project.h"
 #include "session.h"
+#include "test_io.h"
+
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -22,13 +38,25 @@ std::string fixture_path(const std::string& name) {
   return std::string(DONKEY_FIXTURE_DIR) + "/binaries/" + name;
 }
 
+std::uint64_t current_process_id() {
+#if defined(_WIN32)
+  return static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+  return static_cast<std::uint64_t>(getpid());
+#endif
+}
+
 /// Unique database path that removes itself and its SQLite sidecars.
 class TempPath {
  public:
   explicit TempPath(const std::string& name) {
+    // CTest runs each test in its own process, possibly in parallel, so the
+    // name must be unique across processes, not only within one.
     static std::uint64_t counter = 0;
+    const auto unique = std::to_string(current_process_id()) + "-" +
+                        std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
     path_ = std::filesystem::temp_directory_path() /
-            ("donkey-session-" + name + "-" + std::to_string(++counter) + ".db");
+            ("donkey-session-" + name + "-" + unique + "-" + std::to_string(++counter) + ".db");
   }
   ~TempPath() { remove(); }
   TempPath(const TempPath&) = delete;
@@ -51,6 +79,12 @@ donkey::LoadedBinary load_fixture(const std::string& name) {
   auto loaded = donkey::load_binary(fixture_path(name));
   EXPECT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   return loaded.has_value() ? std::move(loaded.value()) : donkey::LoadedBinary{};
+}
+
+/// Annotation text, or a marker when the annotation is missing, so a failing
+/// expectation reports a value instead of dereferencing null.
+std::string text_of(const std::string* text) {
+  return text != nullptr ? *text : std::string("<missing>");
 }
 
 /// Spins until the session's worker thread reports idle. The worker owns all
@@ -105,9 +139,9 @@ TEST(Session, OpenProjectPublishesDocumentAndAnnotations) {
   const auto annotations = session.annotations();
   ASSERT_NE(annotations, nullptr);
   ASSERT_NE(annotations->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*annotations->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(annotations->rename_at(0x400100)), "entry_point");
   ASSERT_NE(annotations->comment_at(0x400104), nullptr);
-  EXPECT_EQ(*annotations->comment_at(0x400104), "calls helper");
+  EXPECT_EQ(text_of(annotations->comment_at(0x400104)), "calls helper");
 
   EXPECT_TRUE(session.has_project());
   EXPECT_EQ(session.project_path(), path.str());
@@ -127,7 +161,7 @@ TEST(Session, SaveProjectPersistsInMemoryAnnotationEdits) {
   session.set_annotation(donkey::AnnotationKind::Comment, 0x400104, "edited in the shell");
   session.set_annotation(donkey::AnnotationKind::Rename, 0x400109, "helper");
   EXPECT_TRUE(session.dirty());
-  EXPECT_EQ(*session.annotations()->comment_at(0x400104), "edited in the shell");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400104)), "edited in the shell");
 
   session.save_project(path.str());
   ASSERT_TRUE(wait_idle(session));
@@ -181,8 +215,8 @@ TEST(Session, SaveThenReopenSeesTheSameAnnotations) {
   ASSERT_TRUE(wait_idle(session));
   ASSERT_FALSE(session.take_error().has_value());
   ASSERT_NE(session.annotations()->comment_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "entry comment");
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "entry comment");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "entry_point");
 }
 
 TEST(Session, OpenProjectReportsMissingImageFile) {
@@ -267,7 +301,7 @@ TEST(Session, BackupAndRestoreProjectRoundTripsAnnotationsAndClearsDirtyState) {
   ASSERT_TRUE(wait_idle(session));
   ASSERT_FALSE(session.take_error().has_value());
   ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "mutated_entry");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "mutated_entry");
   EXPECT_EQ(session.annotations()->comment_at(0x400104), nullptr);
 
   // Also stage an unsaved in-memory edit before restoring.
@@ -282,9 +316,9 @@ TEST(Session, BackupAndRestoreProjectRoundTripsAnnotationsAndClearsDirtyState) {
   const auto restored = session.annotations();
   ASSERT_NE(restored, nullptr);
   ASSERT_NE(restored->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*restored->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(restored->rename_at(0x400100)), "entry_point");
   ASSERT_NE(restored->comment_at(0x400104), nullptr);
-  EXPECT_EQ(*restored->comment_at(0x400104), "calls helper");
+  EXPECT_EQ(text_of(restored->comment_at(0x400104)), "calls helper");
   EXPECT_EQ(restored->comment_at(0x400109), nullptr);
 }
 
@@ -311,7 +345,7 @@ TEST(Session, RestoreProjectRejectsCorruptBackupAndPreservesLiveSession) {
   // The live document and annotations must remain intact after a rejected restore.
   ASSERT_NE(session.document(), nullptr);
   ASSERT_NE(session.annotations()->rename_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "entry_point");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "entry_point");
 }
 
 TEST(Session, BackupAndRestoreRequireOpenProject) {
@@ -341,16 +375,16 @@ TEST(Session, UndoAndRedoEdits) {
   session.set_annotation(donkey::AnnotationKind::Rename, 0x400100, "my_main");
   EXPECT_TRUE(session.can_undo());
   EXPECT_FALSE(session.can_redo());
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
 
   // Set a comment
   session.set_annotation(donkey::AnnotationKind::Comment, 0x400100, "first line");
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "first line");
 
   // Toggle bookmark
   session.toggle_bookmark(0x400100, "entry");
   EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
-  EXPECT_EQ(*session.annotations()->bookmark_at(0x400100), "entry");
+  EXPECT_EQ(text_of(session.annotations()->bookmark_at(0x400100)), "entry");
 
   // Undo bookmark
   EXPECT_TRUE(session.undo());
@@ -365,7 +399,7 @@ TEST(Session, UndoAndRedoEdits) {
   EXPECT_TRUE(session.undo());  // undo bookmark
   EXPECT_TRUE(session.undo());  // undo comment
   EXPECT_EQ(session.annotations()->comment_at(0x400100), nullptr);
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
 
   // Undo rename
   EXPECT_TRUE(session.undo());
@@ -374,9 +408,9 @@ TEST(Session, UndoAndRedoEdits) {
 
   // Redo all three
   EXPECT_TRUE(session.redo());
-  EXPECT_EQ(*session.annotations()->rename_at(0x400100), "my_main");
+  EXPECT_EQ(text_of(session.annotations()->rename_at(0x400100)), "my_main");
   EXPECT_TRUE(session.redo());
-  EXPECT_EQ(*session.annotations()->comment_at(0x400100), "first line");
+  EXPECT_EQ(text_of(session.annotations()->comment_at(0x400100)), "first line");
   EXPECT_TRUE(session.redo());
   EXPECT_TRUE(session.annotations()->has_bookmark(0x400100));
   EXPECT_FALSE(session.can_redo());
@@ -428,6 +462,26 @@ TEST(Session, NavigationHistory) {
   auto back3 = nav.nav_back();
   ASSERT_TRUE(back3.has_value());
   EXPECT_EQ(*back3, 0x2000U);
+}
+
+// The entry point selected at load (on Mach-O that is main itself) and
+// clicks in lists set the selection without navigating; Back must still
+// return to them.
+TEST(Session, NavigationHistoryReturnsToSelectionsMadeOutsideIt) {
+  donkey::NavigationHistory nav;
+  nav.record_location(0x100);  // entry point selected at load
+  nav.navigate_to(0x200);      // "Go to"
+  ASSERT_TRUE(nav.can_nav_back());
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x100));
+  EXPECT_EQ(nav.nav_forward(), std::optional<std::uint64_t>(0x200));
+
+  nav.record_location(0x300);  // a click in the Functions list
+  nav.navigate_to(0x400);
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x300));
+  EXPECT_EQ(nav.nav_back(), std::optional<std::uint64_t>(0x200));
+  // Recording the current entry again changes nothing.
+  nav.record_location(0x200);
+  EXPECT_EQ(nav.nav_forward(), std::optional<std::uint64_t>(0x300));
 }
 
 TEST(Session, CancellationStopsRunningTask) {
@@ -498,8 +552,7 @@ TEST(Session, SupersededRestoreAtCommitBoundaryDoesNotMutateDatabase) {
   std::string orig_db_content;
   {
     std::ifstream in(db_path.str(), std::ios::binary);
-    orig_db_content =
-        std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    orig_db_content = donkey_test::read_stream<std::string>(in);
   }
 
   Session session;
@@ -520,8 +573,7 @@ TEST(Session, SupersededRestoreAtCommitBoundaryDoesNotMutateDatabase) {
   // Verify that on-disk db_path was not mutated by the superseded restore
   {
     std::ifstream in(db_path.str(), std::ios::binary);
-    std::string current_content((std::istreambuf_iterator<char>(in)),
-                                std::istreambuf_iterator<char>());
+    const std::string current_content = donkey_test::read_stream<std::string>(in);
     EXPECT_EQ(current_content, orig_db_content);
   }
 }
@@ -543,6 +595,306 @@ TEST(Session, ReapsCompletedRetiredWorkersDuringNormalOperation) {
   auto doc = session.document();
   ASSERT_NE(doc, nullptr);
   EXPECT_EQ(doc->loaded.image.path, fixture_path("tiny-pe-x86_64.exe"));
+}
+
+TEST(Session, CancelAfterRestoreCommitReportsCompletedRestore) {
+  TempPath db_path("session-post-commit");
+  TempPath backup_path("session-post-commit-backup");
+
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  const auto document = session.document();
+  ASSERT_NE(document, nullptr);
+  const std::uint64_t address = document->loaded.image.entry_point;
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "from_backup");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "after_backup");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+
+  // Cancel deterministically in the window after the database replacement
+  // has committed but before the image is reloaded.
+  bool hook_ran = false;
+  session.set_restore_post_commit_hook_for_testing([&]() {
+    hook_ran = true;
+    session.cancel();
+  });
+  session.restore_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.set_restore_post_commit_hook_for_testing({});
+
+  ASSERT_TRUE(hook_ran);
+  const auto error = session.take_error();
+  EXPECT_FALSE(error.has_value()) << *error;
+  EXPECT_NE(session.status().find("Restored project from"), std::string::npos) << session.status();
+  EXPECT_EQ(session.status().find("Operation cancelled"), std::string::npos);
+  EXPECT_TRUE(session.has_project());
+  EXPECT_FALSE(session.dirty());
+  const auto annotations = session.annotations();
+  ASSERT_NE(annotations->rename_at(address), nullptr);
+  EXPECT_EQ(text_of(annotations->rename_at(address)), "from_backup");
+  // The open document is the restored project's image, so it stays.
+  ASSERT_NE(session.document(), nullptr);
+  EXPECT_EQ(session.path(), fixture_path("tiny-elf-x86_64"));
+
+  // And the database on disk really holds the backup.
+  auto project = Project::open(db_path.str());
+  ASSERT_TRUE(project.has_value());
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  auto stored = project.value().annotations(images.value().front().id);
+  ASSERT_TRUE(stored.has_value());
+  ASSERT_EQ(stored.value().size(), 1U);
+  EXPECT_EQ(stored.value().front().text, "from_backup");
+}
+
+TEST(Session, BackupOverOpenProjectIsRejected) {
+  TempPath db_path("session-backup-self");
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(db_path.str(), true);
+  ASSERT_TRUE(wait_idle(session));
+  const auto error = session.take_error();
+  ASSERT_TRUE(error.has_value());
+  EXPECT_NE(error->find("project.backup_is_source"), std::string::npos) << *error;
+  EXPECT_TRUE(Project::open(db_path.str()).has_value());
+}
+
+bool has_function(const Session& session, std::uint64_t address) {
+  const auto document = session.document();
+  if (document == nullptr) {
+    return false;
+  }
+  for (const auto& function : document->analysis.functions) {
+    if (function.address == address) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TEST(Session, FunctionBoundaryEditsReanalyseUndoAndPersist) {
+  TempPath db_path("session-function-edits");
+  Session session;
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  const auto document = session.document();
+  ASSERT_NE(document, nullptr);
+
+  // An instruction inside main that is not a function start, and a
+  // discovered function to remove.
+  std::uint64_t main_address = 0;
+  std::uint64_t tick_address = 0;
+  for (const auto& function : document->analysis.functions) {
+    // Mach-O symbols carry a leading underscore.
+    if (function.name == "main" || function.name == "_main") {
+      main_address = function.address;
+    } else if (function.name == "donkey_debuggee_tick" ||
+               function.name == "_donkey_debuggee_tick") {
+      tick_address = function.address;
+    }
+  }
+  ASSERT_NE(main_address, 0U);
+  ASSERT_NE(tick_address, 0U);
+  std::uint64_t inside = 0;
+  for (const auto& instruction : document->analysis.instructions) {
+    if (instruction.address > main_address + 4 && !has_function(session, instruction.address)) {
+      inside = instruction.address;
+      break;
+    }
+  }
+  ASSERT_NE(inside, 0U);
+
+  session.set_function_edit(inside, "define");
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_TRUE(has_function(session, inside));
+  EXPECT_NE(session.document(), document) << "analysis must be recomputed, not reused";
+  EXPECT_TRUE(session.dirty());
+
+  session.set_function_edit(tick_address, "remove");
+  ASSERT_TRUE(wait_idle(session));
+  // A user removal wins over discovery, even for a call target.
+  EXPECT_FALSE(has_function(session, tick_address));
+  ASSERT_NE(session.annotations()->function_edit_at(tick_address), nullptr);
+
+  ASSERT_TRUE(session.undo());  // undo the removal
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->function_edit_at(tick_address), nullptr);
+  EXPECT_TRUE(has_function(session, tick_address));
+  ASSERT_TRUE(session.undo());  // undo the definition
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_FALSE(has_function(session, inside));
+  ASSERT_TRUE(session.redo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_TRUE(has_function(session, inside));
+
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  Session reopened;
+  reopened.open_project(db_path.str());
+  ASSERT_TRUE(wait_idle(reopened));
+  ASSERT_FALSE(reopened.take_error().has_value());
+  EXPECT_TRUE(has_function(reopened, inside)) << "the edit must survive save and reopen";
+  ASSERT_NE(reopened.annotations()->function_edit_at(inside), nullptr);
+  EXPECT_EQ(*reopened.annotations()->function_edit_at(inside), "define");
+}
+
+// M1: with an intentionally slow import, every call the render thread makes
+// returns promptly, cancellation ends the import, and the next open works.
+TEST(Session, SlowImportNeverBlocksTheCallerAndCancelsCleanly) {
+  Session session;
+  std::atomic<bool> hook_running{false};
+  session.set_load_hook_for_testing([&](const donkey::CancellationToken& token) {
+    hook_running.store(true);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (!token.is_cancelled() && std::chrono::steady_clock::now() < until) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));  // "slow disk"
+    }
+  });
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  using Clock = std::chrono::steady_clock;
+  const auto started = Clock::now();
+  while (!hook_running.load() && Clock::now() - started < std::chrono::seconds(5)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(hook_running.load());
+
+  // Simulate 120 frames of what the workspace reads each frame.
+  std::chrono::nanoseconds worst{0};
+  for (int frame = 0; frame < 120; ++frame) {
+    const auto t0 = Clock::now();
+    EXPECT_TRUE(session.busy());
+    (void)session.status();
+    EXPECT_EQ(session.document(), nullptr);
+    (void)session.annotations();
+    (void)session.take_error();
+    (void)session.can_undo();
+    worst =
+        std::max(worst, std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() - t0));
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  EXPECT_LT(worst, std::chrono::milliseconds(25)) << "a render-thread call waited on the import";
+
+  const auto cancel_at = Clock::now();
+  session.cancel();
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_LT(Clock::now() - cancel_at, std::chrono::seconds(2));
+  EXPECT_EQ(session.document(), nullptr);
+  EXPECT_EQ(session.status(), "Cancelled");
+
+  session.set_load_hook_for_testing({});
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_NE(session.document(), nullptr) << "a cancelled import must not wedge the session";
+}
+
+// M7: imported DWARF names carry provenance and never replace a user
+// edit; the edit survives save and reopen next to the imported data.
+TEST(Session, DebugInfoNamesNeverReplaceUserRenames) {
+  TempPath db_path("session-dwarf-rename");
+  Session session;
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  auto document = session.document();
+  ASSERT_NE(document, nullptr);
+  if (!document->debug_info) {
+    GTEST_SKIP() << "no DWARF in this build of the debuggee: " << document->debug_info_note;
+  }
+  EXPECT_NE(document->debug_info_note.find("DWARF"), std::string::npos);
+  const donkey::DebugFunction* tick = nullptr;
+  for (const auto& f : document->debug_info->functions) {
+    if (f.name == "donkey_debuggee_tick") {
+      tick = &f;
+    }
+  }
+  ASSERT_NE(tick, nullptr);
+  const std::uint64_t address = tick->address;
+  EXPECT_EQ(tick->provenance.format, "DWARF");
+
+  session.set_annotation(donkey::AnnotationKind::Rename, address, "user_tick");
+  session.save_project(db_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  Session reopened;
+  reopened.open_project(db_path.str());
+  ASSERT_TRUE(wait_idle(reopened));
+  ASSERT_FALSE(reopened.take_error().has_value());
+  ASSERT_NE(reopened.annotations()->rename_at(address), nullptr);
+  EXPECT_EQ(*reopened.annotations()->rename_at(address), "user_tick")
+      << "the user's name must win over the imported one";
+  auto again = reopened.document();
+  ASSERT_NE(again, nullptr);
+  ASSERT_TRUE(again->debug_info) << "debug info must be read again on reopen";
+  const auto* imported = again->debug_info->function_at(address);
+  ASSERT_NE(imported, nullptr);
+  EXPECT_EQ(imported->name, "donkey_debuggee_tick") << "the imported name is kept, labelled";
+  EXPECT_EQ(again->debug_info->prototype(*imported), "void donkey_debuggee_tick(void)");
+}
+
+// A cancel while DWARF is being read must cancel the open: read_debug_info
+// returns what it read so far, and that must not be published as the
+// document.
+TEST(Session, CancelDuringDebugInfoCancelsTheOpen) {
+  Session session;
+  session.set_debug_info_hook_for_testing([&session]() { session.cancel(); });
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  session.set_debug_info_hook_for_testing({});
+  EXPECT_EQ(session.document(), nullptr);
+  EXPECT_NE(session.status().find("Cancelled"), std::string::npos) << session.status();
+}
+
+// The database replacement at the end of a restore can be slow on slow
+// storage; it must not hold the lock the render thread's accessors take.
+TEST(Session, SlowRestoreReplacementDoesNotBlockTheSession) {
+  TempPath project_path("slow-replace-source");
+  TempPath backup_path("slow-replace-backup");
+  create_project_with_annotations(project_path.str());
+
+  Session session;
+  session.open_project(project_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  std::atomic<bool> entered{false};
+  session.set_restore_replace_hook_for_testing([&entered]() {
+    entered.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  });
+  session.restore_project(backup_path.str());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!entered.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(entered.load()) << "the restore never reached the replacement";
+
+  // While the replacement is in progress, what the render thread calls
+  // returns at once.
+  const auto start = std::chrono::steady_clock::now();
+  (void)session.status();
+  (void)session.is_cancelled();
+  (void)session.document();
+  const auto waited = std::chrono::steady_clock::now() - start;
+  EXPECT_LT(waited, std::chrono::milliseconds(200));
+
+  ASSERT_TRUE(wait_idle(session));
+  session.set_restore_replace_hook_for_testing({});
+  EXPECT_FALSE(session.take_error().has_value());
+  EXPECT_NE(session.status().find("Restored project from"), std::string::npos) << session.status();
 }
 
 }  // namespace

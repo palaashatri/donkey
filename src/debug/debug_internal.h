@@ -1,5 +1,6 @@
 #pragma once
 
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -55,6 +56,14 @@ class MockDebugAdapter : public DebugAdapter {
   StopInfo pending_event_;
 };
 
+/// Native OS debugger for the host. Real execution control exists on Linux
+/// (ptrace; x86-64 and AArch64) and Windows (Win32 debug API; x64). On other
+/// hosts every operation fails with `debug.unsupported_platform` and
+/// `capabilities()` reports nothing; it never fabricates success.
+///
+/// Thread affinity: ptrace and the Win32 debug API bind a debuggee to the OS
+/// thread that launched or attached it, so every call on one adapter must
+/// come from that same thread.
 class LocalDebugAdapter : public DebugAdapter {
  public:
   LocalDebugAdapter();
@@ -82,19 +91,13 @@ class LocalDebugAdapter : public DebugAdapter {
   [[nodiscard]] Result<std::vector<DebugThread>> threads() override;
   [[nodiscard]] Result<std::vector<DebugModule>> modules() override;
   [[nodiscard]] Result<StopInfo> poll_events() override;
-  [[nodiscard]] SessionState state() const noexcept override { return state_; }
-  [[nodiscard]] const AddressTranslator& address_translator() const noexcept override {
-    return translator_;
-  }
+  [[nodiscard]] Result<StopInfo> wait_for_event(int timeout_ms) override;
+  [[nodiscard]] SessionState state() const noexcept override;
+  [[nodiscard]] const AddressTranslator& address_translator() const noexcept override;
 
  private:
-  void clean_child();
-
-  SessionState state_ = SessionState::Disconnected;
-  AddressTranslator translator_;
-  int child_pid_ = -1;
-  std::unordered_map<std::uint64_t, Breakpoint> breakpoints_;
-  std::unordered_map<std::uint64_t, std::uint8_t> original_bytes_;
+  struct Impl;
+  std::unique_ptr<Impl> impl_;
 };
 
 }  // namespace donkey::debug

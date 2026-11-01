@@ -353,6 +353,16 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         }
         result.instructions.push_back(instruction);
       }
+      if (stream.value().invalid_bytes != 0) {
+        // Data in code or encodings the decoder does not know: skipped, so
+        // the code after them is still decoded, but the sweep is Partial.
+        result.partial = true;
+        result.diagnostics.push_back(Diagnostic::make(
+            Status::Partial, "analysis.undecodable_bytes",
+            std::to_string(stream.value().invalid_bytes) + " undecodable byte(s) skipped in '" +
+                section.name + "'",
+            section.file_offset + (stream.value().first_invalid_address - section.address)));
+      }
       if (stream.value().truncated) {
         result.partial = true;
         result.diagnostics.push_back(Diagnostic::make(
@@ -377,7 +387,11 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
   std::set<std::uint64_t> named;
   for (const Symbol& symbol : image.symbols) {
-    if (symbol.imported || symbol.kind != SymbolKind::Function || symbol.address == 0) {
+    // Typed function symbols, and exports in executable code (PE export
+    // tables carry no type: an export in .text is an entry point).
+    const bool code_symbol = symbol.kind == SymbolKind::Function ||
+                             (symbol.kind == SymbolKind::Export && symbol.exported);
+    if (symbol.imported || !code_symbol || symbol.address == 0) {
       continue;
     }
     if (executable_contains(image, symbol.address)) {
@@ -388,6 +402,18 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   for (const Xref& xref : result.xrefs) {
     if (xref.kind == XrefKind::Call && executable_contains(image, xref.to)) {
       seeds.insert(xref.to);
+    }
+  }
+  std::set<std::uint64_t> user_defined;
+  for (const std::uint64_t address : options.user_function_starts) {
+    if (executable_contains(image, address)) {
+      seeds.insert(address);
+      user_defined.insert(address);
+    }
+  }
+  for (const std::uint64_t address : options.removed_function_starts) {
+    if (user_defined.count(address) == 0) {
+      seeds.erase(address);
     }
   }
 
@@ -413,7 +439,8 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
 
   if (options.build_control_flow) {
-    auto graph = build_control_flow_graph(image, result.instructions, result.functions, options);
+    auto graph =
+        build_control_flow_graph(image, result.instructions, result.functions, options, file);
     if (!graph) {
       result.partial = true;
       result.diagnostics.push_back(graph.diagnostic());
@@ -430,6 +457,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
           }
         }
       }
+      result.call_graph = build_call_graph(result.cfg, result.instructions);
       if (result.cfg.partial) {
         result.partial = true;
       }
@@ -450,6 +478,79 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   });
 
   return result;
+}
+
+CallGraph build_call_graph(const ControlFlowGraph& cfg, std::span<const Instruction> instructions) {
+  CallGraph graph;
+  // Function entry by id, and blocks sorted by address for site lookup.
+  std::unordered_map<std::uint64_t, std::uint64_t> entry_of;
+  for (const Function& function : cfg.functions) {
+    entry_of[function.id.value()] = function.address;
+  }
+  std::vector<const BasicBlock*> blocks;
+  blocks.reserve(cfg.blocks.size());
+  for (const BasicBlock& block : cfg.blocks) {
+    blocks.push_back(&block);
+  }
+  std::sort(blocks.begin(), blocks.end(),
+            [](const BasicBlock* a, const BasicBlock* b) { return a->address < b->address; });
+  auto caller_of = [&](std::uint64_t site) -> std::optional<std::uint64_t> {
+    auto it = std::upper_bound(
+        blocks.begin(), blocks.end(), site,
+        [](std::uint64_t value, const BasicBlock* block) { return value < block->address; });
+    if (it == blocks.begin()) {
+      return std::nullopt;
+    }
+    --it;
+    if (site >= (*it)->end_address) {
+      return std::nullopt;
+    }
+    const auto entry = entry_of.find((*it)->function.value());
+    if (entry == entry_of.end()) {
+      return std::nullopt;
+    }
+    return entry->second;
+  };
+  for (const Instruction& instruction : instructions) {
+    if (instruction.classification != InstructionClass::Call) {
+      continue;
+    }
+    const auto caller = caller_of(instruction.address);
+    if (!caller) {
+      ++graph.orphan_sites;
+      continue;
+    }
+    if (instruction.direct_target.has_value()) {
+      graph.edges.push_back({*caller, *instruction.direct_target, instruction.address});
+    } else {
+      graph.unresolved.push_back({*caller, instruction.address});
+    }
+  }
+  std::sort(graph.edges.begin(), graph.edges.end(),
+            [](const CallGraphEdge& a, const CallGraphEdge& b) {
+              return a.caller != b.caller ? a.caller < b.caller : a.site < b.site;
+            });
+  return graph;
+}
+
+std::vector<CallGraphEdge> CallGraph::callers_of(std::uint64_t function) const {
+  std::vector<CallGraphEdge> out;
+  for (const CallGraphEdge& edge : edges) {
+    if (edge.callee == function) {
+      out.push_back(edge);
+    }
+  }
+  return out;
+}
+
+std::vector<CallGraphEdge> CallGraph::callees_of(std::uint64_t function) const {
+  std::vector<CallGraphEdge> out;
+  for (const CallGraphEdge& edge : edges) {
+    if (edge.caller == function) {
+      out.push_back(edge);
+    }
+  }
+  return out;
 }
 
 }  // namespace donkey

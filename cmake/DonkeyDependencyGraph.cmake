@@ -1,0 +1,48 @@
+# Records the link graph of every headless core target so a test can prove
+# none of them reaches SDL, Dear ImGui or the desktop UI (DESIGN §2.3).
+
+set(DONKEY_CORE_TARGETS
+  donkey_foundation donkey_binary donkey_decode donkey_analysis donkey_ir
+  donkey_project donkey_debug donkey_patch donkey_plugin donkey_session donkey-cli)
+
+function(_donkey_collect_links target out_var)
+  set(seen "")
+  set(stack "${target}")
+  while(stack)
+    list(POP_BACK stack current)
+    if(current IN_LIST seen)
+      continue()
+    endif()
+    list(APPEND seen "${current}")
+    if(NOT TARGET "${current}")
+      continue()
+    endif()
+    get_target_property(aliased "${current}" ALIASED_TARGET)
+    if(aliased)
+      list(APPEND stack "${aliased}")
+      continue()
+    endif()
+    foreach(property LINK_LIBRARIES INTERFACE_LINK_LIBRARIES)
+      get_target_property(links "${current}" ${property})
+      if(links)
+        foreach(link IN LISTS links)
+          # Strip generator expressions such as $<LINK_ONLY:x>.
+          string(REGEX REPLACE "^\\$<LINK_ONLY:(.*)>$" "\\1" link "${link}")
+          if(NOT link MATCHES "^\\$<")
+            list(APPEND stack "${link}")
+          endif()
+        endforeach()
+      endif()
+    endforeach()
+  endwhile()
+  list(REMOVE_ITEM seen "${target}")
+  set(${out_var} "${seen}" PARENT_SCOPE)
+endfunction()
+
+set(_donkey_graph "")
+foreach(target IN LISTS DONKEY_CORE_TARGETS)
+  _donkey_collect_links(${target} reached)
+  string(REPLACE ";" " " reached "${reached}")
+  string(APPEND _donkey_graph "${target}: ${reached}\n")
+endforeach()
+file(WRITE "${CMAKE_BINARY_DIR}/donkey-core-link-graph.txt" "${_donkey_graph}")

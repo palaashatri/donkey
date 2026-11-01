@@ -1,5 +1,7 @@
 #include "components.h"
 
+#include <string>
+
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -34,7 +36,13 @@ void badge(std::string_view label, const ImVec4& color) {
   ImGui::PushStyleColor(ImGuiCol_ButtonActive, with_alpha(color, 0.16f));
   ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, 3.0f);
   ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(6.0f, 2.0f));
-  ImGui::Button(label.data(), ImVec2(0.0f, 0.0f));
+  // A badge is a label: keyboard navigation and Tab must skip it.
+  ImGui::PushItemFlag(ImGuiItemFlags_NoTabStop, true);
+  ImGui::PushItemFlag(ImGuiItemFlags_NoNav, true);
+  const std::string text(label);  // string_view is not NUL-terminated
+  ImGui::Button(text.c_str(), ImVec2(0.0f, 0.0f));
+  ImGui::PopItemFlag();
+  ImGui::PopItemFlag();
   ImGui::PopStyleVar(2);
   ImGui::PopStyleColor(4);
 }

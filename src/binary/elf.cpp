@@ -390,9 +390,10 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
     section.virtual_size = raw.size;
     section.alignment = raw.alignment;
     section.has_file_data = raw.type != 8;
-    section.readable = (raw.flags & 0x2U) != 0;    // SHF_ALLOC
-    section.writable = (raw.flags & 0x1U) != 0;    // SHF_WRITE
-    section.executable = (raw.flags & 0x4U) != 0;  // SHF_EXECINSTR
+    section.readable = (raw.flags & 0x2U) != 0;      // SHF_ALLOC
+    section.writable = (raw.flags & 0x1U) != 0;      // SHF_WRITE
+    section.executable = (raw.flags & 0x4U) != 0;    // SHF_EXECINSTR
+    section.compressed = (raw.flags & 0x800U) != 0;  // SHF_COMPRESSED
     image.sections.push_back(std::move(section));
   }
 
@@ -497,6 +498,13 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
                          "symbol name is not NUL-terminated", entry_offset);
       }
       if (terminator == 0) {
+        continue;
+      }
+      // ARM/AArch64/RISC-V mapping symbols ($x, $d, $a, $t, optionally
+      // ".suffix") mark code/data transitions; they are not names.
+      if (symbol_type == 0 && (info >> 4U) == 0 && terminator >= 2 && raw_name[0] == '$' &&
+          (raw_name[1] == 'x' || raw_name[1] == 'd' || raw_name[1] == 'a' || raw_name[1] == 't') &&
+          (terminator == 2 || raw_name[2] == '.')) {
         continue;
       }
       Symbol symbol;

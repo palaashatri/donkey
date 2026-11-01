@@ -31,6 +31,24 @@ class NavigationHistory {
     current_address_ = address;
   }
 
+  /// Record where the user is now when they got there without navigate_to
+  /// (the entry point selected at load, a click in a list), so that the
+  /// next navigation can come back to it. Does nothing if it is already the
+  /// current entry.
+  void record_location(std::uint64_t address) {
+    if (address == 0 || (!history_.empty() && history_[history_index_] == address)) {
+      current_address_ = address == 0 ? current_address_ : address;
+      return;
+    }
+    if (history_index_ + 1 < history_.size()) {
+      history_.erase(history_.begin() + static_cast<std::ptrdiff_t>(history_index_ + 1),
+                     history_.end());
+    }
+    history_.push_back(address);
+    history_index_ = history_.size() - 1;
+    current_address_ = address;
+  }
+
   [[nodiscard]] bool can_nav_back() const noexcept {
     return !history_.empty() && history_index_ > 0;
   }

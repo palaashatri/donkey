@@ -1,0 +1,32 @@
+# DESIGN §12.2: input-to-next-frame p95 <= 50 ms while 8 threads analyse the
+# open binary in the background.
+wait_idle
+frames 3
+gallery_open
+focus_window Component gallery
+background_load 8
+frames 10
+key down
+key down
+key down
+key up
+key up
+key pagedown
+key pagedown
+key pageup
+key home
+key end
+key down
+key down
+key up
+key pagedown
+key pageup
+key down
+key down
+key up
+key up
+key home
+measure under_load 60
+stop_background_load
+assert_p95 input_under_load 50
+assert_p95 under_load 50

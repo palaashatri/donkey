@@ -7,6 +7,7 @@
 #include <fstream>
 
 #include "donkey/core/sha256.h"
+#include "test_io.h"
 
 namespace donkey {
 namespace {
@@ -17,8 +18,7 @@ std::string fixture_path(const std::string& name) {
 
 std::vector<uint8_t> read_file_bytes(const std::string& path) {
   std::ifstream in(path, std::ios::binary);
-  return std::vector<uint8_t>((std::istreambuf_iterator<char>(in)),
-                              std::istreambuf_iterator<char>());
+  return donkey_test::read_stream<std::vector<uint8_t>>(in);
 }
 
 TEST(PatchTest, RejectsEmptyReplacement) {

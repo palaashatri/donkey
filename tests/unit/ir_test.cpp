@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
 #include <vector>
@@ -10,8 +11,10 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/ir/abi.h"
+#include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "test_io.h"
 
 namespace {
 
@@ -36,8 +39,7 @@ std::string fixture_path(const std::string& name) {
 
 std::vector<std::byte> read_bytes(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
-  const std::vector<char> chars((std::istreambuf_iterator<char>(file)),
-                                std::istreambuf_iterator<char>());
+  const auto chars = donkey_test::read_stream<std::vector<char>>(file);
   std::vector<std::byte> out(chars.size());
   for (std::size_t i = 0; i < chars.size(); ++i) {
     out[i] = static_cast<std::byte>(static_cast<unsigned char>(chars[i]));
@@ -612,6 +614,173 @@ TEST(Ir, LiftsX86_32FrameFunction) {
   EXPECT_NE(code.find("ebp = esp;"), std::string::npos) << code;
   EXPECT_NE(code.find("eax = *(u32 *)(ebp + 0x8);"), std::string::npos) << code;
   EXPECT_NE(code.find("return eax;"), std::string::npos) << code;
+}
+
+/// AArch64 load pairs, checked in the IR interpreter against what the
+/// instructions compute.
+std::vector<std::byte> aarch64_bytes(std::initializer_list<std::uint32_t> words) {
+  std::vector<std::byte> out;
+  for (const std::uint32_t word : words) {
+    for (int shift = 0; shift < 32; shift += 8) {
+      out.push_back(static_cast<std::byte>((word >> shift) & 0xFF));
+    }
+  }
+  return out;
+}
+
+std::uint64_t run_aarch64(const std::vector<std::byte>& data, std::vector<std::uint8_t> memory) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return 0;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  if (!lifted.has_value()) {
+    return 0;
+  }
+  EXPECT_FALSE(lifted.value().partial);
+  donkey::IrEvalMemory eval_memory;
+  constexpr std::uint64_t kData = 0x200000;
+  eval_memory.add_region(kData, std::move(memory));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::AArch64;
+  options.convention = donkey::IrCallingConvention::Aapcs64;
+  const std::uint64_t arguments[] = {kData};
+  auto result = donkey::evaluate_ir(lifted.value(), arguments, eval_memory, options);
+  EXPECT_TRUE(result.has_value());
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, AArch64LoadPairIntoItsOwnBaseUsesTheOriginalAddress) {
+  // ldp x0, x1, [x0]; sub x0, x0, x1; ret
+  const auto data = aarch64_bytes({0xa9400400, 0xcb010000, 0xd65f03c0});
+  std::vector<std::uint8_t> memory(16, 0);
+  memory[0] = 100;  // x0 = 100
+  memory[8] = 30;   // x1 = 30
+  EXPECT_EQ(run_aarch64(data, memory), 70U);
+}
+
+TEST(Ir, AArch64LoadPairSignedWordsSignExtends) {
+  // ldpsw x8, x9, [x0]; add x0, x8, x9; ret
+  const auto data = aarch64_bytes({0x69402408, 0x8b090100, 0xd65f03c0});
+  std::vector<std::uint8_t> memory = {0xfe, 0xff, 0xff, 0xff, 5, 0, 0, 0};  // -2, 5
+  EXPECT_EQ(run_aarch64(data, memory), 3U);
+}
+
+// Flags from cmp (with a shifted operand) and subs feed conditional selects
+// in the same block; register-offset loads, mvn, ubfiz and ror. Each input
+// is checked in the interpreter against the same computation in C++.
+TEST(Ir, AArch64SelectsBitfieldsAndRegisterOffsetsComputeTheRealValues) {
+  const auto data = aarch64_bytes({
+      0xb9400008,  // ldr w8, [x0]
+      0xb9400409,  // ldr w9, [x0, #4]
+      0xd280004a,  // mov x10, #2
+      0xb86a780b,  // ldr w11, [x0, x10, lsl #2]
+      0x6b09051f,  // cmp w8, w9, lsl #1
+      0x1a9fd7ec,  // cset w12, gt
+      0x1a89b56d,  // csinc w13, w11, w9, lt
+      0x2a2803ee,  // mvn w14, w8
+      0x531c0d0f,  // ubfiz w15, w8, #4, #4
+      0x13882110,  // ror w16, w8, #8
+      0x6b090111,  // subs w17, w8, w9
+      0x5a892572,  // csneg w18, w11, w9, hs
+      0x0b0d0180,  // add w0, w12, w13
+      0x4a0e0000,  // eor w0, w0, w14
+      0x0b0f0000,  // add w0, w0, w15
+      0x4a100000,  // eor w0, w0, w16
+      0x0b120000,  // add w0, w0, w18
+      0xd65f03c0,  // ret
+  });
+  const std::uint32_t inputs[][3] = {
+      {7, 3, 100}, {5, 3, 9}, {6, 3, 1}, {0x80000001U, 2, 0xdeadbeefU}, {1, 0x40000000U, 4}};
+  for (const auto& in : inputs) {
+    const std::uint32_t a = in[0];
+    const std::uint32_t b = in[1];
+    const std::uint32_t c = in[2];
+    const auto sa = static_cast<std::int32_t>(a);
+    const auto sb2 = static_cast<std::int32_t>(b << 1);
+    const std::uint32_t w12 = sa > sb2 ? 1U : 0U;
+    const std::uint32_t w13 = sa < sb2 ? c : b + 1;
+    const std::uint32_t w14 = ~a;
+    const std::uint32_t w15 = (a & 0xfU) << 4;
+    const std::uint32_t w16 = (a >> 8) | (a << 24);
+    const std::uint32_t w18 = a >= b ? c : 0U - b;
+    const std::uint32_t expected = ((((w12 + w13) ^ w14) + w15) ^ w16) + w18;
+    std::vector<std::uint8_t> memory(16, 0);
+    for (int i = 0; i < 4; ++i) {
+      memory[i] = static_cast<std::uint8_t>(a >> (8 * i));
+      memory[4 + i] = static_cast<std::uint8_t>(b >> (8 * i));
+      memory[8 + i] = static_cast<std::uint8_t>(c >> (8 * i));
+    }
+    EXPECT_EQ(run_aarch64(data, memory) & 0xffffffffU, expected) << "a=" << a << " b=" << b;
+  }
+}
+
+// A branch on flags the lifter does not model must stay Partial: here adds
+// overwrites NZCV between cmp and b.eq.
+TEST(Ir, AArch64BranchAfterAnUnmodelledFlagWriterIsPartial) {
+  const auto data = aarch64_bytes({
+      0x6b01001f,  // cmp w0, w1
+      0x2b010002,  // adds w2, w0, w1
+      0x54000060,  // b.eq +12
+      0x52800020,  // mov w0, #1
+      0xd65f03c0,  // ret
+      0x52800040,  // mov w0, #2
+      0xd65f03c0,  // ret
+  });
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value());
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+// `shl eax, 32` shifts by 0 (x86 masks a 32-bit count to 5 bits) and leaves
+// the flags alone, so the jz below tests esi from `test esi, esi`. Treating
+// the shift as a flag writer branched on eax instead and was reported
+// Complete.
+TEST(Ir, X86ZeroEffectiveShiftKeepsThePriorFlags) {
+  const std::uint8_t raw[] = {0x89, 0xf8,                           // mov eax, edi
+                              0x85, 0xf6,                           // test esi, esi
+                              0xc1, 0xe0, 0x20,                     // shl eax, 32
+                              0x74, 0x06,                           // je +6
+                              0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,   // mov eax, 1; ret
+                              0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3};  // mov eax, 2; ret
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value());
+  // The count is a known 0, so the flags of `test esi, esi` still hold.
+  EXPECT_FALSE(lifted.value().partial);
+  struct Case {
+    std::uint64_t edi;
+    std::uint64_t esi;
+    std::uint64_t expected;
+  };
+  for (const Case c : {Case{5, 0, 2}, Case{0, 7, 1}, Case{0, 0, 2}, Case{9, 9, 1}}) {
+    donkey::IrEvalMemory memory;
+    donkey::IrEvalOptions options;
+    options.architecture = Architecture::X86_64;
+    options.convention = donkey::IrCallingConvention::SysV64;
+    const std::uint64_t arguments[] = {c.edi, c.esi};
+    auto result = donkey::evaluate_ir(lifted.value(), arguments, memory, options);
+    ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+    EXPECT_EQ(result.value().return_value & 0xffffffffU, c.expected)
+        << "edi=" << c.edi << " esi=" << c.esi;
+  }
 }
 
 TEST(Ir, InfersAArch64IntegerArgumentsAndReturn) {

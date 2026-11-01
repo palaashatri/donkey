@@ -1,6 +1,9 @@
 #include "theme.h"
 
+#include <cstdio>
+#include <filesystem>
 #include <string>
+#include <system_error>
 
 #include "imgui.h"
 
@@ -14,11 +17,22 @@ bool load_monospace_font(float scale) {
       "/System/Library/Fonts/SFNSMono.ttf",
       "/System/Library/Fonts/Menlo.ttc",
       "/Library/Fonts/Menlo.ttc",
+      "C:\\Windows\\Fonts\\CascadiaMono.ttf",
+      "C:\\Windows\\Fonts\\consola.ttf",
       "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
       "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+      "/usr/share/fonts/dejavu-sans-mono-fonts/DejaVuSansMono.ttf",
+      "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+      "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+      "/usr/local/share/fonts/dejavu/DejaVuSansMono.ttf",
   };
   ImGuiIO& io = ImGui::GetIO();
   for (const char* path : kCandidates) {
+    // ImGui asserts on a missing file in debug builds, so probe first.
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec)) {
+      continue;
+    }
     ImFont* font = io.Fonts->AddFontFromFileTTF(path, 15.0f);
     if (font != nullptr) {
       std::fprintf(stderr, "donkey: ui font %s\n", path);
@@ -35,8 +49,15 @@ bool load_monospace_font(float scale) {
 
 void apply(float scale) {
   ImGuiStyle& style = ImGui::GetStyle();
+  // Start from defaults so re-applying at a new display scale does not
+  // compound the previous scale.
+  style = ImGuiStyle();
   ImGui::StyleColorsDark(&style);
-  load_monospace_font(scale);
+  static bool font_loaded = false;
+  if (!font_loaded) {
+    load_monospace_font(scale);
+    font_loaded = true;
+  }
 
   const ImVec4 accent(0.35f, 0.62f, 0.94f, 1.0f);
   const ImVec4 accent_dim(0.25f, 0.45f, 0.70f, 1.0f);
@@ -107,6 +128,7 @@ void apply(float scale) {
   style.ScrollbarSize = 12.0f;
 
   style.ScaleAllSizes(scale);
+  style.FontScaleDpi = scale;
 }
 
 }  // namespace donkey::ui::theme
