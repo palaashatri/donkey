@@ -231,11 +231,13 @@ void Session::open(const std::string& path) {
     current_worker_done_ = done;
   }
   std::function<void(const CancellationToken&)> load_hook;
+  std::function<void()> debug_info_hook;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     load_hook = load_hook_;
+    debug_info_hook = debug_info_hook_;
   }
-  worker_ = std::thread([this, path, generation, token, done, load_hook]() {
+  worker_ = std::thread([this, path, generation, token, done, load_hook, debug_info_hook]() {
     WorkerDoneGuard done_guard{done};
     if (load_hook) {
       load_hook(token);
@@ -273,7 +275,16 @@ void Session::open(const std::string& path) {
     auto document = std::make_shared<Document>();
     document->loaded = std::move(loaded.value());
     document->analysis = std::move(analysis.value());
+    if (debug_info_hook) {
+      debug_info_hook();
+    }
     attach_debug_info(*document, token);
+    // A cancel during the DWARF parse returns what was read so far; the open
+    // is still cancelled, not published with partial debug info.
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
+      return;
+    }
     apply_debug_names(*document);
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -308,7 +319,12 @@ void Session::open_project(const std::string& path) {
     std::lock_guard<std::mutex> lock(mutex_);
     current_worker_done_ = done;
   }
-  worker_ = std::thread([this, path, generation, token, done]() {
+  std::function<void()> debug_info_hook;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    debug_info_hook = debug_info_hook_;
+  }
+  worker_ = std::thread([this, path, generation, token, done, debug_info_hook]() {
     WorkerDoneGuard done_guard{done};
     // Read everything the project owns first, then close the database before
     // the (slower) binary load and analysis. busy_ is only cleared after the
@@ -393,7 +409,14 @@ void Session::open_project(const std::string& path) {
     auto document = std::make_shared<Document>();
     document->loaded = std::move(loaded.value());
     document->analysis = std::move(analysis.value());
+    if (debug_info_hook) {
+      debug_info_hook();
+    }
     attach_debug_info(*document, token);
+    if (token.is_cancelled()) {
+      fail(generation, "Operation cancelled", "Cancelled");
+      return;
+    }
     apply_debug_names(*document);
 
     std::lock_guard<std::mutex> lock(mutex_);
@@ -606,14 +629,26 @@ void Session::restore_project(const std::string& backup_path) {
       return;
     }
 
-    auto commit_hook = [this, generation](const std::string& temp,
-                                          const std::string& dest) -> Result<void> {
-      // Holding the lock makes "not superseded, not cancelled" and the rename
-      // one step: cancel() and new operations wait until the commit is done.
+    std::function<void()> replace_hook;
+    {
       std::lock_guard<std::mutex> lock(mutex_);
-      if (generation != generation_.load() || current_cancellation_.is_cancelled()) {
-        return make_error<void>(Status::Cancelled, "io.cancelled",
-                                "restore was superseded or cancelled before commit");
+      replace_hook = restore_replace_hook_;
+    }
+    auto commit_hook = [this, generation, replace_hook](const std::string& temp,
+                                                        const std::string& dest) -> Result<void> {
+      {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (generation != generation_.load() || current_cancellation_.is_cancelled()) {
+          return make_error<void>(Status::Cancelled, "io.cancelled",
+                                  "restore was superseded or cancelled before commit");
+        }
+      }
+      // The replacement (quiescing the destination database, writing and
+      // flushing the file) runs without the session lock, so slow storage
+      // never stalls the render thread. A cancel that arrives during it is
+      // too late: the restore is then reported as completed, below.
+      if (replace_hook) {
+        replace_hook();
       }
       return Project::replace_file_atomically(temp, dest);
     };
@@ -715,16 +750,27 @@ void Session::restore_project(const std::string& backup_path) {
       }
     }
 
+    // DWARF is parsed here, without the session lock, so the render thread
+    // never waits on it. A cancel during the parse cancels the reload; the
+    // restore itself is already complete on disk.
+    std::shared_ptr<Document> document;
+    if (analysis.has_value()) {
+      document = std::make_shared<Document>();
+      document->loaded = std::move(loaded.value());
+      document->analysis = std::move(*analysis);
+      attach_debug_info(*document, token);
+      if (token.is_cancelled()) {
+        document.reset();
+      } else {
+        apply_debug_names(*document);
+      }
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     if (generation_.load() != generation) {
       return;
     }
-    if (analysis.has_value()) {
-      auto document = std::make_shared<Document>();
-      document->loaded = std::move(loaded.value());
-      document->analysis = std::move(*analysis);
-      attach_debug_info(*document, token);
-      apply_debug_names(*document);
+    if (document) {
       document_ = std::move(document);
       path_ = image_path;
       status_ = restored_status;
@@ -773,6 +819,16 @@ bool Session::wait_for_retired_workers(const CancellationToken& token) {
 void Session::set_load_hook_for_testing(std::function<void(const CancellationToken&)> hook) {
   std::lock_guard<std::mutex> lock(mutex_);
   load_hook_ = std::move(hook);
+}
+
+void Session::set_debug_info_hook_for_testing(std::function<void()> hook) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  debug_info_hook_ = std::move(hook);
+}
+
+void Session::set_restore_replace_hook_for_testing(std::function<void()> hook) {
+  std::lock_guard<std::mutex> lock(mutex_);
+  restore_replace_hook_ = std::move(hook);
 }
 
 void Session::set_restore_post_commit_hook_for_testing(std::function<void()> hook) {

@@ -113,6 +113,15 @@ class Session {
   /// can stand in for slow storage. It receives the operation's token.
   void set_load_hook_for_testing(std::function<void(const CancellationToken&)> hook);
 
+  /// Test-only: runs on the open() and open_project() workers just before
+  /// DWARF is read, so a test can cancel at that point.
+  void set_debug_info_hook_for_testing(std::function<void()> hook);
+
+  /// Test-only: runs on the restore worker inside the database replacement,
+  /// after the session lock is released, so a test can stand in for slow
+  /// storage and check the session stays responsive.
+  void set_restore_replace_hook_for_testing(std::function<void()> hook);
+
   /// Request cooperative cancellation of any running worker task.
   void cancel();
   [[nodiscard]] bool is_cancelled() const;
@@ -183,6 +192,8 @@ class Session {
   std::atomic<std::uint64_t> generation_{0};
   std::function<void()> restore_post_commit_hook_;
   std::function<void(const CancellationToken&)> load_hook_;
+  std::function<void()> debug_info_hook_;
+  std::function<void()> restore_replace_hook_;
   bool reanalysis_pending_ = false;
 
   CancellationToken current_cancellation_;

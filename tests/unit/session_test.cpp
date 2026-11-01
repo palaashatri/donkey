@@ -843,4 +843,58 @@ TEST(Session, DebugInfoNamesNeverReplaceUserRenames) {
   EXPECT_EQ(again->debug_info->prototype(*imported), "void donkey_debuggee_tick(void)");
 }
 
+// A cancel while DWARF is being read must cancel the open: read_debug_info
+// returns what it read so far, and that must not be published as the
+// document.
+TEST(Session, CancelDuringDebugInfoCancelsTheOpen) {
+  Session session;
+  session.set_debug_info_hook_for_testing([&session]() { session.cancel(); });
+  session.open(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(wait_idle(session));
+  session.set_debug_info_hook_for_testing({});
+  EXPECT_EQ(session.document(), nullptr);
+  EXPECT_NE(session.status().find("Cancelled"), std::string::npos) << session.status();
+}
+
+// The database replacement at the end of a restore can be slow on slow
+// storage; it must not hold the lock the render thread's accessors take.
+TEST(Session, SlowRestoreReplacementDoesNotBlockTheSession) {
+  TempPath project_path("slow-replace-source");
+  TempPath backup_path("slow-replace-backup");
+  create_project_with_annotations(project_path.str());
+
+  Session session;
+  session.open_project(project_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  session.backup_project(backup_path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+
+  std::atomic<bool> entered{false};
+  session.set_restore_replace_hook_for_testing([&entered]() {
+    entered.store(true);
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+  });
+  session.restore_project(backup_path.str());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!entered.load() && std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+  ASSERT_TRUE(entered.load()) << "the restore never reached the replacement";
+
+  // While the replacement is in progress, what the render thread calls
+  // returns at once.
+  const auto start = std::chrono::steady_clock::now();
+  (void)session.status();
+  (void)session.is_cancelled();
+  (void)session.document();
+  const auto waited = std::chrono::steady_clock::now() - start;
+  EXPECT_LT(waited, std::chrono::milliseconds(200));
+
+  ASSERT_TRUE(wait_idle(session));
+  session.set_restore_replace_hook_for_testing({});
+  EXPECT_FALSE(session.take_error().has_value());
+  EXPECT_NE(session.status().find("Restored project from"), std::string::npos) << session.status();
+}
+
 }  // namespace
