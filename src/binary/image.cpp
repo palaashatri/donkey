@@ -8,10 +8,11 @@
 #include <iterator>
 #include <tuple>
 
+#include "donkey/binary/records.h"
+#include "donkey/binary/relocate.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/sha256.h"
 #include "parsers.h"
-#include "donkey/binary/relocate.h"
 
 namespace donkey {
 namespace {
@@ -448,14 +449,37 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
     return error(Status::Cancelled, "io.cancelled", "file loading was cancelled");
   }
 
+  // Intel HEX and S-record files are decoded into one flat image at their lowest address,
+  // which is analysed as raw bytes. A malformed record is an error, not raw bytes.
+  if (!options.force_raw) {
+    const RecordFormat records = detect_record_format(data.span());
+    if (records != RecordFormat::None) {
+      auto decoded = decode_records(data.span(), records, options.max_file_bytes);
+      if (!decoded) {
+        return decoded.diagnostic();
+      }
+      LoadOptions flat = options;
+      flat.force_raw = true;
+      flat.raw_base_address = decoded.value().base;
+      flat.has_raw_entry_point = decoded.value().has_entry_point;
+      flat.raw_entry_point = decoded.value().entry_point;
+      data = ByteBuffer(std::move(decoded.value().bytes));
+      auto flat_image = parse_binary(data.span(), path, flat);
+      if (!flat_image) {
+        return flat_image.diagnostic();
+      }
+      flat_image.value().format_detail = record_format_name(records);
+      return LoadedBinary{std::move(flat_image.value()), std::move(data)};
+    }
+  }
+
   auto image = parse_binary(data.span(), path, options);
   if (!image) {
     return image.diagnostic();
   }
   // An ELF object is laid out and relocated. Its analysed bytes are a patched copy, so
   // the buffer that the image's file offsets refer to is replaced with that copy.
-  if (image.value().format == BinaryFormat::Elf &&
-      is_relocatable_elf(data.span())) {
+  if (image.value().format == BinaryFormat::Elf && is_relocatable_elf(data.span())) {
     auto linked = link_relocatable_object(data.span(), image.value());
     if (!linked) {
       return linked.diagnostic();

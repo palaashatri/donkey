@@ -77,6 +77,7 @@ add_library(donkey_binary STATIC
   src/binary/demangle.cpp
   src/binary/demangle_msvc.cpp
   src/binary/rtti.cpp
+  src/binary/records.cpp
   src/binary/relocate.cpp
 )
 add_library(donkey::binary ALIAS donkey_binary)
@@ -287,6 +288,12 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_demangle PRIVATE cxx_std_20)
   target_compile_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_records fuzz/fuzz_records.cpp)
+  target_link_libraries(fuzz_records PRIVATE donkey::binary)
+  target_compile_features(fuzz_records PRIVATE cxx_std_20)
+  target_compile_options(fuzz_records PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_records PRIVATE ${DONKEY_FUZZ_SANITIZE})
+
   add_executable(fuzz_archive fuzz/fuzz_archive.cpp)
   target_link_libraries(fuzz_archive PRIVATE donkey::binary)
   target_compile_features(fuzz_archive PRIVATE cxx_std_20)
