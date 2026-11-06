@@ -83,11 +83,14 @@ std::string hex_float_literal(std::uint64_t bits, std::uint8_t width) {
     std::snprintf(buffer, sizeof(buffer), "NAN(0x%llx)", static_cast<unsigned long long>(frac));
     return sign + buffer;
   }
-  // The fraction in hexadecimal, with its trailing zeros removed.
+  // The fraction in hexadecimal, with its trailing zeros removed. The fraction is aligned
+  // to whole hexadecimal digits first: a single-precision fraction has 23 bits, which is
+  // printed as six digits (24 bits), so it is shifted left by one.
   const unsigned digits = (frac_bits + 3U) / 4U;
+  const std::uint64_t aligned = frac << (digits * 4U - frac_bits);
   char hex[32];
   std::snprintf(hex, sizeof(hex), "%0*llx", static_cast<int>(digits),
-                static_cast<unsigned long long>(frac));
+                static_cast<unsigned long long>(aligned));
   std::string fraction = hex;
   while (!fraction.empty() && fraction.back() == '0') {
     fraction.pop_back();
@@ -390,8 +393,12 @@ class Renderer {
                float_operand(statement.b, statement.width) + ");";
       case IrOp::IntToFloat:
       case IrOp::UIntToFloat:
+        // An unsigned source keeps all of its bytes: the cast names the source's width.
         return operand(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
-               ")" + (statement.op == IrOp::UIntToFloat ? "(unsigned)" : "") +
+               ")" +
+               (statement.op == IrOp::UIntToFloat
+                    ? (statement.a.width == 8 ? "(unsigned long long)" : "(unsigned)")
+                    : "") +
                operand(statement.a) + ";";
       case IrOp::FloatToInt:
         return operand(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
