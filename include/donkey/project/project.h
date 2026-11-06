@@ -10,12 +10,13 @@
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/core/result.h"
+#include "donkey/project/types.h"
 
 namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 4;
+constexpr int kProjectSchemaVersion = 5;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
@@ -33,6 +34,16 @@ struct Annotation {
   AnnotationKind kind = AnnotationKind::Rename;
   std::uint64_t address = 0;
   std::string text;
+};
+
+/// Where a type is applied (G05-T3 uses these): a function prototype at its entry, or a
+/// data slot (a stack slot or a global) at its address.
+enum class TypeApplicationKind : std::uint8_t { FunctionPrototype = 0, DataSlot = 1 };
+
+struct TypeApplication {
+  TypeApplicationKind kind = TypeApplicationKind::FunctionPrototype;
+  std::uint64_t address = 0;
+  TypeId type_id{};
 };
 
 struct ProjectImage {
@@ -105,6 +116,21 @@ class Project {
   /// the desktop shell to flush its in-memory annotation snapshot.
   [[nodiscard]] Result<void> replace_annotations(std::int64_t image_id,
                                                  const std::vector<Annotation>& annotations);
+
+  /// Every type in the project's type store (G05-T1), validated as a whole.
+  [[nodiscard]] Result<TypeTable> types() const;
+
+  /// Replace the whole type store in one transaction. The table is validated first; an
+  /// invalid table is refused and nothing changes. A type removed from the table takes
+  /// its applications with it.
+  [[nodiscard]] Result<void> replace_types(const TypeTable& table);
+
+  /// Type applications for one image, ordered by address.
+  [[nodiscard]] Result<std::vector<TypeApplication>> type_applications(std::int64_t image_id) const;
+
+  /// Apply a type to an address of an image. A type id of zero removes the application.
+  [[nodiscard]] Result<void> set_type_application(std::int64_t image_id, TypeApplicationKind kind,
+                                                  std::uint64_t address, TypeId type_id);
 
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;

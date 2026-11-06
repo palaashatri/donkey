@@ -55,6 +55,7 @@ struct DebugType {
   std::uint64_t byte_size = 0;
   std::uint64_t target = 0;          ///< referenced type for pointers, typedefs, arrays...
   std::uint64_t element_count = 0;   ///< arrays: elements of the first dimension (0 unknown)
+  std::uint8_t encoding = 0;         ///< base types: DW_AT_encoding (0 when absent)
   std::vector<DebugMember> members;  ///< structs, unions, classes
   DebugProvenance provenance;
 };
