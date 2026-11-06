@@ -155,7 +155,7 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form and break/continue not done; T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). A prototype can be applied to recovered code, naming parameters and pointer structures (G05-T3, partial). No propagation through copies and loads, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 TODO) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). A prototype can be applied to recovered code, naming parameters and pointer structures (G05-T3, partial). No propagation through copies and loads. `donkey-cli project type add|list|apply` store and list types (G05-T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types yet | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -866,6 +866,16 @@ for Partial functions.
 - **Tests:** CLI tests in `tests/CMakeLists.txt`, and a UI script
   `tests/ui/types.donkeyui` that applies a type with the keyboard and
   asserts the pseudocode.
+- **Status:** PARTIAL. Done: step 1. `donkey-cli project type add|list|apply` exist and
+  are tested in `tests/CMakeLists.txt` (`cli.project_type_*`, seven tests, repeatable).
+  `add` parses a header with the G05-T2 parser, merges the declarations into the project's
+  type table and reports a parse error with its line and column; `list` prints the types
+  (text or `--json`); `apply` stores a type for an address, as a prototype when the type is
+  a function and as a data slot otherwise. Not done: the decompiler does not yet read the
+  stored applications, so `apply` changes no output (the conversion from a `TypeTable` to
+  the `IrPrototype` of G05-T3 is still written by hand, in the test). Not done: step 2 (the
+  Types panel, the editor with parse errors, "Set type…", the shared components) and step 3
+  (undo and redo), and the UI script `tests/ui/types.donkeyui`.
 
 ### G06 PDB
 

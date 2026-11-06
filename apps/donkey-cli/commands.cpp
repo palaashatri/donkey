@@ -24,7 +24,9 @@
 #include "donkey/ir/lift.h"
 #include "donkey/patch/patch.h"
 #include "donkey/plugin/plugin.h"
+#include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/types.h"
 #include "json.h"
 
 namespace donkey::cli {
@@ -1542,9 +1544,186 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+namespace {
+
+/// `project type add|list|apply`: the C types a project holds, and which address each
+/// applies to (G05-T4). The declarations are read from a C header of the supported subset.
+int command_project_type(const std::vector<std::string_view>& positional, bool json) {
+  if (positional.empty()) {
+    return usage_error("project type needs a subcommand: add, list or apply");
+  }
+  const std::string_view action = positional[0];
+  const std::vector<std::string_view> rest(positional.begin() + 1, positional.end());
+
+  if (action == "add") {
+    if (rest.size() != 2) {
+      return usage_error("project type add needs a database and a C declarations file");
+    }
+    const std::string database(rest[0]);
+    const std::string path(rest[1]);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+      return usage_error("cannot open the declarations file");
+    }
+    // Read at most one byte past the limit, so an oversized file is reported as such.
+    std::string text;
+    char buffer[4096];
+    while (file && text.size() <= donkey::kMaxCDeclarationBytes) {
+      file.read(buffer, sizeof(buffer));
+      text.append(buffer, static_cast<std::size_t>(file.gcount()));
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto known = project.value().types();
+    if (!known) {
+      return fail(known.diagnostic());
+    }
+    auto declared = donkey::parse_c_declarations(text, known.value());
+    if (!declared) {
+      return fail(declared.diagnostic());
+    }
+    donkey::TypeTable table = known.value();
+    for (const donkey::TypeDefinition& definition : declared.value()) {
+      table.put(definition);
+    }
+    auto saved = project.value().replace_types(table);
+    if (!saved) {
+      return fail(saved.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"declarations\": " + quote(path) + ",\n";
+      out += "  \"added\": " + std::to_string(declared.value().size()) + "\n}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Added %zu types from %s\n", declared.value().size(), path.c_str());
+    }
+    return kExitOk;
+  }
+
+  if (action == "list") {
+    if (rest.size() != 1) {
+      return usage_error("project type list needs a database");
+    }
+    const std::string database(rest[0]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    const std::vector<donkey::TypeDefinition> types = table.value().list();
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"types\": [";
+      for (std::size_t i = 0; i < types.size(); ++i) {
+        const donkey::TypeDefinition& type = types[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"id\": " + std::to_string(type.id.value()) +
+               ", \"kind\": " + quote(donkey::type_kind_name(type.kind)) +
+               ", \"name\": " + quote(type.name) + ", \"size\": " + std::to_string(type.size) +
+               ", \"provenance\": " + quote(donkey::type_provenance_name(type.provenance)) + "}";
+      }
+      out += types.empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("%zu types\n", types.size());
+      for (const donkey::TypeDefinition& type : types) {
+        std::printf("  #%-5llu %-9s %-20s %llu bytes\n",
+                    static_cast<unsigned long long>(type.id.value()),
+                    donkey::type_kind_name(type.kind), type.name.c_str(),
+                    static_cast<unsigned long long>(type.size));
+      }
+    }
+    return kExitOk;
+  }
+
+  if (action == "apply") {
+    if (rest.size() != 4) {
+      return usage_error(
+          "project type apply needs a database, an image id, an address and a type name");
+    }
+    const std::string database(rest[0]);
+    std::uint64_t image_id = 0;
+    if (!parse_u64(rest[1], image_id) || image_id == 0 ||
+        image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t address = 0;
+    if (!parse_u64(rest[2], address)) {
+      return usage_error("invalid address");
+    }
+    const std::string name(rest[3]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    // The first type with that name. A function type applies as a prototype; any other
+    // type applies to a data slot.
+    const std::vector<donkey::TypeDefinition> types = table.value().list();
+    const donkey::TypeDefinition* chosen = nullptr;
+    for (const donkey::TypeDefinition& type : types) {
+      if (type.name == name) {
+        chosen = &type;
+        break;
+      }
+    }
+    if (chosen == nullptr) {
+      return usage_error("no type with that name in the project");
+    }
+    const donkey::TypeApplicationKind kind = chosen->kind == donkey::TypeKind::Function
+                                                 ? donkey::TypeApplicationKind::FunctionPrototype
+                                                 : donkey::TypeApplicationKind::DataSlot;
+    auto applied = project.value().set_type_application(static_cast<std::int64_t>(image_id), kind,
+                                                        address, chosen->id);
+    if (!applied) {
+      return fail(applied.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+      out += "  \"address\": " + quote(hex(address)) + ",\n";
+      out += "  \"type\": " + quote(name) + ",\n";
+      out += "  \"applied_as\": " +
+             quote(kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype" : "data") +
+             "\n}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Applied %s to %s in image %llu\n", name.c_str(), hex(address).c_str(),
+                  static_cast<unsigned long long>(image_id));
+    }
+    return kExitOk;
+  }
+
+  return usage_error("project type needs a subcommand: add, list or apply");
+}
+
+}  // namespace
+
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
-    return usage_error("project needs a subcommand: save or info");
+    return usage_error("project needs a subcommand: save, info or type");
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
@@ -1570,6 +1749,10 @@ int command_project(const std::vector<std::string_view>& arguments) {
     } else {
       positional.push_back(argument);
     }
+  }
+
+  if (subcommand == "type") {
+    return command_project_type(positional, json);
   }
 
   if (subcommand == "save") {
@@ -1881,7 +2064,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
 
   return usage_error(
       "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
-      "backup or restore)");
+      "backup, restore or type)");
 }
 
 namespace {
