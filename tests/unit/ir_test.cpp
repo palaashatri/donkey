@@ -2070,6 +2070,31 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
 }
 
+TEST(Ir, VerifierRejectsADivisorTemporaryThatIsNeverDefined) {
+  // The divisor is an operand like the others: an undefined temporary there is
+  // rejected instead of being read as zero.
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.c = donkey::IrOperand::register_ref("var_7", 8);
+  divide.width = 8;
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.undefined_variable");
+}
+
 TEST(Ir, VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled) {
   // Compare; AddCarry; AddCarry: the second carry would read the compare's CF,
   // not the carry out of the first add, which the IR does not represent.
@@ -2156,6 +2181,18 @@ TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
       EXPECT_NE(statement.op, donkey::IrOp::AddCarry);
     }
   }
+}
+
+TEST(Ir, X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature) {
+  // mov rax, rdi; mov edx, 0; div rsi; ret: the divisor is rsi, the second argument.
+  // (mov, not xor, for rdx: an xor reads its register and would add rdx as an input.)
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0xba, 0x00, 0x00, 0x00, 0x00, 0x48, 0xf7, 0xf6, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  ASSERT_EQ(f.parameters.size(), 2U);
+  EXPECT_EQ(f.parameters[1].abi_register, "rsi");
+  EXPECT_EQ(run_x86_64(f, {10, 3}), 3U);
 }
 
 }  // namespace
