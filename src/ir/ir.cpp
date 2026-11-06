@@ -312,6 +312,21 @@ class Renderer {
         return operand(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
                operand(statement.b) + (add ? " + CF;" : " - CF;");
       }
+      case IrOp::MulHighUnsigned:
+      case IrOp::MulHighSigned:
+        return operand(statement.dest) + " = mulh" +
+               (statement.op == IrOp::MulHighSigned ? "s(" : "u(") + operand(statement.a) + ", " +
+               operand(statement.b) + ");";
+      case IrOp::DivUnsigned:
+      case IrOp::DivSigned:
+      case IrOp::RemUnsigned:
+      case IrOp::RemSigned: {
+        const bool quotient = statement.op == IrOp::DivUnsigned || statement.op == IrOp::DivSigned;
+        const bool is_signed = statement.op == IrOp::DivSigned || statement.op == IrOp::RemSigned;
+        return operand(statement.dest) + " = (" + operand(statement.a) + ":" +
+               operand(statement.b) + (is_signed ? " signed) " : " unsigned) ") +
+               (quotient ? "/ " : "% ") + operand(statement.c) + ";";
+      }
     }
     return "";
   }
@@ -446,6 +461,18 @@ const char* ir_op_name(IrOp op) noexcept {
       return "add_carry";
     case IrOp::SubBorrow:
       return "sub_borrow";
+    case IrOp::MulHighUnsigned:
+      return "mul_high_unsigned";
+    case IrOp::MulHighSigned:
+      return "mul_high_signed";
+    case IrOp::DivUnsigned:
+      return "div_unsigned";
+    case IrOp::DivSigned:
+      return "div_signed";
+    case IrOp::RemUnsigned:
+      return "rem_unsigned";
+    case IrOp::RemSigned:
+      return "rem_signed";
   }
   return "unknown";
 }
@@ -661,6 +688,39 @@ Result<bool> verify_ir(const IrFunction& function) {
                statement.a.width != statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "conditional assign source and destination widths must match");
+          }
+          break;
+        case IrOp::MulHighUnsigned:
+        case IrOp::MulHighSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None) {
+            return fail("ir.malformed_mul_high",
+                        "high multiply needs a register destination and two sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "high multiply operand widths must match statement width");
+          }
+          break;
+        case IrOp::DivUnsigned:
+        case IrOp::DivSigned:
+        case IrOp::RemUnsigned:
+        case IrOp::RemSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.c.kind == IrOperandKind::None) {
+            return fail("ir.malformed_divide",
+                        "divide needs a register destination and a 2-part dividend and divisor");
+          }
+          if (statement.dest.width != statement.width || statement.a.width != statement.width ||
+              statement.b.width != statement.width ||
+              (statement.c.kind == IrOperandKind::Register &&
+               statement.c.width != statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "divide operand widths must match statement width");
           }
           break;
         case IrOp::AddCarry:

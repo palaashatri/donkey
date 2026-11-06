@@ -87,6 +87,17 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_add128_hi", 'U', "UUUU"},
     {"c_sub128_hi", 'U', "UUUU"},
     {"c_add_wraps", 'i', "UU"},
+    {"c_mulhi_u64", 'U', "UU"},
+    {"c_mulhi_s64", 'U', "UU"},
+    {"c_udiv32", 'u', "uu"},
+    {"c_urem32", 'u', "uu"},
+    {"c_sdiv32", 'i', "ii"},
+    {"c_srem32", 'i', "ii"},
+    {"c_udiv64", 'U', "UU"},
+    {"c_urem64", 'U', "UU"},
+    {"c_sdiv64", 'U', "UU"},
+    {"c_srem64", 'U', "UU"},
+    {"c_div10", 'U', "U"},
 };
 
 struct Library {

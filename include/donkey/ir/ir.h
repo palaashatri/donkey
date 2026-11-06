@@ -13,32 +13,38 @@ namespace donkey {
 /// lifter today; no pseudocode is ever synthesised from strings or a model.
 enum class IrOp : std::uint8_t {
   Nop = 0,
-  Assign,       ///< dest = a
-  Add,          ///< dest = a + b
-  Sub,          ///< dest = a - b
-  Mul,          ///< dest = a * b
-  And,          ///< dest = a & b
-  Or,           ///< dest = a | b
-  Xor,          ///< dest = a ^ b
-  Shl,          ///< dest = a << b
-  Shr,          ///< dest = a >> b (logical)
-  Sar,          ///< dest = a >> b (arithmetic)
-  ZeroExtend,   ///< dest = (dest.width)a, zero-extended
-  SignExtend,   ///< dest = (dest.width)a, sign-extended
-  Lea,          ///< dest = address of a     (a is a memory operand)
-  Load,         ///< dest = *(width*)a        (a is a memory operand)
-  Store,        ///< *(width*)a = b           (a is a memory operand)
-  Call,         ///< dest = call(a)           (a is a constant address, 0 = indirect)
-  Return,       ///< return a (a may be None)
-  Branch,       ///< goto block a.block
-  CondBranch,   ///< if (condition over a) goto block b.block
-  Switch,       ///< switch (dest) { case: goto target_block; default: goto a.block; }
-  Compare,      ///< flags = a <condition> b
-  Test,         ///< flags = a & b
-  Unsupported,  ///< an instruction the lifter does not model; `text` is raw
-  CondAssign,   ///< if (condition over the last Compare/Test) dest = a  (cmovcc, setcc)
-  AddCarry,     ///< dest = a + b + CF, CF taken from the last Compare/Test in the block (adc)
-  SubBorrow,    ///< dest = a - b - CF, CF taken from the last Compare/Test in the block (sbb)
+  Assign,           ///< dest = a
+  Add,              ///< dest = a + b
+  Sub,              ///< dest = a - b
+  Mul,              ///< dest = a * b
+  And,              ///< dest = a & b
+  Or,               ///< dest = a | b
+  Xor,              ///< dest = a ^ b
+  Shl,              ///< dest = a << b
+  Shr,              ///< dest = a >> b (logical)
+  Sar,              ///< dest = a >> b (arithmetic)
+  ZeroExtend,       ///< dest = (dest.width)a, zero-extended
+  SignExtend,       ///< dest = (dest.width)a, sign-extended
+  Lea,              ///< dest = address of a     (a is a memory operand)
+  Load,             ///< dest = *(width*)a        (a is a memory operand)
+  Store,            ///< *(width*)a = b           (a is a memory operand)
+  Call,             ///< dest = call(a)           (a is a constant address, 0 = indirect)
+  Return,           ///< return a (a may be None)
+  Branch,           ///< goto block a.block
+  CondBranch,       ///< if (condition over a) goto block b.block
+  Switch,           ///< switch (dest) { case: goto target_block; default: goto a.block; }
+  Compare,          ///< flags = a <condition> b
+  Test,             ///< flags = a & b
+  Unsupported,      ///< an instruction the lifter does not model; `text` is raw
+  CondAssign,       ///< if (condition over the last Compare/Test) dest = a  (cmovcc, setcc)
+  AddCarry,         ///< dest = a + b + CF, CF taken from the last Compare/Test in the block (adc)
+  SubBorrow,        ///< dest = a - b - CF, CF taken from the last Compare/Test in the block (sbb)
+  MulHighUnsigned,  ///< dest = high part of a * b, unsigned (mul)
+  MulHighSigned,    ///< dest = high part of a * b, signed (imul one operand)
+  DivUnsigned,      ///< dest = (a:b) / c, the 2w-byte dividend a:b (high:low); fault on overflow
+  DivSigned,        ///< dest = (a:b) / c, signed (idiv); fault on overflow
+  RemUnsigned,      ///< dest = (a:b) % c, unsigned
+  RemSigned,        ///< dest = (a:b) % c, signed
 };
 
 const char* ir_op_name(IrOp op) noexcept;
@@ -119,6 +125,8 @@ struct IrStatement {
   IrOperand dest;
   IrOperand a;
   IrOperand b;
+  /// Third operand: the divisor of the Div and Rem operations.
+  IrOperand c;
   IrCondition condition = IrCondition::None;
   std::uint8_t width = 0;
   /// Address of the machine instruction this statement came from (0 for

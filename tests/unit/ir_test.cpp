@@ -1945,4 +1945,129 @@ TEST(Ir, VerifierRejectsCarryWithoutAFlagWriterInItsBlock) {
   EXPECT_EQ(interrupted_result.diagnostic().code, "ir.carry_without_flags");
 }
 
+// ---- G02-T2: double-width multiply and divide ----
+
+/// Evaluates an x86-64 function on SysV arguments and returns the whole result,
+/// so that a fault can be checked.
+donkey::Result<donkey::IrEvalResult> evaluate_x86_64(
+    const donkey::IrFunction& function, std::initializer_list<std::uint64_t> arguments) {
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values(arguments);
+  return donkey::evaluate_ir(function, values, memory, options);
+}
+
+TEST(Ir, X86MulAndImulReturnTheHighHalfOfTheProduct) {
+  // mov rax, rdi; mul rsi; mov rax, rdx; ret
+  donkey::IrFunction unsigned_high;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0xf7, 0xe6, 0x48, 0x89, 0xd0, 0xc3}, unsigned_high));
+  EXPECT_FALSE(unsigned_high.partial);
+  EXPECT_EQ(run_x86_64(unsigned_high, {1ULL << 63, 4}), 2U);        // 2^65 >> 64
+  EXPECT_EQ(run_x86_64(unsigned_high, {~0ULL, ~0ULL}), ~0ULL - 1);  // (2^64-1)^2 >> 64
+  EXPECT_EQ(run_x86_64(unsigned_high, {3, 5}), 0U);
+
+  // mov rax, rdi; imul rsi; mov rax, rdx; ret
+  donkey::IrFunction signed_high;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0xf7, 0xee, 0x48, 0x89, 0xd0, 0xc3}, signed_high));
+  EXPECT_FALSE(signed_high.partial);
+  EXPECT_EQ(run_x86_64(signed_high, {~0ULL, ~0ULL}), 0U);      // (-1) * (-1) = 1
+  EXPECT_EQ(run_x86_64(signed_high, {1ULL << 63, 2}), ~0ULL);  // -2^64 >> 64 = -1
+  EXPECT_EQ(run_x86_64(signed_high, {5, static_cast<std::uint64_t>(-3)}), ~0ULL);  // -15 >> 64
+}
+
+TEST(Ir, X86DivAndIdivReturnTheQuotientAndTheRemainder) {
+  // mov rax, rdi; xor edx, edx; div rsi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0xc3}, quotient));
+  EXPECT_FALSE(quotient.partial);
+  EXPECT_EQ(run_x86_64(quotient, {100, 7}), 14U);
+  EXPECT_EQ(run_x86_64(quotient, {~0ULL, 2}), 0x7fffffffffffffffULL);
+  EXPECT_EQ(run_x86_64(quotient, {9, 1}), 9U);
+
+  // mov rax, rdi; xor edx, edx; div rsi; mov rax, rdx; ret
+  donkey::IrFunction remainder;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0x48, 0x89, 0xd0, 0xc3}, remainder));
+  EXPECT_EQ(run_x86_64(remainder, {100, 7}), 2U);
+  EXPECT_EQ(run_x86_64(remainder, {~0ULL, 2}), 1U);
+
+  // mov rax, rdi; cqo; idiv rsi; ret
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  EXPECT_FALSE(signed_quotient.partial);
+  const auto neg = [](std::uint64_t v) {
+    return static_cast<std::uint64_t>(-static_cast<std::int64_t>(v));
+  };
+  EXPECT_EQ(run_x86_64(signed_quotient, {neg(100), 7}), neg(14));
+  EXPECT_EQ(run_x86_64(signed_quotient, {100, neg(7)}), neg(14));
+  EXPECT_EQ(run_x86_64(signed_quotient, {neg(100), neg(7)}), 14U);
+
+  // mov rax, rdi; cqo; idiv rsi; mov rax, rdx; ret
+  donkey::IrFunction signed_remainder;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0x48, 0x89, 0xd0, 0xc3}, signed_remainder));
+  EXPECT_EQ(run_x86_64(signed_remainder, {neg(100), 7}),
+            neg(2));  // the remainder keeps the dividend's sign
+  EXPECT_EQ(run_x86_64(signed_remainder, {100, neg(7)}), 2U);
+}
+
+TEST(Ir, X86DivideFaultsWhereTheHardwareDivideErrors) {
+  // mov rax, rdi; xor edx, edx; div rsi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0xc3}, quotient));
+  const auto zero = evaluate_x86_64(quotient, {5, 0});
+  ASSERT_FALSE(zero.has_value());
+  EXPECT_EQ(zero.diagnostic().code, "ir.eval_fault");
+
+  // mov rax, rdi; cqo; idiv rsi; ret. INT64_MIN / -1 needs 2^63, which does not fit.
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  const auto overflow = evaluate_x86_64(signed_quotient, {1ULL << 63, ~0ULL});
+  ASSERT_FALSE(overflow.has_value());
+  EXPECT_EQ(overflow.diagnostic().code, "ir.eval_fault");
+}
+
+TEST(Ir, X86ThirtyTwoBitDivideUsesEdxAndEax) {
+  // mov eax, edi; xor edx, edx; div esi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x89, 0xf8, 0x31, 0xd2, 0xf7, 0xf6, 0xc3}, quotient));
+  EXPECT_FALSE(quotient.partial);
+  EXPECT_EQ(run_x86_64(quotient, {0xffffffffULL, 2}) & 0xffffffffU, 0x7fffffffU);
+
+  // mov eax, edi; cdq; idiv esi; ret
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x89, 0xf8, 0x99, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  EXPECT_FALSE(signed_quotient.partial);
+  EXPECT_EQ(run_x86_64(signed_quotient, {static_cast<std::uint64_t>(-100), 7}) & 0xffffffffU,
+            0xfffffff2U);  // -14
+}
+
+TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.width = 8;  // c is left unset
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
+}
+
 }  // namespace
