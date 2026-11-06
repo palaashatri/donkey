@@ -154,8 +154,7 @@ void collect_reads(const IrOperand& operand, std::vector<std::string>& out) {
 }
 
 struct Scan {
-  std::vector<bool> argument_read;  // read before any write of the family
-  std::vector<bool> argument_written;
+  std::vector<bool> argument_read;  // read before any write of the family on some path
   std::vector<std::uint8_t> argument_width;
   // The register each argument was first read from. A family can name several
   // (Microsoft x64 position 1 is rdx or xmm1), so the parameter keeps this one.
@@ -168,6 +167,109 @@ struct Scan {
   std::uint8_t widest_return_width = 0;
 };
 
+/// Whether an argument family is a floating-point or vector register.
+bool is_fp_family(const RegisterFamily& family) {
+  for (const Alias& alias : family.aliases) {
+    if (is_fp_register(alias.name)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The blocks control can pass to from the end of block `index`.
+std::vector<std::size_t> successor_blocks(const IrFunction& function, std::size_t index) {
+  std::vector<std::size_t> out;
+  const IrBlock& block = function.blocks[index];
+  bool falls_through = true;
+  if (!block.statements.empty()) {
+    const IrStatement& last = block.statements.back();
+    if (last.op == IrOp::Branch) {
+      out.push_back(last.a.block);
+      falls_through = false;
+    } else if (last.op == IrOp::CondBranch) {
+      out.push_back(last.b.block);
+    } else if (last.op == IrOp::Switch) {
+      out.push_back(last.a.block);
+      for (const IrSwitchCase& switch_case : last.switch_cases) {
+        out.push_back(switch_case.target_block);
+      }
+      falls_through = false;
+    } else if (last.op == IrOp::Return) {
+      falls_through = false;
+    }
+  }
+  if (falls_through && index + 1 < function.blocks.size()) {
+    out.push_back(index + 1);
+  }
+  return out;
+}
+
+/// Applies one block to `written`, the families written on every path into it. A read
+/// of a family that is not written yet is an incoming argument value, and `scan`
+/// records it when it is given.
+void walk_block(const IrBlock& block, const AbiModel& model, std::vector<bool>& written,
+                Scan* scan) {
+  std::vector<std::string> reads;
+  for (const IrStatement& statement : block.statements) {
+    if (statement.op == IrOp::Unsupported) {
+      // The effect of an unsupported statement is unknown. Such statements are mostly
+      // vector or floating-point instructions, so it is taken to write every FP and
+      // vector argument register. This keeps a vector temporary from being reported as
+      // a floating-point parameter, which would move the integer arguments. Integer
+      // arguments are placed by position, so they are not changed here.
+      for (std::size_t index = 0; index < model.arguments.size(); ++index) {
+        if (is_fp_family(model.arguments[index])) {
+          written[index] = true;
+        }
+      }
+      continue;
+    }
+    // A return reads the result register, not an incoming argument.
+    if (statement.op == IrOp::Return) {
+      continue;
+    }
+
+    reads.clear();
+    collect_reads(statement.a, reads);
+    collect_reads(statement.b, reads);
+    collect_reads(statement.c, reads);  // the divisor of Div and Rem
+    if (statement.dest.kind == IrOperandKind::Memory) {
+      collect_reads(statement.dest, reads);
+    }
+
+    // Reads happen before the write in one statement, so a read of an
+    // as-yet-unwritten argument register is an incoming value.
+    for (const std::string& name : reads) {
+      const auto family = family_of(model.arguments, name);
+      if (!family.has_value() || written[family.value()]) {
+        continue;
+      }
+      const std::size_t index = family.value();
+      if (scan != nullptr) {
+        if (!scan->argument_read[index]) {
+          scan->argument_register[index] = name;
+        }
+        scan->argument_read[index] = true;
+        // An XMM argument is as wide as the read that uses it: 4 for a single.
+        // The width is the one the read uses: a 4-byte read of edi is a 4-byte
+        // argument, even though the family is rdi.
+        const std::uint8_t width = read_width(statement, name);
+        if (width > scan->argument_width[index]) {
+          scan->argument_width[index] = width;
+        }
+      }
+    }
+
+    if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
+      if (const auto family = family_of(model.arguments, statement.dest.reg);
+          family.has_value()) {
+        written[family.value()] = true;
+      }
+    }
+  }
+}
+
 Scan scan(const IrFunction& function, const AbiModel& model) {
   Scan result;
   if (!model.return_aliases.empty()) {
@@ -175,15 +277,48 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
   }
   const std::size_t argument_count = model.arguments.size();
   result.argument_read.assign(argument_count, false);
-  result.argument_written.assign(argument_count, false);
   result.argument_width.assign(argument_count, 0);
   result.argument_register.assign(argument_count, std::string());
 
-  std::vector<std::string> reads;
+  // Whether each family is written on every path from the entry into each block. The
+  // layout order of the blocks says nothing about the paths, so a write in one block
+  // hides a later read only when every path to the read passes through that write. A
+  // block the entry cannot reach keeps "all written" and contributes no argument reads.
+  const std::size_t count = function.blocks.size();
+  std::vector<std::vector<bool>> written_on_entry(count, std::vector<bool>(argument_count, true));
+  if (count > 0) {
+    written_on_entry[0].assign(argument_count, false);
+  }
+  std::vector<std::vector<std::size_t>> successors(count);
+  for (std::size_t b = 0; b < count; ++b) {
+    successors[b] = successor_blocks(function, b);
+  }
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t b = 0; b < count; ++b) {
+      std::vector<bool> written = written_on_entry[b];
+      walk_block(function.blocks[b], model, written, nullptr);
+      for (const std::size_t next : successors[b]) {
+        if (next == 0 || next >= count) {
+          continue;  // the entry starts with nothing written, whatever reaches it
+        }
+        for (std::size_t index = 0; index < argument_count; ++index) {
+          if (!written[index] && written_on_entry[next][index]) {
+            written_on_entry[next][index] = false;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  for (std::size_t b = 0; b < count; ++b) {
+    std::vector<bool> written = written_on_entry[b];
+    walk_block(function.blocks[b], model, written, &result);
+  }
+
   for (const IrBlock& block : function.blocks) {
     for (const IrStatement& statement : block.statements) {
-      // A return reads the result register, not an incoming argument. Treating
-      // it as a read would report `x0`/`rax` as a parameter of every function.
       if (statement.op == IrOp::Return) {
         if (statement.a.kind == IrOperandKind::Register) {
           result.has_value_return = true;
@@ -204,49 +339,12 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
         }
         continue;
       }
-
-      reads.clear();
-      collect_reads(statement.a, reads);
-      collect_reads(statement.b, reads);
-      collect_reads(statement.c, reads);  // the divisor of Div and Rem
-      if (statement.dest.kind == IrOperandKind::Memory) {
-        collect_reads(statement.dest, reads);
-      }
-
-      // Reads happen before the write in one statement, so a read of an
-      // as-yet-unwritten argument register is an incoming value.
-      for (const std::string& name : reads) {
-        const auto family = family_of(model.arguments, name);
-        if (!family.has_value()) {
-          continue;
-        }
-        const std::size_t index = family.value();
-        if (!result.argument_written[index]) {
-          if (!result.argument_read[index]) {
-            result.argument_register[index] = name;
-          }
-          result.argument_read[index] = true;
-          // An XMM argument is as wide as the read that uses it: 4 for a single.
-          // The width is the one the read uses: a 4-byte read of edi is a 4-byte
-          // argument, even though the family is rdi.
-          const auto width = std::optional<std::uint8_t>(read_width(statement, name));
-          if (width.has_value() && width.value() > result.argument_width[index]) {
-            result.argument_width[index] = width.value();
-          }
-        }
-      }
-
-      if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
-        if (const auto family = family_of(model.arguments, statement.dest.reg);
-            family.has_value()) {
-          result.argument_written[family.value()] = true;
-        }
-        if (width_of(model.return_aliases, statement.dest.reg).has_value()) {
-          const std::uint8_t width =
-              statement.dest.width != 0 ? statement.dest.width : statement.width;
-          if (width != 0) {
-            result.current_return_width = width;
-          }
+      if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+          width_of(model.return_aliases, statement.dest.reg).has_value()) {
+        const std::uint8_t width =
+            statement.dest.width != 0 ? statement.dest.width : statement.width;
+        if (width != 0) {
+          result.current_return_width = width;
         }
       }
     }

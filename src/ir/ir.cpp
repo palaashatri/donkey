@@ -146,7 +146,9 @@ class Renderer {
     if (value.kind == IrOperandKind::Constant) {
       return hex_float_literal(value.constant, width);
     }
-    return operand(value);
+    // A register read here is a floating-point value: the integer width cast of operand()
+    // would misstate it, so the register is shown by name.
+    return operand_text(value);
   }
 
   /// A destination: a write to a canonical register is shown by name, because its
@@ -336,7 +338,7 @@ class Renderer {
       case IrOp::CondBranch:
         return "if (" + condition(statement, previous) + ") goto " + operand(statement.b) + ";";
       case IrOp::Switch: {
-        std::string out = "switch (" + destination(statement.dest) + ") {";
+        std::string out = "switch (" + operand(statement.dest) + ") {";
         for (const auto& sc : statement.switch_cases) {
           char buffer[32];
           std::snprintf(buffer, sizeof(buffer), "0x%llx",
