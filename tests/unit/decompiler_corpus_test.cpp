@@ -1027,13 +1027,13 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
       for (double& arg : args) {
         arg = next_double_input(rng);
       }
-      // Each IR parameter reads one floating-point register (xmm0 to xmm3 on x86-64,
-      // d0 to d3 or s0 to s3 on AArch64), so it takes that argument.
+      // Each IR parameter reads one floating-point register (xmm0 to xmm3 on x86-64, or
+      // v0 to v3 on AArch64, named as d, s or v), so it takes that argument.
       std::vector<std::uint64_t> ir_args;
       for (const donkey::IrParameter& parameter : lifted.value().parameters) {
         const std::string& reg = parameter.abi_register;
         const bool xmm = reg.rfind("xmm", 0) == 0;
-        const bool scalar = reg.size() == 2 && (reg[0] == 'd' || reg[0] == 's');
+        const bool scalar = reg.size() == 2 && (reg[0] == 'd' || reg[0] == 's' || reg[0] == 'v');
         ASSERT_TRUE(xmm || scalar) << name << " reads " << reg;
         const auto index = static_cast<std::size_t>(xmm ? reg[3] - '0' : reg[1] - '0');
         ASSERT_LT(index, 4U);

@@ -12,6 +12,22 @@
 
 namespace donkey::internal {
 
+/// True for an AArch64 SIMD&FP register named by its full vector name, v0 to v31. The
+/// family of s and d registers is this one.
+inline bool is_simd_register(const std::string& name) {
+  if (name.size() < 2 || name.size() > 3 || name[0] != 'v') {
+    return false;
+  }
+  unsigned index = 0;
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') {
+      return false;
+    }
+    index = index * 10 + static_cast<unsigned>(name[i] - '0');
+  }
+  return index <= 31;
+}
+
 /// The width of an AArch64 scalar floating-point register: `s0`-`s31` are 4 bytes
 /// and `d0`-`d31` 8 bytes, both views of `v0`-`v31`. Returns 0 for any other name.
 inline std::uint8_t scalar_fp_width(const std::string& name) {

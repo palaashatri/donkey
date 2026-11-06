@@ -2035,8 +2035,7 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
   lifter.out.address = function.address;
   lifter.out.name = function.name.empty() ? "sub" : function.name;
   lifter.out.partial = function.estimated;
-  lifter.out.notes.push_back(
-      "AArch64 subset; register aliases are not canonicalised and locals are not recovered");
+  lifter.out.notes.push_back("AArch64 subset; locals are not recovered");
 
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;

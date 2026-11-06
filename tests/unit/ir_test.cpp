@@ -918,10 +918,10 @@ TEST(Ir, LiftsExtensionsLeaAndIndirectCall) {
   auto text = donkey::format_pseudocode(lifted.value());
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   const std::string& code = text.value();
-  EXPECT_NE(code.find("eax = (u32)al;"), std::string::npos) << code;
-  EXPECT_NE(code.find("rcx = (u64)al;"), std::string::npos) << code;
-  EXPECT_NE(code.find("edx = (s32)al;"), std::string::npos) << code;
-  EXPECT_NE(code.find("rax = (s64)eax;"), std::string::npos) << code;
+  EXPECT_NE(code.find("rax = (u32)(u8)rax;"), std::string::npos) << code;
+  EXPECT_NE(code.find("rcx = (u64)(u8)rax;"), std::string::npos) << code;
+  EXPECT_NE(code.find("rdx = (s32)(u8)rax;"), std::string::npos) << code;
+  EXPECT_NE(code.find("rax = (s64)(u32)rax;"), std::string::npos) << code;
   // LEA must print an address expression, not a dereference.
   EXPECT_NE(code.find("rcx = (u64)(0x"), std::string::npos) << code;
   EXPECT_EQ(code.find("(u64)&*"), std::string::npos) << code;
@@ -1001,7 +1001,7 @@ TEST(Ir, LiftsSyntheticBranchyX86Function) {
   // if/else instead of labels and gotos.
   EXPECT_NE(code.find("if ((rax & rax) == 0) {"), std::string::npos) << code;
   EXPECT_NE(code.find("} else {"), std::string::npos) << code;
-  EXPECT_NE(code.find("eax = 0x1;"), std::string::npos) << code;
+  EXPECT_NE(code.find("rax = 0x1;"), std::string::npos) << code;
   EXPECT_NE(code.find("return rax;"), std::string::npos) << code;
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
@@ -1043,17 +1043,17 @@ TEST(Ir, LiftsAArch64StraightLineFunction) {
   const std::string& code = text.value();
   // Pre-index stp: store at [sp, #-0x10]!, then sp -= 0x10. Capstone reports
   // x29/x30 by their ABI aliases fp/lr.
-  EXPECT_NE(code.find("*(u64 *)(sp - 0x10) = fp;"), std::string::npos) << code;
-  EXPECT_NE(code.find("*(u64 *)(sp - 0x8) = lr;"), std::string::npos) << code;
+  EXPECT_NE(code.find("*(u64 *)(sp - 0x10) = x29;"), std::string::npos) << code;
+  EXPECT_NE(code.find("*(u64 *)(sp - 0x8) = x30;"), std::string::npos) << code;
   EXPECT_NE(code.find("sp = sp - 0x10;"), std::string::npos) << code;
   // mov x29, sp
-  EXPECT_NE(code.find("fp = sp;"), std::string::npos) << code;
+  EXPECT_NE(code.find("x29 = sp;"), std::string::npos) << code;
   // movz/movk: movz sets 0x1234, movk clears then merges 0xabcd into bits 16..31.
   EXPECT_NE(code.find("x0 = 0x1234;"), std::string::npos) << code;
   EXPECT_NE(code.find("x0 = x0 | 0xabcd0000;"), std::string::npos) << code;
   // Post-index ldp: access [sp] and [sp + 0x8], then sp += 0x10.
-  EXPECT_NE(code.find("fp = *(u64 *)(sp);"), std::string::npos) << code;
-  EXPECT_NE(code.find("lr = *(u64 *)(sp + 0x8);"), std::string::npos) << code;
+  EXPECT_NE(code.find("x29 = *(u64 *)(sp);"), std::string::npos) << code;
+  EXPECT_NE(code.find("x30 = *(u64 *)(sp + 0x8);"), std::string::npos) << code;
   EXPECT_NE(code.find("sp = sp + 0x10;"), std::string::npos) << code;
   // ldrsw sign-extends a 32-bit load into a 64-bit register.
   EXPECT_NE(code.find("x5 = (s64)var_0;"), std::string::npos) << code;
@@ -3202,6 +3202,39 @@ TEST(Ir, AArch64FloatConversionsAndImmediateMoves) {
   EXPECT_EQ(bits_as_double(run_aarch64_args(fcvt, {0x3fc00000ULL})), 1.5);
   const auto movi = aarch64_bytes({0x1e6e1000, 0xd65f03c0});  // fmov d0, #1.0; ret
   EXPECT_EQ(run_aarch64_args(movi, {}), double_bits(1.0));
+}
+
+// G04-T1: every register alias is its family. A write of 4 bytes zero-extends; a
+// write of 1 or 2 bytes, and a write to ah, keeps the other bytes of the family.
+TEST(Ir, X86NarrowWritesMergeIntoTheFamily) {
+  donkey::IrFunction word;  // mov rax, -1; mov ax, di; ret
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x66, 0x89, 0xf8, 0xc3}, word));
+  EXPECT_EQ(run_x86_64(word, {0x1234}), 0xffffffffffff1234ULL);
+
+  donkey::IrFunction high;  // mov rax, -1; mov ah, cl; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x88, 0xcc, 0xc3}, high));
+  EXPECT_EQ(run_x86_64(high, {0, 0, 0, 0x42}), 0xffffffffffff42ffULL);  // cl is the 4th argument
+
+  donkey::IrFunction read_high;  // mov rax, rdi; mov al, ah; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x8a, 0xc4, 0xc3}, read_high));
+  EXPECT_EQ(run_x86_64(read_high, {0x1234}), 0x1212ULL);
+}
+
+TEST(Ir, X86DoubleWordWritesZeroExtend) {
+  donkey::IrFunction f;  // mov rax, -1; mov eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x89, 0xf8, 0xc3}, f));
+  EXPECT_EQ(run_x86_64(f, {0xffffffff12345678ULL}), 0x12345678ULL);
+}
+
+TEST(Ir, X86ConditionalMoveOfADoubleWordZeroExtendsEvenWhenItFails) {
+  // mov rax, -1; cmp rdi, rsi; cmovl eax, edx; ret. A 32-bit cmov writes eax whether or
+  // not the condition holds, so rax is zero-extended in both cases.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x48, 0x39, 0xf7, 0x0f, 0x4c, 0xc2, 0xc3}, f));
+  EXPECT_EQ(run_x86_64(f, {5, 3, 7}), 0xffffffffULL);  // not less: eax kept, zero-extended
+  EXPECT_EQ(run_x86_64(f, {1, 3, 7}), 7U);             // less: eax = edx
 }
 
 }  // namespace

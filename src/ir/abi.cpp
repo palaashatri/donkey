@@ -13,7 +13,8 @@ namespace {
 
 /// An XMM register (x86) or a scalar s or d register (AArch64) used as an argument.
 bool is_fp_register(const std::string& name) {
-  return name.rfind("xmm", 0) == 0 || internal::scalar_fp_width(name) != 0;
+  return name.rfind("xmm", 0) == 0 || internal::scalar_fp_width(name) != 0 ||
+         internal::is_simd_register(name);
 }
 
 struct Alias {
@@ -78,10 +79,11 @@ AbiModel model_for(Architecture architecture, BinaryFormat format) {
       }
       // Floating-point arguments use v0 to v7, read as d (8 bytes) or s (4 bytes).
       for (int index = 0; index < 8; ++index) {
-        model.arguments.push_back(
-            {{{"d" + std::to_string(index), 8}, {"s" + std::to_string(index), 4}}});
+        model.arguments.push_back({{{"v" + std::to_string(index), 16},
+                                    {"d" + std::to_string(index), 8},
+                                    {"s" + std::to_string(index), 4}}});
       }
-      model.return_aliases = {{"x0", 8}, {"w0", 4}, {"d0", 8}, {"s0", 4}};
+      model.return_aliases = {{"x0", 8}, {"w0", 4}, {"v0", 16}, {"d0", 8}, {"s0", 4}};
       model.convention_name = "AAPCS64 ABI";
       break;
     case Architecture::X86:
@@ -225,9 +227,9 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
           }
           result.argument_read[index] = true;
           // An XMM argument is as wide as the read that uses it: 4 for a single.
-          const auto width = is_fp_register(name)
-                                 ? std::optional<std::uint8_t>(read_width(statement, name))
-                                 : width_of(model.arguments[index].aliases, name);
+          // The width is the one the read uses: a 4-byte read of edi is a 4-byte
+          // argument, even though the family is rdi.
+          const auto width = std::optional<std::uint8_t>(read_width(statement, name));
           if (width.has_value() && width.value() > result.argument_width[index]) {
             result.argument_width[index] = width.value();
           }

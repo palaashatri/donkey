@@ -1273,13 +1273,14 @@ Result<IrEvalResult> evaluate_ir(const IrFunction& function,
   std::size_t in_registers = 0;
   std::uint64_t stack_args = 0;  // address of the first stack argument
   const std::uint8_t pointer = options.architecture == Architecture::X86 ? 4 : 8;
-  // A function with a floating-point parameter takes each argument in the register
-  // that parameter was read from: an XMM or SIMD&FP register is not a positional
-  // integer register. The parameters of such a function are the arguments, in order.
+  // Integer arguments go to the argument registers in order. A function with a
+  // floating-point parameter takes each argument in the register that parameter was
+  // read from: an XMM or SIMD&FP register is not a positional integer register.
   const bool named_parameters =
       std::any_of(function.parameters.begin(), function.parameters.end(), [](const IrParameter& p) {
         return p.abi_register.rfind("xmm", 0) == 0 ||
-               internal::scalar_fp_width(p.abi_register) != 0;
+               internal::scalar_fp_width(p.abi_register) != 0 ||
+               internal::is_simd_register(p.abi_register);
       });
   const bool register_convention = options.convention == IrCallingConvention::SysV64 ||
                                    options.convention == IrCallingConvention::Win64 ||

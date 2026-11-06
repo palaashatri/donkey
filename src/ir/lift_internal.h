@@ -11,4 +11,9 @@ namespace donkey::internal {
                                               const AnalysisResult& analysis,
                                               const Function& function, const LiftOptions& options);
 
+/// Rewrites every register operand to its family (eax, ax, al and rax become rax) and
+/// makes the width rules explicit: a 4-byte write zero-extends, and a 1- or 2-byte
+/// write, or a high-byte write, is an explicit merge. x86-64 and AArch64 only.
+void canonicalise_registers(IrFunction& function, Architecture architecture);
+
 }  // namespace donkey::internal
