@@ -262,8 +262,7 @@ void walk_block(const IrBlock& block, const AbiModel& model, std::vector<bool>& 
     }
 
     if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
-      if (const auto family = family_of(model.arguments, statement.dest.reg);
-          family.has_value()) {
+      if (const auto family = family_of(model.arguments, statement.dest.reg); family.has_value()) {
         written[family.value()] = true;
       }
     }
