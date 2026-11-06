@@ -23,6 +23,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
@@ -1150,5 +1151,57 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
   GTEST_SKIP() << "the floating-point corpus runs on x86-64 and AArch64 hosts";
 }
 #endif
+
+// G04-T4: the parameters of a function in a -g binary take their names from the debug
+// information. The module fixture's donkey_module_answer(int value) is built at -O0 -g.
+TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_TEST_MODULE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& candidate : analysis.value().functions) {
+    if (candidate.name == "donkey_module_answer") {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  const donkey::DebugFunction* debug = info.value().function_at(function->address);
+  ASSERT_NE(debug, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+
+  donkey::IrFunction named = lifted.value();
+  auto before = donkey::format_pseudocode(named);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_NE(before.value().find("(u32 a0)"), std::string::npos) << before.value();
+
+  auto applied = donkey::apply_debug_parameter_names(named, *debug, info.value());
+  ASSERT_TRUE(applied.has_value())
+      << applied.diagnostic().code << ": " << applied.diagnostic().message;
+  auto text = donkey::format_pseudocode(named);
+  ASSERT_TRUE(text.has_value());
+  // The width spelling (u32) is the decompiler's; the name is the debug information's.
+  EXPECT_NE(text.value().find("donkey_module_answer(u32 value)"), std::string::npos)
+      << text.value();
+  EXPECT_EQ(text.value().find("a0"), std::string::npos) << text.value();
+
+  // A debug function that does not match the code (one parameter too many) is refused,
+  // and the function keeps its inferred names.
+  donkey::DebugFunction extra = *debug;
+  extra.parameters.push_back(donkey::DebugParameter{"extra", debug->parameters.front().type});
+  donkey::IrFunction unchanged = lifted.value();
+  auto refused = donkey::apply_debug_parameter_names(unchanged, extra, info.value());
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "ir.debug_names_arity");
+  auto kept = donkey::format_pseudocode(unchanged);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(kept.value(), before.value());
+}
 
 }  // namespace
