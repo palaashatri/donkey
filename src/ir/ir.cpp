@@ -748,9 +748,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::PopCount:
         case IrOp::ByteSwap:
           if (statement.dest.kind != IrOperandKind::Register ||
-              statement.a.kind == IrOperandKind::None) {
+              statement.a.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block) {
             return fail("ir.malformed_bit_op",
-                        "bit operation needs a register destination and a source");
+                        "bit operation needs a register destination and a value source");
           }
           if (statement.dest.width != statement.width || statement.a.width != statement.width) {
             return fail("ir.type_width_mismatch",

@@ -1329,7 +1329,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           statement.a = IrOperand::constant_value(0, kPointerWidth);
         }
         lifter.push(out_block, std::move(statement));
-        lifter.note("call arguments and return values follow no modelled ABI");
+        // The callee's effects on registers, memory and NZCV are not modelled.
+        lifter.mark_partial("outgoing call arguments and return values follow no modelled ABI");
         lifter.flags_exact = false;  // the callee may change NZCV
         continue;
       }

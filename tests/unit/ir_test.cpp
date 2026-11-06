@@ -2313,4 +2313,26 @@ TEST(Ir, X86MovbeLoadsAndStoresTheBytesReversed) {
   EXPECT_EQ(*bytes, expected);
 }
 
+TEST(Ir, VerifierRejectsABitOperationWithABlockSource) {
+  // A block reference is not a value; the evaluator cannot read it.
+  donkey::IrBlock block;
+  donkey::IrStatement popcount;
+  popcount.op = donkey::IrOp::PopCount;
+  popcount.dest = donkey::IrOperand::register_ref("rax", 8);
+  popcount.a = donkey::IrOperand::block_ref(0);
+  popcount.width = 8;
+  block.statements.push_back(popcount);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "popcount";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_bit_op");
+}
+
 }  // namespace
