@@ -67,6 +67,7 @@ endforeach()
 
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
+  unit/demangle_test.cpp
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
