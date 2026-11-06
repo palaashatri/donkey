@@ -2747,6 +2747,254 @@ TEST(Ir, AArch64FlagsFromAddsDoNotCarryAcrossBlocks) {
                      0xd65f03c0U, 0x528000e0U, 0xd65f03c0U})));
 }
 
+// ---- G01-T1: floating point in the IR ---------------------------------------
+// The expected bits come from running the same operations natively: x86-64 SSE on
+// the host, and AArch64 under qemu-aarch64. The two models differ only where the
+// architectures do: the default NaN, the integer a conversion gives for a NaN or an
+// out-of-range value, and the flags a comparison sets.
+
+// A one-block function that computes dest = op(a, b) on constant operands at
+// `width`, and returns dest.
+donkey::IrFunction fp_one_op(donkey::IrOp op, std::uint8_t width, std::uint64_t a, std::uint64_t b,
+                             donkey::IrFloatModel model) {
+  donkey::IrFunction f;
+  f.name = "fp";
+  f.return_width = 8;
+  donkey::IrBlock block;
+  donkey::IrStatement s;
+  s.op = op;
+  s.dest = donkey::IrOperand::register_ref("rax", width);
+  s.a = donkey::IrOperand::constant_value(a, width);
+  s.b = donkey::IrOperand::constant_value(b, width);
+  s.width = width;
+  s.float_model = model;
+  block.statements.push_back(s);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  f.blocks.push_back(block);
+  return f;
+}
+
+// A one-block function that converts a constant of `source_width` bytes to a result
+// of `result_width` bytes with `op`, and returns the result.
+donkey::IrFunction fp_convert(donkey::IrOp op, std::uint8_t result_width, std::uint8_t source_width,
+                              std::uint64_t value, donkey::IrFloatModel model) {
+  donkey::IrFunction f;
+  f.name = "fp_convert";
+  f.return_width = 8;
+  donkey::IrBlock block;
+  donkey::IrStatement s;
+  s.op = op;
+  s.dest = donkey::IrOperand::register_ref("rax", result_width);
+  s.a = donkey::IrOperand::constant_value(value, source_width);
+  s.width = result_width;
+  s.float_model = model;
+  block.statements.push_back(s);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  f.blocks.push_back(block);
+  return f;
+}
+
+std::uint64_t fp_result(const donkey::IrFunction& function) {
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  const auto result = donkey::evaluate_ir(function, std::vector<std::uint64_t>(), memory, options);
+  EXPECT_TRUE(result.has_value()) << (result.has_value() ? "" : result.diagnostic().code);
+  return result.has_value() ? result.value().return_value : ~0ULL;
+}
+
+TEST(Ir, FloatArithmeticMatchesIeee) {
+  using donkey::IrFloatModel;
+  using donkey::IrOp;
+  constexpr std::uint64_t inf = 0x7ff0000000000000ULL;
+  constexpr std::uint64_t ninf = 0xfff0000000000000ULL;
+  constexpr std::uint64_t one = 0x3ff0000000000000ULL;
+  constexpr std::uint64_t nzero = 0x8000000000000000ULL;
+  constexpr std::uint64_t qnan = 0x7ff8000000000000ULL;
+  constexpr std::uint64_t qnan2 = 0x7ff8000000000123ULL;
+  constexpr std::uint64_t snan = 0x7ff0000000000001ULL;
+  constexpr std::uint64_t x86_default = 0xfff8000000000000ULL;
+  constexpr std::uint64_t arm_default = 0x7ff8000000000000ULL;
+  struct Case {
+    IrOp op;
+    std::uint8_t width;
+    std::uint64_t a;
+    std::uint64_t b;
+    std::uint64_t x86;
+    std::uint64_t aarch64;
+  };
+  const Case cases[] = {
+      // Double precision: the ground-truth rows are dadd, dsub, dmul, ddiv and dsqrt.
+      {IrOp::FAdd, 8, one, 0, one, one},
+      {IrOp::FAdd, 8, nzero, 0, 0, 0},  // -0 + +0 is +0 in round-to-nearest
+      {IrOp::FDiv, 8, one, 0, inf, inf},
+      {IrOp::FDiv, 8, 0, 0, x86_default, arm_default},
+      {IrOp::FAdd, 8, inf, ninf, x86_default, arm_default},
+      {IrOp::FSub, 8, inf, inf, x86_default, arm_default},
+      {IrOp::FMul, 8, 0, inf, x86_default, arm_default},
+      {IrOp::FAdd, 8, qnan, one, qnan, qnan},
+      {IrOp::FAdd, 8, qnan, qnan2, qnan, qnan},  // both NaN: the first operand
+      {IrOp::FAdd, 8, qnan2, qnan, qnan2, qnan2},
+      {IrOp::FAdd, 8, snan, one, 0x7ff8000000000001ULL, 0x7ff8000000000001ULL},  // quieted
+      {IrOp::FAdd, 8, 1, 0x3fe0000000000000ULL, 0x3fe0000000000000ULL, 0x3fe0000000000000ULL},
+      // 1 ulp divided by 0.5 is 2 ulps: a denormal, so the bits are 0x2.
+      {IrOp::FDiv, 8, 1, 0x3fe0000000000000ULL, 0x2ULL, 0x2ULL},
+      {IrOp::FMul, 8, nzero, 0, nzero, nzero},
+      {IrOp::FSqrt, 8, 0xbff0000000000000ULL, 0, x86_default, arm_default},  // sqrt(-1)
+      {IrOp::FSqrt, 8, 0x4010000000000000ULL, 0, 0x4000000000000000ULL, 0x4000000000000000ULL},
+      {IrOp::FSqrt, 8, nzero, 0, nzero, nzero},
+      {IrOp::FSqrt, 8, qnan2, 0, qnan2, qnan2},
+      {IrOp::FNeg, 8, 0, 0, nzero, nzero},
+      {IrOp::FAbs, 8, qnan | nzero, 0, qnan, qnan},
+      // Single precision: the ground-truth rows are fadd32, fsub32, fmul32 and fdiv32.
+      {IrOp::FAdd, 4, 0x3fc00000ULL, 0x40100000ULL, 0x40700000ULL, 0x40700000ULL},
+      {IrOp::FSub, 4, 0x7f800000ULL, 0x7f800000ULL, 0xffc00000ULL, 0x7fc00000ULL},
+      {IrOp::FMul, 4, 0, 0x7f800000ULL, 0xffc00000ULL, 0x7fc00000ULL},
+      {IrOp::FDiv, 4, 0, 0, 0xffc00000ULL, 0x7fc00000ULL},
+      {IrOp::FAdd, 4, 0x7f800001ULL, 0x3f800000ULL, 0x7fc00001ULL, 0x7fc00001ULL},
+      {IrOp::FAdd, 4, 0x7fc00000ULL, 0x3f800000ULL, 0x7fc00000ULL, 0x7fc00000ULL},
+  };
+  for (const Case& c : cases) {
+    const std::uint64_t mask = c.width == 4 ? 0xffffffffULL : ~0ULL;
+    EXPECT_EQ(fp_result(fp_one_op(c.op, c.width, c.a, c.b, IrFloatModel::X86)) & mask, c.x86)
+        << "x86 op " << static_cast<int>(c.op) << " a=" << std::hex << c.a << " b=" << c.b;
+    EXPECT_EQ(fp_result(fp_one_op(c.op, c.width, c.a, c.b, IrFloatModel::AArch64)) & mask,
+              c.aarch64)
+        << "AArch64 op " << static_cast<int>(c.op) << " a=" << std::hex << c.a << " b=" << c.b;
+  }
+}
+
+// Conversions from floating point to integers differ where the architectures do:
+// x86 cvttsd2si gives the "integer indefinite" (the minimum) for a NaN or an
+// out-of-range value, and AArch64 fcvtzs gives 0 for a NaN and saturates the rest.
+TEST(Ir, FloatToIntIndefiniteOnX86AndSaturatesOnAArch64) {
+  using donkey::IrFloatModel;
+  using donkey::IrOp;
+  struct Case {
+    std::uint8_t result_width;
+    std::uint64_t value;  // a double
+    std::uint64_t x86;
+    std::uint64_t aarch64;
+  };
+  const Case cases[] = {
+      {8, 0x400f333333333333ULL, 3, 3},                                          // 3.9
+      {8, 0xc00f333333333333ULL, 0xfffffffffffffffdULL, 0xfffffffffffffffdULL},  // -3.9
+      {8, 0x7ff8000000000000ULL, 0x8000000000000000ULL, 0},                      // NaN
+      {8, 0x7ff0000000000000ULL, 0x8000000000000000ULL, 0x7fffffffffffffffULL},  // +inf
+      {8, 0xfff0000000000000ULL, 0x8000000000000000ULL, 0x8000000000000000ULL},  // -inf
+      {8, 0x46293e5939a08ceaULL, 0x8000000000000000ULL, 0x7fffffffffffffffULL},  // 1e30
+      {8, 0x43e0000000000000ULL, 0x8000000000000000ULL, 0x7fffffffffffffffULL},  // 2^63
+      {4, 0x400f333333333333ULL, 3, 3},
+      {4, 0x7ff8000000000000ULL, 0x80000000ULL, 0},
+      {4, 0x41e0000000000000ULL, 0x80000000ULL, 0x7fffffffULL},  // 2^31
+  };
+  for (const Case& c : cases) {
+    EXPECT_EQ(
+        fp_result(fp_convert(IrOp::FloatToInt, c.result_width, 8, c.value, IrFloatModel::X86)),
+        c.x86)
+        << "x86 " << std::hex << c.value;
+    EXPECT_EQ(
+        fp_result(fp_convert(IrOp::FloatToInt, c.result_width, 8, c.value, IrFloatModel::AArch64)),
+        c.aarch64)
+        << "AArch64 " << std::hex << c.value;
+  }
+}
+
+// ucomis* (x86) sets ZF, PF and CF, and an unordered comparison sets all three.
+// fcmp (AArch64) sets NZCV, and an unordered comparison sets 0011.
+TEST(Ir, FCompareUnorderedSetsFlags) {
+  using donkey::IrCondition;
+  using donkey::IrFloatModel;
+  using donkey::IrOp;
+  // dest = 0; compare a with b; if (condition) dest = 1; return dest
+  const auto conditional = [](std::uint64_t a, std::uint64_t b, IrFloatModel model,
+                              IrCondition condition) {
+    donkey::IrFunction f;
+    f.name = "fcompare";
+    f.return_width = 8;
+    donkey::IrBlock block;
+    donkey::IrStatement zero;
+    zero.op = donkey::IrOp::Assign;
+    zero.dest = donkey::IrOperand::register_ref("rax", 8);
+    zero.a = donkey::IrOperand::constant_value(0, 8);
+    zero.width = 8;
+    block.statements.push_back(zero);
+    donkey::IrStatement compare;
+    compare.op = IrOp::FCompare;
+    compare.a = donkey::IrOperand::constant_value(a, 8);
+    compare.b = donkey::IrOperand::constant_value(b, 8);
+    compare.width = 8;
+    compare.float_model = model;
+    block.statements.push_back(compare);
+    donkey::IrStatement pick;
+    pick.op = donkey::IrOp::CondAssign;
+    pick.dest = donkey::IrOperand::register_ref("rax", 8);
+    pick.a = donkey::IrOperand::constant_value(1, 8);
+    pick.condition = condition;
+    pick.width = 8;
+    block.statements.push_back(pick);
+    donkey::IrStatement ret;
+    ret.op = donkey::IrOp::Return;
+    ret.a = donkey::IrOperand::register_ref("rax", 8);
+    ret.width = 8;
+    block.statements.push_back(ret);
+    f.blocks.push_back(block);
+    return f;
+  };
+  constexpr std::uint64_t qnan = 0x7ff8000000000000ULL;
+  constexpr std::uint64_t one = 0x3ff0000000000000ULL;
+  constexpr std::uint64_t two = 0x4000000000000000ULL;
+  // x86: unordered sets ZF, PF and CF.
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::X86, IrCondition::Equal)), 1U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::X86, IrCondition::Parity)), 1U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::X86, IrCondition::UnsignedLess)), 1U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::X86, IrCondition::UnsignedGreater)), 0U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::X86, IrCondition::NoParity)), 0U);
+  // x86, less: CF only.
+  EXPECT_EQ(fp_result(conditional(one, two, IrFloatModel::X86, IrCondition::UnsignedLess)), 1U);
+  EXPECT_EQ(fp_result(conditional(one, two, IrFloatModel::X86, IrCondition::Equal)), 0U);
+  EXPECT_EQ(fp_result(conditional(one, two, IrFloatModel::X86, IrCondition::Parity)), 0U);
+  // AArch64: unordered is 0011, so V is set and Z is clear.
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::AArch64, IrCondition::Overflow)), 1U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::AArch64, IrCondition::Equal)), 0U);
+  EXPECT_EQ(fp_result(conditional(qnan, one, IrFloatModel::AArch64, IrCondition::UnsignedLess)),
+            0U);
+  // AArch64, less: 1000, so N is set.
+  EXPECT_EQ(fp_result(conditional(one, two, IrFloatModel::AArch64, IrCondition::Negative)), 1U);
+  EXPECT_EQ(fp_result(conditional(one, two, IrFloatModel::AArch64, IrCondition::UnsignedLess)), 1U);
+  // Equal: x86 sets ZF; AArch64 sets Z and C.
+  EXPECT_EQ(fp_result(conditional(one, one, IrFloatModel::X86, IrCondition::Equal)), 1U);
+  EXPECT_EQ(fp_result(conditional(one, one, IrFloatModel::AArch64, IrCondition::Equal)), 1U);
+}
+
+TEST(Ir, VerifierRejectsMixedIntFloatOperands) {
+  // A float operation whose operand is 8 bytes wide while the statement is 4 bytes.
+  donkey::IrFunction mixed =
+      fp_one_op(donkey::IrOp::FAdd, 4, 0x3f800000ULL, 0x3f800000ULL, donkey::IrFloatModel::X86);
+  mixed.blocks[0].statements[0].a = donkey::IrOperand::constant_value(0x3ff0000000000000ULL, 8);
+  EXPECT_FALSE(donkey::verify_ir(mixed).has_value());
+  EXPECT_TRUE(donkey::verify_ir(fp_one_op(donkey::IrOp::FAdd, 4, 0x3f800000ULL, 0x3f800000ULL,
+                                          donkey::IrFloatModel::X86))
+                  .has_value());
+}
+
+TEST(Ir, FloatConstantsPrintAsExactHexadecimalFloats) {
+  // 1.5 and 2.25, printed exactly: 0x1.8p+0 and 0x1.2p+1.
+  const donkey::IrFunction f = fp_one_op(donkey::IrOp::FAdd, 8, 0x3ff8000000000000ULL,
+                                         0x4002000000000000ULL, donkey::IrFloatModel::X86);
+  const auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("0x1.8p+0"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("0x1.2p+1"), std::string::npos) << text.value();
+}
+
 TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {
   // adcs with no flag writer before it: its carry in is unknown.
   EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xba010000U, 0xd65f03c0U})));
