@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cfenv>
 #include <cmath>
 #include <cstring>
 #include <optional>
@@ -1204,9 +1205,32 @@ const std::vector<std::uint8_t>* IrEvalMemory::region(std::uint64_t base) const 
   return nullptr;
 }
 
+/// The IR's floating-point operations round to nearest, and the host arithmetic in this
+/// file uses the host's current rounding mode. The mode is set to nearest for one
+/// evaluation and the caller's mode is restored afterwards.
+class NearestRounding {
+ public:
+  NearestRounding() : saved_(std::fegetround()) {
+    if (saved_ != FE_TONEAREST) {
+      std::fesetround(FE_TONEAREST);
+    }
+  }
+  ~NearestRounding() {
+    if (saved_ != FE_TONEAREST) {
+      std::fesetround(saved_);
+    }
+  }
+  NearestRounding(const NearestRounding&) = delete;
+  NearestRounding& operator=(const NearestRounding&) = delete;
+
+ private:
+  int saved_;
+};
+
 Result<IrEvalResult> evaluate_ir(const IrFunction& function,
                                  std::span<const std::uint64_t> arguments, IrEvalMemory& memory,
                                  const IrEvalOptions& options) {
+  const NearestRounding nearest;
   const std::uint64_t stack_base = options.stack_top - options.stack_size;
   if (!memory.add_region(stack_base, std::vector<std::uint8_t>(options.stack_size, 0xCC))) {
     return make_error<IrEvalResult>(Status::InvalidInput, "ir.eval_stack",

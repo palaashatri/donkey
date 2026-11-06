@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cfenv>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -3002,6 +3003,48 @@ TEST(Ir, FloatConstantsPrintAsExactHexadecimalFloats) {
   ASSERT_TRUE(text.has_value());
   EXPECT_NE(text.value().find("0x1.8p+0"), std::string::npos) << text.value();
   EXPECT_NE(text.value().find("0x1.2p+1"), std::string::npos) << text.value();
+}
+
+TEST(Ir, SingleFractionsAreAlignedToWholeHexDigits) {
+  // 1.5f is 0x3fc00000: the 23-bit fraction 0x400000 must print as 0x1.8p+0, not 0x1.4p+0.
+  const donkey::IrFunction f =
+      fp_one_op(donkey::IrOp::FAdd, 4, 0x3fc00000ULL, 0ULL, donkey::IrFloatModel::X86);
+  const auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("0x1.8p+0"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("0x1.4p+0"), std::string::npos) << text.value();
+}
+
+TEST(Ir, UnsignedConversionKeepsTheWholeOfAWideSource) {
+  donkey::IrFunction function;
+  function.name = "to_double";
+  function.blocks.push_back(make_block(0x1000));
+  donkey::IrStatement convert;
+  convert.op = donkey::IrOp::UIntToFloat;
+  convert.dest = donkey::IrOperand::register_ref("xmm0", 8);
+  convert.a = donkey::IrOperand::register_ref("rdi", 8);
+  convert.width = 8;
+  function.blocks[0].statements.push_back(convert);
+  IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("xmm0", 8);
+  ret.width = 8;
+  function.blocks[0].statements.push_back(ret);
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("(unsigned long long)rdi"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FloatingPointEvaluationRoundsToNearestWhateverTheCallerSet) {
+  // 1 + 2^-60 is 1 under round-to-nearest. Under FE_UPWARD the host would round it up.
+  const int saved = std::fegetround();
+  std::fesetround(FE_UPWARD);
+  const std::uint64_t result =
+      fp_result(fp_one_op(donkey::IrOp::FAdd, 8, 0x3ff0000000000000ULL, 0x3c30000000000000ULL,
+                          donkey::IrFloatModel::X86));
+  EXPECT_EQ(std::fegetround(), FE_UPWARD) << "the caller's rounding mode must be restored";
+  std::fesetround(saved);
+  EXPECT_EQ(result, 0x3ff0000000000000ULL);
 }
 
 TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {
