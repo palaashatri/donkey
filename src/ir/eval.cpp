@@ -615,9 +615,10 @@ class Machine {
             ok = x.has_value() && y.has_value() && s.c.kind == IrOperandKind::Constant;
             if (ok) {
               const std::uint8_t width = s.width == 0 ? 8 : s.width;
-              nzcv_ = condition_holds(s.condition)
-                          ? nzcv_of(s.op == IrOp::CondCompareAdd, *x, *y, width)
-                          : static_cast<std::uint8_t>(s.c.constant & 0xFU);
+              // IrCondition::None means unconditionally.
+              const bool holds = s.condition == IrCondition::None || condition_holds(s.condition);
+              nzcv_ = holds ? nzcv_of(s.op == IrOp::CondCompareAdd, *x, *y, width)
+                            : static_cast<std::uint8_t>(s.c.constant & 0xFU);
               explicit_flags_ = true;
             }
             break;

@@ -56,6 +56,7 @@ enum class IrOp : std::uint8_t {
   // interpreter then holds as an explicit NZCV value: if `condition` holds over
   // the current flags, NZCV is the flags of a - b (CondCompare) or of a + b
   // (CondCompareAdd); otherwise NZCV is the constant c, 0 to 15, in bits N Z C V.
+  // IrCondition::None means unconditionally: AArch64 cmn and adds.
   CondCompare,     ///< flags = condition ? flags(a - b) : c
   CondCompareAdd,  ///< flags = condition ? flags(a + b) : c
 };
