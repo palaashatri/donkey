@@ -133,6 +133,7 @@ target_compile_features(donkey_ir PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_ir)
 
 add_library(donkey_project STATIC
+  src/project/cdecl.cpp
   src/project/project.cpp
   src/project/types.cpp
 )
@@ -283,6 +284,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_demangle PRIVATE cxx_std_20)
   target_compile_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_cdecl fuzz/fuzz_cdecl.cpp)
+  target_link_libraries(fuzz_cdecl PRIVATE donkey::project)
+  target_compile_features(fuzz_cdecl PRIVATE cxx_std_20)
+  target_compile_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
 
 # ---------------------------------------------------------------------------

@@ -10,6 +10,7 @@
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -28,6 +29,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
 #include "test_io.h"
 
@@ -1260,6 +1262,205 @@ TEST(Types, SizeAndAlignmentFollowTheAbi) {
   donkey::TypeDefinition function = scalar(donkey::TypeId(1), donkey::TypeKind::Function, "", 0);
   functions.put(std::move(function));
   EXPECT_FALSE(functions.size_of(donkey::TypeId(1)).has_value());
+}
+
+namespace {
+
+const donkey::TypeDefinition* named_type(const std::vector<donkey::TypeDefinition>& types,
+                                         const std::string& name) {
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.name == name) {
+      return &type;
+    }
+  }
+  return nullptr;
+}
+
+const donkey::TypeDefinition* type_by_id(const std::vector<donkey::TypeDefinition>& types,
+                                         donkey::TypeId id) {
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.id == id) {
+      return &type;
+    }
+  }
+  return nullptr;
+}
+
+/// Parses `text` and checks that it is refused with `code`, and that the message
+/// begins with `location` (for example "line 1, column 18: ").
+void expect_located_error(std::string_view text, const char* code, std::string_view location) {
+  const auto result = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_FALSE(result.has_value()) << text;
+  EXPECT_EQ(result.diagnostic().code, code) << text;
+  EXPECT_TRUE(std::string_view(result.diagnostic().message).starts_with(location))
+      << result.diagnostic().message;
+}
+
+}  // namespace
+
+TEST(Types, ParsesCDeclarations) {
+  const char* text = R"(
+typedef unsigned char u8;
+struct point { int32_t x; int32_t y; };
+struct record { uint8_t tag; struct point at; double weight; char name[5]; };
+union value { uint32_t word; float real; };
+enum mode { MODE_A, MODE_B = 4, MODE_C };
+typedef struct { uint16_t lo, hi; } pair;
+struct list { struct list *next; int count; };
+int64_t sum(const struct point *points, size_t count, ...);
+void reset(void);
+)";
+  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const std::vector<donkey::TypeDefinition>& types = parsed.value();
+
+  // Ids start where the empty table left off, one per declared type.
+  ASSERT_FALSE(types.empty());
+  EXPECT_EQ(types.front().id.value(), 1U);
+  EXPECT_EQ(types.front().provenance, donkey::TypeProvenance::User);
+
+  // struct point: two int32_t members.
+  const auto* point = named_type(types, "point");
+  ASSERT_NE(point, nullptr);
+  EXPECT_EQ(point->kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(point->size, 8U);
+  ASSERT_EQ(point->fields.size(), 2U);
+  EXPECT_EQ(point->fields[1].offset, 4U);
+
+  // struct record: tag at 0, the point at 4 (align 4), weight at 16 (align 8), name at
+  // 24. The members end at 29, padded to 32 for the 8-byte alignment of the double.
+  const auto* record = named_type(types, "record");
+  ASSERT_NE(record, nullptr);
+  EXPECT_EQ(record->size, 32U);
+  ASSERT_EQ(record->fields.size(), 4U);
+  EXPECT_EQ(record->fields[1].offset, 4U);
+  EXPECT_EQ(record->fields[2].offset, 16U);
+  EXPECT_EQ(record->fields[3].offset, 24U);
+
+  const auto* value = named_type(types, "value");
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(value->kind, donkey::TypeKind::Union);
+  EXPECT_EQ(value->size, 4U);
+  EXPECT_EQ(value->fields[1].offset, 0U);
+
+  const auto* mode = named_type(types, "mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_EQ(mode->kind, donkey::TypeKind::Enum);
+  ASSERT_EQ(mode->enumerators.size(), 3U);
+  EXPECT_EQ(mode->enumerators[1].value, 4);
+  EXPECT_EQ(mode->enumerators[2].value, 5);
+
+  // An untagged struct takes the typedef's name.
+  const auto* pair = named_type(types, "pair");
+  ASSERT_NE(pair, nullptr);
+  EXPECT_EQ(pair->kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(pair->size, 4U);
+  ASSERT_EQ(pair->fields.size(), 2U);
+  EXPECT_EQ(pair->fields[1].offset, 2U);
+
+  // A pointer to the struct being defined refers back to it.
+  const auto* list = named_type(types, "list");
+  ASSERT_NE(list, nullptr);
+  EXPECT_EQ(list->size, 16U);
+  const auto* next = type_by_id(types, list->fields[0].type);
+  ASSERT_NE(next, nullptr);
+  EXPECT_EQ(next->kind, donkey::TypeKind::Pointer);
+  EXPECT_EQ(next->target, list->id);
+
+  // A prototype: a variadic function of a struct pointer and a size_t, returning
+  // int64_t. A void return has no target.
+  const auto* sum = named_type(types, "sum");
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(sum->kind, donkey::TypeKind::Function);
+  EXPECT_TRUE(sum->variadic);
+  ASSERT_EQ(sum->fields.size(), 2U);
+  const auto* returned = type_by_id(types, sum->target);
+  ASSERT_NE(returned, nullptr);
+  EXPECT_EQ(returned->name, "int64_t");
+  EXPECT_EQ(returned->size, 8U);
+  EXPECT_TRUE(returned->is_signed);
+  const auto* first_parameter = type_by_id(types, sum->fields[0].type);
+  ASSERT_NE(first_parameter, nullptr);
+  EXPECT_EQ(first_parameter->kind, donkey::TypeKind::Pointer);
+  EXPECT_EQ(first_parameter->target, point->id);
+  const auto* reset = named_type(types, "reset");
+  ASSERT_NE(reset, nullptr);
+  EXPECT_FALSE(reset->variadic);
+  EXPECT_TRUE(reset->fields.empty());
+  EXPECT_EQ(type_by_id(types, reset->target), nullptr);
+
+  // The whole result passes the type store's checks.
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& type : types) {
+    table.put(type);
+  }
+  EXPECT_TRUE(table.validate().has_value());
+
+  // A second parse sees the first one's types. The int32_t it needs is reused, not
+  // declared again.
+  donkey::TypeTable known = table;
+  const auto second = donkey::parse_c_declarations(
+      "typedef struct point point_t; struct pair2 { point_t p; int32_t extra; };", known);
+  ASSERT_TRUE(second.has_value()) << second.diagnostic().message;
+  const auto* pair2 = named_type(second.value(), "pair2");
+  ASSERT_NE(pair2, nullptr);
+  EXPECT_EQ(pair2->size, 12U);
+  EXPECT_EQ(named_type(second.value(), "int32_t"), nullptr);
+
+  // The ILP32 model: 4-byte pointers and long, and an unsigned plain char.
+  donkey::CDeclarationOptions ilp32;
+  ilp32.pointer_size = 4;
+  ilp32.long_size = 4;
+  ilp32.char_is_signed = false;
+  const auto narrow = donkey::parse_c_declarations("struct s { long a; char *p; char c; };",
+                                                   donkey::TypeTable{}, ilp32);
+  ASSERT_TRUE(narrow.has_value()) << narrow.diagnostic().message;
+  const auto* s = named_type(narrow.value(), "s");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->size, 12U);
+  EXPECT_EQ(s->fields[1].offset, 4U);
+  const auto* plain_char = type_by_id(narrow.value(), s->fields[2].type);
+  ASSERT_NE(plain_char, nullptr);
+  EXPECT_FALSE(plain_char->is_signed);
+}
+
+TEST(Types, ParserErrorsAreLocated) {
+  expect_located_error("struct s { int x }", "cdecl.unexpected_token", "line 1, column 18: ");
+  expect_located_error("typedef int T;\n  #define X 1\n", "cdecl.preprocessor",
+                       "line 2, column 3: ");
+  expect_located_error("/* abc\n  def", "cdecl.unterminated_comment", "line 1, column 1: ");
+  expect_located_error("typedef int T $;", "cdecl.bad_character", "line 1, column 15: ");
+  expect_located_error("foo x;", "cdecl.unknown_type", "line 1, column 1: ");
+  expect_located_error("struct s { int a[]; };", "cdecl.array_size_required",
+                       "line 1, column 17: ");
+  expect_located_error("struct s { int a : 3; };", "cdecl.bitfield_unsupported",
+                       "line 1, column 18: ");
+  expect_located_error("struct s { int a; }; struct s { int b; };", "cdecl.redefinition",
+                       "line 1, column 29: ");
+  expect_located_error("struct s {", "cdecl.unexpected_token", "line 1, column 11: ");
+  expect_located_error("struct list2 { struct nope n; };", "cdecl.incomplete_type",
+                       "line 1, column 28: ");
+  expect_located_error("enum e { A = 3000000000 };", "cdecl.enum_value_range",
+                       "line 1, column 14: ");
+  expect_located_error("typedef char c[99999999999999999999];", "cdecl.number_too_large",
+                       "line 1, column 16: ");
+  expect_located_error(std::string("typedef int ") + std::string(65, '*') + "p;", "cdecl.nesting",
+                       "line 1, column 77: ");
+  // An array of arrays whose total size does not fit in 64 bits is refused by the
+  // type store's whole-table check.
+  expect_located_error("typedef long long huge[9223372036854775807][4];", "cdecl.invalid_type", "");
+
+  const std::string huge(donkey::kMaxCDeclarationBytes + 1, ' ');
+  const auto too_large = donkey::parse_c_declarations(huge, donkey::TypeTable{});
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(too_large.diagnostic().status, donkey::Status::ResourceLimit);
+  EXPECT_EQ(too_large.diagnostic().code, "cdecl.too_large");
+
+  donkey::CDeclarationOptions bad;
+  bad.pointer_size = 3;
+  const auto refused = donkey::parse_c_declarations("int x;", donkey::TypeTable{}, bad);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "cdecl.bad_options");
 }
 
 TEST(Types, DwarfStructsMatchTheirByteSize) {
