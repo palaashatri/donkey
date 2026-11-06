@@ -2424,6 +2424,15 @@ TEST(Ir, AArch64WideningMultiplyUsesTheLow32BitsOfEachSource) {
   EXPECT_EQ(run_aarch64_args(smull, {all_ones, all_ones}), 1U);
 }
 
+// A widening multiply into xzr discards its product, so nothing is lifted for it.
+// The function still lifts exactly and returns its first argument.
+TEST(Ir, AArch64WideningMultiplyIntoXzrIsDiscarded) {
+  const auto umull = aarch64_bytes({0x9ba17c1f, 0xd65f03c0});   // umull xzr, w0, w1; ret
+  const auto umaddl = aarch64_bytes({0x9ba1081f, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; ret
+  EXPECT_EQ(run_aarch64_args(umull, {7, 9}), 7U);
+  EXPECT_EQ(run_aarch64_args(umaddl, {7, 9, 11}), 7U);
+}
+
 TEST(Ir, AArch64CountAndReverseInstructionsMatchTheArchitecture) {
   const auto clz = aarch64_bytes({0xdac01000, 0xd65f03c0});     // clz x0, x0
   const auto cls = aarch64_bytes({0xdac01400, 0xd65f03c0});     // cls x0, x0
