@@ -937,9 +937,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
-    if (lifted) {
-      infer_signature(lifted.value(), image.architecture, image.format);
-      recover_pointer_structs(lifted.value());
+    if (lifted && options.run_passes) {
+      run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
     }
     return lifted;
   }
@@ -1270,8 +1269,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
-  infer_signature(lifter.out, image.architecture, image.format);
-  recover_pointer_structs(lifter.out);
+  if (options.run_passes) {
+    run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
+  }
   return lifter.out;
 }
 

@@ -14,7 +14,9 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
@@ -218,6 +220,200 @@ IrCallingConvention host_convention() {
 #endif
 }
 
+// The number of input vectors per function. The compiled and interpreted runs
+// use the same inputs.
+constexpr int kVectorCount = 48;
+
+/// The inputs of one vector. The compiled function gets them as real pointers
+/// and the IR gets the addresses of the mapped regions (kP, kQ, ...).
+struct VectorInputs {
+  std::vector<std::int32_t> p = std::vector<std::int32_t>(64);
+  std::vector<std::int32_t> q = std::vector<std::int32_t>(64);
+  std::vector<std::uint8_t> bytes = std::vector<std::uint8_t>(256);
+  std::vector<std::int32_t> out = std::vector<std::int32_t>(64, -7);
+  CorpusPoint point{};
+  std::size_t count = 0;
+  std::uint64_t native_args[9] = {};
+  std::uint64_t ir_args[9] = {};
+};
+
+// Fills `in` for one vector. The random draws happen in a fixed order, so
+// vector N of a function always receives the same inputs.
+void fill_vector_inputs(VectorInputs& in, const CorpusFunction& entry, Rng& rng, int vector) {
+  for (auto& v : in.p) {
+    v = static_cast<std::int32_t>(rng.next() % 2001) - 1000;
+  }
+  for (auto& v : in.q) {
+    v = static_cast<std::int32_t>(rng.next() % 2001) - 1000;
+  }
+  for (auto& v : in.bytes) {
+    v = static_cast<std::uint8_t>(rng.next());
+  }
+  if (vector % 3 == 0) {
+    in.p[5] = in.p[9] = 17;  // something for count_eq to find
+  }
+  in.point = CorpusPoint{static_cast<std::int32_t>(rng.next() % 1000),
+                         static_cast<std::int32_t>(rng.next() % 1000),
+                         static_cast<std::int64_t>(rng.next() % 100000), 250};
+  in.count = std::strlen(entry.arguments);
+  for (std::size_t i = 0; i < in.count; ++i) {
+    const char kind = entry.arguments[i];
+    switch (kind) {
+      case 'P':
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.p.data());
+        in.ir_args[i] = kP;
+        break;
+      case 'Q':
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.q.data());
+        in.ir_args[i] = kQ;
+        break;
+      case 'B':
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.bytes.data());
+        in.ir_args[i] = kB;
+        break;
+      case 'O':
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.out.data());
+        in.ir_args[i] = kO;
+        break;
+      case 'S':
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(&in.point);
+        in.ir_args[i] = kS;
+        break;
+      default:
+        in.native_args[i] = in.ir_args[i] = scalar(kind, rng, vector);
+    }
+  }
+}
+
+std::vector<std::uint8_t> bytes_of(const void* data, std::size_t size) {
+  const auto* b = static_cast<const std::uint8_t*>(data);
+  return std::vector<std::uint8_t>(b, b + size);
+}
+
+/// Mapped memory for one vector: the image, plus copies of the pointer
+/// arguments so that the IR's writes can be read back afterwards.
+donkey::IrEvalMemory vector_memory(const donkey::BinaryImage& image,
+                                   std::span<const std::byte> file, const VectorInputs& in) {
+  donkey::IrEvalMemory memory(image, file);
+  memory.add_region(kP, bytes_of(in.p.data(), in.p.size() * 4));
+  memory.add_region(kQ, bytes_of(in.q.data(), in.q.size() * 4));
+  memory.add_region(kB, bytes_of(in.bytes.data(), in.bytes.size()));
+  memory.add_region(kO, bytes_of(in.out.data(), in.out.size() * 4));
+  memory.add_region(kS, bytes_of(&in.point, sizeof(in.point)));
+  return memory;
+}
+
+/// The function the analysis names `name`, with or without the Mach-O leading
+/// underscore. The last match wins.
+const donkey::Function* find_corpus_function(const donkey::AnalysisResult& analysis,
+                                             const char* name) {
+  const donkey::Function* found = nullptr;
+  for (const auto& f : analysis.functions) {
+    if (f.name == name || f.name == std::string("_") + name) {
+      found = &f;
+    }
+  }
+  return found;
+}
+
+/// One version of a function: the lifter's output ("lift") or the function as
+/// a pass left it.
+struct PassSnapshot {
+  std::string pass;
+  donkey::IrFunction function;
+};
+
+/// Everything a caller can see of one run: whether the IR verifies, the outcome
+/// (a return value or an error code), and every mapped region afterwards. Two
+/// versions of a function agree when these are equal.
+struct Observation {
+  bool verified = false;
+  bool partial = false;  ///< IrFunction::partial, which decides how the result is reported
+  bool evaluated = false;
+  std::string error;  ///< error code when not evaluated
+  std::uint64_t return_value = 0;
+  std::vector<std::vector<std::uint8_t>> regions;  ///< kP, kQ, kB, kO, kS
+  bool operator==(const Observation&) const = default;
+};
+
+Observation observe(const donkey::IrFunction& function, bool verified, const VectorInputs& in,
+                    const donkey::BinaryImage& image, std::span<const std::byte> file,
+                    const donkey::IrEvalOptions& options) {
+  Observation observation;
+  observation.verified = verified;
+  observation.partial = function.partial;
+  donkey::IrEvalMemory memory = vector_memory(image, file, in);
+  auto result = donkey::evaluate_ir(function, std::span(in.ir_args, in.count), memory, options);
+  if (result) {
+    observation.evaluated = true;
+    observation.return_value = result.value().return_value;
+  } else {
+    observation.error = result.diagnostic().code;
+  }
+  for (const std::uint64_t base : {kP, kQ, kB, kO, kS}) {
+    const auto* bytes = memory.region(base);
+    observation.regions.push_back(bytes != nullptr ? *bytes : std::vector<std::uint8_t>{});
+  }
+  return observation;
+}
+
+std::string outcome_text(const Observation& observation) {
+  if (!observation.evaluated) {
+    return "error " + observation.error;
+  }
+  char text[40];
+  std::snprintf(text, sizeof(text), "returned 0x%llx",
+                static_cast<unsigned long long>(observation.return_value));
+  return text;
+}
+
+std::string describe_difference(const Observation& before, const Observation& after) {
+  if (before.verified != after.verified) {
+    return "changed whether the IR verifies";
+  }
+  if (before.partial != after.partial) {
+    return "changed whether the function is reported Partial";
+  }
+  if (before.evaluated != after.evaluated || before.error != after.error ||
+      before.return_value != after.return_value) {
+    return "changed the outcome from " + outcome_text(before) + " to " + outcome_text(after);
+  }
+  return "left a mapped region with different contents";
+}
+
+/// Compares every version with the first (the lifter's output) on all corpus
+/// vectors. Returns "" when they all agree, otherwise a description of the
+/// first difference.
+std::string first_difference(const std::vector<PassSnapshot>& versions, const CorpusFunction& entry,
+                             const donkey::BinaryImage& image, std::span<const std::byte> file,
+                             const donkey::IrEvalOptions& options) {
+  std::vector<bool> verified;
+  for (const PassSnapshot& version : versions) {
+    verified.push_back(donkey::verify_ir(version.function).has_value());
+  }
+  Rng rng(0x5EEDULL ^ std::hash<std::string>{}(entry.name));
+  for (int vector = 0; vector < kVectorCount; ++vector) {
+    VectorInputs in;
+    fill_vector_inputs(in, entry, rng, vector);
+    const Observation expected =
+        observe(versions.front().function, verified.front(), in, image, file, options);
+    for (std::size_t i = 1; i < versions.size(); ++i) {
+      const Observation got = observe(versions[i].function, verified[i], in, image, file, options);
+      if (got != expected) {
+        return "vector " + std::to_string(vector) + ": after the '" + versions[i].pass +
+               "' pass the IR " + describe_difference(expected, got);
+      }
+    }
+  }
+  return "";
+}
+
+/// The pseudocode of a function, or the error code that rendering reported.
+std::string render_or_error(const donkey::IrFunction& function) {
+  auto text = donkey::format_pseudocode(function);
+  return text.has_value() ? text.value() : "error " + text.diagnostic().code;
+}
+
 TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
 #if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
   GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
@@ -279,75 +475,17 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       Rng rng(0x5EEDULL ^ std::hash<std::string>{}(entry.name));
       bool mismatch = false;
       std::string eval_error;
-      for (int vector = 0; vector < 48 && !mismatch && eval_error.empty(); ++vector) {
-        // Inputs shared by both sides.
-        std::vector<std::int32_t> p(64);
-        std::vector<std::int32_t> q(64);
-        std::vector<std::uint8_t> bytes(256);
-        for (auto& v : p) {
-          v = static_cast<std::int32_t>(rng.next() % 2001) - 1000;
-        }
-        for (auto& v : q) {
-          v = static_cast<std::int32_t>(rng.next() % 2001) - 1000;
-        }
-        for (auto& v : bytes) {
-          v = static_cast<std::uint8_t>(rng.next());
-        }
-        if (vector % 3 == 0) {
-          p[5] = p[9] = 17;  // something for count_eq to find
-        }
-        std::vector<std::int32_t> out_native(64, -7);
-        CorpusPoint point_native{static_cast<std::int32_t>(rng.next() % 1000),
-                                 static_cast<std::int32_t>(rng.next() % 1000),
-                                 static_cast<std::int64_t>(rng.next() % 100000), 250};
+      for (int vector = 0; vector < kVectorCount && !mismatch && eval_error.empty(); ++vector) {
+        VectorInputs in;
+        fill_vector_inputs(in, entry, rng, vector);
+        donkey::IrEvalMemory memory = vector_memory(loaded.value().image, loaded.value().data, in);
 
-        std::uint64_t native_args[9] = {};
-        std::uint64_t ir_args[9] = {};
-        const std::size_t count = std::strlen(entry.arguments);
-        for (std::size_t i = 0; i < count; ++i) {
-          const char kind = entry.arguments[i];
-          switch (kind) {
-            case 'P':
-              native_args[i] = reinterpret_cast<std::uintptr_t>(p.data());
-              ir_args[i] = kP;
-              break;
-            case 'Q':
-              native_args[i] = reinterpret_cast<std::uintptr_t>(q.data());
-              ir_args[i] = kQ;
-              break;
-            case 'B':
-              native_args[i] = reinterpret_cast<std::uintptr_t>(bytes.data());
-              ir_args[i] = kB;
-              break;
-            case 'O':
-              native_args[i] = reinterpret_cast<std::uintptr_t>(out_native.data());
-              ir_args[i] = kO;
-              break;
-            case 'S':
-              native_args[i] = reinterpret_cast<std::uintptr_t>(&point_native);
-              ir_args[i] = kS;
-              break;
-            default:
-              native_args[i] = ir_args[i] = scalar(kind, rng, vector);
-          }
-        }
-
-        donkey::IrEvalMemory memory(loaded.value().image, loaded.value().data);
-        auto as_bytes = [](const void* data, std::size_t size) {
-          const auto* b = static_cast<const std::uint8_t*>(data);
-          return std::vector<std::uint8_t>(b, b + size);
-        };
-        memory.add_region(kP, as_bytes(p.data(), p.size() * 4));
-        memory.add_region(kQ, as_bytes(q.data(), q.size() * 4));
-        memory.add_region(kB, as_bytes(bytes.data(), bytes.size()));
-        memory.add_region(kO, as_bytes(out_native.data(), out_native.size() * 4));
-        memory.add_region(kS, as_bytes(&point_native, sizeof(point_native)));
-
-        auto ir =
-            donkey::evaluate_ir(lifted.value(), std::span(ir_args, count), memory, eval_options);
+        auto ir = donkey::evaluate_ir(lifted.value(), std::span(in.ir_args, in.count), memory,
+                                      eval_options);
         const std::uint64_t got_native =
-            native(native_args[0], native_args[1], native_args[2], native_args[3], native_args[4],
-                   native_args[5], native_args[6], native_args[7], native_args[8]);
+            native(in.native_args[0], in.native_args[1], in.native_args[2], in.native_args[3],
+                   in.native_args[4], in.native_args[5], in.native_args[6], in.native_args[7],
+                   in.native_args[8]);
         if (!ir) {
           eval_error = ir.diagnostic().code + ": " + ir.diagnostic().message;
           break;
@@ -364,12 +502,12 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
         }
         // Memory written through pointer arguments must match too.
         if (std::strchr(entry.arguments, 'O') != nullptr &&
-            *memory.region(kO) != as_bytes(out_native.data(), out_native.size() * 4)) {
+            *memory.region(kO) != bytes_of(in.out.data(), in.out.size() * 4)) {
           mismatch = true;
           outcome.detail = "vector " + std::to_string(vector) + ": output buffer differs";
         }
         if (std::strchr(entry.arguments, 'S') != nullptr &&
-            *memory.region(kS) != as_bytes(&point_native, sizeof(point_native))) {
+            *memory.region(kS) != bytes_of(&in.point, sizeof(in.point))) {
           mismatch = true;
           outcome.detail = "vector " + std::to_string(vector) + ": struct contents differ";
         }
@@ -500,6 +638,153 @@ TEST(DecompilerCorpus, StructLayoutRecoveredBehindAPointerArgument) {
   auto text = donkey::format_pseudocode(lifted.value());
   ASSERT_TRUE(text.has_value());
   EXPECT_NE(text.value().find("->f_8"), std::string::npos) << text.value();
+}
+
+// G04-T0: every pass that runs after lifting must keep the IR's meaning. Each
+// corpus function is lifted with passes disabled, then the passes are run and
+// the hook records the function after each one. Every version is interpreted
+// on all corpus vectors and must give the same observation as the lifter's
+// output, Partial functions included. The test also checks that the hook saw
+// each pass, and that the pipeline matches what lift_function produces.
+TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  std::size_t checked = 0;
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+
+    donkey::IrEvalOptions eval_options;
+    eval_options.architecture = loaded.value().image.architecture;
+    eval_options.convention = host_convention();
+
+    for (const CorpusFunction& entry : kCorpus) {
+      const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
+      ASSERT_NE(function, nullptr)
+          << library.level << " " << entry.name << " was not found by the analysis";
+
+      donkey::LiftOptions raw_options;
+      raw_options.run_passes = false;
+      auto raw =
+          donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+      ASSERT_TRUE(raw.has_value())
+          << library.level << " " << entry.name << ": " << raw.diagnostic().code;
+
+      std::vector<PassSnapshot> versions{{"lift", raw.value()}};
+      donkey::PassOptions pass_options;
+      pass_options.architecture = loaded.value().image.architecture;
+      pass_options.format = loaded.value().image.format;
+      pass_options.after_pass = [&versions](std::string_view pass,
+                                            const donkey::IrFunction& after) {
+        versions.push_back({std::string(pass), after});
+      };
+      donkey::IrFunction piped = raw.value();
+      donkey::run_ir_passes(piped, pass_options);
+
+      std::vector<std::string> passes;
+      for (const PassSnapshot& version : versions) {
+        passes.push_back(version.pass);
+      }
+      EXPECT_EQ(passes,
+                (std::vector<std::string>{"lift", "infer_signature", "recover_pointer_structs"}))
+          << library.level << " " << entry.name << ": the hook must see every pass, in order";
+
+      auto production = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+      ASSERT_TRUE(production.has_value());
+      EXPECT_EQ(render_or_error(piped), render_or_error(production.value()))
+          << library.level << " " << entry.name
+          << ": the passes checked here must be the ones lift_function runs";
+
+      const std::string difference = first_difference(versions, entry, loaded.value().image,
+                                                      loaded.value().data, eval_options);
+      EXPECT_EQ(difference, "") << library.level << " " << entry.name << ": " << difference;
+      ++checked;
+    }
+  }
+  EXPECT_EQ(checked, std::size(kLibraries) * std::size(kCorpus));
+}
+
+// The checker must not be vacuous: a pass that turns the first addition of
+// c_add3 into a subtraction has to be reported.
+TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaning) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  const CorpusFunction& add3 = kCorpus[0];
+  ASSERT_STREQ(add3.name, "c_add3");
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), add3.name);
+  ASSERT_NE(function, nullptr);
+  donkey::LiftOptions raw_options;
+  raw_options.run_passes = false;
+  auto raw = donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+  ASSERT_TRUE(raw.has_value());
+
+  donkey::IrFunction broken = raw.value();
+  std::size_t changed = 0;
+  for (donkey::IrBlock& block : broken.blocks) {
+    for (donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Add && changed == 0) {
+        statement.op = donkey::IrOp::Sub;
+        ++changed;
+      }
+    }
+  }
+  ASSERT_EQ(changed, 1U) << "c_add3 has no addition to change";
+
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+  const std::vector<PassSnapshot> versions{{"lift", raw.value()}, {"broken", broken}};
+  const std::string difference =
+      first_difference(versions, add3, loaded.value().image, loaded.value().data, eval_options);
+  EXPECT_NE(difference, "") << "the checker accepted an addition turned into a subtraction";
+}
+
+// A pass that changes only the Partial flag changes how the result is reported,
+// even when every execution is identical. Setting the flag and clearing it must
+// each be reported.
+TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  const CorpusFunction& add3 = kCorpus[0];
+  ASSERT_STREQ(add3.name, "c_add3");
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), add3.name);
+  ASSERT_NE(function, nullptr);
+  donkey::LiftOptions raw_options;
+  raw_options.run_passes = false;
+  auto raw = donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+  ASSERT_TRUE(raw.has_value());
+  ASSERT_FALSE(raw.value().partial) << "c_add3 at O0 must be Complete for this check";
+
+  donkey::IrFunction flagged = raw.value();
+  flagged.partial = true;
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  const std::vector<PassSnapshot> setting{{"lift", raw.value()}, {"set partial", flagged}};
+  const std::vector<PassSnapshot> clearing{{"lift", flagged}, {"clear partial", raw.value()}};
+  EXPECT_NE(first_difference(setting, add3, loaded.value().image, loaded.value().data, eval_options)
+                .find("reported Partial"),
+            std::string::npos)
+      << "the checker accepted a pass that set the Partial flag";
+  EXPECT_NE(
+      first_difference(clearing, add3, loaded.value().image, loaded.value().data, eval_options)
+          .find("reported Partial"),
+      std::string::npos)
+      << "the checker accepted a pass that cleared the Partial flag";
 }
 
 }  // namespace
