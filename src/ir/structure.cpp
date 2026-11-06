@@ -256,22 +256,32 @@ struct Structurer {
     }
 
     for (auto& [header, body] : bodies) {
-      std::vector<BlockId> exits;
-      for (BlockId block = 0; block < count; ++block) {
-        if (!body.test(block)) {
-          continue;
+      const std::vector<BlockId> exits = outside_successors(body);
+      BlockId exit = kNoBlock;
+      if (exits.size() == 1) {
+        exit = exits.front();
+      } else if (exits.size() > 1) {
+        // A `break` leaves the loop from a block that no path back to the header passes
+        // through, so the natural body misses it. The loop's own test names the exit, and
+        // the blocks the header dominates below that exit belong to the body.
+        exit = test_exit(header, body, exits);
+        if (exit == kNoBlock) {
+          return false;
         }
-        for (const BlockId successor : graph_.successors[block]) {
-          if (!body.test(successor) &&
-              std::find(exits.begin(), exits.end(), successor) == exits.end()) {
-            exits.push_back(successor);
+        for (BlockId block = header + 1; block < exit; ++block) {
+          if (!body.test(block) && dominators_[block].test(header)) {
+            body.set(block);
           }
         }
-      }
-      if (exits.size() != 1 || exits.front() <= header) {
+        if (outside_successors(body) != std::vector<BlockId>{exit}) {
+          return false;
+        }
+      } else {
         return false;
       }
-      const BlockId exit = exits.front();
+      if (exit <= header) {
+        return false;
+      }
       if (body.count() != exit - header) {
         return false;  // non-contiguous loop body: labels/goto are more honest
       }
@@ -290,6 +300,55 @@ struct Structurer {
       loops_.emplace(header, loop);
     }
     return true;
+  }
+
+  /// The blocks outside `body` that a block inside it branches to, in block order.
+  [[nodiscard]] std::vector<BlockId> outside_successors(const BitSet& body) const {
+    std::vector<BlockId> exits;
+    for (BlockId block = 0; block < graph_.successors.size(); ++block) {
+      if (!body.test(block)) {
+        continue;
+      }
+      for (const BlockId successor : graph_.successors[block]) {
+        if (!body.test(successor) &&
+            std::find(exits.begin(), exits.end(), successor) == exits.end()) {
+          exits.push_back(successor);
+        }
+      }
+    }
+    return exits;
+  }
+
+  /// The exit that a loop's own test leaves to, when it is one of `exits`. The tests
+  /// are the header's conditional branch and the one that ends the body's last block.
+  /// kNoBlock unless exactly one of them names an exit.
+  [[nodiscard]] BlockId test_exit(BlockId header, const BitSet& body,
+                                  const std::vector<BlockId>& exits) const {
+    std::vector<BlockId> candidates;
+    const auto consider = [&](BlockId block) {
+      const IrBlock& candidate = function_.blocks[block];
+      if (candidate.statements.empty() || candidate.statements.back().op != IrOp::CondBranch) {
+        return;
+      }
+      const IrStatement& test = candidate.statements.back();
+      for (const BlockId target :
+           {static_cast<BlockId>(test.b.block), static_cast<BlockId>(block + 1)}) {
+        const bool is_exit = std::find(exits.begin(), exits.end(), target) != exits.end();
+        if (is_exit &&
+            std::find(candidates.begin(), candidates.end(), target) == candidates.end()) {
+          candidates.push_back(target);
+        }
+      }
+    };
+    consider(header);
+    BlockId latch = header;
+    for (BlockId block = header; block < graph_.successors.size(); ++block) {
+      if (body.test(block)) {
+        latch = block;
+      }
+    }
+    consider(latch);
+    return candidates.size() == 1 ? candidates.front() : kNoBlock;
   }
 
   bool describe_loop(Loop& loop, const BitSet& body, BlockId exit) {
@@ -434,6 +493,9 @@ struct Structurer {
           }
         }
         emit_statements(index, false);
+        if (!frames_.empty()) {
+          ++frames_.back().switch_depth;
+        }
         line("switch (" + render_operand(function_, terminator.dest) + ") {");
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
@@ -475,6 +537,9 @@ struct Structurer {
         }
         --indent_;
         line("}");
+        if (!frames_.empty()) {
+          --frames_.back().switch_depth;
+        }
         if (join != kNoBlock && join <= last) {
           index = join;
         } else {
@@ -485,6 +550,17 @@ struct Structurer {
       if (terminator.op != IrOp::CondBranch) {
         if (terminator.op == IrOp::Branch) {
           emit_statements(index, false);
+          if (!frames_.empty() && terminator.a.block == frames_.back().exit) {
+            // Leaving the innermost loop from its body. Inside a switch, `break` would
+            // leave the switch instead, so that case is left to labels.
+            if (frames_.back().switch_depth > 0) {
+              ok_ = false;
+              return;
+            }
+            line("break;");
+            ++index;
+            continue;
+          }
           if (terminator.a.block == loop_header) {
             if (index + 1 != last) {
               line("continue;");
@@ -607,7 +683,9 @@ struct Structurer {
       }
       line("while (" + condition_of(loop.header, loop.negate_condition) + ") {");
       ++indent_;
+      frames_.push_back(LoopFrame{loop.exit, 0});
       emit_range(first_body, loop.exit, loop.header);
+      frames_.pop_back();
       --indent_;
       line("}");
       return true;
@@ -627,6 +705,7 @@ struct Structurer {
     }
     line("do {");
     ++indent_;
+    frames_.push_back(LoopFrame{loop.exit, 0});
     if (latch == loop.header) {
       emit_statements(loop.header, false);
     } else {
@@ -634,6 +713,7 @@ struct Structurer {
       emit_range(loop.header + 1, latch, loop.header);
       emit_statements(latch, false);
     }
+    frames_.pop_back();
     --indent_;
     line("} while (" + condition_of(latch, loop.negate_condition) + ");");
     return true;
@@ -646,6 +726,14 @@ struct Structurer {
   std::unordered_map<BlockId, Loop> loops_;
   std::string out_;
   std::vector<StructuredLine> lines_;
+  /// The loops being emitted, innermost last. A branch from a loop body to its exit is a
+  /// `break`; `switch_depth` counts the switches the body is inside, where `break` means
+  /// something else.
+  struct LoopFrame {
+    BlockId exit = 0;
+    int switch_depth = 0;
+  };
+  std::vector<LoopFrame> frames_;
   int indent_ = 1;
   bool ok_ = true;
 };
