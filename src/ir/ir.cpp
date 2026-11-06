@@ -297,6 +297,12 @@ class Renderer {
         out += " }";
         return out;
       }
+      case IrOp::CondCompare:
+      case IrOp::CondCompareAdd:
+        return "/* flags = " + operand(statement.a) +
+               (statement.op == IrOp::CondCompare ? " - " : " + ") + operand(statement.b) +
+               " when " + ir_condition_operator(statement.condition) + ", else nzcv " +
+               operand(statement.c) + " */";
       case IrOp::Compare:
         return "/* flags = " + operand(statement.a) + " " +
                ir_condition_operator(statement.condition) + " " + operand(statement.b) + " */";
@@ -363,7 +369,8 @@ namespace detail {
 bool flags_written_in_block(const IrBlock& block, std::size_t index) {
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
-    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
+    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test ||
+        candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd) {
       return true;
     }
     if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
@@ -461,6 +468,10 @@ const char* ir_op_name(IrOp op) noexcept {
       return "cond_branch";
     case IrOp::Switch:
       return "switch";
+    case IrOp::CondCompare:
+      return "cond_compare";
+    case IrOp::CondCompareAdd:
+      return "cond_compare_add";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -894,6 +905,24 @@ Result<bool> verify_ir(const IrFunction& function) {
           }
           if (statement.a.kind != IrOperandKind::Block) {
             return fail("ir.malformed_switch", "switch needs a default block target");
+          }
+          break;
+        case IrOp::CondCompare:
+        case IrOp::CondCompareAdd:
+          if (statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.c.kind != IrOperandKind::Constant || statement.c.constant > 15 ||
+              statement.condition == IrCondition::None) {
+            return fail(
+                "ir.malformed_cond_compare",
+                "conditional compare needs two operands, a condition and an NZCV value 0-15");
+          }
+          if (statement.a.width != statement.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.width) ||
+              (statement.b.kind == IrOperandKind::Constant &&
+               statement.b.width > statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "conditional compare operand widths must match statement width");
           }
           break;
         case IrOp::Compare:

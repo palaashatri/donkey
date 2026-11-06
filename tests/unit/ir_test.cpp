@@ -2429,4 +2429,66 @@ TEST(Ir, AArch64ExtractAndBitfieldInsertMatchTheArchitecture) {
   EXPECT_EQ(run_aarch64_args(bfxil, {~0ULL, 0xABCD}), (~0ULL & ~0xFFULL) | 0xBCULL);
 }
 
+TEST(Ir, AArch64ConditionalCompareUsesTheCompareOnlyWhenItsConditionHolds) {
+  // cmp x0, x1; ccmp x2, x3, #0, eq; cset x0, eq; ret. When x0 == x1 the flags
+  // are those of x2 - x3; otherwise NZCV is 0 and eq is false.
+  const auto data = aarch64_bytes({0xeb01001f, 0xfa430040, 0x9a9f17e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {5, 5, 7, 7}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {5, 5, 7, 8}), 0U);
+  EXPECT_EQ(run_aarch64_args(data, {5, 6, 7, 7}), 0U);
+}
+
+TEST(Ir, AArch64ConditionalCompareSetsTheImmediateNzcvWhenItsConditionFails) {
+  // cmp x0, x1; ccmp x2, x3, #8, ne; cset x0, lt; ret. When x0 != x1, lt compares
+  // x2 with x3 as signed values. When x0 == x1, NZCV is #8 (N set), so lt holds.
+  const auto data = aarch64_bytes({0xeb01001f, 0xfa431048, 0x9a9fa7e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 0, 0}), 0U);
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, static_cast<std::uint64_t>(-1), 0}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {3, 3, 0, 0}), 1U);
+}
+
+TEST(Ir, AArch64ConditionalCompareNegatedSetsTheFlagsOfTheSum) {
+  // cmp x0, x0; ccmn x2, x3, #0, eq; cset x0, eq; ret. ccmn sets the flags of
+  // x2 + x3, so eq holds when the sum is zero.
+  const auto data = aarch64_bytes({0xeb00001f, 0xba430040, 0x9a9f17e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {0, 0, 5, static_cast<std::uint64_t>(-5)}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {0, 0, 1, 1}), 0U);
+}
+
+TEST(Ir, AArch64ConditionalCompareWithoutExactFlagsIsPartial) {
+  // ccmp x2, x3, #0, eq; ret. No flag writer comes first, so the condition is unknown.
+  const auto data = aarch64_bytes({0xfa430040, 0xd65f03c0});
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value());
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+TEST(Ir, VerifierRejectsAConditionalCompareWithAnOutOfRangeNzcv) {
+  donkey::IrBlock block;
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::CondCompare;
+  compare.a = donkey::IrOperand::register_ref("rax", 8);
+  compare.b = donkey::IrOperand::register_ref("rbx", 8);
+  compare.c = donkey::IrOperand::constant_value(16, 1);  // NZCV is 0 to 15
+  compare.condition = donkey::IrCondition::Equal;
+  compare.width = 8;
+  block.statements.push_back(compare);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "compare";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_cond_compare");
+}
+
 }  // namespace

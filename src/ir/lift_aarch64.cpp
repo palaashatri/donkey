@@ -895,6 +895,34 @@ struct Lifter {
     unsupported(block, instruction);
   }
 
+  /// ccmp and ccmn. If the condition holds over the current flags, NZCV becomes
+  /// the flags of a compare (ccmp: a - b) or an addition (ccmn: a + b); otherwise
+  /// NZCV becomes the immediate #nzcv. The condition is read from the flags before,
+  /// so they must be exact: when they are not, the instruction is Unsupported.
+  void lift_conditional_compare(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const IrCondition condition = trailing_condition(instruction.operands);
+    if (!flags_exact || condition == IrCondition::None || operands.size() < 3 ||
+        operands[0].kind != OperandKind::Register || register_width(operands[0].reg) == 0 ||
+        (operands[1].kind != OperandKind::Register && operands[1].kind != OperandKind::Immediate) ||
+        operands[2].kind != OperandKind::Immediate) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    IrStatement statement;
+    statement.op = instruction.mnemonic == "ccmn" ? IrOp::CondCompareAdd : IrOp::CondCompare;
+    statement.a = to_ir_operand(operands[0], kPointerWidth);
+    statement.b = to_ir_operand(operands[1], width);
+    statement.c =
+        IrOperand::constant_value(static_cast<std::uint64_t>(operands[2].immediate) & 0xFU, 1);
+    statement.condition = condition;
+    statement.width = width;
+    statement.source_address = instruction.address;
+    push(block, std::move(statement));
+    modelled_flags = true;
+  }
+
   /// udiv, sdiv, umulh, smulh, clz, cls, rbit, rev, rev16, rev32, extr, bfi and
   /// bfxil. AArch64 division by zero yields 0 and never faults, and INT_MIN / -1
   /// yields INT_MIN, while the IR divide faults in both cases. So the divisor is
@@ -1642,6 +1670,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
+      } else if (mnemonic == "ccmp" || mnemonic == "ccmn") {
+        lifter.lift_conditional_compare(out_block, instruction);
       } else if (mnemonic == "udiv" || mnemonic == "sdiv" || mnemonic == "umulh" ||
                  mnemonic == "smulh" || mnemonic == "clz" || mnemonic == "cls" ||
                  mnemonic == "rbit" || mnemonic == "rev" || mnemonic == "rev16" ||

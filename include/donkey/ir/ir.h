@@ -52,6 +52,12 @@ enum class IrOp : std::uint8_t {
   CountLeadingZeros,   ///< dest = leading zero bits of a; a == 0 gives the operand width in bits
   PopCount,            ///< dest = number of set bits in a
   ByteSwap,            ///< dest = a with its bytes in reverse order (bswap)
+  // Conditional compare (AArch64 ccmp and ccmn). It sets the flags, which the
+  // interpreter then holds as an explicit NZCV value: if `condition` holds over
+  // the current flags, NZCV is the flags of a - b (CondCompare) or of a + b
+  // (CondCompareAdd); otherwise NZCV is the constant c, 0 to 15, in bits N Z C V.
+  CondCompare,     ///< flags = condition ? flags(a - b) : c
+  CondCompareAdd,  ///< flags = condition ? flags(a + b) : c
 };
 
 const char* ir_op_name(IrOp op) noexcept;

@@ -81,6 +81,7 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G02-T1 (42 functions), under qemu-aarch64 | 40/42 | 36/42 | 30/42 | SIMD, `ccmp`, `adc`/`sbc`/`cmn` (not lifted yet) |
 | GCC 13.3, AArch64 Linux | locally, after G02-T2 (53 functions), under qemu-aarch64 | 40/53 | 36/53 | 30/53 | SIMD, `ccmp`, `adc`/`sbc`/`cmn`, `umulh`/`smulh`, `udiv`/`sdiv` (not lifted yet) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T2 (59 functions), under qemu-aarch64 | 52/59 | 48/59 | 42/59 | SIMD, `ccmp`/`ccmn` (G03-T1), `cmn`/`adc`/`sbc` (G03-T4; `sdiv`/`srem` need `cmn`), `fmov`/`ldr d` (popcount) |
+| GCC 13.3, AArch64 Linux | locally, after G03-T1 (59 functions), under qemu-aarch64 | 52/59 | 54/59 | 48/59 | SIMD (`movi`, `dup`, `fmov`, `ldr d`), `cmn`/`adc`/`sbc` (G03-T4; `sdiv`/`srem` need `cmn`), `c_switch_sparse` Partial (cause not itemised) |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -111,7 +112,8 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 `ubfx`/`sbfx` and `mvn`. It also lifts `udiv`/`sdiv` with the architecture's
 results (division by zero gives 0, and `INT_MIN / -1` gives `INT_MIN`, with no
 fault), `umulh`/`smulh`, `clz`, `cls`, `rbit`, `rev`/`rev16`/`rev32`, `extr`,
-`bfi` and `bfxil`. On x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
+`bfi` and `bfxil`, and `ccmp`/`ccmn` when the flags before them are exact. On
+x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
 `bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
 with a register and a memory operand.
 
@@ -124,7 +126,7 @@ with a register and a memory operand.
   Unsupported until a zero-flag state exists.
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
-- Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
+- Flags read across basic blocks. An AArch64 `ccmp`/`ccmn` whose flags before are not exact is Partial.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
 
