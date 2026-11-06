@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2) | P0 | IN PROGRESS (G02-T1, T2 DONE; T3-T4 TODO) |
+| G02 | x86 integer gaps | Full integer semantics | No `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2) | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | TODO |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -397,6 +397,19 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
+- **Status:** IN PROGRESS. Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+  64 bit) and `bt` with a register or immediate index (the IR ops
+  `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
+  Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
+  `Ir.X86BitTestCarriesTheSelectedBit`, and the corpus functions
+  `c_popcount64`, `c_ctz64_guarded`, `c_clz64_guarded`, `c_bswap32`,
+  `c_bswap64`, `c_bit_test`. Also fixed: a function containing a direct call
+  was reported Complete. It is now Partial, which changed the expected status
+  of `_start` in two CLI tests (`cli.decompile_elf_json`,
+  `cli.decompile_elf_i386`) from Complete to Partial. Not done: `bsf`/`bsr`
+  (needs a zero-flag state), `bts`/`btr`/`btc`, `movbe`, memory forms of
+  `bt`, and the `-march=x86-64-v2` corpus variant, so `c_popcount` is not yet
+  verified with the instruction.
 
 **G02-T4 Flags across blocks**
 

@@ -323,3 +323,24 @@ CORPUS long long c_srem64(long long x, long long y) {
 CORPUS unsigned long long c_div10(unsigned long long x) {
   return x / 10;
 }
+
+/* ---- bit operations: population count, bit scans, byte swap, bit test ----
+ * The scans are guarded because the result of bsf and bsr is undefined for 0. */
+CORPUS unsigned int c_popcount64(unsigned long long x) {
+  return (unsigned int)__builtin_popcountll(x);
+}
+CORPUS unsigned int c_ctz64_guarded(unsigned long long x) {
+  return x ? (unsigned int)__builtin_ctzll(x) : 64U;
+}
+CORPUS unsigned int c_clz64_guarded(unsigned long long x) {
+  return x ? (unsigned int)__builtin_clzll(x) : 64U;
+}
+CORPUS unsigned int c_bswap32(unsigned int x) {
+  return __builtin_bswap32(x);
+}
+CORPUS unsigned long long c_bswap64(unsigned long long x) {
+  return __builtin_bswap64(x);
+}
+CORPUS int c_bit_test(unsigned long long x, unsigned int n) {
+  return (int)((x >> (n & 63U)) & 1U);
+}

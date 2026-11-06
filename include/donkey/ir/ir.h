@@ -45,6 +45,10 @@ enum class IrOp : std::uint8_t {
   DivSigned,        ///< dest = (a:b) / c, signed (idiv); fault on overflow
   RemUnsigned,      ///< dest = (a:b) % c, unsigned
   RemSigned,        ///< dest = (a:b) % c, signed
+  CountTrailingZeros,  ///< dest = trailing zero bits of a; a == 0 gives the operand width in bits
+  CountLeadingZeros,   ///< dest = leading zero bits of a; a == 0 gives the operand width in bits
+  PopCount,            ///< dest = number of set bits in a
+  ByteSwap,            ///< dest = a with its bytes in reverse order (bswap)
 };
 
 const char* ir_op_name(IrOp op) noexcept;

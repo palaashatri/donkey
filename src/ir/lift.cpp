@@ -551,6 +551,122 @@ struct Lifter {
     unsupported(block, instruction);
   }
 
+  /// popcnt, tzcnt, lzcnt and bswap (register destination; popcnt, tzcnt and
+  /// lzcnt take a register or memory source). popcnt, tzcnt and lzcnt write
+  /// flags that are not modelled. bswap leaves the flags alone. Memory
+  /// destinations and the 8- and 16-bit forms are Unsupported.
+  void lift_bit_operation(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    if (mnemonic == "bt") {
+      lift_bit_test(block, instruction);
+      return;
+    }
+    const bool swap = mnemonic == "bswap";
+    if (!swap) {
+      flags_state = FlagsState::Unknown;
+    }
+    if (operands.size() != (swap ? 1U : 2U) || operands[0].kind != OperandKind::Register ||
+        (!swap && operands[1].kind != OperandKind::Register &&
+         operands[1].kind != OperandKind::Memory)) {
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    if (destination.width != 4 && destination.width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    IrOperand source = destination;
+    if (!swap) {
+      source = to_ir_operand(operands[1], instruction, pointer_width);
+      if (source.kind == IrOperandKind::Memory) {
+        // The memory operand is read first, into a temporary of the operation's width.
+        const IrOperand value = temp_operand(temporary_id(), destination.width);
+        IrStatement load;
+        load.op = IrOp::Load;
+        load.dest = value;
+        load.a = source;
+        load.width = destination.width;
+        load.source_address = instruction.address;
+        push(block, std::move(load));
+        source = value;
+      }
+    }
+    IrStatement statement;
+    if (mnemonic == "popcnt") {
+      statement.op = IrOp::PopCount;
+    } else if (mnemonic == "tzcnt") {
+      statement.op = IrOp::CountTrailingZeros;
+    } else if (mnemonic == "lzcnt") {
+      statement.op = IrOp::CountLeadingZeros;
+    } else {
+      statement.op = IrOp::ByteSwap;
+    }
+    statement.dest = destination;
+    statement.a = source;
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    push(block, std::move(statement));
+  }
+
+  /// bt with a register destination and a register or immediate bit index. CF
+  /// becomes the selected bit, and the other flags are undefined. The IR states
+  /// CF as `0 <u bit`, which is the CarryOnly state. A memory destination, whose
+  /// bit can lie outside the operand, is Unsupported.
+  void lift_bit_test(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    flags_state = FlagsState::Unknown;
+    if (operands.size() != 2 || operands[0].kind != OperandKind::Register ||
+        (operands[1].kind != OperandKind::Register && operands[1].kind != OperandKind::Immediate)) {
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand value = to_ir_operand(operands[0], instruction, pointer_width);
+    if (value.width != 4 && value.width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = value.width;
+    const std::uint64_t mask_bits = static_cast<std::uint64_t>(width) * 8U - 1U;
+    const auto emit = [&](IrOp op, const IrOperand& dest, const IrOperand& a, const IrOperand& b,
+                          IrCondition condition) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = dest;
+      statement.a = a;
+      statement.b = b;
+      statement.condition = condition;
+      statement.width = width;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    IrOperand index = IrOperand::constant_value(0, width);
+    if (operands[1].kind == OperandKind::Immediate) {
+      index = IrOperand::constant_value(
+          static_cast<std::uint64_t>(operands[1].immediate) & mask_bits, width);
+    } else {
+      // A register index is taken modulo the operand width.
+      const IrOperand selector = to_ir_operand(operands[1], instruction, pointer_width);
+      if (selector.width != width) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand masked = temp_operand(temporary_id(), width);
+      emit(IrOp::And, masked, selector, IrOperand::constant_value(mask_bits, width),
+           IrCondition::None);
+      index = masked;
+    }
+    const IrOperand shifted = temp_operand(temporary_id(), width);
+    emit(IrOp::Shr, shifted, value, index, IrCondition::None);
+    const IrOperand bit = temp_operand(temporary_id(), width);
+    emit(IrOp::And, bit, shifted, IrOperand::constant_value(1, width), IrCondition::None);
+    // CF = bit, which is `0 <u bit`.
+    emit(IrOp::Compare, IrOperand::none(), IrOperand::constant_value(0, width), bit,
+         IrCondition::UnsignedLess);
+    flags_state = FlagsState::CarryOnly;
+  }
+
   /// mul / imul with one operand, and div / idiv, which use the implicit rax and
   /// rdx operands: rdx:rax = rax * source, or rax = rdx:rax / source and
   /// rdx = rdx:rax % source. The 8- and 16-bit forms use other registers and are
@@ -993,7 +1109,9 @@ struct Lifter {
       statement.a = IrOperand::constant_value(0, pointer_width);
     }
     push(block, std::move(statement));
-    note("outgoing call arguments and return values follow no modelled ABI");
+    // The callee's effects on registers and memory are not modelled, so the
+    // function cannot be Complete. The call itself stays in the IR.
+    mark_partial("outgoing call arguments and return values follow no modelled ABI");
   }
 };
 
@@ -1238,6 +1356,11 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.lift_test(out_block, instruction);
         lifter.flags_state = Lifter::FlagsState::Exact;
         keeps_flags = true;
+      } else if (mnemonic == "popcnt" || mnemonic == "tzcnt" || mnemonic == "lzcnt" ||
+                 mnemonic == "bswap" || mnemonic == "bt") {
+        lifter.lift_bit_operation(out_block, instruction);
+        // bswap leaves the flags alone and bt sets CF, so their state is kept.
+        keeps_flags = mnemonic == "bswap" || mnemonic == "bt";
       } else if (mnemonic == "mul" || mnemonic == "div" || mnemonic == "idiv" ||
                  (mnemonic == "imul" && instruction.structured_operands.size() == 1)) {
         lifter.lift_multiply_divide(out_block, instruction);

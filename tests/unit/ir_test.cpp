@@ -2070,4 +2070,62 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
 }
 
+// ---- G02-T3: population count, bit scans, byte swap, bit test ----
+
+TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
+  // popcnt rax, rdi; ret
+  donkey::IrFunction popcount;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xb8, 0xc7, 0xc3}, popcount));
+  EXPECT_FALSE(popcount.partial);
+  EXPECT_EQ(run_x86_64(popcount, {0xff}), 8U);
+  EXPECT_EQ(run_x86_64(popcount, {~0ULL}), 64U);
+  EXPECT_EQ(run_x86_64(popcount, {0}), 0U);
+
+  // tzcnt rax, rdi; ret
+  donkey::IrFunction trailing;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbc, 0xc7, 0xc3}, trailing));
+  EXPECT_EQ(run_x86_64(trailing, {8}), 3U);
+  EXPECT_EQ(run_x86_64(trailing, {0}), 64U);  // tzcnt of zero is the operand width
+
+  // lzcnt rax, rdi; ret
+  donkey::IrFunction leading;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbd, 0xc7, 0xc3}, leading));
+  EXPECT_EQ(run_x86_64(leading, {1}), 63U);
+  EXPECT_EQ(run_x86_64(leading, {0}), 64U);
+
+  // mov rax, rdi; bswap rax; ret
+  donkey::IrFunction swap;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x0f, 0xc8, 0xc3}, swap));
+  EXPECT_FALSE(swap.partial);
+  EXPECT_EQ(run_x86_64(swap, {0x0102030405060708ULL}), 0x0807060504030201ULL);
+}
+
+TEST(Ir, X86BitTestCarriesTheSelectedBit) {
+  // bt rdi, rsi; setc al; movzx eax, al; ret
+  donkey::IrFunction register_index;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xa3, 0xf7, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3},
+                              register_index));
+  EXPECT_FALSE(register_index.partial);
+  EXPECT_EQ(run_x86_64(register_index, {4, 2}) & 0xffU, 1U);   // bit 2 of 4 is set
+  EXPECT_EQ(run_x86_64(register_index, {4, 1}) & 0xffU, 0U);   // bit 1 of 4 is clear
+  EXPECT_EQ(run_x86_64(register_index, {4, 66}) & 0xffU, 1U);  // the index is taken modulo 64
+
+  // bt rdi, 3; setc al; movzx eax, al; ret
+  donkey::IrFunction immediate_index;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x0f, 0xba, 0xe7, 0x03, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, immediate_index));
+  EXPECT_FALSE(immediate_index.partial);
+  EXPECT_EQ(run_x86_64(immediate_index, {8}) & 0xffU, 1U);
+  EXPECT_EQ(run_x86_64(immediate_index, {4}) & 0xffU, 0U);
+}
+
+TEST(Ir, FunctionWithADirectCallIsNotComplete) {
+  // call +0; mov eax, 1; ret. The call's effects are not modelled, so the result
+  // must be Partial even though every instruction lifts.
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0xe8, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+}
+
 }  // namespace

@@ -42,10 +42,11 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
-`tests/corpus/corpus.c` has 53 integer functions: arithmetic, branches,
+`tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
-types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), and double-width
-multiply and divide (`mul`, `imul`, `div`, `idiv`). The test
+types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), double-width
+multiply and divide (`mul`, `imul`, `div`, `idiv`), and bit operations
+(population count, guarded bit scans, byte swap, bit test). The test
 suite builds it at -O0, -O2 and -O3 with the host's C
 compiler. `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
 every function from the built library and runs the IR in an interpreter on
@@ -67,6 +68,7 @@ listed where the per-function report was read.
 | GCC 13.3, x86-64 Linux | CI ubuntu-24.04 (before G02-T1, 39 functions) | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 41/42 | 35/42 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
 | Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
 | Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
@@ -100,8 +102,10 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 ### Known unsupported classes
 
 - Floating point and SIMD: vectorised loops are Partial.
-- Calls' effects on registers and memory: functions that call are
-  rendered, but the oracle does not evaluate them.
+- Calls: a function that calls is Partial. Its call is rendered, and the
+  callee's effects on registers and memory are not modelled.
+- `bsf`/`bsr`: the result is undefined for a zero source, so they are
+  Unsupported until a zero-flag state exists.
 - Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.

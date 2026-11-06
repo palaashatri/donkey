@@ -367,8 +367,9 @@ set_tests_properties(cli.cfg_elf_json PROPERTIES
 
 add_test(NAME cli.decompile_elf_json
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+# _start contains a direct call, whose effects are not modelled, so it is Partial.
 set_tests_properties(cli.decompile_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Complete\".*u64 _start")
+  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Partial\".*u64 _start")
 
 add_test(NAME cli.decompile_elf_function_filter
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
@@ -390,7 +391,7 @@ add_test(NAME cli.decompile_elf_i386
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
 set_tests_properties(cli.decompile_elf_i386 PROPERTIES
   PASS_REGULAR_EXPRESSION
-    "\"name\": \"_start\".*\"status\": \"Complete\".*u32 _start\\(void\\).*esp = esp - 0x4")
+    "\"name\": \"_start\".*\"status\": \"Partial\".*u32 _start\\(void\\).*esp = esp - 0x4")
 
 # ---------------------------------------------------------------------------
 # Project persistence CLI.

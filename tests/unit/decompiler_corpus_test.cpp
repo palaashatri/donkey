@@ -98,6 +98,12 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_sdiv64", 'U', "UU"},
     {"c_srem64", 'U', "UU"},
     {"c_div10", 'U', "U"},
+    {"c_popcount64", 'u', "U"},
+    {"c_ctz64_guarded", 'u', "U"},
+    {"c_clz64_guarded", 'u', "U"},
+    {"c_bswap32", 'u', "u"},
+    {"c_bswap64", 'U', "U"},
+    {"c_bit_test", 'i', "Uu"},
 };
 
 struct Library {
