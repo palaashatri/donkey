@@ -2639,10 +2639,132 @@ TEST(Ir, AArch64SecondCarryReaderIsPartial) {
       aarch64_lifts_partial(aarch64_bytes({0xab010000, 0x9a030040, 0x9a030040, 0xd65f03c0})));
 }
 
-TEST(Ir, AArch64AddsWithCarryIsPartial) {
-  // adds x0, x0, x1; adcs x0, x2, x3; ret. adcs sets flags from the carry out, which
-  // is not modelled, so it is Unsupported.
-  EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xab010000, 0xba030040, 0xd65f03c0})));
+// adcs and sbcs set NZCV from the addition, as the architecture defines it, and
+// the IR states that exactly. The expected values are ground truth from running
+// the instructions under qemu-aarch64: the carry in is set by `cmp x2, #1`, which
+// makes C equal to x2 >= 1. nzcv uses N=8, Z=4, C=2, V=1.
+TEST(Ir, AArch64AdcsAndSbcsSetNzcvLikeTheAddition) {
+  struct Set {
+    std::vector<std::byte> result, eq, cs, mi, vs;  // eq tests Z, cs C, mi N, vs V
+  };
+  const Set adcs64{aarch64_bytes({0xf100045fU, 0xba010000U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xba010003U, 0x1a9f17e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xba010003U, 0x1a9f37e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xba010003U, 0x1a9f57e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xba010003U, 0x1a9f77e0U, 0xd65f03c0U})};
+  const Set sbcs64{aarch64_bytes({0xf100045fU, 0xfa010000U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xfa010003U, 0x1a9f17e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xfa010003U, 0x1a9f37e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xfa010003U, 0x1a9f57e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0xfa010003U, 0x1a9f77e0U, 0xd65f03c0U})};
+  const Set adcs32{aarch64_bytes({0xf100045fU, 0x3a010000U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x3a010003U, 0x1a9f17e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x3a010003U, 0x1a9f37e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x3a010003U, 0x1a9f57e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x3a010003U, 0x1a9f77e0U, 0xd65f03c0U})};
+  const Set sbcs32{aarch64_bytes({0xf100045fU, 0x7a010000U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x7a010003U, 0x1a9f17e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x7a010003U, 0x1a9f37e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x7a010003U, 0x1a9f57e0U, 0xd65f03c0U}),
+                   aarch64_bytes({0xf100045fU, 0x7a010003U, 0x1a9f77e0U, 0xd65f03c0U})};
+  struct Row {
+    bool subtract;
+    bool wide;
+    std::uint64_t a;
+    std::uint64_t b;
+    std::uint64_t carry;
+    std::uint64_t result;
+    std::uint64_t nzcv;
+  };
+  const Row rows[] = {
+      {false, true, 0x0ULL, 0x0ULL, 0, 0x0ULL, 4},
+      {false, true, 0x7fffffffffffffffULL, 0x1ULL, 0, 0x8000000000000000ULL, 9},
+      {false, true, 0x8000000000000000ULL, 0x8000000000000000ULL, 0, 0x0ULL, 7},
+      {false, true, 0xffffffffffffffffULL, 0x1ULL, 0, 0x0ULL, 6},
+      {false, true, 0x5ULL, 0x3ULL, 1, 0x9ULL, 0},
+      {true, true, 0x0ULL, 0x0ULL, 0, 0xffffffffffffffffULL, 8},
+      {true, true, 0x5ULL, 0x3ULL, 0, 0x1ULL, 2},
+      {true, true, 0x3ULL, 0x5ULL, 1, 0xfffffffffffffffeULL, 8},
+      {true, true, 0x5ULL, 0x3ULL, 1, 0x2ULL, 2},
+      {true, true, 0xffffffffffffffffULL, 0x1ULL, 1, 0xfffffffffffffffeULL, 10},
+      {false, false, 0x7fffffffULL, 0x1ULL, 0, 0x80000000ULL, 9},
+      {false, false, 0xffffffffULL, 0x1ULL, 0, 0x0ULL, 6},
+      {false, false, 0x5ULL, 0x3ULL, 1, 0x9ULL, 0},
+      {true, false, 0x5ULL, 0x3ULL, 0, 0x1ULL, 2},
+      {true, false, 0x3ULL, 0x5ULL, 1, 0xfffffffeULL, 8},
+  };
+  for (const Row& row : rows) {
+    const Set& set = row.subtract ? (row.wide ? sbcs64 : sbcs32) : (row.wide ? adcs64 : adcs32);
+    const std::uint64_t mask = row.wide ? ~0ULL : 0xffffffffULL;
+    const std::uint64_t inputs[] = {row.a, row.b, row.carry};
+    const auto run = [&inputs](const std::vector<std::byte>& code) {
+      return run_aarch64_args(code, {inputs[0], inputs[1], inputs[2]});
+    };
+    EXPECT_EQ(run(set.result) & mask, row.result) << "a=" << row.a << " b=" << row.b;
+    EXPECT_EQ(run(set.eq) & 1U, (row.nzcv >> 2U) & 1U) << "Z of a=" << row.a << " b=" << row.b;
+    EXPECT_EQ(run(set.cs) & 1U, (row.nzcv >> 1U) & 1U) << "C of a=" << row.a << " b=" << row.b;
+    EXPECT_EQ(run(set.mi) & 1U, (row.nzcv >> 3U) & 1U) << "N of a=" << row.a << " b=" << row.b;
+    EXPECT_EQ(run(set.vs) & 1U, row.nzcv & 1U) << "V of a=" << row.a << " b=" << row.b;
+  }
+}
+
+// adcs then adc: the carry out of adcs is the carry in of adc, so a 128-bit add
+// is right. ~0 + 1 carries into the high word: 5 + 7 + 1 = 13.
+TEST(Ir, AArch64AdcsCarryOutFeedsAdc) {
+  const auto chain = aarch64_bytes({0xf100049fU, 0xba020000U, 0x9a030020U, 0xd65f03c0U});
+  // x0, x1 is the low and high word of one operand, x2, x3 of the other, x4 the carry in.
+  EXPECT_EQ(run_aarch64_args(chain, {~0ULL, 5, 1, 7, 0}), 13U);
+  EXPECT_EQ(run_aarch64_args(chain, {1, 5, 2, 7, 0}), 12U);
+}
+
+// A branch on flags set by a cmp in the block before it. The fall-through block has
+// one predecessor, so the cmp is repeated at its start and the function is Complete.
+// This is the shape of c_switch_sparse at -O2 on GCC.
+TEST(Ir, AArch64FlagsFromSinglePredecessorAreExact) {
+  const auto code = aarch64_bytes({0x7101901fU, 0x540000c0U, 0x5400006cU, 0x528000a0U, 0xd65f03c0U,
+                                   0x52800120U, 0xd65f03c0U, 0x528000e0U, 0xd65f03c0U});
+  EXPECT_FALSE(aarch64_lifts_partial(code));
+  EXPECT_EQ(run_aarch64_args(code, {100}), 7U);
+  EXPECT_EQ(run_aarch64_args(code, {200}), 9U);
+  EXPECT_EQ(run_aarch64_args(code, {99}), 5U);  // not equal, and not greater
+  EXPECT_EQ(run_aarch64_args(code, {3}), 5U);
+  EXPECT_EQ(run_aarch64_args(code, {101}), 9U);
+}
+
+// The cmp reads w0, which mov rewrites before the branch. The compare cannot be
+// repeated from its operands, so the block that branches on it stays Partial.
+TEST(Ir, AArch64FlagsRewrittenAfterTheCompareStayPartial) {
+  EXPECT_TRUE(aarch64_lifts_partial(
+      aarch64_bytes({0x7101901fU, 0x52800020U, 0x540000c0U, 0x5400006cU, 0x528000a0U, 0xd65f03c0U,
+                     0x52800120U, 0xd65f03c0U, 0x528000e0U, 0xd65f03c0U})));
+}
+
+// adds sets the flags too, but they are not the flags of a cmp or tst that can be
+// repeated, so the block that branches on them stays Partial.
+TEST(Ir, AArch64FlagsFromAddsDoNotCarryAcrossBlocks) {
+  EXPECT_TRUE(aarch64_lifts_partial(
+      aarch64_bytes({0x31000401U, 0x540000c0U, 0x5400006cU, 0x528000a0U, 0xd65f03c0U, 0x52800120U,
+                     0xd65f03c0U, 0x528000e0U, 0xd65f03c0U})));
+}
+
+TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {
+  // adcs with no flag writer before it: its carry in is unknown.
+  EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xba010000U, 0xd65f03c0U})));
+}
+
+TEST(Ir, AArch64AdcsIntoZeroRegisterSetsTheFlagsOnly) {
+  // adcs xzr, x0, x1: the sum is discarded, the carry out is kept.
+  const auto discard = aarch64_bytes({0xf100045fU, 0xba01001fU, 0x9a9f37e0U, 0xd65f03c0U});
+  EXPECT_EQ(run_aarch64_args(discard, {~0ULL, 1, 0}), 1U);
+  EXPECT_EQ(run_aarch64_args(discard, {5, 3, 0}), 0U);
+}
+
+TEST(Ir, AArch64AddsThenAdcsUsesTheSumsCarry) {
+  // adds x0, x0, x1; adcs x0, x2, x3; ret: adcs takes the carry of adds.
+  const auto code = aarch64_bytes({0xab010000, 0xba030040, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(code));
+  EXPECT_EQ(run_aarch64_args(code, {~0ULL, 1, 5, 7}), 13U);  // carry 1: 5 + 7 + 1
+  EXPECT_EQ(run_aarch64_args(code, {1, 2, 5, 7}), 12U);      // carry 0
 }
 
 }  // namespace

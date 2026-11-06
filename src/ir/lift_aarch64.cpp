@@ -1006,17 +1006,119 @@ struct Lifter {
     push(block, std::move(combined));
   }
 
-  /// adc and sbc: dest = a + b + C, or a - b - borrow, where the borrow is not C.
-  /// The carry comes from the flags before, so they must be exact. The carry out
-  /// of an adc or sbc is not modelled, so a second carry reader in the block needs
-  /// its own flag writer first. adcs and sbcs set flags from that carry out, so
-  /// they stay Unsupported.
+  /// The cmp or tst whose flags are still current at the end of `previous`, a block
+  /// that falls through into the next one. Scanning back from its end, the first
+  /// instruction that sets flags must be a cmp or tst of registers and immediates
+  /// with no shift. Nothing after it may set flags, write a register it reads, or
+  /// write back an address. Returns its index in analysis.instructions.
+  std::optional<std::uint32_t> carried_flag_writer(const BasicBlock& previous) const {
+    const std::uint32_t first = previous.first_instruction;
+    const std::uint32_t end = previous.first_instruction + previous.instruction_count;
+    if (previous.instruction_count == 0 || end > analysis.instructions.size()) {
+      return std::nullopt;
+    }
+    std::optional<std::uint32_t> writer;
+    for (std::uint32_t i = end; i-- > first;) {
+      const Instruction& candidate = analysis.instructions[i];
+      if (candidate.classification == InstructionClass::ConditionalJump) {
+        continue;  // reads the flags and writes none; it can only end the block
+      }
+      if (candidate.classification != InstructionClass::Other) {
+        return std::nullopt;
+      }
+      if (sets_flags(candidate.mnemonic)) {
+        writer = i;
+        break;
+      }
+    }
+    if (!writer) {
+      return std::nullopt;
+    }
+    const Instruction& compare = analysis.instructions[*writer];
+    if ((compare.mnemonic != "cmp" && compare.mnemonic != "tst") ||
+        compare.structured_operands.size() != 2) {
+      return std::nullopt;
+    }
+    std::vector<std::string> read;
+    for (const Operand& operand : compare.structured_operands) {
+      if (operand.kind == OperandKind::Register && operand.shift == ShiftKind::None &&
+          operand.extend == ExtendKind::None) {
+        read.push_back(internal::register_family(operand.reg));
+      } else if (operand.kind != OperandKind::Immediate || operand.shift != ShiftKind::None) {
+        return std::nullopt;
+      }
+    }
+    const auto reads = [&read](const std::string& family) {
+      return std::find(read.begin(), read.end(), family) != read.end();
+    };
+    for (std::uint32_t i = *writer + 1; i < end; ++i) {
+      const Instruction& later = analysis.instructions[i];
+      if (later.classification == InstructionClass::ConditionalJump && i + 1 == end) {
+        continue;  // the block's terminator
+      }
+      if (later.classification != InstructionClass::Other || sets_flags(later.mnemonic)) {
+        return std::nullopt;
+      }
+      const bool store = later.mnemonic.rfind("st", 0) == 0;
+      for (const Operand& operand : later.structured_operands) {
+        if (operand.kind == OperandKind::Memory && operand.memory.writeback) {
+          return std::nullopt;
+        }
+        if (!store && operand.kind == OperandKind::Register &&
+            reads(internal::register_family(operand.reg))) {
+          return std::nullopt;
+        }
+      }
+    }
+    return writer;
+  }
+
+  /// True when `block` has no predecessor but `previous`, the block just before it
+  /// in address order, which reaches it by falling through: either `previous` does
+  /// not end in a branch, or it ends in a conditional branch whose not-taken edge is
+  /// `block`. An unresolved indirect branch in the function could reach any block,
+  /// so it rules this out. Calls and jumps from elsewhere count as predecessors.
+  bool single_fallthrough_predecessor(const BasicBlock& previous, const BasicBlock& block) const {
+    if (function.estimated) {
+      return false;
+    }
+    const Instruction& last =
+        analysis.instructions[previous.first_instruction + previous.instruction_count - 1];
+    std::size_t predecessors = 0;
+    bool from_previous = false;
+    for (const CfgEdge& edge : analysis.cfg.edges) {
+      if (edge.to != block.address) {
+        continue;
+      }
+      ++predecessors;
+      if (edge.from == last.address && edge.kind == CfgEdgeKind::ConditionalFalse) {
+        from_previous = true;
+      }
+    }
+    if (last.classification == InstructionClass::Other) {
+      ++predecessors;  // a fall-through has no CFG edge
+      from_previous = true;
+    } else if (last.classification != InstructionClass::ConditionalJump) {
+      return false;
+    }
+    return from_previous && predecessors == 1;
+  }
+
+  /// adc, sbc, adcs and sbcs. adc is a + b + C, and sbc is a - b - borrow, with the
+  /// borrow the inverse of C. The carry comes from the flags before, so they must be
+  /// exact. adc and sbc leave the carry out unmodelled, so a second carry reader in
+  /// the block needs its own flag writer first. adcs and sbcs set NZCV from the
+  /// addition (C is the carry out, V the signed overflow), which the IR states
+  /// exactly. sbcs is the addition of NOT(b), as the architecture defines it.
   void lift_add_with_carry(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    const bool sets_nzcv = mnemonic == "adcs" || mnemonic == "sbcs";
+    const bool discard =
+        operands.size() == 3 && (operands[0].reg == "xzr" || operands[0].reg == "wzr");
     if (!flags_exact || carry_consumed || operands.size() != 3 ||
         operands[0].kind != OperandKind::Register || operands[1].kind != OperandKind::Register ||
-        operands[2].kind != OperandKind::Register || operands[0].reg == "xzr" ||
-        operands[0].reg == "wzr") {
+        operands[2].kind != OperandKind::Register || (discard && !sets_nzcv)) {
       unsupported(block, instruction);
       return;
     }
@@ -1026,15 +1128,40 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
+    IrOperand addend = to_ir_operand(operands[2], width);
+    if (mnemonic == "sbcs") {
+      // sbcs: a + NOT(b) + C, as the architecture defines it.
+      const std::uint32_t inverted = temporary_id();
+      IrStatement invert;
+      invert.op = IrOp::Xor;
+      invert.dest = temp_operand(inverted, width);
+      invert.a = addend;
+      invert.b = IrOperand::constant_value(width_mask(width), width);
+      invert.width = width;
+      invert.source_address = instruction.address;
+      push(block, std::move(invert));
+      addend = temp_operand(inverted, width);
+    }
     IrStatement statement;
-    statement.op = instruction.mnemonic == "sbc" ? IrOp::SubBorrow : IrOp::AddCarry;
-    statement.dest = to_ir_operand(operands[0], width);
+    if (mnemonic == "sbc") {
+      statement.op = IrOp::SubBorrow;
+    } else if (sets_nzcv) {
+      statement.op = IrOp::AddCarryFlags;
+    } else {
+      statement.op = IrOp::AddCarry;
+    }
+    statement.dest =
+        discard ? temp_operand(temporary_id(), width) : to_ir_operand(operands[0], width);
     statement.a = to_ir_operand(operands[1], width);
-    statement.b = to_ir_operand(operands[2], width);
+    statement.b = addend;
     statement.width = width;
     statement.source_address = instruction.address;
     push(block, std::move(statement));
-    carry_consumed = true;
+    if (sets_nzcv) {
+      modelled_flags = true;  // the flags after are NZCV of this addition
+    } else {
+      carry_consumed = true;
+    }
   }
 
   /// ccmp and ccmn. If the condition holds over the current flags, NZCV becomes
@@ -1735,10 +1862,28 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
-    // Flags are modelled within a block only; a branch on flags set in a
-    // predecessor stays Partial.
+    // The flags exact at the end of the previous block carry into this one when this
+    // block has no other predecessor: the cmp or tst that set them is repeated here,
+    // from the same operands, before anything else in the block.
+    const bool entering = lifter.flags_exact;
     lifter.flags_exact = false;
     lifter.carry_consumed = false;
+    const std::uint32_t block_index = lifter.block_by_address.at(block->address);
+    if (block_index > 0 && entering && lifter.out.blocks.size() == block_index) {
+      const BasicBlock& previous = *lifter.blocks[block_index - 1];
+      if (previous.end_address == block->address) {
+        const auto writer = lifter.carried_flag_writer(previous);
+        if (writer && lifter.single_fallthrough_predecessor(previous, *block)) {
+          lifter.modelled_flags = false;
+          lifter.lift_arithmetic(out_block, analysis.instructions[*writer]);
+          bool unsupported_statement = false;
+          for (const IrStatement& statement : out_block.statements) {
+            unsupported_statement = unsupported_statement || statement.op == IrOp::Unsupported;
+          }
+          lifter.flags_exact = lifter.modelled_flags && !unsupported_statement;
+        }
+      }
+    }
 
     for (std::uint32_t i = 0; i < block->instruction_count; ++i) {
       const std::size_t index = static_cast<std::size_t>(block->first_instruction) + i;
@@ -1899,7 +2044,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
                  mnemonic == "smaddl" || mnemonic == "umsubl" || mnemonic == "smsubl" ||
                  mnemonic == "umnegl" || mnemonic == "smnegl") {
         lifter.lift_widening_multiply(out_block, instruction);
-      } else if (mnemonic == "adc" || mnemonic == "sbc") {
+      } else if (mnemonic == "adc" || mnemonic == "sbc" || mnemonic == "adcs" ||
+                 mnemonic == "sbcs") {
         lifter.lift_add_with_carry(out_block, instruction);
       } else if (mnemonic == "ccmp" || mnemonic == "ccmn") {
         lifter.lift_conditional_compare(out_block, instruction);

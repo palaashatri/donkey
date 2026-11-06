@@ -318,10 +318,12 @@ class Renderer {
         return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
                operand(statement.a) + ";";
       case IrOp::AddCarry:
+      case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
-        const bool add = statement.op == IrOp::AddCarry;
+        const bool add = statement.op != IrOp::SubBorrow;
         return operand(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
-               operand(statement.b) + (add ? " + CF;" : " - CF;");
+               operand(statement.b) + (add ? " + CF;" : " - CF;") +
+               (statement.op == IrOp::AddCarryFlags ? " /* sets NZCV */" : "");
       }
       case IrOp::MulHighUnsigned:
       case IrOp::MulHighSigned:
@@ -374,7 +376,8 @@ bool flags_written_in_block(const IrBlock& block, std::size_t index) {
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test ||
-        candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd) {
+        candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
+        candidate.op == IrOp::AddCarryFlags) {
       return true;
     }
     if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
@@ -389,7 +392,8 @@ const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   std::vector<std::string> written;
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
-    if (candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd) {
+    if (candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
+        candidate.op == IrOp::AddCarryFlags) {
       return nullptr;  // its NZCV is not the comparison of two operands
     }
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
@@ -479,6 +483,8 @@ const char* ir_op_name(IrOp op) noexcept {
       return "cond_compare";
     case IrOp::CondCompareAdd:
       return "cond_compare_add";
+    case IrOp::AddCarryFlags:
+      return "add_carry_flags";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -776,6 +782,7 @@ Result<bool> verify_ir(const IrFunction& function) {
           }
           break;
         case IrOp::AddCarry:
+        case IrOp::AddCarryFlags:
         case IrOp::SubBorrow:
           if (statement.dest.kind != IrOperandKind::Register ||
               statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
