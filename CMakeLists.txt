@@ -121,6 +121,7 @@ add_library(donkey_ir STATIC
   src/ir/canonical.cpp
   src/ir/debug_names.cpp
   src/ir/optimize.cpp
+  src/ir/prototype.cpp
   src/ir/structure.cpp
 )
 add_library(donkey::ir ALIAS donkey_ir)

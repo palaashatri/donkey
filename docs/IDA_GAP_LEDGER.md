@@ -155,8 +155,8 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3, and flags into a single-predecessor fall-through block in G02-T4. Still Partial or Unsupported by design: `bsf`/`bsr` with a zero source, memory forms of `bt` family, flags into a block with several predecessors | P0 | IN PROGRESS (G02-T1, T2, T3, T4 DONE; the rest is by design, see the row text) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; `for` only for counted loops (G04-T3, unit-tested; no corpus loop yet) | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form done for counted loops (unit-tested) but not in the corpus; break, continue and integer negation done; T4 DONE for -O0 code: parameters and frame slots take their DWARF names in `donkey-cli decompile` (GCC and Clang frame layouts; optimised code keeps register names, and nested lexical blocks are not read) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). No application to code, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3-T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). No application to code, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3-T4 TODO) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). A prototype can be applied to recovered code, naming parameters and pointer structures (G05-T3, partial). No propagation through copies and loads, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 TODO) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). A prototype can be applied to recovered code, naming parameters and pointer structures (G05-T3, partial). No propagation through copies and loads, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 TODO) |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -888,6 +888,21 @@ for Partial functions.
   4. The printer uses the field names.
 - **Done when:** G04-T0 still passes (types never change semantics), and a
   test applies `struct corpus_point *` to `c_point_sum` and prints `p->z`.
+- **Status:** PARTIAL. Done: steps 1, 2 and 4, and the done-when test. `apply_prototype`
+  (`include/donkey/ir/prototype.h`, `src/ir/prototype.cpp`) takes an `IrPrototype` (return
+  width, parameters with width, class and an optional pointee structure with named members)
+  and changes names and types only. It refuses a prototype whose arity, widths, classes or
+  return width differ from the inferred signature, and a pointee whose members do not match
+  every access the function makes through that parameter (offset and width). A refusal
+  leaves the function unchanged. The printer shows `(struct corpus_point *p)` and `p->z`,
+  and no inferred `a0_fields` block. Evidence: `DecompilerCorpus.AppliedPrototypeNamesStructFields`
+  (the value of `c_point_sum` on a concrete `corpus_point` is the same before and after
+  the prototype, 120), `DecompilerCorpus.AppliedPrototypeThatContradictsTheFunctionIsRefused`,
+  and the full headless ctest suite (415 of 415) and the Release `DecompilerCorpus.*`, `Ir.*`
+  and `Types.*` suites (166 of 166), on Linux x86-64. Not done: step 3, types flowing
+  forward through copies and loads, so a value loaded from a typed field is not typed. The
+  conversion from a `TypeTable` to an `IrPrototype` is written by the caller (the test does
+  it); the CLI and UI that would do it are G05-T4.
 
 **G05-T4 UI and CLI**
 
