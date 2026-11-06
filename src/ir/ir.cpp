@@ -64,6 +64,17 @@ const char* width_type(std::uint8_t width) {
   }
 }
 
+/// The C type of a value `width` bytes wide: float or double for a floating-point value.
+const char* value_type(std::uint8_t width, bool floating_point) {
+  if (floating_point && width == 4) {
+    return "float";
+  }
+  if (floating_point && width == 8) {
+    return "double";
+  }
+  return width_type(width);
+}
+
 /// An exact hexadecimal floating-point literal for the bits of a float (width 4)
 /// or double (width 8), such as 0x1.8p+1. NaN and infinity are spelled out with
 /// their payload or sign. Nothing is rounded to decimal.
@@ -84,11 +95,14 @@ std::string hex_float_literal(std::uint64_t bits, std::uint8_t width) {
     std::snprintf(buffer, sizeof(buffer), "NAN(0x%llx)", static_cast<unsigned long long>(frac));
     return sign + buffer;
   }
-  // The fraction in hexadecimal, with its trailing zeros removed.
+  // The fraction in hexadecimal, with its trailing zeros removed. The fraction is aligned
+  // to whole hexadecimal digits first: a single-precision fraction has 23 bits, which is
+  // printed as six digits (24 bits), so it is shifted left by one.
   const unsigned digits = (frac_bits + 3U) / 4U;
+  const std::uint64_t aligned = frac << (digits * 4U - frac_bits);
   char hex[32];
   std::snprintf(hex, sizeof(hex), "%0*llx", static_cast<int>(digits),
-                static_cast<unsigned long long>(frac));
+                static_cast<unsigned long long>(aligned));
   std::string fraction = hex;
   while (!fraction.empty() && fraction.back() == '0') {
     fraction.pop_back();
@@ -410,8 +424,12 @@ class Renderer {
                float_operand(statement.b, statement.width) + ");";
       case IrOp::IntToFloat:
       case IrOp::UIntToFloat:
+        // An unsigned source keeps all of its bytes: the cast names the source's width.
         return destination(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
-               ")" + (statement.op == IrOp::UIntToFloat ? "(unsigned)" : "") +
+               ")" +
+               (statement.op == IrOp::UIntToFloat
+                    ? (statement.a.width == 8 ? "(unsigned long long)" : "(unsigned)")
+                    : "") +
                operand(statement.a) + ";";
       case IrOp::FloatToInt:
         return destination(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
@@ -426,9 +444,11 @@ class Renderer {
                float_operand(statement.b, statement.width) + ", " +
                float_operand(statement.c, statement.width) + ");";
       case IrOp::FMulSub:
-        return destination(statement.dest) + " = " + float_operand(statement.c, statement.width) +
-               " - " + float_operand(statement.a, statement.width) + " * " +
-               float_operand(statement.b, statement.width) + " /* fused */;";
+        // c - a * b with one rounding: fma(-a, b, c) is the same operation, fused.
+        return destination(statement.dest) + " = fma(-" +
+               float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ", " +
+               float_operand(statement.c, statement.width) + ");";
       case IrOp::AddCarry:
       case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
@@ -1395,7 +1415,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   }
 
   std::string signature;
-  signature += function.return_width != 0 ? width_type(function.return_width) : "void";
+  signature += function.return_width != 0
+                   ? value_type(function.return_width, function.return_floating_point)
+                   : "void";
   signature += " ";
   signature += function.name.empty() ? std::string("sub") : function.name;
   signature += "(";
@@ -1415,7 +1437,8 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
       if (recovered != nullptr) {
         signature += "struct " + recovered->type_name + " *";
       } else {
-        signature += width_type(function.parameters[index].width);
+        signature +=
+            value_type(function.parameters[index].width, function.parameters[index].floating_point);
         signature += " ";
       }
       signature += function.parameters[index].name;

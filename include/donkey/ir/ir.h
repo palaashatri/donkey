@@ -179,6 +179,10 @@ struct IrStatement {
   /// Only for the floating-point operations.
   IrFloatModel float_model = IrFloatModel::X86;
   std::uint8_t width = 0;
+  /// Only for the final OR of a merge into a register family: the width, in bytes, of
+  /// the value merged in (a sub-word write, or a single-precision result). Zero otherwise.
+  /// Return inference reads the width of the value a register holds from this field.
+  std::uint8_t merged_width = 0;
   /// Address of the machine instruction this statement came from (0 for
   /// synthesized statements).
   std::uint64_t source_address = 0;
@@ -201,6 +205,9 @@ struct IrParameter {
   std::uint8_t width = 8;
   /// ABI register the value arrives in (`rdi`, `x0`, …).
   std::string abi_register;
+  /// The value is floating-point (an XMM, s, d or v register): it is rendered as float or
+  /// double, not as an integer of the same width.
+  bool floating_point = false;
 };
 
 struct IrLocalVariable {
@@ -239,6 +246,8 @@ struct IrFunction {
   std::vector<IrParameter> parameters;
   /// Width of the returned value in bytes; 0 means no value is returned.
   std::uint8_t return_width = 0;
+  /// The returned value is floating-point (it is in xmm0, or in v0, d0 or s0).
+  bool return_floating_point = false;
   bool signature_inferred = false;
   /// Stack local variables and arguments recovered from stack frames.
   std::vector<IrLocalVariable> local_variables;

@@ -167,8 +167,12 @@ struct Canonicaliser {
                           IrOperand::constant_value(shift, 1), 8, address));
       shifted = temporary(moved, 8);
     }
-    post.push_back(make(IrOp::Or, IrOperand::register_ref(family_name, 8), temporary(kept, 8),
-                        shifted, 8, address));
+    // The width of the value merged in is recorded on the OR, because the family is written
+    // at full width: return inference uses it (`mov al, dil; ret` returns 1 byte).
+    IrStatement merge = make(IrOp::Or, IrOperand::register_ref(family_name, 8), temporary(kept, 8),
+                             shifted, 8, address);
+    merge.merged_width = width;
+    post.push_back(std::move(merge));
   }
 
   void canonicalise(IrBlock& block, const std::vector<IrStatement>& statements) {
