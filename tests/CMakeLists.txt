@@ -511,6 +511,51 @@ set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL
 
 set(DONKEY_CLI_ANN_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-annotations.db")
 
+# C types in a project (G05-T4): add a header, list the types, apply one to an address.
+set(DONKEY_CLI_TYPES_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-types.db")
+# --clear does not empty the type table, so the database is removed first: a second
+# run of the suite must start from the same state as the first.
+add_test(NAME cli.project_type_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPES_DB}
+                 ${DONKEY_CLI_TYPES_DB}-shm ${DONKEY_CLI_TYPES_DB}-wal)
+add_test(NAME cli.project_type_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --clear --json)
+set_tests_properties(cli.project_type_save PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 5.*\"integrity\": true"
+  DEPENDS cli.project_type_reset)
+
+add_test(NAME cli.project_type_add
+         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
+set_tests_properties(cli.project_type_add PROPERTIES
+  PASS_REGULAR_EXPRESSION "Added [1-9][0-9]* types from"
+  DEPENDS cli.project_type_save)
+
+add_test(NAME cli.project_type_list_json
+         COMMAND donkey-cli project type list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_list_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"kind\": \"struct\".*\"name\": \"point\".*\"size\": 8.*\"kind\": \"function\".*\"name\": \"point_sum\""
+  DEPENDS cli.project_type_add)
+
+add_test(NAME cli.project_type_apply_data
+         COMMAND donkey-cli project type apply ${DONKEY_CLI_TYPES_DB} 1 0x400100 point)
+set_tests_properties(cli.project_type_apply_data PROPERTIES
+  PASS_REGULAR_EXPRESSION "Applied point to 0x400100 in image 1"
+  DEPENDS cli.project_type_add)
+
+add_test(NAME cli.project_type_apply_prototype
+         COMMAND donkey-cli project type apply ${DONKEY_CLI_TYPES_DB} 1 0x400200 point_sum --json)
+set_tests_properties(cli.project_type_apply_prototype PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"applied_as\": \"prototype\""
+  DEPENDS cli.project_type_apply_data)
+
+add_test(NAME cli.project_type_rejects_bad_header
+         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bad.h)
+set_tests_properties(cli.project_type_rejects_bad_header PROPERTIES WILL_FAIL TRUE
+  DEPENDS cli.project_type_add)
+
 add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
