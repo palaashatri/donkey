@@ -43,6 +43,12 @@ constexpr std::uint32_t kR_AARCH64_ABS64 = 257;
 constexpr std::uint32_t kR_AARCH64_PREL32 = 261;
 constexpr std::uint32_t kR_AARCH64_JUMP26 = 282;
 constexpr std::uint32_t kR_AARCH64_CALL26 = 283;
+constexpr std::uint32_t kR_AARCH64_ADR_PREL_PG_HI21 = 275;
+constexpr std::uint32_t kR_AARCH64_ADD_ABS_LO12_NC = 277;
+constexpr std::uint32_t kR_AARCH64_LDST8_ABS_LO12_NC = 278;
+constexpr std::uint32_t kR_AARCH64_LDST16_ABS_LO12_NC = 284;
+constexpr std::uint32_t kR_AARCH64_LDST32_ABS_LO12_NC = 285;
+constexpr std::uint32_t kR_AARCH64_LDST64_ABS_LO12_NC = 286;
 
 Endian endian_of(std::span<const std::byte> file) {
   return static_cast<unsigned>(file[5]) == 2 ? Endian::Big : Endian::Little;
@@ -400,6 +406,53 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
             const std::uint64_t instruction = load(out, file_place, 4, endian);
             const std::uint64_t patched = (instruction & ~std::uint64_t{0x03FF'FFFFU}) |
                                           (static_cast<std::uint64_t>(words) & 0x03FF'FFFFU);
+            store(out, file_place, 4, patched, endian);
+            break;
+          }
+          case kR_AARCH64_ADR_PREL_PG_HI21: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            // ADRP: the page of S + A relative to the page of the instruction, in 4 KiB
+            // units, split over immlo (bits 29-30) and immhi (bits 5-23).
+            constexpr std::int64_t kPageMask = 0xFFF;
+            const std::int64_t pages = ((s + addend) & ~kPageMask) - (p & ~kPageMask);
+            const std::int64_t value = pages >> 12;
+            if (value < -(std::int64_t{1} << 20) || value >= (std::int64_t{1} << 20)) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a page-relative address does not fit in 21 bits");
+              break;
+            }
+            const std::uint64_t imm = static_cast<std::uint64_t>(value) & 0x1F'FFFFU;
+            const std::uint64_t instruction = load(out, file_place, 4, endian);
+            const std::uint64_t patched = (instruction & ~std::uint64_t{0x60FF'FFE0U}) |
+                                          ((imm & 0x3U) << 29U) | (((imm >> 2U) & 0x7'FFFFU) << 5U);
+            store(out, file_place, 4, patched, endian);
+            break;
+          }
+          case kR_AARCH64_ADD_ABS_LO12_NC:
+          case kR_AARCH64_LDST8_ABS_LO12_NC:
+          case kR_AARCH64_LDST16_ABS_LO12_NC:
+          case kR_AARCH64_LDST32_ABS_LO12_NC:
+          case kR_AARCH64_LDST64_ABS_LO12_NC: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            // The low 12 bits of S + A go in the instruction's 12-bit immediate (bits 10-21).
+            // A load or store scales that offset by its access size. The _NC forms do not
+            // check that the offset is aligned.
+            const unsigned scale = type == kR_AARCH64_LDST16_ABS_LO12_NC   ? 1U
+                                   : type == kR_AARCH64_LDST32_ABS_LO12_NC ? 2U
+                                   : type == kR_AARCH64_LDST64_ABS_LO12_NC ? 3U
+                                                                           : 0U;
+            const std::uint64_t low = (static_cast<std::uint64_t>(s + addend) & 0xFFFU) >> scale;
+            const std::uint64_t instruction = load(out, file_place, 4, endian);
+            const std::uint64_t patched =
+                (instruction & ~std::uint64_t{0x003F'FC00U}) | ((low & 0xFFFU) << 10U);
             store(out, file_place, 4, patched, endian);
             break;
           }
