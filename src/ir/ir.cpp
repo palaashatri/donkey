@@ -306,6 +306,12 @@ class Renderer {
       case IrOp::CondAssign:
         return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
                operand(statement.a) + ";";
+      case IrOp::AddCarry:
+      case IrOp::SubBorrow: {
+        const bool add = statement.op == IrOp::AddCarry;
+        return operand(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
+               operand(statement.b) + (add ? " + CF;" : " - CF;");
+      }
     }
     return "";
   }
@@ -323,6 +329,23 @@ class Renderer {
 }  // namespace
 
 namespace detail {
+
+/// True when a Compare or Test earlier in the block sets the flags, with no call
+/// or unsupported statement after it that could change them. The interpreter
+/// keeps the operand values the flag writer read, so later writes to those
+/// operands do not change the flags.
+bool flags_written_in_block(const IrBlock& block, std::size_t index) {
+  for (std::size_t i = index; i-- > 0;) {
+    const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
+      return true;
+    }
+    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported) {
+      return false;  // flags may have changed in a way the IR does not show
+    }
+  }
+  return false;
+}
 
 const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   std::vector<std::string> written;
@@ -419,6 +442,10 @@ const char* ir_op_name(IrOp op) noexcept {
       return "unsupported";
     case IrOp::CondAssign:
       return "cond_assign";
+    case IrOp::AddCarry:
+      return "add_carry";
+    case IrOp::SubBorrow:
+      return "sub_borrow";
   }
   return "unknown";
 }
@@ -553,7 +580,8 @@ Result<bool> verify_ir(const IrFunction& function) {
       return fail("ir.empty_block", "block has no statements");
     }
     bool seen_terminator = false;
-    for (const IrStatement& statement : block.statements) {
+    for (std::size_t index = 0; index < block.statements.size(); ++index) {
+      const IrStatement& statement = block.statements[index];
       if (seen_terminator) {
         return fail("ir.dead_statements_after_terminator",
                     "block contains statements after terminator");
@@ -633,6 +661,27 @@ Result<bool> verify_ir(const IrFunction& function) {
                statement.a.width != statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "conditional assign source and destination widths must match");
+          }
+          break;
+        case IrOp::AddCarry:
+        case IrOp::SubBorrow:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None) {
+            return fail("ir.malformed_carry",
+                        "add or subtract with carry needs a register destination and two sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "add or subtract with carry operand widths must match statement width");
+          }
+          // The carry must come from a flag writer earlier in this block; otherwise
+          // it is not known.
+          if (!detail::flags_written_in_block(block, index)) {
+            return fail("ir.carry_without_flags",
+                        "add or subtract with carry has no flag writer earlier in its block");
           }
           break;
         case IrOp::Add:

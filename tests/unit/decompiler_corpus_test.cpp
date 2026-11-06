@@ -84,6 +84,9 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_switch_sparse", 'i', "i"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
+    {"c_add128_hi", 'U', "UUUU"},
+    {"c_sub128_hi", 'U', "UUUU"},
+    {"c_add_wraps", 'i', "UU"},
 };
 
 struct Library {
