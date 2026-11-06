@@ -1134,8 +1134,11 @@ struct Lifter {
     push(block,
          statement_of(IrOp::And, temp_operand(kept, 8), IrOperand::register_ref(destination, 8),
                       IrOperand::constant_value(0xffffffff00000000ULL, 8), 8, instruction));
-    push(block, statement_of(IrOp::Or, IrOperand::register_ref(destination, 8),
-                             temp_operand(kept, 8), temp_operand(widened, 8), 8, instruction));
+    IrStatement merge =
+        statement_of(IrOp::Or, IrOperand::register_ref(destination, 8), temp_operand(kept, 8),
+                     temp_operand(widened, 8), 8, instruction);
+    merge.merged_width = 4;
+    push(block, std::move(merge));
   }
 
   /// Writes a result of `width` bytes into the XMM register `destination`: a double
@@ -1189,6 +1192,15 @@ struct Lifter {
         statement.a = *source;
       }
       statement.float_model = IrFloatModel::X86;
+      // The operations round in the MXCSR mode the caller left. The ABI sets round to
+      // nearest on entry, which is what the IR models; ldmxcsr is not modelled, so a
+      // function that changes the mode is Partial through its Unsupported statement.
+      static const std::string kMxcsrNote =
+          "scalar floating-point operations assume the ABI's default MXCSR (round to nearest, "
+          "no exceptions unmasked) on entry";
+      if (std::find(out.notes.begin(), out.notes.end(), kMxcsrNote) == out.notes.end()) {
+        note(kMxcsrNote);
+      }
       write_xmm_scalar(block, instruction, std::move(statement), width, ops[0].reg);
       return true;
     }
@@ -1594,6 +1606,50 @@ ReturnDefinition reaching_block_start(const IrFunction& function, std::size_t in
   return joined;
 }
 
+/// Which return registers are written along some path to a return. A write is not killed
+/// by a later one, so a write to rax and a write to xmm0 on one path make the return
+/// channel ambiguous, whichever was written last. Walks back from statement `end` of block
+/// `start` over every predecessor, once per block.
+struct ReturnClasses {
+  bool integer = false;
+  bool floating = false;
+};
+
+ReturnClasses classes_reaching_return(const IrFunction& function, std::size_t start,
+                                      std::size_t end) {
+  ReturnClasses out;
+  std::vector<bool> visited(function.blocks.size(), false);
+  std::vector<std::pair<std::size_t, std::size_t>> pending{{start, end}};
+  while (!pending.empty()) {
+    const auto [index, limit] = pending.back();
+    pending.pop_back();
+    const IrBlock& block = function.blocks[index];
+    for (std::size_t s = 0; s < limit && s < block.statements.size(); ++s) {
+      const IrStatement& statement = block.statements[s];
+      if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
+        continue;
+      }
+      if (internal::register_family(statement.dest.reg) == "rax") {
+        out.integer = true;
+      } else if (statement.dest.reg == "xmm0") {
+        out.floating = true;
+      }
+    }
+    for (std::size_t p = 0; p < function.blocks.size(); ++p) {
+      if (visited[p]) {
+        continue;
+      }
+      const auto successors = successors_of(function, p);
+      if (std::find(successors.begin(), successors.end(), index) == successors.end()) {
+        continue;
+      }
+      visited[p] = true;
+      pending.emplace_back(p, function.blocks[p].statements.size());
+    }
+  }
+  return out;
+}
+
 /// Returns that carry a floating-point value leave it in xmm0, not rax. The lifter
 /// emits rax for every return, so each return is resolved from the definitions that
 /// reach it. When they disagree, or a path has no definition, the return stays rax
@@ -1605,6 +1661,14 @@ void resolve_return_registers(IrFunction& function) {
       IrStatement& statement = block.statements[s];
       if (statement.op != IrOp::Return || statement.a.kind != IrOperandKind::Register ||
           internal::register_family(statement.a.reg) != "rax") {
+        continue;
+      }
+      const ReturnClasses classes = classes_reaching_return(function, b, s);
+      if (classes.integer && classes.floating) {
+        function.partial = true;
+        function.notes.push_back(
+            "rax and xmm0 are both written on a path to this return; which one carries the "
+            "return value is not determined, so rax is assumed");
         continue;
       }
       ReturnDefinition found;

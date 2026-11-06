@@ -228,8 +228,12 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
           result.argument_written[family.value()] = true;
         }
         if (width_of(model.return_aliases, statement.dest.reg).has_value()) {
+          // A merge leaves the family at full width, but the value it carries is narrower:
+          // the return is as wide as that value (al, ax, or a single-precision xmm0).
           const std::uint8_t width =
-              statement.dest.width != 0 ? statement.dest.width : statement.width;
+              statement.merged_width != 0
+                  ? statement.merged_width
+                  : (statement.dest.width != 0 ? statement.dest.width : statement.width);
           if (width != 0) {
             result.current_return_width = width;
           }
