@@ -12,6 +12,9 @@ namespace donkey {
 struct LiftOptions {
   std::size_t max_statements = 200'000;
   std::size_t max_blocks = 20'000;
+  /// Run run_ir_passes on the lifted function (the default). Tests set this to
+  /// false to see the lifter's output and run the passes themselves.
+  bool run_passes = true;
 };
 
 /// Lift one function's basic blocks into IR. The lifters model a documented

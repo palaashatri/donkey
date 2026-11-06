@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
 | G02 | x86 integer gaps | Full integer semantics | No `adc`/`sbb`, double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks | P0 | TODO |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | TODO |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -445,6 +445,17 @@ for Partial functions.
 - **Tests:** `DecompilerCorpus.EveryPassPreservesSemantics`
 - **Done when:** it runs with the current passes (signature inference, struct
   recovery) and passes.
+- **Status:** DONE. Evidence: `DecompilerCorpus.EveryPassPreservesSemantics`
+  (every pass, every corpus function, O0/O2/O3, 48 vectors) and
+  `DecompilerCorpus.EveryPassCheckRejectsAChangedMeaning` (a pass that turns an
+  addition into a subtraction is reported) and
+  `DecompilerCorpus.EveryPassCheckRejectsAChangedPartialFlag` (setting or
+  clearing `IrFunction::partial` alone is reported). Green `ci` run on the
+  first G04-T0 commit, 7588286: https://github.com/palaashatri/donkey/actions/runs/41299348751
+  (PR palaashatri/donkey#26). The current passes only annotate the function, so the
+  checker confirms that they leave results unchanged; it does not yet cover
+  passes that rewrite statements. The corpus outcome report is identical to
+  before the change.
 
 **G04-T1 Register alias canonicalisation**
 
