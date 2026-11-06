@@ -161,6 +161,14 @@ bool preserves_flags(const std::string& mnemonic) {
          is_setcc(mnemonic);
 }
 
+/// xchg of two registers: a swap that leaves the flags alone. The memory forms
+/// need a load and a store, so they are not register exchanges.
+bool is_register_exchange(const Instruction& instruction) {
+  const std::vector<Operand>& operands = instruction.structured_operands;
+  return instruction.mnemonic == "xchg" && operands.size() == 2 &&
+         operands[0].kind == OperandKind::Register && operands[1].kind == OperandKind::Register;
+}
+
 /// Conditions that read only ZF and SF, which every flag-setting arithmetic
 /// instruction derives from its result alone.
 bool zero_sign_condition(IrCondition condition) {
@@ -475,9 +483,18 @@ struct Lifter {
         // Keep the minuend: the condition compares it with the subtrahend.
         saved = copy_before(destination);
       }
+      // The Compare reads the source again after the destination is written. A
+      // source that the destination is part of (a register, or a memory address
+      // formed from it, as in `add rax, [rax]`) must be copied before the write.
       std::optional<IrOperand> saved_source;
-      if (needs_operands && source.kind == IrOperandKind::Register &&
-          internal::register_family(source.reg) == internal::register_family(destination.reg)) {
+      const std::string destination_family = internal::register_family(destination.reg);
+      const bool source_uses_destination =
+          source.kind == IrOperandKind::Register
+              ? internal::register_family(source.reg) == destination_family
+              : source.kind == IrOperandKind::Memory &&
+                    (internal::register_family(source.reg) == destination_family ||
+                     internal::register_family(source.index) == destination_family);
+      if (needs_operands && source_uses_destination) {
         saved_source = copy_before(source);
       }
       IrStatement statement;
@@ -618,18 +635,18 @@ struct Lifter {
   }
 
   /// xchg reg, reg: a swap through a temporary. An exchange leaves the flags alone.
-  void lift_exchange(IrBlock& block, const Instruction& instruction) {
+  /// Returns false when the exchange is Unsupported, which invalidates the flags.
+  bool lift_exchange(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
-    if (operands.size() != 2 || operands[0].kind != OperandKind::Register ||
-        operands[1].kind != OperandKind::Register) {
+    if (!is_register_exchange(instruction)) {
       unsupported(block, instruction);  // with memory it needs a load and a store
-      return;
+      return false;
     }
     const IrOperand first = to_ir_operand(operands[0], instruction, pointer_width);
     const IrOperand second = to_ir_operand(operands[1], instruction, pointer_width);
     if (first.width != second.width) {
       unsupported(block, instruction);
-      return;
+      return false;
     }
     const IrOperand saved = temp_operand(temporary_id(), first.width);
     const auto assign = [&](const IrOperand& dest, const IrOperand& source) {
@@ -644,6 +661,7 @@ struct Lifter {
     assign(saved, first);
     assign(first, second);
     assign(second, saved);
+    return true;
   }
 
   /// adc / sbb with a register destination: dest = dest +/- source +/- CF. The
@@ -1003,9 +1021,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
-    if (lifted) {
-      infer_signature(lifted.value(), image.architecture, image.format);
-      recover_pointer_structs(lifted.value());
+    if (lifted && options.run_passes) {
+      run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
     }
     return lifted;
   }
@@ -1067,6 +1084,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         const Instruction& next = analysis.instructions[at];
         if (next.mnemonic == "adc" || next.mnemonic == "sbb") {
           return IrCondition::Carry;  // reads CF only
+        }
+        if (is_register_exchange(next)) {
+          continue;  // swaps two registers; the flags pass through
         }
         if (next.classification == InstructionClass::ConditionalJump) {
           return branch_condition(next.mnemonic);
@@ -1245,8 +1265,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.lift_arithmetic(out_block, instruction, next_consumer(i));
         keeps_flags = true;  // lift_arithmetic set the state
       } else if (mnemonic == "xchg") {
-        lifter.lift_exchange(out_block, instruction);
-        keeps_flags = true;  // an exchange does not write the flags
+        // A register exchange does not write the flags; an unsupported one may
+        // have, so the flag state is dropped.
+        keeps_flags = lifter.lift_exchange(out_block, instruction);
       } else if (mnemonic == "adc" || mnemonic == "sbb") {
         lifter.lift_add_with_carry(out_block, instruction, next_consumer(i));
         keeps_flags = true;  // lift_add_with_carry set the state
@@ -1339,8 +1360,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
-  infer_signature(lifter.out, image.architecture, image.format);
-  recover_pointer_structs(lifter.out);
+  if (options.run_passes) {
+    run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
+  }
   return lifter.out;
 }
 

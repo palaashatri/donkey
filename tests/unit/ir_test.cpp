@@ -2070,4 +2070,92 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
 }
 
+TEST(Ir, VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled) {
+  // Compare; AddCarry; AddCarry: the second carry would read the compare's CF,
+  // not the carry out of the first add, which the IR does not represent.
+  donkey::IrFunction chained = carry_function(donkey::IrOp::AddCarry);
+  auto& statements = chained.blocks.front().statements;
+  statements.insert(statements.begin() + 2, statements[1]);
+  const auto rejected = donkey::verify_ir(chained);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.carry_without_flags");
+}
+
+TEST(Ir, VerifierRejectsACarryWithABlockOperand) {
+  donkey::IrFunction f = carry_function(donkey::IrOp::AddCarry);
+  f.blocks.front().statements[1].b = donkey::IrOperand::block_ref(0);
+  const auto rejected = donkey::verify_ir(f);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_carry");
+}
+
+TEST(Ir, VerifierRejectsACarryConstantWiderThanItsDestination) {
+  donkey::IrFunction f = carry_function(donkey::IrOp::AddCarry);
+  donkey::IrStatement& carry = f.blocks.front().statements[1];
+  carry.dest = donkey::IrOperand::register_ref("rax", 4);
+  carry.a = donkey::IrOperand::register_ref("rdx", 4);
+  carry.b = donkey::IrOperand::constant_value(1, 8);
+  carry.width = 4;
+  const auto rejected = donkey::verify_ir(f);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.type_width_mismatch");
+}
+
+/// Runs an x86-64 function whose only memory is one qword at `address`, passed
+/// in rdi. Reads of any other address fail the evaluation.
+std::uint64_t run_x86_64_on_qword(const donkey::IrFunction& function, std::uint64_t address,
+                                  std::uint64_t value) {
+  donkey::IrEvalMemory memory;
+  std::vector<std::uint8_t> bytes(8);
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    bytes[i] = static_cast<std::uint8_t>(value >> (8 * i));
+  }
+  EXPECT_TRUE(memory.add_region(address, bytes));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values{address};
+  auto result = donkey::evaluate_ir(function, values, memory, options);
+  EXPECT_TRUE(result.has_value()) << (result.has_value() ? "" : result.diagnostic().message);
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue) {
+  // add rdi, [rdi]; setb al; movzx eax, al; ret
+  // The compare for the carry must not re-read [rdi] at the new value of rdi.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x03, 0x3f, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  // The sum wraps to zero: 0x1000 + (2^64 - 0x1000) carries out.
+  EXPECT_EQ(run_x86_64_on_qword(f, 0x1000, 0xFFFF'FFFF'FFFF'F000ULL), 1U);
+  // No wrap: 0x1000 + 5 does not carry out.
+  EXPECT_EQ(run_x86_64_on_qword(f, 0x1000, 5), 0U);
+}
+
+TEST(Ir, X86CarryReachesAnAdcAcrossARegisterExchange) {
+  // add rdi, rsi; xchg rdx, rcx; adc rdx, rcx; mov rax, rdx; ret
+  // The exchange does not write the flags, so the adc reads the add's carry.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x01, 0xf7, 0x48, 0x87, 0xca, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 1, 5, 7}), 13U);  // the sum wraps: 5 + 7 + 1
+  EXPECT_EQ(run_x86_64(f, {1, 2, 5, 7}), 12U);
+}
+
+TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
+  // cmp rdi, rsi; xchg [rdi], rax; adc rdx, rcx; mov rax, rdx; ret
+  // The memory exchange is Unsupported and may have changed the flags, so the
+  // adc must not be lifted with the compare's carry.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x39, 0xf7, 0x48, 0x87, 0x07, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      EXPECT_NE(statement.op, donkey::IrOp::AddCarry);
+    }
+  }
+}
+
 }  // namespace

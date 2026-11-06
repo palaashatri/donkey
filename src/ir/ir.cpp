@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "donkey/ir/abi.h"
 #include "ir_internal.h"
 #include "registers.h"
 
@@ -348,14 +349,17 @@ namespace detail {
 /// True when a Compare or Test earlier in the block sets the flags, with no call
 /// or unsupported statement after it that could change them. The interpreter
 /// keeps the operand values the flag writer read, so later writes to those
-/// operands do not change the flags.
+/// operands do not change the flags. An add or subtract with carry in between
+/// does not qualify: its carry out is not represented in the IR, so the carry
+/// the later statement reads would still be the earlier flag writer's.
 bool flags_written_in_block(const IrBlock& block, std::size_t index) {
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
       return true;
     }
-    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported) {
+    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
+        candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) {
       return false;  // flags may have changed in a way the IR does not show
     }
   }
@@ -726,14 +730,19 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::AddCarry:
         case IrOp::SubBorrow:
           if (statement.dest.kind != IrOperandKind::Register ||
-              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None) {
-            return fail("ir.malformed_carry",
-                        "add or subtract with carry needs a register destination and two sources");
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block) {
+            return fail(
+                "ir.malformed_carry",
+                "add or subtract with carry needs a register destination and two value sources");
           }
           if (statement.dest.width != statement.width ||
               statement.a.width != statement.dest.width ||
               (statement.b.kind == IrOperandKind::Register &&
-               statement.b.width != statement.dest.width)) {
+               statement.b.width != statement.dest.width) ||
+              (statement.b.kind == IrOperandKind::Constant &&
+               statement.b.width > statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "add or subtract with carry operand widths must match statement width");
           }
@@ -1337,6 +1346,17 @@ void recover_stack_variables(IrFunction& function) {
               }
               return a.offset < b.offset;
             });
+}
+
+void run_ir_passes(IrFunction& function, const PassOptions& options) {
+  infer_signature(function, options.architecture, options.format);
+  if (options.after_pass) {
+    options.after_pass("infer_signature", function);
+  }
+  recover_pointer_structs(function);
+  if (options.after_pass) {
+    options.after_pass("recover_pointer_structs", function);
+  }
 }
 
 }  // namespace donkey
