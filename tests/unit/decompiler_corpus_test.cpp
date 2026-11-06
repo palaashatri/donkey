@@ -568,6 +568,22 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
                                   << " is reported Complete but computes something else: "
                                   << o.detail;
   }
+
+  // The carry-chain functions are Complete under Clang 18.1 on x86-64 at every
+  // level. A fall back to Partial would hide a wrong carry, so it must fail here.
+#if defined(__x86_64__) || defined(_M_X64)
+  if (std::strstr(DONKEY_CORPUS_COMPILER, "Clang 18") != nullptr) {
+    for (const Outcome& o : outcomes) {
+      if (o.function != "c_add128_hi" && o.function != "c_sub128_hi" &&
+          o.function != "c_add_wraps") {
+        continue;
+      }
+      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function;
+      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+    }
+  }
+#endif
 }
 
 // A17: the dense switch compiled without optimisation dispatches through a

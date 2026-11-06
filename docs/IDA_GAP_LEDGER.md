@@ -346,7 +346,18 @@ interpreter.
   `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`. On Clang 18.1
   x86-64 those three are Complete and verified at O0, O2 and O3, so the
   `adc` Partial on Clang -O2 is gone. Also fixed in this task: `sub x, x`
-  followed by a signed branch compared against the overwritten register.
+  followed by a signed branch compared against the overwritten register; an
+  `add`/`sub` whose memory source is addressed by its own destination
+  (`add rdi, [rdi]; setb`), which now copies the source before the write
+  (`Ir.X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue`);
+  a register `xchg` between a flag writer and its consumer, which now passes the
+  flags through (`Ir.X86CarryReachesAnAdcAcrossARegisterExchange`); an
+  unsupported memory `xchg`, which now drops the flag state
+  (`Ir.X86CarryIsNotReadAcrossAnUnsupportedExchange`); and the verifier
+  rejects a second carry op that would read a carry out the IR does not
+  represent (`Ir.VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled`),
+  a block operand (`Ir.VerifierRejectsACarryWithABlockOperand`), and a
+  constant wider than the destination (`Ir.VerifierRejectsACarryConstantWiderThanItsDestination`).
 - **Deviations from the steps above:** the carry is read from the flag state
   of the last `Compare`/`Test` in the block, as `CondAssign` already does,
   rather than from a separate operand. The carry out of `adc`/`sbb` is not
