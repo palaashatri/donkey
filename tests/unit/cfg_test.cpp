@@ -206,14 +206,18 @@ struct AArch64DispatchImage {
   std::vector<std::byte> data;
 };
 
+/// `table` is the table's bytes in memory order, so the caller chooses the entry
+/// size and byte order; `endian` orders the instruction words.
 AArch64DispatchImage aarch64_dispatch_image(const std::vector<std::uint32_t>& words,
-                                            const std::vector<std::uint8_t>& table) {
+                                            const std::vector<std::uint8_t>& table,
+                                            donkey::Endian endian = donkey::Endian::Little) {
   AArch64DispatchImage out;
   out.data.assign(0x100, std::byte{0});
   std::size_t at = 0;
   for (const std::uint32_t word : words) {
     for (std::size_t i = 0; i < 4; ++i) {
-      out.data[at++] = static_cast<std::byte>((word >> (8U * i)) & 0xffU);
+      const std::size_t significance = endian == donkey::Endian::Big ? 3 - i : i;
+      out.data[at++] = static_cast<std::byte>((word >> (8U * significance)) & 0xffU);
     }
   }
   at = 0x90;
@@ -223,6 +227,7 @@ AArch64DispatchImage aarch64_dispatch_image(const std::vector<std::uint32_t>& wo
   BinaryImage& image = out.image;
   image.path = "<synthetic>";
   image.architecture = Architecture::AArch64;
+  image.endian = endian;
   image.format = donkey::BinaryFormat::Raw;
   image.bits = 64;
   image.file_size = out.data.size();
@@ -299,6 +304,45 @@ TEST(Cfg, AArch64GccShapedJumpTableIsRecovered) {
     ASSERT_NE(edge, nullptr) << "no jump-table edge to " << target;
     EXPECT_EQ(edge->kind, CfgEdgeKind::JumpTable);
   }
+}
+
+/// gcc_dispatch() with 16-bit entries: `ldrh w2, [x2, w0, uxtw #1]` and
+/// `add x2, x0, w2, sxth #2` replace the byte load and the sxtb add.
+std::vector<std::uint32_t> gcc_halfword_dispatch() {
+  std::vector<std::uint32_t> words = gcc_dispatch();
+  words[6] = 0x78605842U;
+  words[8] = 0x8b22a802U;
+  return words;
+}
+
+/// The four targets of gcc_dispatch(), from a table at 0x2010 read with the
+/// image's byte order.
+void expect_four_target_table(const AArch64DispatchImage& dispatch) {
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& cfg = result.value().cfg;
+  ASSERT_EQ(cfg.jump_tables.size(), 1U);
+  const auto& table = cfg.jump_tables.front();
+  EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1028U, 0x1030U, 0x1038U, 0x1040U}));
+  for (const std::uint64_t target : table.targets) {
+    const CfgEdge* edge = edge_between(cfg, 0x1024, target);
+    ASSERT_NE(edge, nullptr) << "no jump-table edge to " << target;
+    EXPECT_EQ(edge->kind, CfgEdgeKind::JumpTable);
+  }
+}
+
+TEST(Cfg, AArch64HalfwordTableIsRecoveredInLittleEndian) {
+  expect_four_target_table(aarch64_dispatch_image(
+      gcc_halfword_dispatch(), {0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x06, 0x00}));
+}
+
+TEST(Cfg, AArch64HalfwordTableIsRecoveredInBigEndian) {
+  // Big-endian image: the instruction words and the 16-bit entries are both
+  // big-endian. Reading the entries little-endian would give 0x0200 for the second
+  // entry, which is not an instruction start, so no table would be recovered.
+  expect_four_target_table(aarch64_dispatch_image(gcc_halfword_dispatch(),
+                                                  {0x00, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x06},
+                                                  donkey::Endian::Big));
 }
 
 TEST(Cfg, AArch64ClangShapedJumpTableIsRecovered) {
