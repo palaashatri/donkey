@@ -74,6 +74,7 @@ add_library(donkey_binary STATIC
   src/binary/isolation.cpp
   src/binary/macho.cpp
   src/binary/pe.cpp
+  src/binary/relocate.cpp
 )
 add_library(donkey::binary ALIAS donkey_binary)
 target_include_directories(donkey_binary
