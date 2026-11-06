@@ -385,7 +385,9 @@ interpreter.
   `Ir.X86DivAndIdivReturnTheQuotientAndTheRemainder`,
   `Ir.X86DivideFaultsWhereTheHardwareDivideErrors`,
   `Ir.X86ThirtyTwoBitDivideUsesEdxAndEax`,
-  `Ir.VerifierRejectsDivideWithoutItsDivisor`, and the corpus functions
+  `Ir.VerifierRejectsDivideWithoutItsDivisor`,
+  `Ir.VerifierRejectsADivisorTemporaryThatIsNeverDefined`,
+  `Ir.X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature`, and the corpus functions
   `c_mulhi_u64`, `c_mulhi_s64`, `c_udiv32`, `c_urem32`, `c_sdiv32`,
   `c_srem32`, `c_udiv64`, `c_urem64`, `c_sdiv64`, `c_srem64`, `c_div10` in
   `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
