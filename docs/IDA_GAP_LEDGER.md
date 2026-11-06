@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 done under qemu, CI on `ubuntu-24.04-arm` and `macos-15` and Apple Clang pending) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Copy and constant propagation not done yet; register aliases are merged (G04-T1); no `for` loops | P0 | IN PROGRESS (G04-T0 and T1 DONE; T2-T4 TODO) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -706,6 +706,22 @@ for Partial functions.
   4. Leave SSA by merging non-interfering variables.
 - **Done when:** G04-T0 passes, and the median pseudocode line count across
   the corpus drops. Record before/after in the PR.
+- **Status:** DONE with deviations. Implemented: copy propagation of register
+  copies and constants within a block (`propagate_copies`), removal of temporaries
+  nothing reads (`remove_dead_temporaries`), and removal of pure register writes whose
+  value no later statement reads, with liveness over the blocks
+  (`remove_dead_register_writes`). Calls, loads, stores, unsupported statements, and the
+  registers that a return or the caller relies on (stack, frame, callee-saved, and
+  return registers) are never removed. Not done, from the steps above: SSA (steps 1
+  and 4) and memory forwarding across stores (step 2). The "done when" measure is the
+  total of the pseudocode statement lines over the corpus, not the median: the median
+  over 59 functions did not move at every level (AArch64 O2 and O3 stayed at 6), so the
+  test asserts on the total. Totals, before to after: x86-64 O0
+  1111 to 1026, O2 517 to 474, O3 707 to 664, O3-x86-64-v2 702 to 658; AArch64 (GCC)
+  O0 1112 to 1058, O2 520 to 516, O3 737 to 733. Evidence:
+  `DecompilerCorpus.EveryPassPreservesSemantics` (every pass checked on the corpus
+  vectors), `DecompilerCorpus.StatementPassesShortenThePseudocode`, native ctest, and
+  the AArch64 corpus under qemu-aarch64.
 
 **G04-T3 Loop and condition recovery**
 

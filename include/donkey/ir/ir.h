@@ -267,10 +267,12 @@ struct PassOptions {
 };
 
 /// Run the passes that follow lifting, in the fixed order lift_function uses:
-/// signature inference, then pointer-structure recovery. They annotate the
-/// function (parameters, return width, pointer_structs) and must not change
-/// what its statements compute. The decompiler corpus interprets the IR before
-/// and after every pass to check this (DecompilerCorpus.EveryPassPreservesSemantics).
+/// signature inference, then pointer-structure recovery, then copy propagation,
+/// dead temporary removal and removal of overwritten writes. The first two annotate
+/// the function (parameters, return width, pointer_structs); the statement passes
+/// make it smaller. None of them may change what the function computes. The decompiler corpus
+/// interprets the IR before and after every pass to check this
+/// (DecompilerCorpus.EveryPassPreservesSemantics).
 void run_ir_passes(IrFunction& function, const PassOptions& options);
 
 /// Check structural invariants: operand widths, block indices, def-use order
