@@ -155,7 +155,7 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form and break/continue not done; T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. No C declaration parser, no application to code, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2-T4 TODO) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). No application to code, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3-T4 TODO) |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -799,7 +799,7 @@ for Partial functions.
   `Types.DwarfStructsMatchTheirByteSize`, which checks every struct and union of the
   debuggee against its `DW_AT_byte_size`. Not done: step 4's automatic attachment (the
   DWARF types are not written to the project on import; the caller passes them to
-  `replace_types`), and the `C` declaration parser (G05-T2). Bit-fields are not
+  `replace_types`). The `C` declaration parser is G05-T2. Bit-fields are not
   recovered from DWARF (the reader does not record their bit offsets), and enumerator
   values are not recorded either. Those are DWARF reader gaps, not type-store gaps.
 
@@ -814,6 +814,19 @@ for Partial functions.
 - **Tests:** `Types.ParsesCDeclarations`, `Types.ParserErrorsAreLocated`
   (line and column), and a fuzz target `fuzz_cdecl`.
 - **Done when:** the tests pass and the fuzz target runs 60 s clean.
+- **Status:** DONE on Linux x86-64. `parse_c_declarations`
+  (`include/donkey/project/cdecl.h`, `src/project/cdecl.cpp`) parses the subset into
+  `TypeDefinition`s with ABI layout (natural alignment, padded size, `long` and `char`
+  signedness from `CDeclarationOptions`), refuses input over 1 MiB and nesting over 64
+  with `cdecl.*` codes, and reports `line L, column C:` for every syntax error. The result
+  goes through `TypeTable::validate` before it is returned, so an array too large for 64
+  bits is refused with `cdecl.invalid_type`. Evidence: `Types.ParsesCDeclarations` and
+  `Types.ParserErrorsAreLocated`, all seven `Types.*` tests, and the headless ctest suite
+  pass on Linux x86-64 with `-Werror`. `fuzz_cdecl` (clang 18, libFuzzer, ASan and UBSan)
+  ran 679,144 inputs in 61 s with no finding. Not supported: bit-fields, function
+  pointers and other parenthesised declarators, expressions other than integer constants,
+  variables, K&R definitions, octal literals, preprocessor lines and C++. Residual: the
+  macOS and Windows CI legs have not run this yet.
 
 **G05-T3 Apply types and propagate in the decompiler** [oracle-checked]
 
