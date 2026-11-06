@@ -926,6 +926,86 @@ struct Lifter {
     unsupported(block, instruction);
   }
 
+  /// umull, smull, umaddl, smaddl, umsubl, smsubl, umnegl and smnegl: a 32-bit
+  /// product widened to 64 bits, which is added to or subtracted from Xa, or
+  /// negated. Each W source is zero- or sign-extended to 64 bits first, so the
+  /// 64-bit product is exact (|product| < 2^63 for signed sources) and its low
+  /// 64 bits are the architectural result.
+  void lift_widening_multiply(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    enum class Combine { None, Add, Sub, Negate };
+    Combine combine = Combine::None;
+    if (mnemonic == "umaddl" || mnemonic == "smaddl") {
+      combine = Combine::Add;
+    } else if (mnemonic == "umsubl" || mnemonic == "smsubl") {
+      combine = Combine::Sub;
+    } else if (mnemonic == "umnegl" || mnemonic == "smnegl") {
+      combine = Combine::Negate;
+    } else if (mnemonic != "umull" && mnemonic != "smull") {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::size_t expected = combine == Combine::Add || combine == Combine::Sub ? 4 : 3;
+    if (operands.size() != expected || operands[0].kind != OperandKind::Register ||
+        register_width(operands[0].reg) != kPointerWidth ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        register_width(operands[1].reg) != 4 || register_width(operands[2].reg) != 4 ||
+        (expected == 4 && (operands[3].kind != OperandKind::Register ||
+                           register_width(operands[3].reg) != kPointerWidth))) {
+      unsupported(block, instruction);
+      return;
+    }
+    const bool sign = mnemonic[0] == 's';
+    auto widen = [&](const Operand& source, std::uint32_t id) {
+      IrStatement extend;
+      extend.op = sign ? IrOp::SignExtend : IrOp::ZeroExtend;
+      extend.dest = temp_operand(id, kPointerWidth);
+      extend.a = to_ir_operand(source, 4);
+      extend.a.width = 4;
+      extend.width = kPointerWidth;
+      extend.source_address = instruction.address;
+      push(block, std::move(extend));
+    };
+    const std::uint32_t left = temporary_id();
+    const std::uint32_t right = temporary_id();
+    widen(operands[1], left);
+    widen(operands[2], right);
+
+    IrStatement product;
+    product.op = IrOp::Mul;
+    product.dest = combine == Combine::None ? to_ir_operand(operands[0], kPointerWidth)
+                                            : temp_operand(temporary_id(), kPointerWidth);
+    product.a = temp_operand(left, kPointerWidth);
+    product.b = temp_operand(right, kPointerWidth);
+    product.width = kPointerWidth;
+    product.source_address = instruction.address;
+    const IrOperand product_value = product.dest;
+    push(block, std::move(product));
+    if (combine == Combine::None) {
+      return;
+    }
+
+    IrStatement combined;
+    combined.dest = to_ir_operand(operands[0], kPointerWidth);
+    combined.width = kPointerWidth;
+    combined.source_address = instruction.address;
+    if (combine == Combine::Add) {
+      combined.op = IrOp::Add;
+      combined.a = to_ir_operand(operands[3], kPointerWidth);
+      combined.b = product_value;
+    } else if (combine == Combine::Sub) {
+      combined.op = IrOp::Sub;
+      combined.a = to_ir_operand(operands[3], kPointerWidth);
+      combined.b = product_value;
+    } else {
+      combined.op = IrOp::Sub;
+      combined.a = IrOperand::constant_value(0, kPointerWidth);
+      combined.b = product_value;
+    }
+    push(block, std::move(combined));
+  }
+
   /// adc and sbc: dest = a + b + C, or a - b - borrow, where the borrow is not C.
   /// The carry comes from the flags before, so they must be exact. The carry out
   /// of an adc or sbc is not modelled, so a second carry reader in the block needs
@@ -1815,6 +1895,10 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
+      } else if (mnemonic == "umull" || mnemonic == "smull" || mnemonic == "umaddl" ||
+                 mnemonic == "smaddl" || mnemonic == "umsubl" || mnemonic == "smsubl" ||
+                 mnemonic == "umnegl" || mnemonic == "smnegl") {
+        lifter.lift_widening_multiply(out_block, instruction);
       } else if (mnemonic == "adc" || mnemonic == "sbc") {
         lifter.lift_add_with_carry(out_block, instruction);
       } else if (mnemonic == "ccmp" || mnemonic == "ccmn") {

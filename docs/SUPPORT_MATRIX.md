@@ -92,6 +92,7 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | the same as after G03-T4: SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | Clang 18.1, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 56/59 | 52/59 | 52/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`), `umull` (not lifted) |
+| Clang 18.1, AArch64 Linux | locally, after G03-T2 widening multiply (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`) only |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -122,7 +123,9 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 `ubfx`/`sbfx` and `mvn`. It also lifts `udiv`/`sdiv` with the architecture's
 results (division by zero gives 0, and `INT_MIN / -1` gives `INT_MIN`, with no
 fault), `umulh`/`smulh`, `clz`, `cls`, `rbit`, `rev`/`rev16`/`rev32`, `extr`,
-`bfi` and `bfxil`, `ccmp`/`ccmn`, `cmn` and `adds`, and `adc`/`sbc` when the flags
+`bfi` and `bfxil`, `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`
+and `smnegl` (each 32-bit source is extended to 64 bits first), `ccmp`/`ccmn`, `cmn`
+and `adds`, and `adc`/`sbc` when the flags
 before them are exact (a second carry reader in a block needs its own flag
 writer, since the carry out of `adc`/`sbc` is not modelled). On
 x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
