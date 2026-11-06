@@ -15,6 +15,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/debug_info.h"
+#include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
@@ -199,6 +200,16 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
   return false;
 }
 
+/// The Itanium demangling of `name`, or an empty string when `name` is not a mangled name or
+/// the demangler does not read it. The raw name is always printed too.
+std::string demangled_name(const std::string& name) {
+  if (!is_itanium_name(name)) {
+    return {};
+  }
+  const auto demangled = demangle_itanium(name);
+  return demangled.has_value() ? demangled.value() : std::string();
+}
+
 void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("File:      %s\n", image.path.c_str());
   std::printf("Size:      %" PRIu64 " bytes\n", image.file_size);
@@ -257,6 +268,9 @@ void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
                 hex(symbol.address).c_str());
     if (!symbol.module.empty()) {
       std::printf(" (%s)", symbol.module.c_str());
+    }
+    if (const std::string demangled = demangled_name(symbol.name); !demangled.empty()) {
+      std::printf("  [%s]", demangled.c_str());
     }
     std::printf("\n");
   }
@@ -347,7 +361,9 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
     }
     out += written == 0 ? "\n" : ",\n";
     out += "    {\"kind\": " + quote(symbol.imported ? "import" : "export") +
-           ", \"name\": " + quote(symbol.name) + ", \"module\": " + quote(symbol.module) +
+           ", \"name\": " + quote(symbol.name) +
+           ", \"demangled\": " + quote(demangled_name(symbol.name)) +
+           ", \"module\": " + quote(symbol.module) +
            ", \"address\": " + quote(hex(symbol.address)) +
            ", \"size\": " + std::to_string(symbol.size) +
            ", \"binding\": " + quote(symbol_binding_name(symbol.binding)) + "}";

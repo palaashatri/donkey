@@ -187,6 +187,16 @@ add_test(NAME cli.info_elf_json
 set_tests_properties(cli.info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
 
+# A C++ export keeps its raw name and gains its demangled form, in both outputs (G10-T4).
+add_test(NAME cli.info_demangles_itanium_exports
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/cpp-exports-x86_64.so)
+set_tests_properties(cli.info_demangles_itanium_exports PROPERTIES
+  PASS_REGULAR_EXPRESSION "export   _ZN6shapes4areaERKNS_3BoxEi +0x[0-9a-f]+  \\[shapes::area\\(shapes::Box const&, int\\)\\]")
+add_test(NAME cli.info_demangles_itanium_exports_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/cpp-exports-x86_64.so --json)
+set_tests_properties(cli.info_demangles_itanium_exports_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"_ZN6shapes4areaERKNS_3BoxEi\", \"demangled\": \"shapes::area\\(shapes::Box const&, int\\)\"")
+
 if(NOT WIN32)
   add_test(NAME cli.info_isolated_json
            COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --isolate --json)
