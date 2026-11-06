@@ -208,6 +208,9 @@ struct IrParameter {
   /// The value is floating-point (an XMM, s, d or v register): it is rendered as float or
   /// double, not as an integer of the same width.
   bool floating_point = false;
+  /// Set by apply_prototype when the parameter is a pointer to this structure
+  /// (`struct corpus_point *`). Empty when no prototype applies.
+  std::string pointee_struct;
 };
 
 struct IrLocalVariable {
@@ -222,6 +225,9 @@ struct IrLocalVariable {
 struct IrStructField {
   std::int64_t offset = 0;
   std::uint8_t width = 0;
+  /// The member's name when a prototype supplied it (apply_prototype); empty
+  /// otherwise, and the field then renders as `f_<offset>`.
+  std::string name;
 };
 
 /// A layout inferred from constant-offset accesses through a pointer
@@ -230,8 +236,11 @@ struct IrStructField {
 struct IrPointerStruct {
   std::string parameter;      ///< "a0"
   std::string base_register;  ///< "rdi", "x0"
-  std::string type_name;      ///< "a0_fields"
+  std::string type_name;      ///< "a0_fields", or the prototype's structure name
   std::vector<IrStructField> fields;
+  /// True when a prototype named the structure: the printer then shows the
+  /// real name and member names, not an inferred `struct a0_fields` block.
+  bool applied = false;
 };
 
 struct IrFunction {

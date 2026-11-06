@@ -117,6 +117,7 @@ add_library(donkey_ir STATIC
   src/ir/lift_aarch64.cpp
   src/ir/canonical.cpp
   src/ir/optimize.cpp
+  src/ir/prototype.cpp
   src/ir/structure.cpp
 )
 add_library(donkey::ir ALIAS donkey_ir)

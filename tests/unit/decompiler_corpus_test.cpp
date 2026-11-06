@@ -9,6 +9,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
@@ -26,6 +27,8 @@
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "donkey/ir/prototype.h"
+#include "donkey/project/types.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -1150,5 +1153,174 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
   GTEST_SKIP() << "the floating-point corpus runs on x86-64 and AArch64 hosts";
 }
 #endif
+
+// G05-T3: a prototype applied to a recovered function names the structure and its
+// members, and types the parameter. Printing shows p->z, and the function still
+// computes the same value, because a prototype changes names and types only.
+
+donkey::TypeDefinition scalar_type(std::uint64_t id, const char* name, std::uint64_t size,
+                                   bool is_signed) {
+  donkey::TypeDefinition definition;
+  definition.id = donkey::TypeId(id);
+  definition.kind = donkey::TypeKind::Integer;
+  definition.name = name;
+  definition.size = size;
+  definition.is_signed = is_signed;
+  return definition;
+}
+
+// struct corpus_point (tests/corpus/corpus.c) as the type store describes it, and the
+// IR prototype made from it. The CLI and UI that would make this for a user are G05-T4.
+donkey::IrPrototype corpus_point_prototype() {
+  donkey::TypeTable types;
+  types.put(scalar_type(1, "int", 4, true));
+  types.put(scalar_type(2, "long long", 8, true));
+  types.put(scalar_type(3, "unsigned char", 1, false));
+  donkey::TypeDefinition point;
+  point.id = donkey::TypeId(4);
+  point.kind = donkey::TypeKind::Struct;
+  point.name = "corpus_point";
+  point.size = 24;
+  point.fields = {
+      donkey::TypeField{"x", 0, donkey::TypeId(1)},
+      donkey::TypeField{"y", 4, donkey::TypeId(1)},
+      donkey::TypeField{"z", 8, donkey::TypeId(2)},
+      donkey::TypeField{"tag", 16, donkey::TypeId(3)},
+  };
+  types.put(point);
+  EXPECT_TRUE(types.validate().has_value());
+
+  donkey::IrTypeLayout layout;
+  layout.name = "corpus_point";
+  for (const donkey::TypeField& field : point.fields) {
+    layout.fields.push_back(donkey::IrTypeField{
+        field.name, field.offset, static_cast<std::uint8_t>(types.size_of(field.type).value())});
+  }
+  donkey::IrPrototype prototype;
+  prototype.name = "c_point_sum";
+  prototype.return_width = 8;
+  prototype.parameters.push_back(donkey::IrPrototypeParameter{"p", 8, false, layout});
+  return prototype;
+}
+
+void store_little_endian(std::vector<std::uint8_t>& bytes, std::size_t offset, std::size_t size,
+                         std::uint64_t value) {
+  for (std::size_t i = 0; i < size; ++i) {
+    bytes[offset + i] = static_cast<std::uint8_t>(value >> (8 * i));
+  }
+}
+
+TEST(DecompilerCorpus, AppliedPrototypeNamesStructFields) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
+  ASSERT_NE(function, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+  const donkey::IrFunction& ir = lifted.value();
+
+  // struct corpus_point { int x; int y; long long z; unsigned char tag; } at 0, 4, 8, 16:
+  // x = 3, y = 5, z = 100, tag = 7.
+  std::vector<std::uint8_t> point(24, 0);
+  store_little_endian(point, 0, 4, 3);
+  store_little_endian(point, 4, 4, 5);
+  store_little_endian(point, 8, 8, 100);
+  store_little_endian(point, 16, 1, 7);
+  constexpr std::uint64_t kPoint = 0x10000;
+  const std::array<std::uint64_t, 1> arguments{kPoint};
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+  const auto evaluate = [&](const donkey::IrFunction& candidate) {
+    donkey::IrEvalMemory memory;
+    EXPECT_TRUE(memory.add_region(kPoint, point, false));
+    return donkey::evaluate_ir(candidate, arguments, memory, eval_options);
+  };
+  auto before = evaluate(ir);
+  ASSERT_TRUE(before.has_value()) << before.diagnostic().code;
+  EXPECT_EQ(before.value().return_value, 120U);  // 3 + 2 * 5 + 100 + 7
+
+  donkey::IrFunction applied_function = ir;
+  auto applied = donkey::apply_prototype(applied_function, corpus_point_prototype());
+  ASSERT_TRUE(applied.has_value())
+      << applied.diagnostic().code << ": " << applied.diagnostic().message;
+  ASSERT_TRUE(donkey::verify_ir(applied_function).has_value());
+  auto text = donkey::format_pseudocode(applied_function);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("(struct corpus_point *p)"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("p->z"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("p->tag"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("f_8"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("a0_fields"), std::string::npos) << text.value();
+
+  // A prototype changes no statement, so the function computes the same value.
+  auto after = evaluate(applied_function);
+  ASSERT_TRUE(after.has_value()) << after.diagnostic().code;
+  EXPECT_EQ(after.value().return_value, before.value().return_value);
+}
+
+TEST(DecompilerCorpus, AppliedPrototypeThatContradictsTheFunctionIsRefused) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
+  ASSERT_NE(function, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+  const donkey::IrFunction& ir = lifted.value();
+  auto before = donkey::format_pseudocode(ir);
+  ASSERT_TRUE(before.has_value());
+
+  // Each refusal names its code, and the function is left exactly as it was.
+  const auto refused = [&](donkey::IrPrototype prototype, const char* code) {
+    donkey::IrFunction copy = ir;
+    auto result = donkey::apply_prototype(copy, prototype);
+    ASSERT_FALSE(result.has_value()) << code;
+    EXPECT_EQ(result.diagnostic().code, code);
+    auto after = donkey::format_pseudocode(copy);
+    ASSERT_TRUE(after.has_value());
+    EXPECT_EQ(after.value(), before.value());
+  };
+  const donkey::IrPrototype good = corpus_point_prototype();
+
+  // z is read as 8 bytes at offset 8; a 4-byte member there is refused.
+  donkey::IrPrototype narrow = good;
+  narrow.parameters[0].pointee->fields[2].width = 4;
+  refused(narrow, "ir.prototype_field");
+
+  // Offset 8 has no member at all.
+  donkey::IrPrototype missing = good;
+  missing.parameters[0].pointee->fields.erase(missing.parameters[0].pointee->fields.begin() + 2);
+  refused(missing, "ir.prototype_field");
+
+  // The argument is 8 bytes; a 4-byte parameter does not match it.
+  donkey::IrPrototype four = good;
+  four.parameters[0].width = 4;
+  refused(four, "ir.prototype_parameter");
+
+  // The function takes one argument.
+  donkey::IrPrototype none = good;
+  none.parameters.clear();
+  refused(none, "ir.prototype_arity");
+
+  // The function returns 8 bytes.
+  donkey::IrPrototype narrow_return = good;
+  narrow_return.return_width = 4;
+  refused(narrow_return, "ir.prototype_return");
+
+  // A parameter name must be a C identifier.
+  donkey::IrPrototype bad_name = good;
+  bad_name.parameters[0].name = "p q";
+  refused(bad_name, "ir.prototype_name");
+}
 
 }  // namespace

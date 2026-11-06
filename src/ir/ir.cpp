@@ -209,6 +209,9 @@ class Renderer {
             for (const IrStructField& field : recovered.fields) {
               if (field.offset == static_cast<std::int64_t>(value.constant) &&
                   field.width == value.width) {
+                if (!field.name.empty()) {
+                  return recovered.parameter + "->" + field.name;
+                }
                 char buffer[96];
                 std::snprintf(buffer, sizeof(buffer), "%s->f_%llx", recovered.parameter.c_str(),
                               static_cast<unsigned long long>(field.offset));
@@ -1401,6 +1404,11 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   }
 
   for (const IrPointerStruct& recovered : function.pointer_structs) {
+    if (recovered.applied) {
+      append_line("// note: " + recovered.parameter + " points to struct " + recovered.type_name +
+                  " from the applied prototype");
+      continue;
+    }
     append_line("// note: struct " + recovered.type_name + " inferred from accesses through " +
                 recovered.parameter + "; only accessed fields are known");
     append_line("struct " + recovered.type_name + " {");
@@ -1434,7 +1442,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
           recovered = &candidate;
         }
       }
-      if (recovered != nullptr) {
+      if (!function.parameters[index].pointee_struct.empty()) {
+        signature += "struct " + function.parameters[index].pointee_struct + " *";
+      } else if (recovered != nullptr) {
         signature += "struct " + recovered->type_name + " *";
       } else {
         signature +=
@@ -1552,7 +1562,7 @@ void recover_pointer_structs(IrFunction& function) {
           return;
         }
       }
-      fields.push_back(IrStructField{offset, operand.width});
+      fields.push_back(IrStructField{offset, operand.width, std::string()});
     };
     for (const IrBlock& block : function.blocks) {
       for (std::size_t i = 0; i < block.statements.size(); ++i) {
