@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cfenv>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -2612,6 +2613,46 @@ bool aarch64_lifts_partial(const std::vector<std::byte>& data) {
   return lifted.has_value() && lifted.value().partial;
 }
 
+/// The lifted x86-64 function for the code (the first function found).
+donkey::IrFunction lift_x86_64_code(const std::vector<std::byte>& data) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  donkey::IrFunction none;
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return none;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  return lifted.has_value() ? lifted.value() : none;
+}
+
+TEST(Ir, SingleFloatReturnIsFourBytesWide) {
+  // addss xmm0, xmm1; ret: the value returned is a single-precision float.
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf3}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
+  EXPECT_EQ(function.return_width, 4U);
+  EXPECT_FALSE(function.partial);
+}
+
+TEST(Ir, DoubleReturnWithNoIntegerWriteIsComplete) {
+  // addsd xmm0, xmm1; ret
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf2}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
+  EXPECT_EQ(function.return_width, 8U);
+  EXPECT_FALSE(function.partial);
+}
+
+TEST(Ir, IntegerWriteAfterAFloatResultIsAmbiguous) {
+  // addsd xmm0, xmm1; mov eax, 1; ret: rax and xmm0 are both written on the way to the
+  // return, so the return channel cannot be told apart and the function is Partial.
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf2}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xb8},
+       std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xc3}});
+  EXPECT_TRUE(function.partial);
+}
+
 TEST(Ir, AArch64CarryChainAddsThenAdcUsesTheSumsCarry) {
   // adds x0, x0, x1; adc x0, x2, x3; ret. The carry is the one out of the sum.
   const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0xd65f03c0});
@@ -3008,6 +3049,48 @@ TEST(Ir, FloatConstantsPrintAsExactHexadecimalFloats) {
   ASSERT_TRUE(text.has_value());
   EXPECT_NE(text.value().find("0x1.8p+0"), std::string::npos) << text.value();
   EXPECT_NE(text.value().find("0x1.2p+1"), std::string::npos) << text.value();
+}
+
+TEST(Ir, SingleFractionsAreAlignedToWholeHexDigits) {
+  // 1.5f is 0x3fc00000: the 23-bit fraction 0x400000 must print as 0x1.8p+0, not 0x1.4p+0.
+  const donkey::IrFunction f =
+      fp_one_op(donkey::IrOp::FAdd, 4, 0x3fc00000ULL, 0ULL, donkey::IrFloatModel::X86);
+  const auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("0x1.8p+0"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("0x1.4p+0"), std::string::npos) << text.value();
+}
+
+TEST(Ir, UnsignedConversionKeepsTheWholeOfAWideSource) {
+  donkey::IrFunction function;
+  function.name = "to_double";
+  function.blocks.push_back(make_block(0x1000));
+  donkey::IrStatement convert;
+  convert.op = donkey::IrOp::UIntToFloat;
+  convert.dest = donkey::IrOperand::register_ref("xmm0", 8);
+  convert.a = donkey::IrOperand::register_ref("rdi", 8);
+  convert.width = 8;
+  function.blocks[0].statements.push_back(convert);
+  IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("xmm0", 8);
+  ret.width = 8;
+  function.blocks[0].statements.push_back(ret);
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("(unsigned long long)rdi"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FloatingPointEvaluationRoundsToNearestWhateverTheCallerSet) {
+  // 1 + 2^-60 is 1 under round-to-nearest. Under FE_UPWARD the host would round it up.
+  const int saved = std::fegetround();
+  std::fesetround(FE_UPWARD);
+  const std::uint64_t result =
+      fp_result(fp_one_op(donkey::IrOp::FAdd, 8, 0x3ff0000000000000ULL, 0x3c30000000000000ULL,
+                          donkey::IrFloatModel::X86));
+  EXPECT_EQ(std::fegetround(), FE_UPWARD) << "the caller's rounding mode must be restored";
+  std::fesetround(saved);
+  EXPECT_EQ(result, 0x3ff0000000000000ULL);
 }
 
 TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {

@@ -179,6 +179,10 @@ struct IrStatement {
   /// Only for the floating-point operations.
   IrFloatModel float_model = IrFloatModel::X86;
   std::uint8_t width = 0;
+  /// Only for the final OR of a merge into a register family: the width, in bytes, of
+  /// the value merged in (a sub-word write, or a single-precision result). Zero otherwise.
+  /// Return inference reads the width of the value a register holds from this field.
+  std::uint8_t merged_width = 0;
   /// Address of the machine instruction this statement came from (0 for
   /// synthesized statements).
   std::uint64_t source_address = 0;
