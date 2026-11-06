@@ -15,7 +15,7 @@ inline std::string register_family(const std::string& name) {
       {"rax", "eax", "ax", "al", "ah"}, {"rbx", "ebx", "bx", "bl", "bh"},
       {"rcx", "ecx", "cx", "cl", "ch"}, {"rdx", "edx", "dx", "dl", "dh"},
       {"rsi", "esi", "si", "sil", ""},  {"rdi", "edi", "di", "dil", ""},
-      {"rbp", "ebp", "bp", "bpl", ""},  {"rsp", "esp", "spl", "", ""},
+      {"rbp", "ebp", "bp", "bpl", ""},  {"rsp", "esp", "sp", "spl", ""},
   };
   for (const auto& row : kX86) {
     for (const char* alias : row) {

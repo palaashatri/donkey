@@ -2097,6 +2097,16 @@ TEST(Ir, FlagsFromSinglePredecessorAreExact) {
   EXPECT_TRUE(rewritten.partial);
 }
 
+// `sp` is the 16-bit name of the stack pointer. After `mov ax, sp; cmp sp, ax`,
+// the push changes the value the compare read, so its flags cannot be carried
+// into the fall-through block.
+TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
+  donkey::IrFunction function;  // mov ax, sp; cmp sp, ax; push rdi; jne L; setne al; L: ret
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x89, 0xe0, 0x66, 0x39, 0xc4, 0x57, 0x75, 0x03, 0x0f, 0x95, 0xc0, 0xc3}, function));
+  EXPECT_TRUE(function.partial);
+}
+
 // bsf and bsr for a nonzero source are the lowest and highest set bit. The
 // result is Partial, because the destination is undefined for a zero source.
 TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
