@@ -960,6 +960,12 @@ struct Lifter {
       push(block, std::move(statement));
     };
     const IrOperand none = IrOperand::none();
+    if (operands[0].kind == OperandKind::Register &&
+        (operands[0].reg == "xzr" || operands[0].reg == "wzr")) {
+      // The result is discarded, and none of these instructions sets flags or
+      // has another effect, so there is nothing to lift.
+      return;
+    }
     const IrOperand destination = to_ir_operand(operands[0], width);
     const auto is_register = [&](std::size_t index) {
       return index < operands.size() && operands[index].kind == OperandKind::Register;
