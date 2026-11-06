@@ -1220,32 +1220,47 @@ Result<IrEvalResult> evaluate_ir(const IrFunction& function,
   std::size_t in_registers = 0;
   std::uint64_t stack_args = 0;  // address of the first stack argument
   const std::uint8_t pointer = options.architecture == Architecture::X86 ? 4 : 8;
-  switch (options.convention) {
-    case IrCallingConvention::SysV64:
-      in_registers = std::min<std::size_t>(arguments.size(), 6);
-      for (std::size_t i = 0; i < in_registers; ++i) {
-        machine.write_register(sysv[i], 8, arguments[i]);
-      }
-      stack_args = sp + 8;  // above the return address
-      break;
-    case IrCallingConvention::Win64:
-      in_registers = std::min<std::size_t>(arguments.size(), 4);
-      for (std::size_t i = 0; i < in_registers; ++i) {
-        machine.write_register(win64[i], 8, arguments[i]);
-      }
-      stack_args = sp + 8 + 32;  // return address + shadow space
-      break;
-    case IrCallingConvention::Aapcs64:
-      in_registers = std::min<std::size_t>(arguments.size(), 8);
-      for (std::size_t i = 0; i < in_registers; ++i) {
-        machine.write_register("x" + std::to_string(i), 8, arguments[i]);
-      }
-      stack_args = sp;  // no return address on the stack
-      break;
-    case IrCallingConvention::Cdecl32:
-      stack_args = sp + 4;
-      break;
-  }
+  // A function with a floating-point parameter takes each argument in the register
+  // that parameter was read from: an XMM register is not a positional integer
+  // register. The parameters of such a function are the arguments, in order.
+  const bool named_parameters =
+      std::any_of(function.parameters.begin(), function.parameters.end(),
+                  [](const IrParameter& p) { return p.abi_register.rfind("xmm", 0) == 0; });
+  const bool register_convention = options.convention == IrCallingConvention::SysV64 ||
+                                   options.convention == IrCallingConvention::Win64;
+  if (named_parameters && register_convention) {
+    in_registers = std::min<std::size_t>(arguments.size(), function.parameters.size());
+    for (std::size_t i = 0; i < in_registers; ++i) {
+      machine.write_register(function.parameters[i].abi_register, 8, arguments[i]);
+    }
+    stack_args = options.convention == IrCallingConvention::SysV64 ? sp + 8 : sp + 8 + 32;
+  } else
+    switch (options.convention) {
+      case IrCallingConvention::SysV64:
+        in_registers = std::min<std::size_t>(arguments.size(), 6);
+        for (std::size_t i = 0; i < in_registers; ++i) {
+          machine.write_register(sysv[i], 8, arguments[i]);
+        }
+        stack_args = sp + 8;  // above the return address
+        break;
+      case IrCallingConvention::Win64:
+        in_registers = std::min<std::size_t>(arguments.size(), 4);
+        for (std::size_t i = 0; i < in_registers; ++i) {
+          machine.write_register(win64[i], 8, arguments[i]);
+        }
+        stack_args = sp + 8 + 32;  // return address + shadow space
+        break;
+      case IrCallingConvention::Aapcs64:
+        in_registers = std::min<std::size_t>(arguments.size(), 8);
+        for (std::size_t i = 0; i < in_registers; ++i) {
+          machine.write_register("x" + std::to_string(i), 8, arguments[i]);
+        }
+        stack_args = sp;  // no return address on the stack
+        break;
+      case IrCallingConvention::Cdecl32:
+        stack_args = sp + 4;
+        break;
+    }
   for (std::size_t i = in_registers; i < arguments.size(); ++i) {
     const std::uint64_t slot = stack_args + (i - in_registers) * (pointer == 4 ? 4 : 8);
     if (!memory.write(slot, pointer, arguments[i])) {

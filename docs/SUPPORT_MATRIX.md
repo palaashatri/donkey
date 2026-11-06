@@ -35,7 +35,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 | ISA | Decode (Capstone 5) | CFG, xrefs | Lifter / decompiler | Jump tables | Debugger |
 |---|---|---|---|---|---|
-| x86-64 | yes | yes | integer subset: see the corpus below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
+| x86-64 | yes | yes | integer subset and scalar SSE (`ss`/`sd`): see the corpora below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
 | AArch64 | yes | yes, with ADRP folding | integer subset: see the corpus below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
 | 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
@@ -65,6 +65,19 @@ whose cases compute from the second argument (a case that returns a constant
 becomes a lookup, not a jump). `DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode`
 requires it to lift Complete and agree with the compiled code on all 48 vectors.
 On GCC it is built without hot/cold partitioning, see the known limitations.
+
+`tests/corpus/corpus_fp.c` is a third library, on x86-64 hosts only: 26 scalar
+floating-point functions, each `double f(double, double, double, double)`, built
+at -O0 with `-fno-math-errno -ffp-contract=off` so that `sqrt` is one instruction.
+Its arguments arrive in xmm0 to xmm3, which the IR reads as parameters. It covers
+arithmetic, comparisons that select a value, `int`/`double` and `float`/`double`
+conversions, single-precision arithmetic, loops over a local array, and branches.
+`DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode` compares every Complete
+result with the compiled code on 48 vectors. NaN equals NaN; otherwise the bits
+must match, so the sign of a zero is checked. Partial functions are not compared.
+Results at -O0: GCC 13.3, 23 of 26 Complete, none wrong. The three Partial ones
+(`fp_poly`, `fp_hypot_sqrt`, `fp_capped_root`) copy a register with `movapd`, whose
+upper lanes are not modelled. Clang 18.1: 23 of 26 Complete, none wrong. Its three Partial ones are `fp_lt`, which uses `cmpltsd` and packed logic, and `fp_eq_select` and `fp_ne_select`, whose `jp` sits in the block after a compare with a memory operand. Such a compare is not carried into the next block, so the parity test is unmodelled.
 
 Each cell counts functions reported **Complete** whose IR, run in the
 interpreter, agreed with the compiled code on all 48 vectors. CI prints the
@@ -146,10 +159,11 @@ compare, because GCC's table code overwrites `x0`.
 
 ### Known unsupported classes
 
-- Floating point and SIMD: vectorised loops are Partial. The IR has exact
-  IEEE operations for float and double (G01-T1, tested against native execution),
-  but no instruction is lifted to them yet, so a function with an FP instruction
-  is Partial.
+- Floating point and SIMD: x86-64 scalar `ss`/`sd` arithmetic, moves, conversions
+  and comparisons are lifted (G01-T2). Anything else in SSE is Partial: packed
+  and vector forms, `movaps`/`movapd` (their upper lanes are not modelled), x87,
+  and FP on AArch64 until G01-T3. Only the low lane of an XMM register is modelled.
+  The IR's IEEE operations are tested against native execution (G01-T1).
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
 - `bsf`/`bsr`: the result is undefined for a zero source, so they are
