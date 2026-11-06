@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/archive.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/checked.h"
@@ -1720,6 +1721,96 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
 }
 
 }  // namespace
+
+namespace {
+
+/// A member mode in the octal form that `ar tv` and `ls` use, such as "644".
+std::string octal_mode(std::uint32_t mode) {
+  char buffer[16];
+  std::snprintf(buffer, sizeof(buffer), "%o", static_cast<unsigned>(mode));
+  return buffer;
+}
+
+}  // namespace
+
+int command_archive(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("archive needs a subcommand: list");
+  }
+  if (arguments[0] != "list") {
+    return usage_error("unknown archive subcommand (expected list)");
+  }
+  bool json = false;
+  std::vector<std::string_view> positional;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    if (arguments[i] == "--json") {
+      json = true;
+    } else if (!arguments[i].empty() && arguments[i].front() == '-') {
+      return usage_error("unknown option for archive list");
+    } else {
+      positional.push_back(arguments[i]);
+    }
+  }
+  if (positional.size() != 1) {
+    return usage_error("archive list needs one archive file");
+  }
+  const std::string path(positional[0]);
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return usage_error("cannot open the archive file");
+  }
+  // Archives are read whole here; the limit keeps a huge file from exhausting memory.
+  constexpr std::uintmax_t kMaxArchiveFileBytes = std::uintmax_t{1} << 30;
+  std::vector<std::byte> bytes;
+  std::vector<char> buffer(1 << 20);
+  while (file) {
+    file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = static_cast<std::size_t>(file.gcount());
+    bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(buffer.data()),
+                 reinterpret_cast<const std::byte*>(buffer.data()) + count);
+    if (bytes.size() > kMaxArchiveFileBytes) {
+      std::fprintf(stderr, "error [archive.too_large]: the file is larger than 1 GiB\n");
+      return kExitFailure;
+    }
+  }
+  auto index = donkey::read_archive(bytes);
+  if (!index) {
+    return fail(index.diagnostic());
+  }
+  const std::vector<donkey::ArchiveMember>& members = index.value().members;
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"file\": " + quote(path) + ",\n";
+    out += "  \"partial\": " + std::string(index.value().partial ? "true" : "false") + ",\n";
+    out += "  \"note\": " + quote(index.value().note) + ",\n";
+    out += "  \"members\": [";
+    for (std::size_t i = 0; i < members.size(); ++i) {
+      const donkey::ArchiveMember& member = members[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"name\": " + quote(member.name) +
+             ", \"kind\": " + quote(donkey::archive_member_kind_name(member.kind)) +
+             ", \"offset\": " + quote(hex(member.offset)) +
+             ", \"size\": " + std::to_string(member.size) +
+             ", \"modified\": " + std::to_string(member.modified) +
+             ", \"mode\": " + quote(octal_mode(member.mode)) + "}";
+    }
+    out += members.empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu members%s\n", members.size(),
+                index.value().partial ? (" (partial: " + index.value().note + ")").c_str() : "");
+    for (const donkey::ArchiveMember& member : members) {
+      std::printf("  %-18s %10llu  %-12s %s\n", hex(member.offset).c_str(),
+                  static_cast<unsigned long long>(member.size),
+                  donkey::archive_member_kind_name(member.kind), member.name.c_str());
+    }
+  }
+  return kExitOk;
+}
 
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {

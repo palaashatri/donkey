@@ -65,6 +65,7 @@ target_compile_definitions(donkey_foundation PRIVATE DONKEY_VERSION="${PROJECT_V
 donkey_apply_warnings(donkey_foundation)
 
 add_library(donkey_binary STATIC
+  src/binary/archive.cpp
   src/binary/byte_buffer.cpp
   src/binary/byte_reader.cpp
   src/binary/dwarf.cpp
@@ -270,6 +271,12 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_ir PRIVATE cxx_std_20)
   target_compile_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
+
+  add_executable(fuzz_archive fuzz/fuzz_archive.cpp)
+  target_link_libraries(fuzz_archive PRIVATE donkey::binary)
+  target_compile_features(fuzz_archive PRIVATE cxx_std_20)
+  target_compile_options(fuzz_archive PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_archive PRIVATE ${DONKEY_FUZZ_SANITIZE})
 
   add_executable(fuzz_cdecl fuzz/fuzz_cdecl.cpp)
   target_link_libraries(fuzz_cdecl PRIVATE donkey::project)
