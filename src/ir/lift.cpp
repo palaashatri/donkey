@@ -610,6 +610,10 @@ struct Lifter {
         source = value;
       }
     }
+    if (mnemonic == "bsf" || mnemonic == "bsr") {
+      lift_bit_scan(block, instruction, destination, source);
+      return;
+    }
     IrStatement statement;
     if (mnemonic == "popcnt") {
       statement.op = IrOp::PopCount;
@@ -624,6 +628,41 @@ struct Lifter {
     statement.a = source;
     statement.width = destination.width;
     statement.source_address = instruction.address;
+    push(block, std::move(statement));
+  }
+
+  /// bsf and bsr: the index of the lowest or highest set bit. For a nonzero source
+  /// they are tzcnt and width-1 minus lzcnt. For a zero source the architecture
+  /// leaves the destination undefined, and this lifter does not model that case,
+  /// so the function is Partial. ZF is not modelled either, so the flags are
+  /// unknown afterwards.
+  void lift_bit_scan(IrBlock& block, const Instruction& instruction, const IrOperand& destination,
+                     const IrOperand& source) {
+    mark_partial(
+        "bsf and bsr with a zero source leave the destination undefined; that case is not "
+        "modelled");
+    IrStatement statement;
+    statement.dest = destination;
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    if (instruction.mnemonic == "bsf") {
+      statement.op = IrOp::CountTrailingZeros;
+      statement.a = source;
+      push(block, std::move(statement));
+      return;
+    }
+    const IrOperand leading = temp_operand(temporary_id(), destination.width);
+    IrStatement count;
+    count.op = IrOp::CountLeadingZeros;
+    count.dest = leading;
+    count.a = source;
+    count.width = destination.width;
+    count.source_address = instruction.address;
+    push(block, std::move(count));
+    statement.op = IrOp::Sub;
+    statement.a = IrOperand::constant_value(static_cast<std::uint64_t>(destination.width) * 8U - 1U,
+                                            destination.width);
+    statement.b = leading;
     push(block, std::move(statement));
   }
 
@@ -1455,8 +1494,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.flags_state = Lifter::FlagsState::Exact;
         keeps_flags = true;
       } else if (mnemonic == "popcnt" || mnemonic == "tzcnt" || mnemonic == "lzcnt" ||
-                 mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||
-                 mnemonic == "btr" || mnemonic == "btc") {
+                 mnemonic == "bsf" || mnemonic == "bsr" || mnemonic == "bswap" ||
+                 mnemonic == "bt" || mnemonic == "bts" || mnemonic == "btr" || mnemonic == "btc") {
         lifter.lift_bit_operation(out_block, instruction);
         // bswap leaves the flags alone; the bit tests set CF, so their state is kept.
         keeps_flags = mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||

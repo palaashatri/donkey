@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
+| G02 | x86 integer gaps | Full integer semantics | Flags do not cross blocks (G02-T4). `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3 | P0 | IN PROGRESS (G02-T1, T2, T3 DONE; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -410,7 +410,7 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
-- **Status:** IN PROGRESS. Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+- **Status:** DONE on GCC 13.3 and Clang 18.1 (x86-64, native). Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
   64 bit) and `bt` with a register or immediate index (the IR ops
   `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
   Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
@@ -424,8 +424,15 @@ interpreter.
   `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
   and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
   `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
-  at O3 with `popcnt`. Still not done, so the task stays IN PROGRESS: `bsf`/`bsr`
-  (needs a zero-flag state, or G02-T4 for the guarded form in `c_clz64_guarded`).
+  at O3 with `popcnt`. `bsf` and `bsr` are lifted with a register or memory
+  source (`Ir.X86BitScanForwardAndReverseAreExactForANonzeroSource`): exact for
+  a nonzero source, and the function is Partial because the zero-source result
+  is undefined. ZF is not modelled. The guarded use `c_clz64_guarded` is Partial
+  and agrees with the compiled code, and it can only become Complete once flags
+  and path facts cross blocks (G02-T4). `c_ctz64_guarded` is Complete because
+  GCC encodes it as `rep bsf`, which is `tzcnt`. Not done in this task: the
+  `bsf`/`bsr` zero-source case itself, which the ledger's plan allows to stay
+  Partial.
   Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
   can lie outside the operand).
 

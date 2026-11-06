@@ -116,8 +116,10 @@ with a register and a memory operand.
 - Floating point and SIMD: vectorised loops are Partial.
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
-- `bsf`/`bsr`: the result is undefined for a zero source, so they are
-  Unsupported until a zero-flag state exists.
+- `bsf`/`bsr` with a zero source: the destination is undefined there, and ZF is
+  not modelled. They are lifted, and a function that uses them is Partial with a
+  note. A guarded use such as `c_clz64_guarded` stays Partial until flags cross
+  blocks (G02-T4).
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
 - Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
