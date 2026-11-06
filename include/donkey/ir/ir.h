@@ -1,9 +1,12 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "donkey/binary/image.h"
 #include "donkey/core/result.h"
 #include "donkey/core/status.h"
 
@@ -209,6 +212,23 @@ void recover_pointer_structs(IrFunction& function);
 
 /// Recover local variables and stack arguments from stack frame memory accesses.
 void recover_stack_variables(IrFunction& function);
+
+struct PassOptions {
+  /// Chooses the ABI for signature inference.
+  Architecture architecture = Architecture::Unknown;
+  BinaryFormat format = BinaryFormat::Unknown;
+  /// Called after each pass with the pass name and the function as that pass
+  /// left it. The callee must only read the function. The state before the
+  /// first pass is not reported; a caller that needs it copies the function.
+  std::function<void(std::string_view pass, const IrFunction& function)> after_pass;
+};
+
+/// Run the passes that follow lifting, in the fixed order lift_function uses:
+/// signature inference, then pointer-structure recovery. They annotate the
+/// function (parameters, return width, pointer_structs) and must not change
+/// what its statements compute. The decompiler corpus interprets the IR before
+/// and after every pass to check this (DecompilerCorpus.EveryPassPreservesSemantics).
+void run_ir_passes(IrFunction& function, const PassOptions& options);
 
 /// Check structural invariants: operand widths, block indices, def-use order
 /// within each block, and required block terminators. Returns InvalidData with

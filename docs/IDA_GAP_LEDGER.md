@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
 | G02 | x86 integer gaps | Full integer semantics | No `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2) | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | TODO |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -346,7 +346,18 @@ interpreter.
   `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`. On Clang 18.1
   x86-64 those three are Complete and verified at O0, O2 and O3, so the
   `adc` Partial on Clang -O2 is gone. Also fixed in this task: `sub x, x`
-  followed by a signed branch compared against the overwritten register.
+  followed by a signed branch compared against the overwritten register; an
+  `add`/`sub` whose memory source is addressed by its own destination
+  (`add rdi, [rdi]; setb`), which now copies the source before the write
+  (`Ir.X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue`);
+  a register `xchg` between a flag writer and its consumer, which now passes the
+  flags through (`Ir.X86CarryReachesAnAdcAcrossARegisterExchange`); an
+  unsupported memory `xchg`, which now drops the flag state
+  (`Ir.X86CarryIsNotReadAcrossAnUnsupportedExchange`); and the verifier
+  rejects a second carry op that would read a carry out the IR does not
+  represent (`Ir.VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled`),
+  a block operand (`Ir.VerifierRejectsACarryWithABlockOperand`), and a
+  constant wider than the destination (`Ir.VerifierRejectsACarryConstantWiderThanItsDestination`).
 - **Deviations from the steps above:** the carry is read from the flag state
   of the last `Compare`/`Test` in the block, as `CondAssign` already does,
   rather than from a separate operand. The carry out of `adc`/`sbb` is not
@@ -508,6 +519,17 @@ for Partial functions.
 - **Tests:** `DecompilerCorpus.EveryPassPreservesSemantics`
 - **Done when:** it runs with the current passes (signature inference, struct
   recovery) and passes.
+- **Status:** DONE. Evidence: `DecompilerCorpus.EveryPassPreservesSemantics`
+  (every pass, every corpus function, O0/O2/O3, 48 vectors) and
+  `DecompilerCorpus.EveryPassCheckRejectsAChangedMeaning` (a pass that turns an
+  addition into a subtraction is reported) and
+  `DecompilerCorpus.EveryPassCheckRejectsAChangedPartialFlag` (setting or
+  clearing `IrFunction::partial` alone is reported). Green `ci` run on the
+  first G04-T0 commit, 7588286: https://github.com/palaashatri/donkey/actions/runs/41299348751
+  (PR palaashatri/donkey#26). The current passes only annotate the function, so the
+  checker confirms that they leave results unchanged; it does not yet cover
+  passes that rewrite statements. The corpus outcome report is identical to
+  before the change.
 
 **G04-T1 Register alias canonicalisation**
 
