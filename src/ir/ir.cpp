@@ -385,6 +385,9 @@ const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   std::vector<std::string> written;
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd) {
+      return nullptr;  // its NZCV is not the comparison of two operands
+    }
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
       for (const IrOperand* operand : {&candidate.a, &candidate.b}) {
         const std::string families[] = {internal::register_family(operand->reg),

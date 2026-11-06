@@ -2497,4 +2497,58 @@ TEST(Ir, AArch64DiscardedResultToTheZeroRegisterLiftsToNothing) {
   EXPECT_EQ(run_aarch64_args(data, {42, 3}), 42U);
 }
 
+TEST(Ir, AArch64HighAfterLogicalTestUsesTheCarryAndZero) {
+  // tst x0, x0; ccmp x1, x2, #4, hi; cset x0, eq; ret. tst clears C, so hi is false
+  // whatever x0 is. NZCV becomes #4 (Z set), and eq holds.
+  const auto data = aarch64_bytes({0xea00001f, 0xfa428024, 0x9a9f17e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {1, 1, 0}), 1U);
+}
+
+TEST(Ir, AArch64LowAfterLogicalTestIsTrue) {
+  // tst x0, x0; cset x0, lo; ret. lo is C clear, which tst always leaves.
+  const auto data = aarch64_bytes({0xea00001f, 0x9a9f27e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {0}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {5}), 1U);
+}
+
+TEST(Ir, PseudocodeDoesNotNameAnEarlierCompareAfterACondCompare) {
+  // cmp rax, rbx; ccmp rax, rcx, #0, lo; if (lo) rdx = rsi. The lo condition
+  // reads the NZCV that ccmp set, not the comparison of rax with rbx.
+  donkey::IrFunction function;
+  function.name = "conditional";
+  donkey::IrBlock block;
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::Compare;
+  compare.a = donkey::IrOperand::register_ref("rax", 8);
+  compare.b = donkey::IrOperand::register_ref("rbx", 8);
+  compare.condition = donkey::IrCondition::Equal;
+  compare.width = 8;
+  block.statements.push_back(compare);
+  donkey::IrStatement cond_compare;
+  cond_compare.op = donkey::IrOp::CondCompare;
+  cond_compare.a = donkey::IrOperand::register_ref("rax", 8);
+  cond_compare.b = donkey::IrOperand::register_ref("rcx", 8);
+  cond_compare.c = donkey::IrOperand::constant_value(0, 1);
+  cond_compare.condition = donkey::IrCondition::UnsignedLess;
+  cond_compare.width = 8;
+  block.statements.push_back(cond_compare);
+  donkey::IrStatement assign;
+  assign.op = donkey::IrOp::CondAssign;
+  assign.dest = donkey::IrOperand::register_ref("rdx", 8);
+  assign.a = donkey::IrOperand::register_ref("rsi", 8);
+  assign.condition = donkey::IrCondition::UnsignedLess;
+  assign.width = 8;
+  block.statements.push_back(assign);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rdx", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  function.blocks.push_back(std::move(block));
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("if (flags"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("if (rax"), std::string::npos) << text.value();
+}
+
 }  // namespace

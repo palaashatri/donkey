@@ -414,12 +414,18 @@ class Machine {
       switch (condition) {
         case IrCondition::Equal:
         case IrCondition::Zero:
-        case IrCondition::UnsignedLessEqual:
           return r == 0;
         case IrCondition::NotEqual:
         case IrCondition::NonZero:
-        case IrCondition::UnsignedGreater:
           return r != 0;
+        // A logical test clears the carry on both ISAs, so the unsigned
+        // conditions depend on which ISA's meaning the IR condition has.
+        // x86 ja is CF clear and ZF clear; AArch64 hi is C set and Z clear.
+        case IrCondition::UnsignedGreater:
+          return aarch64_ ? false : r != 0;
+        // x86 jbe is CF or ZF; AArch64 ls is C clear or Z set.
+        case IrCondition::UnsignedLessEqual:
+          return aarch64_ ? true : r == 0;
         case IrCondition::Negative:
         case IrCondition::SignedLess:
           return sr < 0;
@@ -430,11 +436,15 @@ class Machine {
           return sr <= 0;
         case IrCondition::SignedGreater:
           return sr > 0;
+        // AArch64 lo is C clear; x86 jb is CF set.
         case IrCondition::UnsignedLess:
+          return aarch64_;
         case IrCondition::Carry:
         case IrCondition::Overflow:
           return false;  // logical ops clear carry and overflow
+        // AArch64 hs is C set; x86 jae is CF clear.
         case IrCondition::UnsignedGreaterEqual:
+          return !aarch64_;
         case IrCondition::NoCarry:
         case IrCondition::NoOverflow:
           return true;
