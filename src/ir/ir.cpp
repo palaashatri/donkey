@@ -659,9 +659,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         return std::nullopt;
       };
 
-      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b};
-      const char* roles[] = {"dest", "a", "b"};
-      for (std::size_t i = 0; i < 3; ++i) {
+      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b, &statement.c};
+      const char* roles[] = {"dest", "a", "b", "c"};
+      for (std::size_t i = 0; i < 4; ++i) {
         if (auto problem = check_operand(*operands[i], roles[i]); problem.has_value()) {
           return make_error<bool>(Status::InternalError, problem->code, problem->message,
                                   problem->offset);
@@ -1079,6 +1079,9 @@ Result<bool> verify_ir(const IrFunction& function) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
         if (auto diag = check_use(stmt.b); diag.has_value()) {
+          return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
+        }
+        if (auto diag = check_use(stmt.c); diag.has_value()) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
         if (stmt.op == IrOp::Switch) {
