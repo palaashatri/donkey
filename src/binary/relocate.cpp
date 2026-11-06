@@ -248,6 +248,8 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
   std::vector<std::optional<std::uint64_t>> symbol_address;
   std::vector<std::string> symbol_name;
   std::map<std::string, std::uint64_t> defined;
+  // Common symbols are placed after the allocated sections, in order, each aligned.
+  std::uint64_t common_next = next;
   for (const SectionHeader& table : headers) {
     if (table.type != kShtSymtab) {
       continue;
@@ -283,8 +285,23 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
       std::optional<std::uint64_t> address;
       if (section_index == kShnAbs) {
         address = value;
-      } else if (section_index != kShnUndef && section_index != kShnCommon &&
-                 section_index < placed.size() && placed[section_index]) {
+      } else if (section_index == kShnCommon) {
+        // st_value is the alignment and st_size the size. The symbol is zero-filled storage.
+        const std::uint64_t size = zero_or(reader.u64(at + 16, endian));
+        const std::uint64_t alignment = std::max<std::uint64_t>(value, 1);
+        if ((alignment & (alignment - 1)) != 0) {
+          note(Status::Unsupported, "elf.common_alignment",
+               "a common symbol's alignment is not a power of two");
+        } else if (size >
+                   std::numeric_limits<std::uint64_t>::max() - round_up(common_next, alignment)) {
+          note(Status::Unsupported, "elf.common_size", "the common symbols do not fit in 64 bits");
+        } else {
+          common_next = round_up(common_next, alignment);
+          address = common_next;
+          common_next += size;
+        }
+      } else if (section_index != kShnUndef && section_index < placed.size() &&
+                 placed[section_index]) {
         address = *placed[section_index] + value;
       }
       if (address && !name.empty()) {
@@ -294,6 +311,20 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
       symbol_name.push_back(std::move(name));
     }
     break;
+  }
+  if (common_next != next) {
+    // The common symbols as one zero-filled section, after the allocated sections.
+    Section common;
+    common.id = SectionId{image.sections.size() + 1};
+    common.name = ".bss";
+    common.type = "nobits";
+    common.address = next;
+    common.virtual_size = common_next - next;
+    common.readable = true;
+    common.writable = true;
+    common.has_file_data = false;
+    image.sections.push_back(common);
+    next = common_next;
   }
   for (Symbol& symbol : image.symbols) {
     if (symbol.imported) {

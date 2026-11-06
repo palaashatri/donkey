@@ -20,3 +20,9 @@ data forms: `R_AARCH64_ADR_PREL_PG_HI21` with `R_AARCH64_LDST8/16/32/64_ABS_LO12
 was written for this repository. The x86-64 object carries `R_X86_64_REX_GOTPCRELX`; the
 AArch64 object carries `R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC`. The tests
 are in `tests/unit/relocate_got_test.cpp`.
+
+`reloc-common-x86_64.o` and `reloc-common-aarch64.o` are built from `reloc-common.c` with Clang
+18.1.3 (`clang -fcommon -O2 -c`, with `--target=aarch64-linux-gnu` for the AArch64 object). The
+source was written for this repository. The objects hold three COMMON symbols (`shared_counter`,
+`shared_buffer`, `shared_wide`) that the linker must place. The tests are in
+`tests/unit/relocate_common_test.cpp`.
