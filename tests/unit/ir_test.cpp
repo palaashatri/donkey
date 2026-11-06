@@ -2429,4 +2429,10 @@ TEST(Ir, AArch64ExtractAndBitfieldInsertMatchTheArchitecture) {
   EXPECT_EQ(run_aarch64_args(bfxil, {~0ULL, 0xABCD}), (~0ULL & ~0xFFULL) | 0xBCULL);
 }
 
+TEST(Ir, AArch64DiscardedResultToTheZeroRegisterLiftsToNothing) {
+  // udiv xzr, x0, x1; ret: the quotient is discarded, so x0 is unchanged.
+  const auto data = aarch64_bytes({0x9ac1081f, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {42, 3}), 42U);
+}
+
 }  // namespace
