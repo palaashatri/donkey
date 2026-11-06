@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -332,7 +333,13 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations", nullptr, nullptr, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=1", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=1",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     sqlite3_close(db);
   }
 
@@ -389,7 +396,13 @@ TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
               SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations_v3_temp", nullptr, nullptr, nullptr),
               SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=2",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     sqlite3_close(db);
   }
 
@@ -988,19 +1001,22 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db,
-                           "DROP TABLE annotations;"
-                           "CREATE TABLE annotations ("
-                           "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
-                           "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
-                           "  address INTEGER NOT NULL, text TEXT NOT NULL,"
-                           "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
-                           "  PRIMARY KEY (image_id, kind, address));"
-                           "INSERT INTO annotations(image_id, kind, address, text) "
-                           "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
-                           "PRAGMA user_version=3;",
-                           nullptr, nullptr, nullptr),
-              SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE annotations;"
+            "CREATE TABLE annotations ("
+            "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+            "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
+            "  address INTEGER NOT NULL, text TEXT NOT NULL,"
+            "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+            "  PRIMARY KEY (image_id, kind, address));"
+            "INSERT INTO annotations(image_id, kind, address, text) "
+            "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=3;",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     // The old constraint really rejects the new kind.
     EXPECT_NE(sqlite3_exec(db,
                            "INSERT INTO annotations(image_id, kind, address, text) "
@@ -1012,7 +1028,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 4);
+    EXPECT_EQ(project.value().schema_version(), 5);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1038,6 +1054,240 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
     }
   }
   EXPECT_TRUE(found);
+}
+
+// ---- Types (G05-T1) ---------------------------------------------------------
+
+namespace {
+
+donkey::TypeDefinition scalar(donkey::TypeId id, donkey::TypeKind kind, const char* name,
+                              std::uint64_t size, bool is_signed = false) {
+  donkey::TypeDefinition definition;
+  definition.id = id;
+  definition.kind = kind;
+  definition.name = name;
+  definition.size = size;
+  definition.is_signed = is_signed;
+  return definition;
+}
+
+donkey::TypeDefinition record(donkey::TypeId id, donkey::TypeKind kind, const char* name,
+                              std::uint64_t size, std::vector<donkey::TypeField> fields) {
+  donkey::TypeDefinition definition = scalar(id, kind, name, size);
+  definition.fields = std::move(fields);
+  return definition;
+}
+
+donkey::TypeField member(const char* name, std::uint64_t offset, donkey::TypeId type) {
+  donkey::TypeField field;
+  field.name = name;
+  field.offset = offset;
+  field.type = type;
+  return field;
+}
+
+}  // namespace
+
+TEST(Types, RoundTripThroughTheProject) {
+  TempPath path("types-round-trip");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  const donkey::TypeId int32(1);
+  const donkey::TypeId point(2);
+  const donkey::TypeId point_pointer(3);
+  const donkey::TypeId color(4);
+  donkey::TypeTable table;
+  table.put(scalar(int32, donkey::TypeKind::Integer, "int", 4, true));
+  table.put(record(point, donkey::TypeKind::Struct, "point", 8,
+                   {member("x", 0, int32), member("y", 4, int32)}));
+  donkey::TypeDefinition pointer = scalar(point_pointer, donkey::TypeKind::Pointer, "", 8);
+  pointer.target = point;
+  table.put(std::move(pointer));
+  donkey::TypeDefinition colour = scalar(color, donkey::TypeKind::Enum, "color", 4);
+  colour.enumerators = {donkey::TypeEnumerator{"RED", 0}, donkey::TypeEnumerator{"GREEN", 1}};
+  table.put(std::move(colour));
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value());
+    image_id = imported.value();
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+    ASSERT_TRUE(project.value()
+                    .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                          0x400100, point)
+                    .has_value());
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto stored = reopened.value().types();
+  ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+  ASSERT_EQ(stored.value().size(), 4U);
+  const donkey::TypeDefinition* read_point = stored.value().find(point);
+  ASSERT_NE(read_point, nullptr);
+  EXPECT_EQ(read_point->name, "point");
+  ASSERT_EQ(read_point->fields.size(), 2U);
+  EXPECT_EQ(read_point->fields[1].name, "y");
+  EXPECT_EQ(read_point->fields[1].offset, 4U);
+  EXPECT_EQ(read_point->fields[1].type, int32);
+  const donkey::TypeDefinition* read_color = stored.value().find(color);
+  ASSERT_NE(read_color, nullptr);
+  ASSERT_EQ(read_color->enumerators.size(), 2U);
+  EXPECT_EQ(read_color->enumerators[1].name, "GREEN");
+  EXPECT_EQ(read_color->enumerators[1].value, 1);
+  EXPECT_EQ(stored.value().find(point_pointer)->target, point);
+  EXPECT_TRUE(stored.value().validate().has_value());
+
+  auto applications = reopened.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 1U);
+  EXPECT_EQ(applications.value()[0].address, 0x400100U);
+  EXPECT_EQ(applications.value()[0].type_id, point);
+}
+
+TEST(Types, MigratesFromSchemaV4) {
+  TempPath path("types-migrate-v4");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    EXPECT_EQ(project.value().schema_version(), 5);
+  }
+  // A v4 project has no type tables; drop them and set the version back to 4.
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "DROP TABLE type_applications; DROP TABLE type_enumerators; "
+                           "DROP TABLE type_fields; DROP TABLE types; PRAGMA user_version=4;",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 5);
+  auto empty = reopened.value().types();
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_EQ(empty.value().size(), 0U);
+  // The migrated project accepts type writes.
+  donkey::TypeTable table;
+  table.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "int", 4, true));
+  EXPECT_TRUE(reopened.value().replace_types(table).has_value());
+}
+
+TEST(Types, RejectsCyclesWithoutPointer) {
+  // A struct that holds itself by value has no size.
+  donkey::TypeTable direct;
+  direct.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "self", 8,
+                    {member("next", 0, donkey::TypeId(1))}));
+  auto refused = direct.validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "type.contains_itself");
+
+  // Two structs that hold each other by value.
+  donkey::TypeTable mutual;
+  mutual.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "a", 8,
+                    {member("b", 0, donkey::TypeId(2))}));
+  mutual.put(record(donkey::TypeId(2), donkey::TypeKind::Struct, "b", 8,
+                    {member("a", 0, donkey::TypeId(1))}));
+  EXPECT_EQ(mutual.validate().diagnostic().code, "type.contains_itself");
+
+  // The same shape through a pointer is a list, and is allowed.
+  donkey::TypeTable linked;
+  linked.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "node", 16,
+                    {member("value", 0, donkey::TypeId(2)), member("next", 8, donkey::TypeId(3))}));
+  linked.put(scalar(donkey::TypeId(2), donkey::TypeKind::Integer, "long", 8, true));
+  donkey::TypeDefinition next = scalar(donkey::TypeId(3), donkey::TypeKind::Pointer, "", 8);
+  next.target = donkey::TypeId(1);
+  linked.put(std::move(next));
+  EXPECT_TRUE(linked.validate().has_value());
+}
+
+TEST(Types, SizeAndAlignmentFollowTheAbi) {
+  const donkey::TypeId c_char(1);
+  const donkey::TypeId c_int(2);
+  donkey::TypeTable table;
+  table.put(scalar(c_char, donkey::TypeKind::Integer, "char", 1, true));
+  table.put(scalar(c_int, donkey::TypeKind::Integer, "int", 4, true));
+
+  // struct { char c; int i; }: the int sits at 4, so the struct is 8 bytes, aligned to 4.
+  table.put(record(donkey::TypeId(3), donkey::TypeKind::Struct, "pair", 8,
+                   {member("c", 0, c_char), member("i", 4, c_int)}));
+  EXPECT_EQ(table.size_of(donkey::TypeId(3)).value(), 8U);
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(3)).value(), 4U);
+
+  // An array of three of them: 24 bytes, still aligned to 4.
+  donkey::TypeDefinition array = scalar(donkey::TypeId(4), donkey::TypeKind::Array, "", 0);
+  array.target = donkey::TypeId(3);
+  array.count = 3;
+  table.put(std::move(array));
+  EXPECT_EQ(table.size_of(donkey::TypeId(4)).value(), 24U);
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(4)).value(), 4U);
+
+  // A union is as large as its largest member, and every member sits at 0.
+  donkey::TypeTable unions = table;
+  unions.put(record(donkey::TypeId(5), donkey::TypeKind::Union, "either", 4,
+                    {member("c", 0, c_char), member("i", 0, c_int)}));
+  EXPECT_EQ(unions.size_of(donkey::TypeId(5)).value(), 4U);
+
+  // A stored size that is not the padded end of the members is refused.
+  donkey::TypeTable wrong = table;
+  wrong.put(record(donkey::TypeId(6), donkey::TypeKind::Struct, "short", 5,
+                   {member("c", 0, c_char), member("i", 4, c_int)}));
+  EXPECT_EQ(wrong.validate().diagnostic().code, "type.size_mismatch");
+
+  // An int at offset 2 is misaligned.
+  donkey::TypeTable misaligned = table;
+  misaligned.put(record(donkey::TypeId(7), donkey::TypeKind::Struct, "gap", 8,
+                        {member("c", 0, c_char), member("i", 2, c_int)}));
+  EXPECT_EQ(misaligned.validate().diagnostic().code, "type.misaligned_field");
+
+  // Integers, pointers and enums have ABI sizes only.
+  donkey::TypeTable sizes;
+  sizes.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "int24", 3, true));
+  EXPECT_EQ(sizes.validate().diagnostic().code, "type.bad_integer_size");
+  donkey::TypeTable pointers;
+  pointers.put(scalar(donkey::TypeId(1), donkey::TypeKind::Pointer, "", 6));
+  EXPECT_EQ(pointers.validate().diagnostic().code, "type.bad_pointer_size");
+
+  // A function has no size by value.
+  donkey::TypeTable functions;
+  donkey::TypeDefinition function = scalar(donkey::TypeId(1), donkey::TypeKind::Function, "", 0);
+  functions.put(std::move(function));
+  EXPECT_FALSE(functions.size_of(donkey::TypeId(1)).has_value());
+}
+
+TEST(Types, DwarfStructsMatchTheirByteSize) {
+  auto loaded = donkey::load_binary(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  if (!info && info.diagnostic().code == "dwarf.not_present") {
+    GTEST_SKIP() << "the toolchain put no DWARF in the debuggee";
+  }
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().code;
+  const donkey::TypeTable table = donkey::types_from_debug_info(info.value());
+  const auto valid = table.validate();
+  std::size_t checked = 0;
+  for (const auto& [offset, source] : info.value().types) {
+    if (source.kind != donkey::DebugTypeKind::Struct &&
+        source.kind != donkey::DebugTypeKind::Union) {
+      continue;
+    }
+    if (source.byte_size == 0) {
+      continue;  // a declaration only: no size to compare
+    }
+    const donkey::TypeId id(offset + 1);
+    auto size = table.size_of(id);
+    ASSERT_TRUE(size.has_value()) << source.name << ": " << size.diagnostic().message;
+    EXPECT_EQ(size.value(), source.byte_size) << source.name;
+    ++checked;
+  }
+  EXPECT_GT(checked, 0U) << "the debuggee has structs to check";
 }
 
 }  // namespace

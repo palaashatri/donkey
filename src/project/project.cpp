@@ -134,6 +134,48 @@ DROP TABLE annotations_v3_old;
 PRAGMA user_version=4;
 )sql";
 
+/// v5 adds the type store (G05-T1): types with their members and enumerators, and the
+/// type applications of an image. A type's members and enumerators are rows of their own,
+/// so a struct of any size is stored without a column for each member.
+constexpr const char* kMigrateV4ToV5 = R"sql(
+CREATE TABLE types (
+  id          INTEGER PRIMARY KEY CHECK (id > 0),
+  kind        INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 9),
+  name        TEXT    NOT NULL,
+  provenance  INTEGER NOT NULL CHECK (provenance BETWEEN 0 AND 4),
+  size        INTEGER NOT NULL CHECK (size >= 0),
+  is_signed   INTEGER NOT NULL,
+  count       INTEGER NOT NULL CHECK (count >= 0),
+  target      INTEGER NOT NULL,
+  variadic    INTEGER NOT NULL
+);
+CREATE TABLE type_fields (
+  type_id     INTEGER NOT NULL REFERENCES types(id) ON DELETE CASCADE,
+  ordinal     INTEGER NOT NULL,
+  name        TEXT    NOT NULL,
+  offset      INTEGER NOT NULL,
+  field_type  INTEGER NOT NULL,
+  bit_offset  INTEGER NOT NULL,
+  bit_size    INTEGER NOT NULL,
+  PRIMARY KEY (type_id, ordinal)
+);
+CREATE TABLE type_enumerators (
+  type_id   INTEGER NOT NULL REFERENCES types(id) ON DELETE CASCADE,
+  ordinal   INTEGER NOT NULL,
+  name      TEXT    NOT NULL,
+  value     INTEGER NOT NULL,
+  PRIMARY KEY (type_id, ordinal)
+);
+CREATE TABLE type_applications (
+  image_id  INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  address   INTEGER NOT NULL,
+  kind      INTEGER NOT NULL CHECK (kind IN (0, 1)),
+  type_id   INTEGER NOT NULL REFERENCES types(id) ON DELETE CASCADE,
+  PRIMARY KEY (image_id, address, kind)
+);
+PRAGMA user_version=5;
+)sql";
+
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
   return Diagnostic::make(Status::InternalError, std::move(code),
@@ -387,6 +429,20 @@ Result<Project> Project::open(const std::string& path) {
                                    "migrate v3->v4: " + message);
       }
       schema = 4;
+    }
+    if (schema == 4) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV4ToV5, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v4->v5: " + message);
+      }
+      schema = 5;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -755,6 +811,293 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
         storage_error(impl_->db, "project.query_failed", "read annotations").message);
   }
   return out;
+}
+
+Result<TypeTable> Project::types() const {
+  if (!is_open()) {
+    return make_error<TypeTable>(Status::InvalidInput, "project.not_open",
+                                 "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  Statement rows(db,
+                 "SELECT id, kind, name, provenance, size, is_signed, count, target, variadic "
+                 "FROM types ORDER BY id");
+  if (!rows.ok()) {
+    return make_error<TypeTable>(Status::InternalError, "project.query_failed",
+                                 storage_error(db, "project.query_failed", "read types").message);
+  }
+  std::vector<TypeDefinition> definitions;
+  while (rows.step()) {
+    const std::int64_t kind = rows.integer(1);
+    const std::int64_t provenance = rows.integer(3);
+    if (kind < 0 || kind > 9 || provenance < 0 || provenance > 4) {
+      return make_error<TypeTable>(Status::CorruptProject, "project.type_corrupt",
+                                   "a stored type has an unknown kind or provenance");
+    }
+    TypeDefinition definition;
+    definition.id = TypeId(static_cast<std::uint64_t>(rows.integer(0)));
+    definition.kind = static_cast<TypeKind>(kind);
+    definition.name = rows.text(2);
+    definition.provenance = static_cast<TypeProvenance>(provenance);
+    definition.size = static_cast<std::uint64_t>(rows.integer(4));
+    definition.is_signed = rows.integer(5) != 0;
+    definition.count = static_cast<std::uint64_t>(rows.integer(6));
+    definition.target = TypeId(static_cast<std::uint64_t>(rows.integer(7)));
+    definition.variadic = rows.integer(8) != 0;
+    definitions.push_back(std::move(definition));
+  }
+  if (!rows.done()) {
+    return make_error<TypeTable>(Status::InternalError, "project.query_failed",
+                                 storage_error(db, "project.query_failed", "read types").message);
+  }
+
+  TypeTable table;
+  for (TypeDefinition& definition : definitions) {
+    Statement fields(db,
+                     "SELECT name, offset, field_type, bit_offset, bit_size FROM type_fields "
+                     "WHERE type_id = ?1 ORDER BY ordinal");
+    fields.bind(1, static_cast<std::int64_t>(definition.id.value()));
+    while (fields.ok() && fields.step()) {
+      TypeField field;
+      field.name = fields.text(0);
+      field.offset = static_cast<std::uint64_t>(fields.integer(1));
+      field.type = TypeId(static_cast<std::uint64_t>(fields.integer(2)));
+      field.bit_offset = static_cast<std::uint8_t>(fields.integer(3));
+      field.bit_size = static_cast<std::uint8_t>(fields.integer(4));
+      definition.fields.push_back(std::move(field));
+    }
+    if (!fields.ok() || !fields.done()) {
+      return make_error<TypeTable>(
+          Status::InternalError, "project.query_failed",
+          storage_error(db, "project.query_failed", "read type fields").message);
+    }
+    Statement enumerators(db,
+                          "SELECT name, value FROM type_enumerators WHERE type_id = ?1 "
+                          "ORDER BY ordinal");
+    enumerators.bind(1, static_cast<std::int64_t>(definition.id.value()));
+    while (enumerators.ok() && enumerators.step()) {
+      definition.enumerators.push_back(TypeEnumerator{enumerators.text(0), enumerators.integer(1)});
+    }
+    if (!enumerators.ok() || !enumerators.done()) {
+      return make_error<TypeTable>(
+          Status::InternalError, "project.query_failed",
+          storage_error(db, "project.query_failed", "read type enumerators").message);
+    }
+    table.put(std::move(definition));
+  }
+  return table;
+}
+
+Result<void> Project::replace_types(const TypeTable& table) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (auto valid = table.validate(); !valid) {
+    return make_void_error(valid.diagnostic().status, valid.diagnostic().code,
+                           valid.diagnostic().message);
+  }
+  const std::vector<TypeDefinition> definitions = table.list();
+  for (const TypeDefinition& definition : definitions) {
+    if (!fits_storage(definition.id.value()) || !definition.id.valid() ||
+        !fits_storage(definition.size) || !fits_storage(definition.count)) {
+      return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                             "a type's id or size does not fit the storage integer range");
+    }
+  }
+  sqlite3* db = impl_->db;
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(Status::InternalError, "project.transaction_failed",
+                           storage_error(db, "project.transaction_failed", "begin types").message);
+  }
+  auto fail = [&](std::string code, const std::string& context) {
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, std::move(code),
+                           storage_error(db, code, context).message);
+  };
+
+  // Types that are no longer in the table go; their members and applications go with them.
+  std::vector<std::int64_t> stored;
+  {
+    Statement ids(db, "SELECT id FROM types");
+    while (ids.ok() && ids.step()) {
+      stored.push_back(ids.integer(0));
+    }
+    if (!ids.ok() || !ids.done()) {
+      return fail("project.query_failed", "read stored type ids");
+    }
+  }
+  for (const std::int64_t id : stored) {
+    if (table.find(TypeId(static_cast<std::uint64_t>(id))) != nullptr) {
+      continue;
+    }
+    Statement remove(db, "DELETE FROM types WHERE id = ?1");
+    remove.bind(1, id);
+    if (!remove.execute_statement()) {
+      return fail("project.type_delete_failed", "remove a type");
+    }
+  }
+
+  // Upsert, not replace: REPLACE would delete the row and cascade its applications away.
+  for (const TypeDefinition& definition : definitions) {
+    {
+      Statement upsert(db,
+                       "INSERT INTO types(id, kind, name, provenance, size, is_signed, count, "
+                       "target, variadic) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) "
+                       "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, "
+                       "provenance = excluded.provenance, size = excluded.size, "
+                       "is_signed = excluded.is_signed, count = excluded.count, "
+                       "target = excluded.target, variadic = excluded.variadic");
+      upsert.bind(1, static_cast<std::int64_t>(definition.id.value()));
+      upsert.bind(2, static_cast<std::int64_t>(definition.kind));
+      upsert.bind(3, definition.name);
+      upsert.bind(4, static_cast<std::int64_t>(definition.provenance));
+      upsert.bind(5, static_cast<std::int64_t>(definition.size));
+      upsert.bind(6, static_cast<std::int64_t>(definition.is_signed ? 1 : 0));
+      upsert.bind(7, static_cast<std::int64_t>(definition.count));
+      upsert.bind(8, static_cast<std::int64_t>(definition.target.value()));
+      upsert.bind(9, static_cast<std::int64_t>(definition.variadic ? 1 : 0));
+      if (!upsert.execute_statement()) {
+        return fail("project.type_write_failed", "write a type");
+      }
+    }
+    {
+      Statement clear_fields(db, "DELETE FROM type_fields WHERE type_id = ?1");
+      clear_fields.bind(1, static_cast<std::int64_t>(definition.id.value()));
+      if (!clear_fields.execute_statement()) {
+        return fail("project.type_write_failed", "clear type members");
+      }
+      Statement clear_enumerators(db, "DELETE FROM type_enumerators WHERE type_id = ?1");
+      clear_enumerators.bind(1, static_cast<std::int64_t>(definition.id.value()));
+      if (!clear_enumerators.execute_statement()) {
+        return fail("project.type_write_failed", "clear type enumerators");
+      }
+    }
+    for (std::size_t ordinal = 0; ordinal < definition.fields.size(); ++ordinal) {
+      const TypeField& field = definition.fields[ordinal];
+      Statement insert(db,
+                       "INSERT INTO type_fields(type_id, ordinal, name, offset, field_type, "
+                       "bit_offset, bit_size) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+      insert.bind(1, static_cast<std::int64_t>(definition.id.value()));
+      insert.bind(2, static_cast<std::int64_t>(ordinal));
+      insert.bind(3, field.name);
+      insert.bind(4, static_cast<std::int64_t>(field.offset));
+      insert.bind(5, static_cast<std::int64_t>(field.type.value()));
+      insert.bind(6, static_cast<std::int64_t>(field.bit_offset));
+      insert.bind(7, static_cast<std::int64_t>(field.bit_size));
+      if (!insert.execute_statement()) {
+        return fail("project.type_write_failed", "write a type member");
+      }
+    }
+    for (std::size_t ordinal = 0; ordinal < definition.enumerators.size(); ++ordinal) {
+      const TypeEnumerator& enumerator = definition.enumerators[ordinal];
+      Statement insert(db,
+                       "INSERT INTO type_enumerators(type_id, ordinal, name, value) "
+                       "VALUES(?1, ?2, ?3, ?4)");
+      insert.bind(1, static_cast<std::int64_t>(definition.id.value()));
+      insert.bind(2, static_cast<std::int64_t>(ordinal));
+      insert.bind(3, enumerator.name);
+      insert.bind(4, enumerator.value);
+      if (!insert.execute_statement()) {
+        return fail("project.type_write_failed", "write a type enumerator");
+      }
+    }
+  }
+  if (!execute(db, "COMMIT")) {
+    return fail("project.transaction_failed", "commit types");
+  }
+  return Result<void>();
+}
+
+Result<std::vector<TypeApplication>> Project::type_applications(std::int64_t image_id) const {
+  if (!is_open()) {
+    return make_error<std::vector<TypeApplication>>(Status::InvalidInput, "project.not_open",
+                                                    "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  Statement rows(db,
+                 "SELECT kind, address, type_id FROM type_applications WHERE image_id = ?1 "
+                 "ORDER BY address, kind");
+  rows.bind(1, image_id);
+  if (!rows.ok()) {
+    return make_error<std::vector<TypeApplication>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(db, "project.query_failed", "read type applications").message);
+  }
+  std::vector<TypeApplication> out;
+  while (rows.step()) {
+    TypeApplication application;
+    application.kind = static_cast<TypeApplicationKind>(rows.integer(0));
+    application.address = static_cast<std::uint64_t>(rows.integer(1));
+    application.type_id = TypeId(static_cast<std::uint64_t>(rows.integer(2)));
+    out.push_back(application);
+  }
+  if (!rows.done()) {
+    return make_error<std::vector<TypeApplication>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(db, "project.query_failed", "read type applications").message);
+  }
+  return out;
+}
+
+Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicationKind kind,
+                                           std::uint64_t address, TypeId type_id) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (!fits_storage(address)) {
+    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                           "address does not fit the storage integer range", address);
+  }
+  sqlite3* db = impl_->db;
+  if (!type_id.valid()) {
+    Statement remove(
+        db, "DELETE FROM type_applications WHERE image_id = ?1 AND address = ?2 AND kind = ?3");
+    remove.bind(1, image_id);
+    remove.bind(2, static_cast<std::int64_t>(address));
+    remove.bind(3, static_cast<std::int64_t>(kind));
+    if (!remove.execute_statement()) {
+      return make_void_error(
+          Status::InternalError, "project.type_application_failed",
+          storage_error(db, "project.type_application_failed", "remove a type application")
+              .message);
+    }
+    return Result<void>();
+  }
+  {
+    Statement type_check(db, "SELECT 1 FROM types WHERE id = ?1");
+    type_check.bind(1, static_cast<std::int64_t>(type_id.value()));
+    if (!type_check.ok() || !type_check.step()) {
+      if (!type_check.done()) {
+        return make_void_error(Status::InternalError, "project.query_failed",
+                               "look up the type for an application");
+      }
+      return make_void_error(Status::InvalidInput, "project.type_not_found",
+                             "no type with id " + std::to_string(type_id.value()));
+    }
+  }
+  Statement image_check(db, "SELECT 1 FROM images WHERE id = ?1");
+  image_check.bind(1, image_id);
+  if (!image_check.ok() || !image_check.step()) {
+    if (!image_check.done()) {
+      return make_void_error(Status::InternalError, "project.query_failed",
+                             "look up the image for an application");
+    }
+    return make_void_error(Status::InvalidInput, "project.image_not_found",
+                           "no image with id " + std::to_string(image_id));
+  }
+  Statement insert(db,
+                   "INSERT OR REPLACE INTO type_applications(image_id, address, kind, type_id) "
+                   "VALUES(?1, ?2, ?3, ?4)");
+  insert.bind(1, image_id);
+  insert.bind(2, static_cast<std::int64_t>(address));
+  insert.bind(3, static_cast<std::int64_t>(kind));
+  insert.bind(4, static_cast<std::int64_t>(type_id.value()));
+  if (!insert.execute_statement()) {
+    return make_void_error(
+        Status::InternalError, "project.type_application_failed",
+        storage_error(db, "project.type_application_failed", "write a type application").message);
+  }
+  return Result<void>();
 }
 
 Result<void> Project::replace_annotations(std::int64_t image_id,

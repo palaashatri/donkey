@@ -56,6 +56,7 @@ constexpr std::uint16_t kAtAbstractOrigin = 0x31;
 constexpr std::uint16_t kAtCount = 0x37;
 constexpr std::uint16_t kAtDataMemberLocation = 0x38;
 constexpr std::uint16_t kAtDeclFile = 0x3a;
+constexpr std::uint16_t kAtEncoding = 0x3e;
 constexpr std::uint16_t kAtDeclLine = 0x3b;
 constexpr std::uint16_t kAtDeclaration = 0x3c;
 constexpr std::uint16_t kAtRanges = 0x55;
@@ -718,6 +719,7 @@ class Reader {
     std::optional<Value> high_pc;
     std::uint64_t type = 0;
     std::uint64_t byte_size = 0;
+    std::uint8_t encoding = 0;
     std::uint64_t count = 0;
     std::optional<std::int64_t> upper_bound;
     std::uint64_t member_offset = 0;
@@ -948,6 +950,11 @@ class Reader {
       case kAtByteSize:
         if (is_constant_form(v.form)) {
           e.byte_size = v.u;
+        }
+        break;
+      case kAtEncoding:
+        if (is_constant_form(v.form)) {
+          e.encoding = static_cast<std::uint8_t>(v.u);
         }
         break;
       case kAtCount:
@@ -1201,6 +1208,7 @@ class Reader {
     type.kind = kind;
     type.name = e.name;
     type.byte_size = e.byte_size;
+    type.encoding = e.encoding;
     type.target = e.type;
     type.provenance = provenance(e, unit);
     out_.types.emplace(e.offset, std::move(type));
