@@ -80,6 +80,10 @@ enum class IrOp : std::uint8_t {
   FloatToInt,     ///< dest (integer) = a (float of a's width) truncated toward zero
   FloatExtend,    ///< dest (double) = a (float), exact
   FloatTruncate,  ///< dest (float) = a (double), rounded to nearest
+  // Fused multiply-add with one rounding (AArch64 fmadd and fmsub). FMulAdd is
+  // dest = a * b + c; FMulSub is dest = c - a * b. Both follow the AArch64 rules.
+  FMulAdd,
+  FMulSub,
 };
 
 const char* ir_op_name(IrOp op) noexcept;

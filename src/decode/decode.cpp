@@ -1,6 +1,7 @@
 #include "donkey/decode/decode.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstring>
 #include <utility>
 
@@ -303,6 +304,12 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
         case ARM64_OP_IMM:
           parsed.kind = OperandKind::Immediate;
           parsed.immediate = operand.imm;
+          break;
+        case ARM64_OP_FP:
+          // A floating-point immediate (fmov, fcmp with #0.0). The value is kept as
+          // the bits of the double; the lifter converts it to the width it needs.
+          parsed.kind = OperandKind::Immediate;
+          parsed.immediate = std::bit_cast<std::int64_t>(operand.fp);
           break;
         case ARM64_OP_MEM:
           parsed.kind = OperandKind::Memory;

@@ -3,6 +3,8 @@
 
 #include "donkey/ir/eval.h"
 
+#include "registers.h"
+
 #include <algorithm>
 #include <bit>
 #include <cmath>
@@ -145,6 +147,45 @@ std::uint64_t fp_binary(IrOp op, std::uint64_t x, std::uint64_t y, std::uint8_t 
                    : op == IrOp::FSub ? a - b
                    : op == IrOp::FMul ? a * b
                                       : a / b;
+  return std::isnan(r) ? fp_default_nan(model, 8) : std::bit_cast<std::uint64_t>(r);
+}
+
+/// a * b + c with one rounding (FMulAdd), or c - a * b (FMulSub). The rules were
+/// checked against AArch64 hardware (qemu-aarch64). An inf times zero is invalid
+/// whatever the addend is. Otherwise a NaN addend propagates first, then the NaN
+/// product operands in order. The product of FMulSub is negated, so a NaN taken
+/// from it has its sign flipped.
+std::uint64_t fp_fused(IrOp op, std::uint64_t a, std::uint64_t b, std::uint64_t c,
+                       std::uint8_t width, IrFloatModel model) {
+  const bool subtract = op == IrOp::FMulSub;
+  const std::uint64_t sign = width == 4 ? 0x80000000ULL : 0x8000000000000000ULL;
+  if (!fp_is_nan(a, width) && !fp_is_nan(b, width)) {
+    const double x = fp_as_double(a, width);
+    const double y = fp_as_double(b, width);
+    if ((std::isinf(x) && y == 0) || (x == 0 && std::isinf(y))) {
+      return fp_default_nan(model, width);
+    }
+  }
+  if (fp_is_nan(c, width)) {
+    return fp_quiet(c, width);
+  }
+  if (fp_is_nan(a, width)) {
+    return fp_quiet(a, width) ^ (subtract ? sign : 0);
+  }
+  if (fp_is_nan(b, width)) {
+    return fp_quiet(b, width) ^ (subtract ? sign : 0);
+  }
+  if (width == 4) {
+    const float x = std::bit_cast<float>(static_cast<std::uint32_t>(a));
+    const float y = std::bit_cast<float>(static_cast<std::uint32_t>(b));
+    const float z = std::bit_cast<float>(static_cast<std::uint32_t>(c));
+    const float r = subtract ? std::fma(-x, y, z) : std::fma(x, y, z);
+    return std::isnan(r) ? fp_default_nan(model, 4) : std::bit_cast<std::uint32_t>(r);
+  }
+  const double x = std::bit_cast<double>(a);
+  const double y = std::bit_cast<double>(b);
+  const double z = std::bit_cast<double>(c);
+  const double r = subtract ? std::fma(-x, y, z) : std::fma(x, y, z);
   return std::isnan(r) ? fp_default_nan(model, 8) : std::bit_cast<std::uint64_t>(r);
 }
 
@@ -438,6 +479,9 @@ Slot x86_slot(const std::string& name) {
 Slot aarch64_slot(const std::string& name) {
   if (name == "xzr" || name == "wzr") {
     return Slot{"xzr", 0, true};
+  }
+  if (internal::scalar_fp_width(name) != 0) {
+    return Slot{"v" + name.substr(1), 0, false};  // s and d are views of v
   }
   if (name == "wsp") {
     return Slot{"sp", 0, false};
@@ -982,6 +1026,15 @@ class Machine {
                  assign(s.dest, w, fp_binary(s.op, *x, *y, w, s.float_model));
             break;
           }
+          case IrOp::FMulAdd:
+          case IrOp::FMulSub: {
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            const auto z = value_of(s.c);
+            ok = x.has_value() && y.has_value() && z.has_value() &&
+                 assign(s.dest, w, fp_fused(s.op, *x, *y, *z, w, s.float_model));
+            break;
+          }
           case IrOp::FSqrt: {
             const auto x = value_of(s.a);
             ok = x.has_value() && assign(s.dest, w, fp_sqrt(*x, w, s.float_model));
@@ -1221,19 +1274,34 @@ Result<IrEvalResult> evaluate_ir(const IrFunction& function,
   std::uint64_t stack_args = 0;  // address of the first stack argument
   const std::uint8_t pointer = options.architecture == Architecture::X86 ? 4 : 8;
   // A function with a floating-point parameter takes each argument in the register
-  // that parameter was read from: an XMM register is not a positional integer
-  // register. The parameters of such a function are the arguments, in order.
+  // that parameter was read from: an XMM or SIMD&FP register is not a positional
+  // integer register. The parameters of such a function are the arguments, in order.
   const bool named_parameters =
-      std::any_of(function.parameters.begin(), function.parameters.end(),
-                  [](const IrParameter& p) { return p.abi_register.rfind("xmm", 0) == 0; });
+      std::any_of(function.parameters.begin(), function.parameters.end(), [](const IrParameter& p) {
+        return p.abi_register.rfind("xmm", 0) == 0 ||
+               internal::scalar_fp_width(p.abi_register) != 0;
+      });
   const bool register_convention = options.convention == IrCallingConvention::SysV64 ||
-                                   options.convention == IrCallingConvention::Win64;
+                                   options.convention == IrCallingConvention::Win64 ||
+                                   options.convention == IrCallingConvention::Aapcs64;
   if (named_parameters && register_convention) {
     in_registers = std::min<std::size_t>(arguments.size(), function.parameters.size());
     for (std::size_t i = 0; i < in_registers; ++i) {
-      machine.write_register(function.parameters[i].abi_register, 8, arguments[i]);
+      const IrParameter& parameter = function.parameters[i];
+      machine.write_register(parameter.abi_register, parameter.width == 0 ? 8 : parameter.width,
+                             arguments[i]);
     }
-    stack_args = options.convention == IrCallingConvention::SysV64 ? sp + 8 : sp + 8 + 32;
+    switch (options.convention) {
+      case IrCallingConvention::SysV64:
+        stack_args = sp + 8;
+        break;
+      case IrCallingConvention::Win64:
+        stack_args = sp + 8 + 32;
+        break;
+      default:
+        stack_args = sp;  // AAPCS64: no return address on the stack
+        break;
+    }
   } else
     switch (options.convention) {
       case IrCallingConvention::SysV64:

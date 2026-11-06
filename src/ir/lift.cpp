@@ -1500,6 +1500,22 @@ ReturnDefinition join(const ReturnDefinition& a, const ReturnDefinition& b) {
   return out;
 }
 
+/// The registers a function returns values in: the integer register and the
+/// floating-point register, as register families (rax and xmm0, or x0 and v0).
+struct ReturnRegisters {
+  std::string integer_family;
+  std::string float_family;
+  bool aarch64 = false;
+};
+
+/// The name the IR uses for the floating-point return register at `width` bytes.
+std::string float_return_name(const ReturnRegisters& regs, std::uint8_t width) {
+  if (!regs.aarch64) {
+    return "xmm0";
+  }
+  return width == 4 ? "s0" : "d0";
+}
+
 ReturnDefinition unknown_definition() {
   ReturnDefinition out;
   out.found = true;
@@ -1537,7 +1553,8 @@ std::vector<std::size_t> successors_of(const IrFunction& function, std::size_t i
 
 /// The last definition of rax (any width) or xmm0 among statements [0, end) of
 /// `block`. A call or an unmodelled statement may define either, so it is unknown.
-std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::size_t end) {
+std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::size_t end,
+                                                    const ReturnRegisters& regs) {
   for (std::size_t s = end; s-- > 0;) {
     const IrStatement& statement = block.statements[s];
     if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
@@ -1546,8 +1563,9 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
     if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
       continue;
     }
-    const bool integer = internal::register_family(statement.dest.reg) == "rax";
-    if (!integer && statement.dest.reg != "xmm0") {
+    const std::string family = internal::register_family(statement.dest.reg);
+    const bool integer = family == regs.integer_family;
+    if (!integer && family != regs.float_family) {
       continue;
     }
     ReturnDefinition out;
@@ -1565,7 +1583,7 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
 /// loop: a block searched already adds nothing, because the search that began there
 /// covers its paths.
 ReturnDefinition reaching_block_start(const IrFunction& function, std::size_t index,
-                                      std::vector<bool>& visited) {
+                                      std::vector<bool>& visited, const ReturnRegisters& regs) {
   if (visited[index]) {
     return {};
   }
@@ -1582,10 +1600,10 @@ ReturnDefinition reaching_block_start(const IrFunction& function, std::size_t in
     }
     has_predecessor = true;
     const IrBlock& pred = function.blocks[p];
-    if (const auto defined = definition_in_block(pred, pred.statements.size())) {
+    if (const auto defined = definition_in_block(pred, pred.statements.size(), regs)) {
       joined = join(joined, *defined);
     } else {
-      joined = join(joined, reaching_block_start(function, p, visited));
+      joined = join(joined, reaching_block_start(function, p, visited, regs));
     }
   }
   if (!has_predecessor && index != 0) {
@@ -1598,21 +1616,21 @@ ReturnDefinition reaching_block_start(const IrFunction& function, std::size_t in
 /// emits rax for every return, so each return is resolved from the definitions that
 /// reach it. When they disagree, or a path has no definition, the return stays rax
 /// and the function is marked Partial.
-void resolve_return_registers(IrFunction& function) {
+void resolve_return_registers(IrFunction& function, const ReturnRegisters& regs) {
   for (std::size_t b = 0; b < function.blocks.size(); ++b) {
     IrBlock& block = function.blocks[b];
     for (std::size_t s = 0; s < block.statements.size(); ++s) {
       IrStatement& statement = block.statements[s];
       if (statement.op != IrOp::Return || statement.a.kind != IrOperandKind::Register ||
-          internal::register_family(statement.a.reg) != "rax") {
+          internal::register_family(statement.a.reg) != regs.integer_family) {
         continue;
       }
       ReturnDefinition found;
-      if (const auto defined = definition_in_block(block, s)) {
+      if (const auto defined = definition_in_block(block, s, regs)) {
         found = *defined;
       } else {
         std::vector<bool> visited(function.blocks.size(), false);
-        found = reaching_block_start(function, b, visited);
+        found = reaching_block_start(function, b, visited, regs);
       }
       if (!found.found || found.unknown) {
         function.partial = true;
@@ -1620,7 +1638,7 @@ void resolve_return_registers(IrFunction& function) {
             "the returned register is not determined by the definitions that reach the return; rax "
             "is assumed");
       } else if (found.float_value) {
-        statement.a = IrOperand::register_ref("xmm0", found.width);
+        statement.a = IrOperand::register_ref(float_return_name(regs, found.width), found.width);
       }
     }
   }
@@ -1632,8 +1650,11 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
-    if (lifted && options.run_passes) {
-      run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
+    if (lifted) {
+      resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
+      if (options.run_passes) {
+        run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
+      }
     }
     return lifted;
   }
@@ -1989,7 +2010,10 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
-  resolve_return_registers(lifter.out);
+  const ReturnRegisters return_registers = image.architecture == Architecture::AArch64
+                                               ? ReturnRegisters{"x0", "v0", true}
+                                               : ReturnRegisters{"rax", "xmm0", false};
+  resolve_return_registers(lifter.out, return_registers);
   if (options.run_passes) {
     run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
   }

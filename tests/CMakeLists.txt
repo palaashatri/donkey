@@ -89,10 +89,10 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 list(APPEND DONKEY_CORPUS_LIBRARIES donkey_jump_table_O2)
 
-# Scalar floating-point code (G01-T2), x86-64 only: the lifter models SSE, and an
-# AArch64 build of the same source would be a different corpus. Math errno is off so
-# that sqrt is one instruction and no libm call remains.
-if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+# Scalar floating-point code (G01-T2 and G01-T3) on x86-64 and AArch64: each host
+# builds its own machine code from the same source. Math errno is off so that sqrt
+# is one instruction and no libm call remains.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
   add_library(donkey_corpus_fp_O0 SHARED corpus/corpus_fp.c)
   target_compile_options(donkey_corpus_fp_O0 PRIVATE -O0 -fno-stack-protector -fno-math-errno
                          -ffp-contract=off)

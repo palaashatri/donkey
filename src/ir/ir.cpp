@@ -400,6 +400,14 @@ class Renderer {
         return operand(statement.dest) + " = (double)" + float_operand(statement.a, 4) + ";";
       case IrOp::FloatTruncate:
         return operand(statement.dest) + " = (float)" + float_operand(statement.a, 8) + ";";
+      case IrOp::FMulAdd:
+        return operand(statement.dest) + " = fma(" + float_operand(statement.a, statement.width) +
+               ", " + float_operand(statement.b, statement.width) + ", " +
+               float_operand(statement.c, statement.width) + ");";
+      case IrOp::FMulSub:
+        return operand(statement.dest) + " = " + float_operand(statement.c, statement.width) +
+               " - " + float_operand(statement.a, statement.width) + " * " +
+               float_operand(statement.b, statement.width) + " /* fused */;";
       case IrOp::AddCarry:
       case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
@@ -594,6 +602,10 @@ const char* ir_op_name(IrOp op) noexcept {
       return "float_extend";
     case IrOp::FloatTruncate:
       return "float_truncate";
+    case IrOp::FMulAdd:
+      return "fused_multiply_add";
+    case IrOp::FMulSub:
+      return "fused_multiply_subtract";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -921,6 +933,23 @@ Result<bool> verify_ir(const IrFunction& function) {
             return fail("ir.malformed_float",
                         "floating-point operands and destination must have the statement's width "
                         "(4 or 8)");
+          }
+          break;
+        }
+        case IrOp::FMulAdd:
+        case IrOp::FMulSub: {
+          // Three float operands of the statement width, and a float destination.
+          const auto operand_ok = [&statement](const IrOperand& o) {
+            return (o.kind == IrOperandKind::Register || o.kind == IrOperandKind::Constant) &&
+                   o.width == statement.width;
+          };
+          if (!(statement.width == 4 || statement.width == 8) || !operand_ok(statement.a) ||
+              !operand_ok(statement.b) || !operand_ok(statement.c) ||
+              statement.dest.kind != IrOperandKind::Register ||
+              (statement.dest.width != 0 && statement.dest.width != statement.width)) {
+            return fail("ir.malformed_float",
+                        "fused multiply-add operands and destination must have the statement's "
+                        "width (4 or 8)");
           }
           break;
         }

@@ -1,5 +1,7 @@
 #include "donkey/ir/abi.h"
 
+#include "registers.h"
+
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -8,6 +10,11 @@
 
 namespace donkey {
 namespace {
+
+/// An XMM register (x86) or a scalar s or d register (AArch64) used as an argument.
+bool is_fp_register(const std::string& name) {
+  return name.rfind("xmm", 0) == 0 || internal::scalar_fp_width(name) != 0;
+}
 
 struct Alias {
   std::string name;
@@ -69,7 +76,12 @@ AbiModel model_for(Architecture architecture, BinaryFormat format) {
         model.arguments.push_back(
             {{{("x" + std::to_string(index)), 8}, {("w" + std::to_string(index)), 4}}});
       }
-      model.return_aliases = {{"x0", 8}, {"w0", 4}};
+      // Floating-point arguments use v0 to v7, read as d (8 bytes) or s (4 bytes).
+      for (int index = 0; index < 8; ++index) {
+        model.arguments.push_back(
+            {{{"d" + std::to_string(index), 8}, {"s" + std::to_string(index), 4}}});
+      }
+      model.return_aliases = {{"x0", 8}, {"w0", 4}, {"d0", 8}, {"s0", 4}};
       model.convention_name = "AAPCS64 ABI";
       break;
     case Architecture::X86:
@@ -213,7 +225,7 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
           }
           result.argument_read[index] = true;
           // An XMM argument is as wide as the read that uses it: 4 for a single.
-          const auto width = name.rfind("xmm", 0) == 0
+          const auto width = is_fp_register(name)
                                  ? std::optional<std::uint8_t>(read_width(statement, name))
                                  : width_of(model.arguments[index].aliases, name);
           if (width.has_value() && width.value() > result.argument_width[index]) {
@@ -267,7 +279,7 @@ void infer_signature(IrFunction& function, Architecture architecture, BinaryForm
     // XMM register it was read from.
     const std::string& read_as = result.argument_register[index];
     parameter.abi_register =
-        read_as.rfind("xmm", 0) == 0 ? read_as : model.arguments[index].aliases.front().name;
+        is_fp_register(read_as) ? read_as : model.arguments[index].aliases.front().name;
     function.parameters.push_back(std::move(parameter));
   }
 

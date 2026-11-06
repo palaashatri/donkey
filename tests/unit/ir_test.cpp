@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -2427,10 +2428,13 @@ TEST(Ir, AArch64WideningMultiplyUsesTheLow32BitsOfEachSource) {
 }
 
 // A widening multiply into xzr discards its product, so nothing is lifted for it.
-// The function still lifts exactly and returns its first argument.
+// The function still lifts exactly and returns x0. `mov x0, x0` defines the return
+// register: a return of an unwritten x0 could also be a floating-point argument.
 TEST(Ir, AArch64WideningMultiplyIntoXzrIsDiscarded) {
-  const auto umull = aarch64_bytes({0x9ba17c1f, 0xd65f03c0});   // umull xzr, w0, w1; ret
-  const auto umaddl = aarch64_bytes({0x9ba1081f, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; ret
+  const auto umull =
+      aarch64_bytes({0x9ba17c1f, 0xaa0003e0, 0xd65f03c0});  // umull xzr, w0, w1; mov x0, x0; ret
+  const auto umaddl = aarch64_bytes(
+      {0x9ba1081f, 0xaa0003e0, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; mov x0, x0; ret
   EXPECT_EQ(run_aarch64_args(umull, {7, 9}), 7U);
   EXPECT_EQ(run_aarch64_args(umaddl, {7, 9, 11}), 7U);
 }
@@ -2536,7 +2540,7 @@ TEST(Ir, VerifierRejectsAConditionalCompareWithAnOutOfRangeNzcv) {
 
 TEST(Ir, AArch64DiscardedResultToTheZeroRegisterLiftsToNothing) {
   // udiv xzr, x0, x1; ret: the quotient is discarded, so x0 is unchanged.
-  const auto data = aarch64_bytes({0x9ac1081f, 0xd65f03c0});
+  const auto data = aarch64_bytes({0x9ac1081f, 0xaa0003e0, 0xd65f03c0});  // ...; mov x0, x0; ret
   EXPECT_EQ(run_aarch64_args(data, {42, 3}), 42U);
 }
 
@@ -3107,6 +3111,97 @@ TEST(Ir, X86MovapsIsPartialBecauseItCopiesTheUpperLanes) {
   donkey::IrFunction f;  // movaps xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x28, 0xc1, 0xc3}, f));
   EXPECT_TRUE(f.partial);
+}
+
+// AArch64 scalar floating point. The encodings are the assembler's (llvm-mc); the
+// fused and NaN rules were checked against qemu-aarch64 by running the same
+// instructions natively.
+TEST(Ir, AArch64ScalarDoubleArithmeticLiftsExactly) {
+  const auto fadd = aarch64_bytes({0x1e612800, 0xd65f03c0});  // fadd d0, d0, d1; ret
+  const auto fsub = aarch64_bytes({0x1e613800, 0xd65f03c0});  // fsub d0, d0, d1; ret
+  const auto fmul = aarch64_bytes({0x1e610800, 0xd65f03c0});  // fmul d0, d0, d1; ret
+  const auto fdiv = aarch64_bytes({0x1e611800, 0xd65f03c0});  // fdiv d0, d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fadd, {double_bits(1.5), double_bits(2.25)})), 3.75);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fsub, {double_bits(1.5), double_bits(2.25)})), -0.75);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fmul, {double_bits(1.5), double_bits(2.25)})), 3.375);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fdiv, {double_bits(1.0), double_bits(4.0)})), 0.25);
+  const auto fsqrt = aarch64_bytes({0x1e61c020, 0xd65f03c0});  // fsqrt d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fsqrt, {double_bits(2.25)})), 1.5);
+  const auto fneg = aarch64_bytes({0x1e614020, 0xd65f03c0});  // fneg d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fneg, {double_bits(2.5)})), -2.5);
+  const auto fabs = aarch64_bytes({0x1e60c020, 0xd65f03c0});  // fabs d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fabs, {double_bits(-2.5)})), 2.5);
+}
+
+TEST(Ir, AArch64SingleRegisterWritesZeroTheRestOfTheVector) {
+  // fadd s0, s0, s1; ret: a single result, with the upper half of d0 cleared.
+  const auto fadd = aarch64_bytes({0x1e212800, 0xd65f03c0});
+  const std::uint64_t one_and_a_half = 0x3fc00000ULL;
+  const std::uint64_t two_and_a_quarter = 0x40100000ULL;
+  const std::uint64_t dirty_upper = 0xabcdef0100000000ULL;  // ignored: only s0 is read
+  EXPECT_EQ(run_aarch64_args(fadd, {one_and_a_half | dirty_upper, two_and_a_quarter}),
+            0x40700000ULL);  // 3.75f, and bits 32 to 63 are zero
+}
+
+TEST(Ir, AArch64FusedMultiplyAddRoundsOnce) {
+  // fmadd d0, d1, d2, d3: d0 = d3 + d1 * d2. (1 + 2^-52)^2 - (1 + 2^-51) is 2^-104
+  // with one rounding, and 0 when the product is rounded before the add.
+  const auto fmadd = aarch64_bytes({0x1f420c20, 0xd65f03c0});
+  const double n = 1.0 + std::ldexp(1.0, -52);
+  const double addend = -(1.0 + std::ldexp(1.0, -51));
+  EXPECT_EQ(run_aarch64_args(fmadd, {double_bits(n), double_bits(n), double_bits(addend)}),
+            double_bits(std::ldexp(1.0, -104)));
+  // fmsub d0, d1, d2, d3: d0 = d3 - d1 * d2.
+  const auto fmsub = aarch64_bytes({0x1f428c20, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(fmsub, {double_bits(n), double_bits(n), double_bits(-addend)}),
+            double_bits(-std::ldexp(1.0, -104)));
+}
+
+TEST(Ir, AArch64FusedMultiplyAddFollowsTheHardwareNaNRules) {
+  const auto fmadd = aarch64_bytes({0x1f420c20, 0xd65f03c0});
+  const auto fmsub = aarch64_bytes({0x1f428c20, 0xd65f03c0});
+  const std::uint64_t nan1 = 0x7ff8000000000001ULL;
+  const std::uint64_t nan3 = 0x7ff8000000000003ULL;
+  const std::uint64_t one = double_bits(1.0);
+  const std::uint64_t zero = 0;
+  const std::uint64_t inf = 0x7ff0000000000000ULL;
+  // A NaN addend wins over a NaN product operand.
+  EXPECT_EQ(run_aarch64_args(fmadd, {nan1, one, nan3}), nan3);
+  // The NaN taken from the product of fmsub has its sign flipped.
+  EXPECT_EQ(run_aarch64_args(fmsub, {nan1, one, one}), 0xfff8000000000001ULL);
+  // inf * 0 is invalid whatever the addend is: the default NaN.
+  EXPECT_EQ(run_aarch64_args(fmadd, {inf, zero, nan3}), 0x7ff8000000000000ULL);
+}
+
+TEST(Ir, AArch64FloatCompareSelectsWithItsNZCV) {
+  const auto fcsel =
+      aarch64_bytes({0x1e612000, 0x1e62cc20, 0xd65f03c0});  // fcmp d0, d1; fcsel d0, d1, d2, gt
+  // d0 > d1 selects d1; otherwise d2. NaN is unordered, so it is not greater.
+  EXPECT_EQ(bits_as_double(
+                run_aarch64_args(fcsel, {double_bits(2.0), double_bits(1.0), double_bits(5.0)})),
+            1.0);
+  EXPECT_EQ(bits_as_double(
+                run_aarch64_args(fcsel, {double_bits(1.0), double_bits(2.0), double_bits(5.0)})),
+            5.0);
+  EXPECT_EQ(
+      bits_as_double(run_aarch64_args(fcsel, {double_bits(std::numeric_limits<double>::quiet_NaN()),
+                                              double_bits(1.0), double_bits(5.0)})),
+      5.0);
+}
+
+TEST(Ir, AArch64IntegerToDoubleAndBack) {
+  const auto scvtf = aarch64_bytes({0x9e620000, 0xd65f03c0});  // scvtf d0, x0; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(scvtf, {static_cast<std::uint64_t>(-3)})), -3.0);
+  const auto fcvtzs = aarch64_bytes({0x9e780000, 0xd65f03c0});  // fcvtzs x0, d0; ret
+  EXPECT_EQ(run_aarch64_args(fcvtzs, {double_bits(-3.9)}), static_cast<std::uint64_t>(-3));
+  EXPECT_EQ(run_aarch64_args(fcvtzs, {double_bits(3.9)}), 3U);
+}
+
+TEST(Ir, AArch64FloatConversionsAndImmediateMoves) {
+  const auto fcvt = aarch64_bytes({0x1e22c000, 0xd65f03c0});  // fcvt d0, s0; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fcvt, {0x3fc00000ULL})), 1.5);
+  const auto movi = aarch64_bytes({0x1e6e1000, 0xd65f03c0});  // fmov d0, #1.0; ret
+  EXPECT_EQ(run_aarch64_args(movi, {}), double_bits(1.0));
 }
 
 }  // namespace

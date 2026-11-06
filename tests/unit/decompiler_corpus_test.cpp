@@ -896,7 +896,7 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
       << "the checker accepted a pass that cleared the Partial flag";
 }
 
-#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 // G01-T2: scalar floating-point functions from corpus_fp.c. They all have the
 // prototype double f(double, double, double, double), so the arguments arrive in
 // xmm0 to xmm3 and the result is in xmm0. The IR receives each argument in the XMM
@@ -1027,12 +1027,15 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
       for (double& arg : args) {
         arg = next_double_input(rng);
       }
-      // Each IR parameter reads one XMM register, so it takes that argument.
+      // Each IR parameter reads one floating-point register (xmm0 to xmm3 on x86-64,
+      // d0 to d3 or s0 to s3 on AArch64), so it takes that argument.
       std::vector<std::uint64_t> ir_args;
       for (const donkey::IrParameter& parameter : lifted.value().parameters) {
-        ASSERT_EQ(parameter.abi_register.rfind("xmm", 0), 0U)
-            << name << " reads " << parameter.abi_register;
-        const auto index = static_cast<std::size_t>(parameter.abi_register[3] - '0');
+        const std::string& reg = parameter.abi_register;
+        const bool xmm = reg.rfind("xmm", 0) == 0;
+        const bool scalar = reg.size() == 2 && (reg[0] == 'd' || reg[0] == 's');
+        ASSERT_TRUE(xmm || scalar) << name << " reads " << reg;
+        const auto index = static_cast<std::size_t>(xmm ? reg[3] - '0' : reg[1] - '0');
         ASSERT_LT(index, 4U);
         ir_args.push_back(double_bits_of(args[index]));
       }
@@ -1055,7 +1058,7 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
 }
 #else
 TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
-  GTEST_SKIP() << "the floating-point corpus is x86-64 only";
+  GTEST_SKIP() << "the floating-point corpus runs on x86-64 and AArch64 hosts";
 }
 #endif
 
