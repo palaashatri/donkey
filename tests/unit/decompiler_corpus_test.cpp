@@ -117,6 +117,9 @@ const Library kLibraries[] = {
     {"O0", DONKEY_CORPUS_O0_PATH},
     {"O2", DONKEY_CORPUS_O2_PATH},
     {"O3", DONKEY_CORPUS_O3_PATH},
+#ifdef DONKEY_CORPUS_O3_V2_PATH
+    {"O3-x86-64-v2", DONKEY_CORPUS_O3_V2_PATH},
+#endif
 };
 
 constexpr std::uint64_t kP = 0x10000000ULL;

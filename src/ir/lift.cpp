@@ -575,7 +575,7 @@ struct Lifter {
   void lift_bit_operation(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const std::string& mnemonic = instruction.mnemonic;
-    if (mnemonic == "bt") {
+    if (mnemonic == "bt" || mnemonic == "bts" || mnemonic == "btr" || mnemonic == "btc") {
       lift_bit_test(block, instruction);
       return;
     }
@@ -627,10 +627,11 @@ struct Lifter {
     push(block, std::move(statement));
   }
 
-  /// bt with a register destination and a register or immediate bit index. CF
-  /// becomes the selected bit, and the other flags are undefined. The IR states
-  /// CF as `0 <u bit`, which is the CarryOnly state. A memory destination, whose
-  /// bit can lie outside the operand, is Unsupported.
+  /// bt, bts, btr and btc with a register destination and a register or immediate
+  /// bit index. CF becomes the selected bit, and the other flags are undefined.
+  /// The IR states CF as `0 <u bit`, which is the CarryOnly state. bts, btr and
+  /// btc then set, clear or flip that bit. A memory destination, whose bit can
+  /// lie outside the operand, is Unsupported.
   void lift_bit_test(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     flags_state = FlagsState::Unknown;
@@ -682,6 +683,83 @@ struct Lifter {
     emit(IrOp::Compare, IrOperand::none(), IrOperand::constant_value(0, width), bit,
          IrCondition::UnsignedLess);
     flags_state = FlagsState::CarryOnly;
+    if (instruction.mnemonic == "bt") {
+      return;
+    }
+    // bts sets the selected bit, btr clears it and btc flips it. CF was read into
+    // `bit` above, so the write does not change it.
+    const IrOperand mask = temp_operand(temporary_id(), width);
+    emit(IrOp::Shl, mask, IrOperand::constant_value(1, width), index, IrCondition::None);
+    if (instruction.mnemonic == "bts") {
+      emit(IrOp::Or, value, value, mask, IrCondition::None);
+    } else if (instruction.mnemonic == "btc") {
+      emit(IrOp::Xor, value, value, mask, IrCondition::None);
+    } else {
+      // btr: AND with the complement of the mask.
+      const std::uint64_t all_ones = width == 8 ? ~0ULL : 0xFFFF'FFFFULL;
+      const IrOperand clear = temp_operand(temporary_id(), width);
+      emit(IrOp::Xor, clear, mask, IrOperand::constant_value(all_ones, width), IrCondition::None);
+      emit(IrOp::And, value, value, clear, IrCondition::None);
+    }
+  }
+
+  /// movbe with a register and a memory operand: a load of the memory operand
+  /// with its bytes reversed (`movbe reg, mem`), or the reverse, a store
+  /// (`movbe mem, reg`). Only 32- and 64-bit forms are lifted; movbe leaves the
+  /// flags alone.
+  void lift_movbe(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    if (operands.size() != 2 ||
+        !((operands[0].kind == OperandKind::Register && operands[1].kind == OperandKind::Memory) ||
+          (operands[0].kind == OperandKind::Memory && operands[1].kind == OperandKind::Register))) {
+      unsupported(block, instruction);
+      return;
+    }
+    const bool load = operands[0].kind == OperandKind::Register;
+    const IrOperand register_operand =
+        to_ir_operand(operands[load ? 0 : 1], instruction, pointer_width);
+    const IrOperand memory_operand =
+        to_ir_operand(operands[load ? 1 : 0], instruction, pointer_width);
+    const std::uint8_t width = register_operand.width;
+    if (width != 4 && width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    if (load) {
+      // reg = bswap(load(mem)).
+      const IrOperand value = temp_operand(temporary_id(), width);
+      IrStatement fetch;
+      fetch.op = IrOp::Load;
+      fetch.dest = value;
+      fetch.a = memory_operand;
+      fetch.width = width;
+      fetch.source_address = instruction.address;
+      push(block, std::move(fetch));
+      IrStatement swap;
+      swap.op = IrOp::ByteSwap;
+      swap.dest = register_operand;
+      swap.a = value;
+      swap.width = width;
+      swap.source_address = instruction.address;
+      push(block, std::move(swap));
+      return;
+    }
+    // store(mem, bswap(reg)).
+    const IrOperand value = temp_operand(temporary_id(), width);
+    IrStatement swap;
+    swap.op = IrOp::ByteSwap;
+    swap.dest = value;
+    swap.a = register_operand;
+    swap.width = width;
+    swap.source_address = instruction.address;
+    push(block, std::move(swap));
+    IrStatement store;
+    store.op = IrOp::Store;
+    store.a = memory_operand;
+    store.b = value;
+    store.width = width;
+    store.source_address = instruction.address;
+    push(block, std::move(store));
   }
 
   /// mul / imul with one operand, and div / idiv, which use the implicit rax and
@@ -1377,10 +1455,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.flags_state = Lifter::FlagsState::Exact;
         keeps_flags = true;
       } else if (mnemonic == "popcnt" || mnemonic == "tzcnt" || mnemonic == "lzcnt" ||
-                 mnemonic == "bswap" || mnemonic == "bt") {
+                 mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||
+                 mnemonic == "btr" || mnemonic == "btc") {
         lifter.lift_bit_operation(out_block, instruction);
-        // bswap leaves the flags alone and bt sets CF, so their state is kept.
-        keeps_flags = mnemonic == "bswap" || mnemonic == "bt";
+        // bswap leaves the flags alone; the bit tests set CF, so their state is kept.
+        keeps_flags = mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||
+                      mnemonic == "btr" || mnemonic == "btc";
+      } else if (mnemonic == "movbe") {
+        lifter.lift_movbe(out_block, instruction);
+        keeps_flags = true;  // movbe leaves the flags alone
       } else if (mnemonic == "mul" || mnemonic == "div" || mnemonic == "idiv" ||
                  (mnemonic == "imul" && instruction.structured_operands.size() == 1)) {
         lifter.lift_multiply_divide(out_block, instruction);

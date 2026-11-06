@@ -65,6 +65,14 @@ foreach(level O0 O2 O3)
   list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_${level})
 endforeach()
 
+# The same source for x86-64-v2 (which adds POPCNT and SSE4.2) at -O3, so that the
+# instructions of a newer baseline are measured too. The flag is x86 only.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_library(donkey_corpus_O3_v2 SHARED corpus/corpus.c)
+  target_compile_options(donkey_corpus_O3_v2 PRIVATE -O3 -march=x86-64-v2 -fno-stack-protector)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_O3_v2)
+endif()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/decompiler_corpus_test.cpp
@@ -99,6 +107,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
+  $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )

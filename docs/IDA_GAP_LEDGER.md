@@ -419,10 +419,15 @@ interpreter.
   `c_bswap64`, `c_bit_test`. Also fixed: a function containing a direct call
   was reported Complete. It is now Partial, which changed the expected status
   of `_start` in two CLI tests (`cli.decompile_elf_json`,
-  `cli.decompile_elf_i386`) from Complete to Partial. Not done: `bsf`/`bsr`
-  (needs a zero-flag state), `bts`/`btr`/`btc`, `movbe`, memory forms of
-  `bt`, and the `-march=x86-64-v2` corpus variant, so `c_popcount` is not yet
-  verified with the instruction.
+  `cli.decompile_elf_i386`) from Complete to Partial. Since then: `bts`, `btr`
+  and `btc` with a register destination (`Ir.X86BitTestAndSetResetAndComplementWriteTheBit`,
+  `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
+  and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
+  `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
+  at O3 with `popcnt`. Still not done, so the task stays IN PROGRESS: `bsf`/`bsr`
+  (needs a zero-flag state, or G02-T4 for the guarded form in `c_clz64_guarded`).
+  Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
+  can lie outside the operand).
 
 **G02-T4 Flags across blocks**
 
