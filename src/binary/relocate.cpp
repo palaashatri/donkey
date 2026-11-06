@@ -38,6 +38,9 @@ constexpr std::uint32_t kR_X86_64_PC32 = 2;
 constexpr std::uint32_t kR_X86_64_PLT32 = 4;
 constexpr std::uint32_t kR_X86_64_32 = 10;
 constexpr std::uint32_t kR_X86_64_32S = 11;
+constexpr std::uint32_t kR_X86_64_GOTPCREL = 9;
+constexpr std::uint32_t kR_X86_64_GOTPCRELX = 41;
+constexpr std::uint32_t kR_X86_64_REX_GOTPCRELX = 42;
 // AArch64 relocation types (ELF for the Arm 64-bit Architecture).
 constexpr std::uint32_t kR_AARCH64_ABS64 = 257;
 constexpr std::uint32_t kR_AARCH64_PREL32 = 261;
@@ -49,6 +52,8 @@ constexpr std::uint32_t kR_AARCH64_LDST8_ABS_LO12_NC = 278;
 constexpr std::uint32_t kR_AARCH64_LDST16_ABS_LO12_NC = 284;
 constexpr std::uint32_t kR_AARCH64_LDST32_ABS_LO12_NC = 285;
 constexpr std::uint32_t kR_AARCH64_LDST64_ABS_LO12_NC = 286;
+constexpr std::uint32_t kR_AARCH64_ADR_GOT_PAGE = 311;
+constexpr std::uint32_t kR_AARCH64_LD64_GOT_LO12_NC = 312;
 
 Endian endian_of(std::span<const std::byte> file) {
   return static_cast<unsigned>(file[5]) == 2 ? Endian::Big : Endian::Little;
@@ -90,6 +95,43 @@ T zero_or(const Result<T>& result) {
 bool fits_int32(std::int64_t value) {
   return value >= std::numeric_limits<std::int32_t>::min() &&
          value <= std::numeric_limits<std::int32_t>::max();
+}
+
+/// True for the relocation types that reach a symbol through its GOT slot.
+bool is_got_relocation(std::uint16_t machine, std::uint32_t type) {
+  if (machine == kMachineX86_64) {
+    return type == kR_X86_64_GOTPCREL || type == kR_X86_64_GOTPCRELX ||
+           type == kR_X86_64_REX_GOTPCRELX;
+  }
+  return type == kR_AARCH64_ADR_GOT_PAGE || type == kR_AARCH64_LD64_GOT_LO12_NC;
+}
+
+/// Writes into the ADRP at file offset `at`, placed at address `place`, the page of
+/// `target` relative to the page of the instruction, in 4 KiB units split over immlo
+/// (bits 29-30) and immhi (bits 5-23). Returns false when the page is out of range.
+bool patch_adrp(std::vector<std::byte>& out, std::uint64_t at, std::int64_t place,
+                std::int64_t target, Endian endian) {
+  constexpr std::int64_t kPageMask = 0xFFF;
+  const std::int64_t pages = (target & ~kPageMask) - (place & ~kPageMask);
+  const std::int64_t value = pages >> 12;
+  if (value < -(std::int64_t{1} << 20) || value >= (std::int64_t{1} << 20)) {
+    return false;
+  }
+  const auto imm = static_cast<std::uint64_t>(value) & 0x1F'FFFFU;
+  const std::uint64_t instruction = load(out, at, 4, endian);
+  const std::uint64_t patched = (instruction & ~std::uint64_t{0x60FF'FFE0U}) |
+                                ((imm & 0x3U) << 29U) | (((imm >> 2U) & 0x7'FFFFU) << 5U);
+  store(out, at, 4, patched, endian);
+  return true;
+}
+
+/// Writes the low 12 bits of `value` (already shifted for the access size) into the 12-bit
+/// immediate (bits 10-21) of the instruction at file offset `at`.
+void patch_imm12(std::vector<std::byte>& out, std::uint64_t at, std::uint64_t value,
+                 Endian endian) {
+  const std::uint64_t instruction = load(out, at, 4, endian);
+  store(out, at, 4, (instruction & ~std::uint64_t{0x003F'FC00U}) | ((value & 0xFFFU) << 10U),
+        endian);
 }
 
 struct SectionHeader {
@@ -269,6 +311,63 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
     note(Status::Unsupported, "elf.relocation_machine",
          "relocations are applied for x86-64 and AArch64 objects only");
   }
+  // GOT: an 8-byte slot for each defined symbol that a GOT relocation names, placed after the
+  // allocated sections. The static link stores the symbol's address in its slot, so a
+  // GOT-relative access loads that address.
+  std::map<std::uint64_t, std::uint64_t> got_slot;  // symbol index -> slot address
+  if (known_machine) {
+    std::vector<std::uint64_t> got_symbols;
+    for (const SectionHeader& relocations : headers) {
+      if (relocations.type != kShtRela || relocations.entry_size != kRelaSize ||
+          relocations.offset > file.size() || relocations.size > file.size() - relocations.offset) {
+        continue;
+      }
+      const std::size_t target = relocations.info;
+      if (target == 0 || target >= headers.size() || !placed[target] || !body[target]) {
+        continue;
+      }
+      for (std::uint64_t k = 0; k < relocations.size / kRelaSize; ++k) {
+        const std::uint64_t info =
+            zero_or(reader.u64(relocations.offset + k * kRelaSize + 8, endian));
+        const auto type = static_cast<std::uint32_t>(info & 0xFFFF'FFFFU);
+        const std::uint64_t symbol_index = info >> 32U;
+        if (!is_got_relocation(machine.value(), type) || symbol_index == 0 ||
+            symbol_index >= symbol_address.size() || !symbol_address[symbol_index] ||
+            got_slot.contains(symbol_index)) {
+          continue;
+        }
+        got_slot.emplace(symbol_index, 0);
+        got_symbols.push_back(symbol_index);
+      }
+    }
+    if (!got_symbols.empty()) {
+      while (out.size() % 8 != 0) {
+        out.push_back(std::byte{0});
+      }
+      const std::uint64_t got_address = round_up(next, 8);
+      const std::uint64_t got_file = out.size();
+      out.resize(out.size() + got_symbols.size() * 8, std::byte{0});
+      for (std::size_t i = 0; i < got_symbols.size(); ++i) {
+        const std::uint64_t index = got_symbols[i];
+        got_slot[index] = got_address + i * 8;
+        store(out, got_file + i * 8, 8, *symbol_address[index], endian);
+      }
+      Section got;
+      got.id = SectionId{image.sections.size() + 1};
+      got.name = ".got";
+      got.type = "got";
+      got.file_offset = got_file;
+      got.file_size = got_symbols.size() * 8;
+      got.virtual_size = got.file_size;
+      got.alignment = 8;
+      got.address = got_address;
+      got.readable = true;
+      got.writable = true;
+      got.has_file_data = true;
+      image.sections.push_back(got);
+    }
+  }
+
   for (const SectionHeader& relocations : headers) {
     if (relocations.type != kShtRela || !known_machine) {
       continue;
@@ -314,6 +413,17 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
       const std::uint64_t file_place = *body[target] + where;
       const auto s = static_cast<std::int64_t>(symbol);
       const auto p = static_cast<std::int64_t>(place);
+      // A GOT relocation addresses the symbol's slot rather than the symbol itself.
+      std::optional<std::uint64_t> slot;
+      if (is_got_relocation(machine.value(), type)) {
+        const auto found = got_slot.find(symbol_index);
+        if (found == got_slot.end()) {
+          note(Status::Unsupported, "elf.relocation_got",
+               "a GOT relocation names no symbol defined in this object");
+          continue;
+        }
+        slot = found->second;
+      }
 
       if (machine.value() == kMachineX86_64) {
         switch (type) {
@@ -354,6 +464,25 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
             if (!ok) {
               note(Status::Unsupported, "elf.relocation_range",
                    "an absolute value does not fit in 32 bits");
+              break;
+            }
+            store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          case kR_X86_64_GOTPCREL:
+          case kR_X86_64_GOTPCRELX:
+          case kR_X86_64_REX_GOTPCRELX: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            // The 32-bit displacement from the instruction to the GOT slot. The relaxable
+            // forms are patched as they are: the instruction still loads through the slot.
+            const std::int64_t value = static_cast<std::int64_t>(*slot) + addend - p;
+            if (!fits_int32(value)) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a GOT displacement does not fit in 32 bits");
               break;
             }
             store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
@@ -409,51 +538,43 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
             store(out, file_place, 4, patched, endian);
             break;
           }
-          case kR_AARCH64_ADR_PREL_PG_HI21: {
+          case kR_AARCH64_ADR_PREL_PG_HI21:
+          case kR_AARCH64_ADR_GOT_PAGE: {
             if (where + 4 > target_header.size) {
               note(Status::Unsupported, "elf.relocation_range",
                    "a relocation lies outside its section");
               break;
             }
-            // ADRP: the page of S + A relative to the page of the instruction, in 4 KiB
-            // units, split over immlo (bits 29-30) and immhi (bits 5-23).
-            constexpr std::int64_t kPageMask = 0xFFF;
-            const std::int64_t pages = ((s + addend) & ~kPageMask) - (p & ~kPageMask);
-            const std::int64_t value = pages >> 12;
-            if (value < -(std::int64_t{1} << 20) || value >= (std::int64_t{1} << 20)) {
+            // The page of the data (S + A), or of its GOT slot, relative to this ADRP.
+            const std::int64_t destination = slot ? static_cast<std::int64_t>(*slot) : s + addend;
+            if (!patch_adrp(out, file_place, p, destination, endian)) {
               note(Status::Unsupported, "elf.relocation_range",
                    "a page-relative address does not fit in 21 bits");
-              break;
             }
-            const std::uint64_t imm = static_cast<std::uint64_t>(value) & 0x1F'FFFFU;
-            const std::uint64_t instruction = load(out, file_place, 4, endian);
-            const std::uint64_t patched = (instruction & ~std::uint64_t{0x60FF'FFE0U}) |
-                                          ((imm & 0x3U) << 29U) | (((imm >> 2U) & 0x7'FFFFU) << 5U);
-            store(out, file_place, 4, patched, endian);
             break;
           }
           case kR_AARCH64_ADD_ABS_LO12_NC:
           case kR_AARCH64_LDST8_ABS_LO12_NC:
           case kR_AARCH64_LDST16_ABS_LO12_NC:
           case kR_AARCH64_LDST32_ABS_LO12_NC:
-          case kR_AARCH64_LDST64_ABS_LO12_NC: {
+          case kR_AARCH64_LDST64_ABS_LO12_NC:
+          case kR_AARCH64_LD64_GOT_LO12_NC: {
             if (where + 4 > target_header.size) {
               note(Status::Unsupported, "elf.relocation_range",
                    "a relocation lies outside its section");
               break;
             }
-            // The low 12 bits of S + A go in the instruction's 12-bit immediate (bits 10-21).
-            // A load or store scales that offset by its access size. The _NC forms do not
-            // check that the offset is aligned.
-            const unsigned scale = type == kR_AARCH64_LDST16_ABS_LO12_NC   ? 1U
-                                   : type == kR_AARCH64_LDST32_ABS_LO12_NC ? 2U
-                                   : type == kR_AARCH64_LDST64_ABS_LO12_NC ? 3U
-                                                                           : 0U;
-            const std::uint64_t low = (static_cast<std::uint64_t>(s + addend) & 0xFFFU) >> scale;
-            const std::uint64_t instruction = load(out, file_place, 4, endian);
-            const std::uint64_t patched =
-                (instruction & ~std::uint64_t{0x003F'FC00U}) | ((low & 0xFFFU) << 10U);
-            store(out, file_place, 4, patched, endian);
+            // The low 12 bits of the address (S + A, or the GOT slot) go in the instruction's
+            // 12-bit immediate. A load or store scales them by its access size. The _NC forms
+            // do not check that the offset is aligned.
+            const unsigned scale =
+                type == kR_AARCH64_LDST16_ABS_LO12_NC   ? 1U
+                : type == kR_AARCH64_LDST32_ABS_LO12_NC ? 2U
+                : (type == kR_AARCH64_LDST64_ABS_LO12_NC || type == kR_AARCH64_LD64_GOT_LO12_NC)
+                    ? 3U
+                    : 0U;
+            const std::uint64_t address = slot ? *slot : static_cast<std::uint64_t>(s + addend);
+            patch_imm12(out, file_place, (address & 0xFFFU) >> scale, endian);
             break;
           }
           default:

@@ -14,3 +14,9 @@ The source was written for this repository. The object carries the page and low-
 data forms: `R_AARCH64_ADR_PREL_PG_HI21` with `R_AARCH64_LDST8/16/32/64_ABS_LO12_NC`, and
 `R_AARCH64_ADD_ABS_LO12_NC` for the address of a static table. The test is
 `RelocateAArch64.PageAndLowBitRelocationsReachTheirData` in `tests/unit/relocate_aarch64_test.cpp`.
+
+`reloc-got-x86_64.o` and `reloc-got-aarch64.o` are built from `reloc-got.c` with Clang 18.1.3
+(`clang -fPIC -O2 -c`, and `--target=aarch64-linux-gnu` for the AArch64 object). The source
+was written for this repository. The x86-64 object carries `R_X86_64_REX_GOTPCRELX`; the
+AArch64 object carries `R_AARCH64_ADR_GOT_PAGE` and `R_AARCH64_LD64_GOT_LO12_NC`. The tests
+are in `tests/unit/relocate_got_test.cpp`.
