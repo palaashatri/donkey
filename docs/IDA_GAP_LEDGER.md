@@ -448,10 +448,14 @@ for Partial functions.
 - **Status:** DONE. Evidence: `DecompilerCorpus.EveryPassPreservesSemantics`
   (every pass, every corpus function, O0/O2/O3, 48 vectors) and
   `DecompilerCorpus.EveryPassCheckRejectsAChangedMeaning` (a pass that turns an
-  addition into a subtraction is reported). The current passes only annotate
-  the function, so the checker confirms that they leave results unchanged; it
-  does not yet cover passes that rewrite statements. The corpus outcome report
-  is identical to before the change.
+  addition into a subtraction is reported) and
+  `DecompilerCorpus.EveryPassCheckRejectsAChangedPartialFlag` (setting or
+  clearing `IrFunction::partial` alone is reported). Green `ci` run on the
+  first G04-T0 commit, 7588286: https://github.com/palaashatri/donkey/actions/runs/41299348751
+  (PR palaashatri/donkey#26). The current passes only annotate the function, so the
+  checker confirms that they leave results unchanged; it does not yet cover
+  passes that rewrite statements. The corpus outcome report is identical to
+  before the change.
 
 **G04-T1 Register alias canonicalisation**
 

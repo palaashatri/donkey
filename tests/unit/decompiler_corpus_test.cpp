@@ -325,6 +325,7 @@ struct PassSnapshot {
 /// versions of a function agree when these are equal.
 struct Observation {
   bool verified = false;
+  bool partial = false;  ///< IrFunction::partial, which decides how the result is reported
   bool evaluated = false;
   std::string error;  ///< error code when not evaluated
   std::uint64_t return_value = 0;
@@ -337,6 +338,7 @@ Observation observe(const donkey::IrFunction& function, bool verified, const Vec
                     const donkey::IrEvalOptions& options) {
   Observation observation;
   observation.verified = verified;
+  observation.partial = function.partial;
   donkey::IrEvalMemory memory = vector_memory(image, file, in);
   auto result = donkey::evaluate_ir(function, std::span(in.ir_args, in.count), memory, options);
   if (result) {
@@ -365,6 +367,9 @@ std::string outcome_text(const Observation& observation) {
 std::string describe_difference(const Observation& before, const Observation& after) {
   if (before.verified != after.verified) {
     return "changed whether the IR verifies";
+  }
+  if (before.partial != after.partial) {
+    return "changed whether the function is reported Partial";
   }
   if (before.evaluated != after.evaluated || before.error != after.error ||
       before.return_value != after.return_value) {
@@ -737,6 +742,46 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaning) {
   const std::string difference =
       first_difference(versions, add3, loaded.value().image, loaded.value().data, eval_options);
   EXPECT_NE(difference, "") << "the checker accepted an addition turned into a subtraction";
+}
+
+// A pass that changes only the Partial flag changes how the result is reported,
+// even when every execution is identical. Setting the flag and clearing it must
+// each be reported.
+TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  const CorpusFunction& add3 = kCorpus[0];
+  ASSERT_STREQ(add3.name, "c_add3");
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), add3.name);
+  ASSERT_NE(function, nullptr);
+  donkey::LiftOptions raw_options;
+  raw_options.run_passes = false;
+  auto raw = donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+  ASSERT_TRUE(raw.has_value());
+  ASSERT_FALSE(raw.value().partial) << "c_add3 at O0 must be Complete for this check";
+
+  donkey::IrFunction flagged = raw.value();
+  flagged.partial = true;
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  const std::vector<PassSnapshot> setting{{"lift", raw.value()}, {"set partial", flagged}};
+  const std::vector<PassSnapshot> clearing{{"lift", flagged}, {"clear partial", raw.value()}};
+  EXPECT_NE(first_difference(setting, add3, loaded.value().image, loaded.value().data, eval_options)
+                .find("reported Partial"),
+            std::string::npos)
+      << "the checker accepted a pass that set the Partial flag";
+  EXPECT_NE(
+      first_difference(clearing, add3, loaded.value().image, loaded.value().data, eval_options)
+          .find("reported Partial"),
+      std::string::npos)
+      << "the checker accepted a pass that cleared the Partial flag";
 }
 
 }  // namespace
