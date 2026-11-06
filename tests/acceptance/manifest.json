@@ -55,7 +55,7 @@
      "tests": ["Ir.AcceptanceScenarioA16_SourceMapNavigation", "Ir.StructuresIfThenElse", "Ir.StructuresWhileLoop", "Ir.StructuresDoWhileLoop", "DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode"]},
     {"id": "A17", "scenario": "Switch/jump-table corpus", "status": "pass",
      "fixtures": ["tests/corpus/corpus.c (c_switch_dense, c_switch_sparse)"],
-     "tests": ["DecompilerCorpus.JumpTableIsRecoveredWithEvidence", "Ir.AcceptanceScenarioA17_GracefulUnresolvedJumpTable", "Ir.StructuresReducibleSwitchStatement"],
+     "tests": ["DecompilerCorpus.JumpTableIsRecoveredWithEvidence", "DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode", "Cfg.AArch64GccShapedJumpTableIsRecovered", "Cfg.AArch64ClangShapedJumpTableIsRecovered", "Cfg.AArch64TableOnTheOutOfRangeSideIsNotRecovered", "Cfg.AArch64TableEntryOutsideTheCodeIsNotRecovered", "Ir.AcceptanceScenarioA17_GracefulUnresolvedJumpTable", "Ir.StructuresReducibleSwitchStatement"],
      "limits": "Jump tables are recovered on x86 and x86-64; AArch64 tables stay unresolved indirect branches (reported, not guessed)."},
     {"id": "A18", "scenario": "Local debugger launch fixture", "status": "pass",
      "fixtures": ["tests/fixtures/debuggee/debuggee.c"],

@@ -153,7 +153,7 @@ P0 is the most important, P3 the least.
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
-| G03 | AArch64 integer gaps | Full | No jump tables (G03-T3). `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, and `adc`/`sbc`/`adds`/`cmn` in G03-T4 | P0 | IN PROGRESS (G03-T1, T2, T4 DONE; T3 TODO) |
+| G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, and jump tables (GCC and Clang forms) in G03-T3. Still open in G03-T2: `umull`/`smull`/`umaddl` | P0 | IN PROGRESS (G03-T1, T3, T4 DONE; T2 open for `umull`/`smull`/`umaddl`) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
@@ -523,6 +523,27 @@ interpreter.
   AArch64 instead of skipping.
 - **Done when:** that test passes on `ubuntu-24.04-arm` and `macos-15`, and
   `c_switch_dense` is Complete and verified.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Not yet run
+  on `ubuntu-24.04-arm` or `macos-15` (CI is the check for those two). GCC and
+  Clang do not give `c_switch_dense` a code jump table on AArch64 (at -O0 it is
+  a compare chain, at -O2 a lookup of constants), so the recovery test uses the
+  fixture `tests/corpus/jump_table.c` (`jt_dispatch16`). `c_switch_dense` is
+  Complete and verified at O0, O2 and O3. Recognised: GCC's form (`b.ls` into
+  the table, byte offsets with `add ... sxtb #2`) and Clang's form (`b.hi`
+  falling into the table, `uxtb ... lsl #2`); any other shape stays unresolved.
+  The switch reads a copy of the compared register taken after the compare,
+  since GCC's table code overwrites `x0`. The CFG keeps the last two path
+  entries for a block entered through a conditional's taken edge, so the
+  compare is in view. In the x86 slice, an unrelated computation with an
+  unknown input now leaves its destination unknown instead of failing; only a
+  jump that needs that value fails. Evidence: `Cfg.AArch64GccShapedJumpTableIsRecovered`,
+  `Cfg.AArch64ClangShapedJumpTableIsRecovered`,
+  `Cfg.AArch64TableOnTheOutOfRangeSideIsNotRecovered`,
+  `Cfg.AArch64TableEntryOutsideTheCodeIsNotRecovered`,
+  `DecompilerCorpus.JumpTableIsRecoveredWithEvidence`,
+  `DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode`. The corpus
+  counts did not change on any tree. Not done: a function whose cold block lies
+  below its entry is rejected by the verifier (see `docs/SUPPORT_MATRIX.md`).
 
 **G03-T4 AArch64 carry chain** (depends: G02-T1; added when G02-T1 landed)
 

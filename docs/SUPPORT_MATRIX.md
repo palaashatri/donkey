@@ -37,7 +37,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 |---|---|---|---|---|---|
 | x86-64 | yes | yes | integer subset: see the corpus below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
-| AArch64 | yes | yes, with ADRP folding | integer subset: see the corpus below | no: reported as unresolved indirect branches | Linux |
+| AArch64 | yes | yes, with ADRP folding | integer subset: see the corpus below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
 | 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
 
 ## Decompiler corpus
@@ -58,6 +58,13 @@ A function the decompiler reports **Complete** that computes anything
 different fails the test. **Partial** results are run too and recorded. The
 full outcome table is `tests/decompiler-corpus-report.json` in the build
 tree.
+
+`tests/corpus/jump_table.c` is a separate library, so the counts above stay as
+they are. It has one function, `jt_dispatch16`, a 16-case switch built at -O2
+whose cases compute from the second argument (a case that returns a constant
+becomes a lookup, not a jump). `DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode`
+requires it to lift Complete and agree with the compiled code on all 48 vectors.
+On GCC it is built without hot/cold partitioning, see the known limitations.
 
 Each cell counts functions reported **Complete** whose IR, run in the
 interpreter, agreed with the compiled code on all 48 vectors. CI prints the
@@ -83,6 +90,8 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G03-T2 (59 functions), under qemu-aarch64 | 52/59 | 48/59 | 42/59 | SIMD, `ccmp`/`ccmn` (G03-T1), `cmn`/`adc`/`sbc` (G03-T4; `sdiv`/`srem` need `cmn`), `fmov`/`ldr d` (popcount) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T1 (59 functions), under qemu-aarch64 | 52/59 | 54/59 | 48/59 | SIMD (`movi`, `dup`, `fmov`, `ldr d`), `cmn`/`adc`/`sbc` (G03-T4; `sdiv`/`srem` need `cmn`), `c_switch_sparse` Partial (cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
+| GCC 13.3, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | the same as after G03-T4: SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
+| Clang 18.1, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 56/59 | 52/59 | 52/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`), `umull` (not lifted) |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -120,6 +129,16 @@ x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
 `bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
 with a register and a memory operand.
 
+Jump tables are recovered on x86-64 and AArch64 from the bounds check and the
+table bytes, and the decompiler shows a `switch`. On AArch64 the bounds check
+is a `cmp` directly before a `b.cond`, and the path must follow its in-range
+side. Two forms are recognised: GCC's (`b.ls` into the table, byte offsets read
+with `ldrb` and applied with `add ... sxtb #2`) and Clang's (`b.hi` falling
+into the table, `uxtb ... lsl #2`). Each entry must be a code address that
+starts an instruction; one bad entry leaves the whole table unresolved. The
+switch selects on a copy of the compared register taken right after the
+compare, because GCC's table code overwrites `x0`.
+
 ### Known unsupported classes
 
 - Floating point and SIMD: vectorised loops are Partial.
@@ -132,7 +151,11 @@ with a register and a memory operand.
 - AArch64 `adcs` and `sbcs`: they set flags from the carry out, which is not
   modelled, so they are Unsupported.
 - Flags read across basic blocks. An AArch64 `ccmp`/`ccmn` whose flags before are not exact is Partial.
-- AArch64 jump tables; 32-bit ARM.
+- AArch64 jump tables outside the GCC and Clang forms above; 32-bit ARM.
+- Functions with a cold block below their entry (GCC's -O2 hot/cold split can
+  place the default path there on x86-64). The lifter keeps blocks in address
+  order and the verifier starts from the first one, so the IR is rejected
+  (`ir.unreachable_block`) and the function is never shown as Complete.
 - Varargs and struct passing by value.
 
 ## UI

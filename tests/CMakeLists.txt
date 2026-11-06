@@ -73,6 +73,22 @@ if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_O3_v2)
 endif()
 
+# A dense switch that compilers lower to a code jump table (G03-T3). Kept out
+# of corpus.c so that the corpus function counts do not change.
+add_library(donkey_jump_table_O2 SHARED corpus/jump_table.c)
+if(NOT MSVC)
+  target_compile_options(donkey_jump_table_O2 PRIVATE -O2 -fno-stack-protector)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  # GCC can move the default path into a .cold part that is laid out below the
+  # entry. The lifter keeps blocks in address order (a conditional branch falls
+  # through to the next block), so such a function is rejected by the verifier.
+  # That limitation is recorded in the support matrix; this fixture keeps the
+  # switch in one part so that it measures the jump table.
+  target_compile_options(donkey_jump_table_O2 PRIVATE -fno-reorder-blocks-and-partition)
+endif()
+list(APPEND DONKEY_CORPUS_LIBRARIES donkey_jump_table_O2)
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/decompiler_corpus_test.cpp
@@ -108,6 +124,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
   $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
+  DONKEY_JUMP_TABLE_O2_PATH="$<TARGET_FILE:donkey_jump_table_O2>"
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )

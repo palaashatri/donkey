@@ -1572,6 +1572,52 @@ struct Lifter {
   }
 };
 
+/// The synthetic register that holds a jump table's selector from its compare
+/// to its jump. Not an architectural name, so it cannot collide with one.
+constexpr const char* kJumpSelectorRegister = "jump_selector";
+
+/// A jump table the analysis recovered (G03-T3), lowered as the x86 lifter
+/// lowers one: a switch over the selector copy, with one case per table entry.
+/// Returns false, with a note, when the cases are not all blocks of this
+/// function; the jump then stays a tail call.
+bool lift_jump_table_switch(Lifter& lifter, IrBlock& out_block, const AnalysisResult& analysis,
+                            const JumpTable& table, std::uint64_t jump_address) {
+  const bool check_found = std::any_of(
+      analysis.instructions.begin(), analysis.instructions.end(),
+      [&](const Instruction& candidate) { return candidate.address == table.check_address; });
+  std::vector<IrSwitchCase> cases;
+  for (std::size_t value = 0; check_found && value < table.targets.size(); ++value) {
+    const auto block_it = lifter.block_by_address.find(table.targets[value]);
+    if (block_it == lifter.block_by_address.end()) {
+      break;
+    }
+    cases.push_back(IrSwitchCase{value, block_it->second});
+  }
+  IrOperand selector;
+  if (check_found && cases.size() == table.targets.size() && !cases.empty()) {
+    selector = IrOperand::register_ref(kJumpSelectorRegister, register_width(table.selector.reg));
+  }
+  if (selector.kind == IrOperandKind::None) {
+    lifter.mark_partial("jump table cases lie outside this function");
+    return false;
+  }
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.source_address = jump_address;
+  sw.width = kPointerWidth;
+  sw.dest = selector;
+  sw.switch_cases = std::move(cases);
+  // Out-of-range selectors were sent elsewhere by the bounds check before this
+  // jump, so the default is unreachable here when it is not a block of this
+  // function.
+  const auto fallback = lifter.block_by_address.find(table.default_target);
+  sw.a = IrOperand::block_ref(fallback != lifter.block_by_address.end()
+                                  ? fallback->second
+                                  : sw.switch_cases.front().target_block);
+  lifter.push(out_block, std::move(sw));
+  return true;
+}
+
 }  // namespace
 
 Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& analysis,
@@ -1624,6 +1670,23 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       const std::string& mnemonic = instruction.mnemonic;
 
       if (instruction.classification == InstructionClass::ConditionalJump) {
+        // A jump table behind this branch switches on the value the compare
+        // tested. Its table code may overwrite that register (GCC keeps the
+        // table base in x0), so the value is copied here, after the compare
+        // and before the branch.
+        for (const JumpTable& table : analysis.cfg.jump_tables) {
+          // The recogniser only accepts a compare directly before the branch,
+          // and AArch64 instructions are four bytes.
+          if (table.check_address + 4 == instruction.address) {
+            IrStatement copy;
+            copy.op = IrOp::Assign;
+            copy.source_address = instruction.address;
+            copy.width = register_width(table.selector.reg);
+            copy.dest = IrOperand::register_ref(kJumpSelectorRegister, copy.width);
+            copy.a = lifter.to_ir_operand(table.selector, copy.width);
+            lifter.push(out_block, std::move(copy));
+          }
+        }
         IrCondition condition = branch_condition(mnemonic);
         if (mnemonic == "cbz" || mnemonic == "cbnz") {
           // cbz/cbnz test a register, not the flags: exact.
@@ -1661,6 +1724,18 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
 
       if (instruction.classification == InstructionClass::Jump) {
+        const JumpTable* table = nullptr;
+        if (!instruction.direct_target.has_value()) {
+          for (const JumpTable& candidate : analysis.cfg.jump_tables) {
+            if (candidate.jump_address == instruction.address) {
+              table = &candidate;
+            }
+          }
+        }
+        if (table != nullptr &&
+            lift_jump_table_switch(lifter, out_block, analysis, *table, instruction.address)) {
+          continue;
+        }
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
@@ -1786,6 +1861,7 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
 
     if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
                                          out_block.statements.back().op != IrOp::CondBranch &&
+                                         out_block.statements.back().op != IrOp::Switch &&
                                          out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {
