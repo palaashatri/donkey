@@ -63,6 +63,17 @@ const char* width_type(std::uint8_t width) {
   }
 }
 
+/// The C type of a value `width` bytes wide: float or double for a floating-point value.
+const char* value_type(std::uint8_t width, bool floating_point) {
+  if (floating_point && width == 4) {
+    return "float";
+  }
+  if (floating_point && width == 8) {
+    return "double";
+  }
+  return width_type(width);
+}
+
 /// An exact hexadecimal floating-point literal for the bits of a float (width 4)
 /// or double (width 8), such as 0x1.8p+1. NaN and infinity are spelled out with
 /// their payload or sign. Nothing is rounded to decimal.
@@ -412,9 +423,10 @@ class Renderer {
                ", " + float_operand(statement.b, statement.width) + ", " +
                float_operand(statement.c, statement.width) + ");";
       case IrOp::FMulSub:
-        return operand(statement.dest) + " = " + float_operand(statement.c, statement.width) +
-               " - " + float_operand(statement.a, statement.width) + " * " +
-               float_operand(statement.b, statement.width) + " /* fused */;";
+        // c - a * b with one rounding: fma(-a, b, c) is the same operation, fused.
+        return operand(statement.dest) + " = fma(-" + float_operand(statement.a, statement.width) +
+               ", " + float_operand(statement.b, statement.width) + ", " +
+               float_operand(statement.c, statement.width) + ");";
       case IrOp::AddCarry:
       case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
@@ -1381,7 +1393,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   }
 
   std::string signature;
-  signature += function.return_width != 0 ? width_type(function.return_width) : "void";
+  signature += function.return_width != 0
+                   ? value_type(function.return_width, function.return_floating_point)
+                   : "void";
   signature += " ";
   signature += function.name.empty() ? std::string("sub") : function.name;
   signature += "(";
@@ -1401,7 +1415,8 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
       if (recovered != nullptr) {
         signature += "struct " + recovered->type_name + " *";
       } else {
-        signature += width_type(function.parameters[index].width);
+        signature +=
+            value_type(function.parameters[index].width, function.parameters[index].floating_point);
         signature += " ";
       }
       signature += function.parameters[index].name;

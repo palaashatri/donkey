@@ -1634,7 +1634,7 @@ struct ReturnClasses {
 };
 
 ReturnClasses classes_reaching_return(const IrFunction& function, std::size_t start,
-                                      std::size_t end) {
+                                      std::size_t end, const ReturnRegisters& regs) {
   ReturnClasses out;
   std::vector<bool> visited(function.blocks.size(), false);
   std::vector<std::pair<std::size_t, std::size_t>> pending{{start, end}};
@@ -1647,9 +1647,10 @@ ReturnClasses classes_reaching_return(const IrFunction& function, std::size_t st
       if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
         continue;
       }
-      if (internal::register_family(statement.dest.reg) == "rax") {
+      const std::string family = internal::register_family(statement.dest.reg);
+      if (family == regs.integer_family) {
         out.integer = true;
-      } else if (statement.dest.reg == "xmm0") {
+      } else if (family == regs.float_family) {
         out.floating = true;
       }
     }
@@ -1681,12 +1682,13 @@ void resolve_return_registers(IrFunction& function, const ReturnRegisters& regs)
           internal::register_family(statement.a.reg) != regs.integer_family) {
         continue;
       }
-      const ReturnClasses classes = classes_reaching_return(function, b, s);
+      const ReturnClasses classes = classes_reaching_return(function, b, s, regs);
       if (classes.integer && classes.floating) {
         function.partial = true;
-        function.notes.push_back(
-            "rax and xmm0 are both written on a path to this return; which one carries the "
-            "return value is not determined, so rax is assumed");
+        function.notes.push_back("both " + regs.integer_family + " and " + regs.float_family +
+                                 " are written on a path to this return; which one carries the "
+                                 "return value is not determined, so " +
+                                 regs.integer_family + " is assumed");
         continue;
       }
       ReturnDefinition found;
@@ -1710,6 +1712,24 @@ void resolve_return_registers(IrFunction& function, const ReturnRegisters& regs)
 
 }  // namespace
 
+/// Integer and floating-point parameters are placed by their own registers, so the order
+/// the source gives them is not recoverable from the registers they arrive in. The
+/// evaluator places parameters in the order it has, so a function with both kinds is
+/// Partial rather than Complete with an order that may be wrong.
+void mark_mixed_parameters(IrFunction& function) {
+  bool integer = false;
+  bool floating = false;
+  for (const IrParameter& parameter : function.parameters) {
+    (parameter.floating_point ? floating : integer) = true;
+  }
+  if (integer && floating) {
+    function.partial = true;
+    function.notes.push_back(
+        "integer and floating-point parameters are both present; their order in the source is "
+        "not recoverable from the registers, so the signature is Partial");
+  }
+}
+
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
@@ -1718,6 +1738,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
       if (options.run_passes) {
         run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
+        mark_mixed_parameters(lifted.value());
       }
     }
     return lifted;
@@ -2080,6 +2101,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   resolve_return_registers(lifter.out, return_registers);
   if (options.run_passes) {
     run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
+    mark_mixed_parameters(lifter.out);
   }
   return lifter.out;
 }

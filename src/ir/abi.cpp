@@ -160,6 +160,8 @@ struct Scan {
   std::vector<std::string> argument_register;
   bool has_value_return = false;
   bool has_bare_return = false;
+  // The returned value is in a floating-point register (xmm0, v0, d0 or s0).
+  bool return_is_fp = false;
   // Default to the width of the ABI's own return register (rax/x0: 8, eax: 4)
   // so a function that never writes it still reports the right size.
   std::uint8_t current_return_width = 8;
@@ -185,6 +187,9 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
       if (statement.op == IrOp::Return) {
         if (statement.a.kind == IrOperandKind::Register) {
           result.has_value_return = true;
+          if (is_fp_register(statement.a.reg)) {
+            result.return_is_fp = true;
+          }
           // The lifter spells the return operand as the full pointer register
           // (`rax`, `x0`), so its width says nothing about the source type. The
           // last write to that family is the better signal (`mov eax, ...`
@@ -284,10 +289,12 @@ void infer_signature(IrFunction& function, Architecture architecture, BinaryForm
     const std::string& read_as = result.argument_register[index];
     parameter.abi_register =
         is_fp_register(read_as) ? read_as : model.arguments[index].aliases.front().name;
+    parameter.floating_point = is_fp_register(read_as);
     function.parameters.push_back(std::move(parameter));
   }
 
   function.return_width = result.has_value_return ? result.widest_return_width : 0;
+  function.return_floating_point = result.has_value_return && result.return_is_fp;
   function.signature_inferred = true;
 
   function.notes.push_back("signature inferred from " + model.convention_name +

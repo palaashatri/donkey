@@ -3093,6 +3093,52 @@ TEST(Ir, FloatingPointEvaluationRoundsToNearestWhateverTheCallerSet) {
   EXPECT_EQ(result, 0x3ff0000000000000ULL);
 }
 
+/// The lifted AArch64 function for the code (the first function found).
+donkey::IrFunction lift_aarch64_code(const std::vector<std::byte>& data) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  donkey::IrFunction none;
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return none;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  return lifted.has_value() ? lifted.value() : none;
+}
+
+TEST(Ir, AArch64FloatingPointParametersAndReturnAreRenderedAsDouble) {
+  // fadd d0, d0, d1; ret: two double arguments and a double result.
+  const auto function = lift_aarch64_code(aarch64_bytes({0x1e612800U, 0xd65f03c0U}));
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("double a0, double a1"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("double sub"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("u64 a0"), std::string::npos) << text.value();
+}
+
+TEST(Ir, AArch64FusedMultiplySubtractIsRenderedAsAFusedCall) {
+  // fmsub d0, d1, d2, d3: d0 = d3 - d1 * d2, rounded once.
+  const auto function = lift_aarch64_code(aarch64_bytes({0x1f428c20U, 0xd65f03c0U}));
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("fma(-"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("/* fused */"), std::string::npos) << text.value();
+}
+
+TEST(Ir, AArch64IntegerAndFloatingPointParametersTogetherArePartial) {
+  // add x0, x0, x1; fadd d0, d0, d1; ret: the order of the four arguments is not
+  // recoverable from their registers, so the signature is Partial.
+  EXPECT_TRUE(lift_aarch64_code(aarch64_bytes({0x8b010000U, 0x1e612800U, 0xd65f03c0U})).partial);
+}
+
+TEST(Ir, AArch64IntegerReturnAfterAFloatingPointResultIsAmbiguous) {
+  // fadd d0, d0, d1; movz x0, #1; ret: x0 and d0 are both written on the way to the
+  // return, so the return channel is not determined.
+  EXPECT_TRUE(lift_aarch64_code(aarch64_bytes({0x1e612800U, 0xd2800020U, 0xd65f03c0U})).partial);
+}
+
 TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {
   // adcs with no flag writer before it: its carry in is unknown.
   EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xba010000U, 0xd65f03c0U})));
