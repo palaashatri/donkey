@@ -81,7 +81,11 @@ std::optional<std::uint64_t> read_table_entry(const BinaryImage& image,
     }
     std::uint64_t value = 0;
     for (std::size_t i = 0; i < size; ++i) {
-      value |= static_cast<std::uint64_t>(file[static_cast<std::size_t>(offset + i)]) << (8U * i);
+      const auto byte = static_cast<std::uint64_t>(file[static_cast<std::size_t>(offset + i)]);
+      // Entries use the image's byte order, as the load that reads them does: the
+      // lowest address holds the most significant byte when the image is big-endian.
+      const std::size_t significance = image.endian == Endian::Big ? size - 1 - i : i;
+      value |= byte << (8U * significance);
     }
     return value;
   }

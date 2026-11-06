@@ -956,6 +956,10 @@ struct Lifter {
       unsupported(block, instruction);
       return;
     }
+    if (operands[0].reg == "xzr") {
+      // The result is discarded and no flags are written, so there is nothing to lift.
+      return;
+    }
     const bool sign = mnemonic[0] == 's';
     auto widen = [&](const Operand& source, std::uint32_t id) {
       IrStatement extend;
