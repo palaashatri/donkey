@@ -1191,9 +1191,22 @@ platform; do not write new, weaker ones.
     members. Evidence: a GNU `ar` archive (`tests/fixtures/archives/libcheck.a`) lists the
     same object members as `ar t` (`cli.archive_list_gnu`); eleven `Archive.*` unit tests
     cover the BSD form, padding, truncation, the member limit and sanitizing; `fuzz_archive`
-    ran 4.2 million inputs in 60 s under ASan and UBSan with no finding. Not done:
-    relocations for ELF relocatable objects, so an object member is listed but not
-    analysed as code; the reader does not yet open a member as a binary.
+    ran 4.2 million inputs in 60 s under ASan and UBSan with no finding. The archive
+    members are not yet opened as binaries.
+  - **Status (relocations):** PARTIAL. Done: an ELF relocatable object (`ET_REL`) is laid
+    out from `kObjectBase` (0x1000), its allocated sections are copied and patched, and its
+    symbols take their layout addresses (`link_relocatable_object`,
+    `include/donkey/binary/relocate.h`, called from `load_binary`). Applied: x86-64 `64`,
+    `PC32`, `PLT32`, `32` and `32S`; AArch64 `ABS64`, `CALL26`, `JUMP26` and `PREL32`.
+    A relocation that cannot be applied is a diagnostic and sets `partial`. A call or
+    data reference to a symbol the object does not define is `elf.relocation_unresolved`:
+    the second object is needed for it, which is G15-T2. Evidence: `Relocate.*` (x86-64,
+    built with GCC) and `RelocateAArch64.*` (built with clang for AArch64): the data
+    pointer holds its target's address, a call reaches its callee, and the unresolved
+    call is reported. `fuzz_binary` runs both objects as seeds (60 s and 45 s, no
+    finding). Not done: GOT-based relocations (`GOTPCREL`), the TLS types, the AArch64
+    page and `LO12` forms (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols, and
+    the relocations of non-allocated sections (debug information).
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.

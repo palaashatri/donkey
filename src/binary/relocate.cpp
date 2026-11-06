@@ -1,0 +1,421 @@
+#include "donkey/binary/relocate.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <limits>
+#include <map>
+#include <optional>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "donkey/binary/byte_reader.h"
+
+namespace donkey {
+namespace {
+
+constexpr std::uint16_t kEtRel = 1;
+constexpr std::uint16_t kMachineX86_64 = 62;
+constexpr std::uint16_t kMachineAarch64 = 183;
+constexpr std::uint32_t kShtSymtab = 2;
+constexpr std::uint32_t kShtRela = 4;
+constexpr std::uint32_t kShtNobits = 8;
+constexpr std::uint64_t kShfAlloc = 0x2;
+constexpr std::uint16_t kShnUndef = 0;
+constexpr std::uint16_t kShnAbs = 0xfff1;
+constexpr std::uint16_t kShnCommon = 0xfff2;
+constexpr std::size_t kSectionHeaderSize = 64;
+constexpr std::size_t kSymbolSize = 24;
+constexpr std::size_t kRelaSize = 24;
+constexpr std::uint64_t kBodyAlignment = 16;
+constexpr std::uint64_t kMaxSymbolNameBytes = 4096;
+
+// x86-64 relocation types (System V psABI).
+constexpr std::uint32_t kR_X86_64_64 = 1;
+constexpr std::uint32_t kR_X86_64_PC32 = 2;
+constexpr std::uint32_t kR_X86_64_PLT32 = 4;
+constexpr std::uint32_t kR_X86_64_32 = 10;
+constexpr std::uint32_t kR_X86_64_32S = 11;
+// AArch64 relocation types (ELF for the Arm 64-bit Architecture).
+constexpr std::uint32_t kR_AARCH64_ABS64 = 257;
+constexpr std::uint32_t kR_AARCH64_PREL32 = 261;
+constexpr std::uint32_t kR_AARCH64_JUMP26 = 282;
+constexpr std::uint32_t kR_AARCH64_CALL26 = 283;
+
+Endian endian_of(std::span<const std::byte> file) {
+  return static_cast<unsigned>(file[5]) == 2 ? Endian::Big : Endian::Little;
+}
+
+Diagnostic error_at(Status status, const char* code, std::string message) {
+  return Diagnostic::make(status, code, std::move(message));
+}
+
+std::uint64_t round_up(std::uint64_t value, std::uint64_t alignment) {
+  return (value + alignment - 1) / alignment * alignment;
+}
+
+void store(std::vector<std::byte>& bytes, std::uint64_t at, unsigned width, std::uint64_t value,
+           Endian endian) {
+  for (unsigned i = 0; i < width; ++i) {
+    const unsigned shift = endian == Endian::Little ? 8U * i : 8U * (width - 1U - i);
+    bytes[static_cast<std::size_t>(at) + i] = static_cast<std::byte>((value >> shift) & 0xFFU);
+  }
+}
+
+std::uint64_t load(const std::vector<std::byte>& bytes, std::uint64_t at, unsigned width,
+                   Endian endian) {
+  std::uint64_t value = 0;
+  for (unsigned i = 0; i < width; ++i) {
+    const unsigned shift = endian == Endian::Little ? 8U * i : 8U * (width - 1U - i);
+    value |= static_cast<std::uint64_t>(
+                 std::to_integer<unsigned>(bytes[static_cast<std::size_t>(at) + i]))
+             << shift;
+  }
+  return value;
+}
+
+template <typename T>
+T zero_or(const Result<T>& result) {
+  return result ? result.value() : T{};
+}
+
+bool fits_int32(std::int64_t value) {
+  return value >= std::numeric_limits<std::int32_t>::min() &&
+         value <= std::numeric_limits<std::int32_t>::max();
+}
+
+struct SectionHeader {
+  std::uint32_t type = 0;
+  std::uint64_t flags = 0;
+  std::uint64_t alignment = 0;
+  std::uint64_t offset = 0;
+  std::uint64_t size = 0;
+  std::uint32_t link = 0;
+  std::uint32_t info = 0;
+  std::uint64_t entry_size = 0;
+};
+
+}  // namespace
+
+bool is_relocatable_elf(std::span<const std::byte> file) {
+  if (file.size() < 0x12 || file[0] != std::byte{0x7F} || file[1] != std::byte{'E'} ||
+      file[2] != std::byte{'L'} || file[3] != std::byte{'F'} || file[4] != std::byte{2}) {
+    return false;
+  }
+  const ByteReader reader(file);
+  const auto type = reader.u16(16, endian_of(file));
+  return type && type.value() == kEtRel;
+}
+
+Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte> file,
+                                                       BinaryImage& image) {
+  const ByteReader reader(file);
+  const Endian endian = endian_of(file);
+  const auto fail = [](const char* code, std::string message) {
+    return make_error<std::vector<std::byte>>(Status::InvalidInput, code, std::move(message));
+  };
+
+  const auto machine = reader.u16(18, endian);
+  const auto section_offset = reader.u64(0x28, endian);
+  const auto section_entry_size = reader.u16(0x3A, endian);
+  const auto section_count = reader.u16(0x3C, endian);
+  if (!machine || !section_offset || !section_entry_size || !section_count) {
+    return fail("elf.truncated", "the object's header is truncated");
+  }
+  if (section_entry_size.value() != kSectionHeaderSize) {
+    return fail("elf.section_entry_size", "the section header size is not 64 bytes");
+  }
+  const std::uint64_t count = section_count.value();
+  if (count != image.sections.size()) {
+    return fail("elf.section_count", "the section table does not match the parsed sections");
+  }
+  if (section_offset.value() > file.size() ||
+      count * kSectionHeaderSize > file.size() - section_offset.value()) {
+    return fail("elf.section_table", "the section table extends past the end of the file");
+  }
+
+  std::vector<SectionHeader> headers(static_cast<std::size_t>(count));
+  for (std::uint64_t i = 0; i < count; ++i) {
+    const std::uint64_t at = section_offset.value() + i * kSectionHeaderSize;
+    SectionHeader& header = headers[static_cast<std::size_t>(i)];
+    header.type = zero_or(reader.u32(at + 4, endian));
+    header.flags = zero_or(reader.u64(at + 8, endian));
+    header.offset = zero_or(reader.u64(at + 24, endian));
+    header.size = zero_or(reader.u64(at + 32, endian));
+    header.link = zero_or(reader.u32(at + 40, endian));
+    header.info = zero_or(reader.u32(at + 44, endian));
+    header.alignment = zero_or(reader.u64(at + 48, endian));
+    header.entry_size = zero_or(reader.u64(at + 56, endian));
+  }
+
+  // Layout: allocated sections, in section order, from kObjectBase.
+  std::vector<std::optional<std::uint64_t>> placed(static_cast<std::size_t>(count));
+  std::uint64_t next = kObjectBase;
+  for (std::size_t i = 1; i < headers.size(); ++i) {
+    const SectionHeader& header = headers[i];
+    if ((header.flags & kShfAlloc) == 0) {
+      continue;
+    }
+    const std::uint64_t alignment = std::max<std::uint64_t>(header.alignment, 1);
+    next = round_up(next, alignment);
+    if (header.size > std::numeric_limits<std::uint64_t>::max() - next) {
+      return fail("elf.layout_overflow", "the allocated sections do not fit in 64 bits");
+    }
+    placed[i] = next;
+    image.sections[i].address = next;
+    next += header.size;
+  }
+  image.image_base = kObjectBase;
+
+  // The output: the file, then a copy of each allocated section that has file data.
+  std::vector<std::byte> out(file.begin(), file.end());
+  std::vector<std::optional<std::uint64_t>> body(static_cast<std::size_t>(count));
+  for (std::size_t i = 1; i < headers.size(); ++i) {
+    const SectionHeader& header = headers[i];
+    if (!placed[i] || header.type == kShtNobits || header.size == 0) {
+      continue;
+    }
+    if (header.offset > file.size() || header.size > file.size() - header.offset) {
+      return fail("elf.section_out_of_bounds", "a section extends past the end of the file");
+    }
+    while (out.size() % kBodyAlignment != 0) {
+      out.push_back(std::byte{0});
+    }
+    body[i] = out.size();
+    out.insert(out.end(), file.begin() + static_cast<std::ptrdiff_t>(header.offset),
+               file.begin() + static_cast<std::ptrdiff_t>(header.offset + header.size));
+    image.sections[i].file_offset = *body[i];
+    image.sections[i].file_size = header.size;
+  }
+
+  std::vector<Diagnostic> diagnostics;
+  const auto note = [&](Status status, const char* code, std::string message) {
+    image.partial = true;
+    diagnostics.push_back(error_at(status, code, std::move(message)));
+  };
+
+  // Symbols: their addresses in the layout, from the first symbol table.
+  std::vector<std::optional<std::uint64_t>> symbol_address;
+  std::vector<std::string> symbol_name;
+  std::map<std::string, std::uint64_t> defined;
+  for (const SectionHeader& table : headers) {
+    if (table.type != kShtSymtab) {
+      continue;
+    }
+    if (table.link >= headers.size() || table.entry_size != kSymbolSize) {
+      note(Status::Unsupported, "elf.symbol_table", "the symbol table cannot be read");
+      break;
+    }
+    const SectionHeader& strings = headers[table.link];
+    const auto strings_view =
+        (strings.offset <= file.size() && strings.size <= file.size() - strings.offset)
+            ? std::string_view(reinterpret_cast<const char*>(file.data() + strings.offset),
+                               static_cast<std::size_t>(strings.size))
+            : std::string_view();
+    const std::uint64_t entries = table.size / kSymbolSize;
+    if (table.offset > file.size() || table.size > file.size() - table.offset) {
+      note(Status::Unsupported, "elf.symbol_table", "the symbol table cannot be read");
+      break;
+    }
+    for (std::uint64_t k = 0; k < entries; ++k) {
+      const std::uint64_t at = table.offset + k * kSymbolSize;
+      const std::uint32_t name_offset = zero_or(reader.u32(at, endian));
+      const std::uint16_t section_index = zero_or(reader.u16(at + 6, endian));
+      const std::uint64_t value = zero_or(reader.u64(at + 8, endian));
+      std::string name;
+      if (name_offset != 0 && name_offset < strings_view.size()) {
+        const std::string_view rest = strings_view.substr(name_offset);
+        const std::size_t length = std::min<std::size_t>(
+            rest.find('\0') == std::string_view::npos ? rest.size() : rest.find('\0'),
+            kMaxSymbolNameBytes);
+        name = std::string(rest.substr(0, length));
+      }
+      std::optional<std::uint64_t> address;
+      if (section_index == kShnAbs) {
+        address = value;
+      } else if (section_index != kShnUndef && section_index != kShnCommon &&
+                 section_index < placed.size() && placed[section_index]) {
+        address = *placed[section_index] + value;
+      }
+      if (address && !name.empty()) {
+        defined.emplace(name, *address);
+      }
+      symbol_address.push_back(address);
+      symbol_name.push_back(std::move(name));
+    }
+    break;
+  }
+  for (Symbol& symbol : image.symbols) {
+    if (symbol.imported) {
+      continue;
+    }
+    if (const auto found = defined.find(symbol.name); found != defined.end()) {
+      symbol.address = found->second;
+    }
+  }
+
+  // Relocations: each RELA section patches the section named by its `info` field.
+  const bool known_machine =
+      machine.value() == kMachineX86_64 || machine.value() == kMachineAarch64;
+  if (!known_machine) {
+    note(Status::Unsupported, "elf.relocation_machine",
+         "relocations are applied for x86-64 and AArch64 objects only");
+  }
+  for (const SectionHeader& relocations : headers) {
+    if (relocations.type != kShtRela || !known_machine) {
+      continue;
+    }
+    const std::size_t target = relocations.info;
+    if (target == 0 || target >= headers.size() || !placed[target] || !body[target]) {
+      continue;  // debug information and other non-allocated targets are not applied
+    }
+    if (relocations.entry_size != kRelaSize || relocations.offset > file.size() ||
+        relocations.size > file.size() - relocations.offset) {
+      note(Status::Unsupported, "elf.relocation_table", "a relocation table cannot be read");
+      continue;
+    }
+    const SectionHeader& target_header = headers[target];
+    const std::uint64_t entries = relocations.size / kRelaSize;
+    for (std::uint64_t k = 0; k < entries; ++k) {
+      const std::uint64_t at = relocations.offset + k * kRelaSize;
+      const std::uint64_t where = zero_or(reader.u64(at, endian));
+      const std::uint64_t info = zero_or(reader.u64(at + 8, endian));
+      const std::int64_t addend = static_cast<std::int64_t>(zero_or(reader.u64(at + 16, endian)));
+      const std::uint64_t symbol_index = info >> 32U;
+      const auto type = static_cast<std::uint32_t>(info & 0xFFFF'FFFFU);
+
+      std::uint64_t symbol = 0;
+      if (symbol_index != 0) {
+        if (symbol_index >= symbol_address.size() || !symbol_address[symbol_index]) {
+          const std::string name =
+              symbol_index < symbol_name.size() && !symbol_name[symbol_index].empty()
+                  ? symbol_name[symbol_index]
+                  : "#" + std::to_string(symbol_index);
+          note(Status::Unsupported, "elf.relocation_unresolved",
+               "relocation against '" + name +
+                   "' is not applied: the symbol is not defined in this object");
+          continue;
+        }
+        symbol = *symbol_address[symbol_index];
+      }
+      if (where > target_header.size) {
+        note(Status::Unsupported, "elf.relocation_range", "a relocation lies outside its section");
+        continue;
+      }
+      const std::uint64_t place = *placed[target] + where;  // address of the patched location
+      const std::uint64_t file_place = *body[target] + where;
+      const auto s = static_cast<std::int64_t>(symbol);
+      const auto p = static_cast<std::int64_t>(place);
+
+      if (machine.value() == kMachineX86_64) {
+        switch (type) {
+          case kR_X86_64_64:
+            if (where + 8 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            store(out, file_place, 8, symbol + static_cast<std::uint64_t>(addend), endian);
+            break;
+          case kR_X86_64_PC32:
+          case kR_X86_64_PLT32: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const std::int64_t value = s + addend - p;
+            if (!fits_int32(value)) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a PC-relative value does not fit in 32 bits");
+              break;
+            }
+            store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          case kR_X86_64_32:
+          case kR_X86_64_32S: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const std::int64_t value = s + addend;
+            const bool ok =
+                type == kR_X86_64_32 ? (value >= 0 && value <= 0xFFFF'FFFFLL) : fits_int32(value);
+            if (!ok) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "an absolute value does not fit in 32 bits");
+              break;
+            }
+            store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          default:
+            note(Status::Unsupported, "elf.relocation_type",
+                 "x86-64 relocation type " + std::to_string(type) + " is not applied");
+            break;
+        }
+      } else {
+        switch (type) {
+          case kR_AARCH64_PREL32: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const std::int64_t value = s + addend - p;
+            if (!fits_int32(value)) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a PC-relative value does not fit in 32 bits");
+              break;
+            }
+            store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          case kR_AARCH64_ABS64:
+            if (where + 8 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            store(out, file_place, 8, symbol + static_cast<std::uint64_t>(addend), endian);
+            break;
+          case kR_AARCH64_CALL26:
+          case kR_AARCH64_JUMP26: {
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const std::int64_t delta = s + addend - p;
+            const std::int64_t words = delta / 4;
+            if ((delta % 4) != 0 || words < -(std::int64_t{1} << 25) ||
+                words >= (std::int64_t{1} << 25)) {
+              note(Status::Unsupported, "elf.relocation_range", "a branch target is out of range");
+              break;
+            }
+            const std::uint64_t instruction = load(out, file_place, 4, endian);
+            const std::uint64_t patched = (instruction & ~std::uint64_t{0x03FF'FFFFU}) |
+                                          (static_cast<std::uint64_t>(words) & 0x03FF'FFFFU);
+            store(out, file_place, 4, patched, endian);
+            break;
+          }
+          default:
+            note(Status::Unsupported, "elf.relocation_type",
+                 "AArch64 relocation type " + std::to_string(type) + " is not applied");
+            break;
+        }
+      }
+    }
+  }
+
+  for (Diagnostic& diagnostic : diagnostics) {
+    image.diagnostics.push_back(std::move(diagnostic));
+  }
+  return out;
+}
+
+}  // namespace donkey
