@@ -852,6 +852,79 @@ TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
   EXPECT_EQ(function.return_width, 0);
 }
 
+TEST(Ir, ArgumentReadsFollowThePathsNotTheBlockOrder) {
+  // Block 1 writes x0 and sits before block 2 in the layout, but block 0 reaches block 2
+  // without passing block 1. The x0 that block 2 reads is still the incoming argument.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "path_sensitive";
+  function.blocks.push_back(make_block(0x1000));
+  function.blocks.push_back(make_block(0x1008));
+  function.blocks.push_back(make_block(0x100c));
+
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("x1", 8);
+  compare.b = IrOperand::constant_value(0, 8);
+  compare.condition = IrCondition::Equal;
+  compare.width = 8;
+  function.blocks[0].statements.push_back(compare);
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("x0", 0));
+  function.blocks[1].statements.push_back(branch_statement(2));
+
+  IrStatement use;
+  use.op = IrOp::Assign;
+  use.dest = IrOperand::register_ref("x3", 8);
+  use.a = IrOperand::register_ref("x0", 8);
+  use.width = 8;
+  function.blocks[2].statements.push_back(use);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("x3", 8);
+  ret.width = 8;
+  function.blocks[2].statements.push_back(ret);
+
+  donkey::infer_signature(function, Architecture::AArch64);
+  bool has_x0 = false;
+  for (const IrParameter& parameter : function.parameters) {
+    has_x0 = has_x0 || parameter.abi_register == "x0";
+  }
+  EXPECT_TRUE(has_x0) << "x0 is read on a path that does not write it";
+}
+
+TEST(Ir, UnsupportedVectorStatementDoesNotMakeAVectorRegisterAnArgument) {
+  // The vector move is not modelled, so its effect on v0 is unknown. The v0 read after it
+  // must not be taken for an incoming floating-point argument: that would move the integer
+  // arguments to the wrong registers when the function runs.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "vector_temporary";
+  function.blocks.push_back(make_block(0x1000));
+  IrStatement unsupported;
+  unsupported.op = IrOp::Unsupported;
+  unsupported.text = "movi v0.2d, #0000000000000000";
+  function.blocks[0].statements.push_back(unsupported);
+
+  IrStatement use;
+  use.op = IrOp::Assign;
+  use.dest = IrOperand::register_ref("x8", 8);
+  use.a = IrOperand::register_ref("v0", 4);
+  use.width = 8;
+  function.blocks[0].statements.push_back(use);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("x8", 8);
+  ret.width = 8;
+  function.blocks[0].statements.push_back(ret);
+
+  donkey::infer_signature(function, Architecture::AArch64);
+  for (const IrParameter& parameter : function.parameters) {
+    EXPECT_NE(parameter.abi_register.rfind("v", 0), 0U) << parameter.abi_register;
+  }
+  EXPECT_TRUE(function.parameters.empty());
+}
+
 TEST(Ir, SignatureInferenceDistinguishesSystemVAndWindowsX64) {
   // Read rcx and rdi before write
   IrFunction func_sysv = single_block_function();
