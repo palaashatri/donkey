@@ -75,9 +75,7 @@ conversions, single-precision arithmetic, loops over a local array, and branches
 `DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode` compares every Complete
 result with the compiled code on 48 vectors. NaN equals NaN; otherwise the bits
 must match, so the sign of a zero is checked. Partial functions are not compared.
-Results at -O0: GCC 13.3, 23 of 26 Complete, none wrong. The three Partial ones
-(`fp_poly`, `fp_hypot_sqrt`, `fp_capped_root`) copy a register with `movapd`, whose
-upper lanes are not modelled. Clang 18.1: 23 of 26 Complete, none wrong. Its three Partial ones are `fp_lt`, which uses `cmpltsd` and packed logic, and `fp_eq_select` and `fp_ne_select`, whose `jp` sits in the block after a compare with a memory operand. Such a compare is not carried into the next block, so the parity test is unmodelled.
+Results at -O0 on x86-64: GCC 13.3, 18 of 26 Complete, none wrong. Eight are Partial. Three copy a register with `movapd`, whose upper lanes are not modelled (`fp_poly`, `fp_hypot_sqrt`, `fp_capped_root`). Five write both `rax` and `xmm0` on a path to the return (`fp_truncate_int`, `fp_scale_by_int`, `fp_sum_array`, `fp_dot3`, `fp_int_quotient`). Those `rax` writes are integer temporaries, but register evidence cannot tell them from an integer return, so the return channel is ambiguous and the function is Partial. Before that rule these five were Complete and correct, which is why the count was 23 of 26: the rule is conservative by design. Clang 18.1, before the rule: 23 of 26 Complete, none wrong; its three Partial ones were `fp_lt`, which uses `cmpltsd` and packed logic, and `fp_eq_select` and `fp_ne_select`, whose `jp` sits in the block after a compare with a memory operand. Such a compare is not carried into the next block, so the parity test is unmodelled. Clang has not been re-measured since the rule.
 
 Each cell counts functions reported **Complete** whose IR, run in the
 interpreter, agreed with the compiled code on all 48 vectors. CI prints the
