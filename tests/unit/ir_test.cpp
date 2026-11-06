@@ -2072,6 +2072,31 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
 
 // ---- G02-T3: population count, bit scans, byte swap, bit test ----
 
+// The flags of a compare carry into a fall-through block that has no other
+// predecessor, so `setg` after `cmp`/`je` is exact there and the function is
+// Complete. The compare is repeated at the start of that block.
+TEST(Ir, FlagsFromSinglePredecessorAreExact) {
+  donkey::IrFunction
+      carried;  // cmp rdi, rsi; je L; setg al; movzx eax, al; ret; L: mov eax, 42; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x39, 0xf7, 0x74, 0x07, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0,
+                               0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                              carried));
+  EXPECT_FALSE(carried.partial);
+  EXPECT_EQ(run_x86_64(carried, {5, 3}), 1U);
+  EXPECT_EQ(run_x86_64(carried, {3, 5}), 0U);
+  EXPECT_EQ(run_x86_64(carried, {~0ULL, 0}), 0U);  // -1 > 0 is false, signed
+  EXPECT_EQ(run_x86_64(carried, {3, 3}), 42U);     // equal: the je branch
+
+  // The same shape, but rdi is rewritten between the compare and the branch: the
+  // operands the repeated compare would read are not the ones that set the flags.
+  donkey::IrFunction rewritten;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x39, 0xf7, 0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, 0x74, 0x07, 0x0f,
+                       0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                      rewritten));
+  EXPECT_TRUE(rewritten.partial);
+}
+
 // bsf and bsr for a nonzero source are the lowest and highest set bit. The
 // result is Partial, because the destination is undefined for a zero source.
 TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
