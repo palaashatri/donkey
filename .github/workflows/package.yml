@@ -356,6 +356,14 @@ jobs:
             build/package-freebsd/apps/donkey-cli/donkey-cli analyze \
               build/package-freebsd/tests/donkey_test_debuggee --json \
               | grep -E '"status"|"code"' || true
+            # Diagnostic: the code this compiler emits for the jump-table fixture. The
+            # DecompilerCorpus.JumpTable* tests fail on this host only, and the fixture is
+            # not kept after the build.
+            for f in $(find build/package-freebsd/tests -name '*jump_table_O2*' -type f); do
+              echo "== disassembly of $f"
+              (llvm-objdump -d "$f" 2>/dev/null || objdump -d "$f" 2>/dev/null || echo "no objdump") \
+                | sed -n '/<jt_dispatch16>:/,/^$/p' | head -48
+            done
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             sleep 2
             # The aarch64 VM runs without hardware virtualisation (about 70 min
