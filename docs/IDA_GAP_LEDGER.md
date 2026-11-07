@@ -743,8 +743,11 @@ for Partial functions.
   `for` form. A bottom-tested loop is printed as `do { } while`, which is exact. Turning
   it into `for (init; cond; step)` would move the step in front of the test, and that is
   only equal when the loop is entered with the test true, which needs a proof from the
-  entry guard. Not done either: `break`/`continue` (step 2), and the `!(a < b)` to `a >= b`
-  simplification (step 3) for integers. Evidence: `Ir.SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto`
+  entry guard. Step 3 is done for integers: a negated integer compare prints as its complement
+  (`!(a < b)` as `a >= b`), and a negated float compare stays a flag test, since an operand
+  rewrite would be wrong for NaN. Evidence: `Ir.NegatedIntegerCompareIsPrintedAsItsComplement`
+  and `Ir.NegatedFloatCompareStaysAFlagTest`. Not done: `break`/`continue` (step 2), and the
+  `for` form. Evidence for the structuring: `Ir.SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto`
   and the full native suite.
 
 **G04-T4 Names and locals from DWARF**

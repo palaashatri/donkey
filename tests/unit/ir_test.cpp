@@ -3569,3 +3569,61 @@ TEST(Ir, CalleeSavedRsiWriteIsKeptAtReturn) {
 }
 
 }  // namespace
+
+// A branch that skips a block is printed with the complement of its condition: the body is the
+// fall-through, so the if needs the negated compare.
+namespace {
+std::string skip_layout_text(bool floating) {
+  IrFunction function;
+  function.address = 0x2000;
+  function.name = floating ? "float_skip" : "signed_skip";
+  function.blocks.push_back(make_block(0x2000));  // 0: compare and branch over the body
+  function.blocks.push_back(make_block(0x2008));  // 1: the body
+  function.blocks.push_back(make_block(0x2010));  // 2: return rax
+  IrStatement compare;
+  compare.width = 8;
+  compare.op = floating ? IrOp::FCompare : IrOp::Compare;
+  compare.a = IrOperand::register_ref(floating ? "xmm0" : "rdi", 8);
+  compare.b = IrOperand::register_ref(floating ? "xmm1" : "rsi", 8);
+  compare.condition = floating ? IrCondition::UnsignedLess : IrCondition::SignedLess;
+  function.blocks[0].statements.push_back(compare);
+  IrStatement branch;
+  branch.op = IrOp::CondBranch;
+  branch.condition = compare.condition;
+  branch.a = IrOperand::register_ref("rax", 8);
+  branch.b = IrOperand::block_ref(2);
+  branch.width = 8;
+  function.blocks[0].statements.push_back(branch);
+  IrStatement body;
+  body.op = IrOp::Assign;
+  body.dest = IrOperand::register_ref("rax", 8);
+  body.a = IrOperand::constant_value(7, 8);
+  body.width = 8;
+  function.blocks[1].statements.push_back(body);
+  IrStatement jump;
+  jump.op = IrOp::Branch;
+  jump.a = IrOperand::block_ref(2);
+  jump.width = 8;
+  function.blocks[1].statements.push_back(jump);
+  function.blocks[2].statements.push_back(return_statement());
+  auto text = format_pseudocode(function);
+  return text ? text.value() : text.diagnostic().message;
+}
+}  // namespace
+
+// G04-T3 step 3: an integer `!(a < b)` prints as `a >= b`, and no `!( )` wrapper is left.
+TEST(Ir, NegatedIntegerCompareIsPrintedAsItsComplement) {
+  const std::string text = skip_layout_text(/*floating=*/false);
+  EXPECT_NE(text.find("if (rdi >= rsi) {"), std::string::npos) << text;
+  EXPECT_EQ(text.find("!("), std::string::npos) << text;
+}
+
+// G04-T3 step 3, the floating-point rule: a negated float compare stays a flag test. The operands
+// are not rewritten, because `!(a < b)` is not `a >= b` when either operand is NaN. The flag form
+// is exact: after ucomis* CF is 0 only when the operands are ordered and a >= b.
+TEST(Ir, NegatedFloatCompareStaysAFlagTest) {
+  const std::string text = skip_layout_text(/*floating=*/true);
+  EXPECT_NE(text.find("if (flags >=) {"), std::string::npos) << text;
+  EXPECT_EQ(text.find("xmm0"), std::string::npos) << text;
+  EXPECT_EQ(text.find("!("), std::string::npos) << text;
+}
