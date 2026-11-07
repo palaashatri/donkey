@@ -114,8 +114,9 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 results (division by zero gives 0, and `INT_MIN / -1` gives `INT_MIN`, with no
 fault), `umulh`/`smulh`, `clz`, `cls`, `rbit`, `rev`/`rev16`/`rev32`, `extr`,
 `bfi` and `bfxil`, `ccmp`/`ccmn`, `cmn` and `adds`, and `adc`/`sbc` when the flags
-before them are exact (a second carry reader in a block needs its own flag
-writer, since the carry out of `adc`/`sbc` is not modelled). On
+before them are exact (`adc`/`sbc` without S do not write NZCV, so several of them
+in a block read the same carry; `adcs`/`sbcs` set flags from their carry out, which
+is not modelled, and stay Unsupported). On
 x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
 `bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
 with a register and a memory operand.
