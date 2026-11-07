@@ -38,7 +38,11 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | Itanium (`_Z`) | `demangle_itanium` (G10-T1, partial) | 502 of 512 `c++filt` corpus names match; 10 are Unsupported | expression template arguments, generic lambdas |
 | MSVC (`?`, x64 `__cdecl`) | `demangle_msvc` (G10-T2, partial) | 87 of 95 `llvm-undname` corpus names match exactly; 8 are Unsupported | templates, arrays, string literals, vftables, dynamic initialisers, function and member pointers, 32-bit forms and other calling conventions |
 
-`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4). There is no RTTI or vtable recovery (G10-T3).
+`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4).
+
+| Itanium RTTI and vtables (ELF) | Reader | Checked against | Not covered |
+|---|---|---|---|
+| x86-64, PIE and non-PIE | `read_itanium_rtti` (G10-T3, partial) | `gdb` on the non-PIE fixture: vtable slots, typeinfo bases and offsets-to-top match; the PIE build gives the same graph | AArch64 PLT stubs are not named (the reader reports `rtti.plt_unnamed`); AArch64 is checked one-off, not in CI; MSVC RTTI (Complete Object Locators) is not read; no call-site resolution in the decompiler |
 
 ## Instruction sets
 

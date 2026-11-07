@@ -40,6 +40,16 @@ if(NOT MSVC)
 endif()
 # The dynamic-module fixture `debuggee load` opens at run time.
 add_library(donkey_test_module SHARED fixtures/debuggee/module.c)
+# Itanium RTTI fixtures (G10-T3): the same source as a PIE and as a non-PIE executable, so
+# the reader is checked on both relocation models. The symbols are kept (no stripping).
+if(NOT MSVC)
+  add_executable(donkey_test_hierarchy fixtures/rtti/hierarchy.cpp)
+  target_compile_options(donkey_test_hierarchy PRIVATE -O0 -g0 -fPIE)
+  target_link_options(donkey_test_hierarchy PRIVATE -pie)
+  add_executable(donkey_test_hierarchy_nopie fixtures/rtti/hierarchy.cpp)
+  target_compile_options(donkey_test_hierarchy_nopie PRIVATE -O0 -g0 -fno-pie)
+  target_link_options(donkey_test_hierarchy_nopie PRIVATE -no-pie)
+endif()
 if(MSVC)
   target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
   target_compile_options(donkey_test_module PRIVATE /Od /Oy-)
@@ -69,6 +79,7 @@ add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/demangle_test.cpp
   unit/demangle_msvc_test.cpp
+  unit/rtti_test.cpp
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
@@ -97,6 +108,8 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_PATH="$<TARGET_FILE:donkey_test_hierarchy>">
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_NOPIE_PATH="$<TARGET_FILE:donkey_test_hierarchy_nopie>">
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_RANGES_FIXTURE_PATH="$<TARGET_FILE:donkey_ranges_fixture>">
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
@@ -106,6 +119,9 @@ target_compile_definitions(donkey_unit_tests PRIVATE
 )
 if(NOT MSVC)
   add_dependencies(donkey_unit_tests donkey_ranges_fixture)
+endif()
+if(NOT MSVC)
+  add_dependencies(donkey_unit_tests donkey_test_hierarchy donkey_test_hierarchy_nopie)
 endif()
 add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)

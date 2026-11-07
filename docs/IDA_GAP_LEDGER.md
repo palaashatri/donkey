@@ -160,7 +160,7 @@ P0 is the most important, P3 the least.
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
-| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler library (G10-T1, partial): 502 of 512 corpus names match c++filt, and 10 are reported Unsupported (expression template arguments and a generic lambda). MSVC demangler library (G10-T2, partial, 64-bit `__cdecl` forms): 87 of 95 `llvm-undname` corpus names match exactly, and 8 are reported Unsupported (templates, arrays, string literals, vftables, function and member pointers). `donkey-cli info` shows the demangled form of Itanium and MSVC exports (a `demangled` JSON field, and the demangled name in brackets in the human output); the raw name is kept. Not yet used by the GUI or the symbol list. No RTTI or vtable recovery (G10-T3 TODO); G10-T4 partial, CLI only | P1 | IN PROGRESS (G10-T1 PARTIAL; T2 PARTIAL; T3 TODO; T4 PARTIAL) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler library (G10-T1, partial): 502 of 512 corpus names match c++filt, and 10 are reported Unsupported (expression template arguments and a generic lambda); thunks name their target. MSVC demangler library (G10-T2, partial, 64-bit `__cdecl` forms): 87 of 95 `llvm-undname` corpus names match exactly, and 8 are reported Unsupported. Itanium RTTI and vtables from ELF (G10-T3, partial): classes, bases, vtable groups and slots, checked against gdb on x86-64 PIE and non-PIE; AArch64 PLT stubs are not named. `donkey-cli info` shows demangled names of exports; the GUI does not yet. No MSVC RTTI, no decompiler call-site resolution (G10-T3 open) | P1 | IN PROGRESS (G10-T1 PARTIAL; T2 PARTIAL; T3 PARTIAL; T4 PARTIAL) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | C ABI plugins, `donkey-cli --json`; no scripting API | P1 | TODO |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
 | G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
@@ -706,6 +706,21 @@ own code.
     forms and the other calling conventions. Corpus provenance:
     `tests/fixtures/msvc/PROVENANCE.md`.
 - **G10-T3 RTTI and vtables.**
+  - **Status:** PARTIAL. Done: `read_itanium_rtti` (`include/donkey/binary/rtti.h`,
+    `src/binary/rtti.cpp`) reads `_ZTI` typeinfo objects (class, single and multiple
+    inheritance, with their base lists) and `_ZTV` vtables split into groups by the
+    offset-to-top and typeinfo pairs of secondary subobjects. Pointers come from the file or,
+    for PIE, from `.rela.dyn`; symbol relocations and PLT stubs are named where the reader can.
+    Evidence: `Rtti.ReadsThePieHierarchyFromRelocations`,
+    `Rtti.ReadsTheNonPieHierarchyFromTheFile`, and
+    `Rtti.PiePointersComeFromTheRelocationTableNotTheFile` (zeroes every relocated pointer in a
+    copy, so only `.rela.dyn` can supply them; ignoring relocations fails it, checked by
+    mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
+    (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
+    `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
+    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stub naming, and call-site
+    resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
+    hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
     pointer, function pointers), and MSVC RTTI Complete Object Locators.
   - Build a class hierarchy.
