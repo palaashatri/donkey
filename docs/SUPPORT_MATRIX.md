@@ -42,6 +42,14 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
+Loop structuring (G04-T3, partial): a loop whose body is one block that repeats
+itself is printed as `do { ... } while (...)`, and a branch to the next block is a
+fall-through. A function with an early return therefore prints an if/else around the
+loop instead of labelled blocks with `goto`. Not done: the `for (init; cond; step)`
+form (a bottom-tested loop cannot be rewritten into it without a proof from the entry
+guard), `break`, `continue`, and the integer comparison simplification. Shapes the
+structurer does not recognise keep the labelled-block form.
+
 `tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
 types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), double-width
@@ -75,7 +83,7 @@ conversions, single-precision arithmetic, loops over a local array, and branches
 `DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode` compares every Complete
 result with the compiled code on 48 vectors. NaN equals NaN; otherwise the bits
 must match, so the sign of a zero is checked. Partial functions are not compared.
-Results at -O0 on x86-64: GCC 13.3, 18 of 26 Complete, none wrong. Eight are Partial. Three copy a register with `movapd`, whose upper lanes are not modelled (`fp_poly`, `fp_hypot_sqrt`, `fp_capped_root`). Five write both `rax` and `xmm0` on a path to the return (`fp_truncate_int`, `fp_scale_by_int`, `fp_sum_array`, `fp_dot3`, `fp_int_quotient`). Those `rax` writes are integer temporaries, but register evidence cannot tell them from an integer return, so the return channel is ambiguous and the function is Partial. Before that rule these five were Complete and correct, which is why the count was 23 of 26: the rule is conservative by design. Clang 18.1, before the rule: 23 of 26 Complete, none wrong; its three Partial ones were `fp_lt`, which uses `cmpltsd` and packed logic, and `fp_eq_select` and `fp_ne_select`, whose `jp` sits in the block after a compare with a memory operand. Such a compare is not carried into the next block, so the parity test is unmodelled. Clang has not been re-measured since the rule.
+Results at -O0 on x86-64, GCC 13.3: 6 of 26 Complete, none wrong. The other 20 are Partial. Every scalar SSE arithmetic operation and every integer-to-float conversion depends on the MXCSR rounding mode. The caller may set a mode other than round to nearest, and this lifter does not model MXCSR, so each function that rounds is Partial with that assumption written in its notes (review of #39). Before this rule the count was 18 of 26: three functions copied a register with `movapd`, whose upper lanes are not modelled, and five wrote both `rax` and `xmm0` on a path to the return, which the return rule now keeps Partial. Every Partial function is still compared with the compiled code on all 48 vectors. Clang 18.1 has not been re-measured since the rounding rule; its count before the rule was 23 of 26 Complete, none wrong.
 
 On AArch64, GCC 13.3 at -O0 gives 20 of 26 Complete, none wrong, run under
 qemu-aarch64 against the native AArch64 code (48 vectors each). The six Partial functions
