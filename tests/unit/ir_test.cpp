@@ -2986,10 +2986,13 @@ TEST(Ir, AArch64CarryWithoutAFlagWriterIsPartial) {
   EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0x9a030040, 0xd65f03c0})));
 }
 
-TEST(Ir, AArch64SecondCarryReaderIsPartial) {
-  // adds; adc; adc; ret. The carry out of the first adc is not modelled.
-  EXPECT_TRUE(
-      aarch64_lifts_partial(aarch64_bytes({0xab010000, 0x9a030040, 0x9a030040, 0xd65f03c0})));
+TEST(Ir, AArch64CarryReadersShareTheCarryOfTheFlagWriter) {
+  // adds x0, x0, x1; adc x0, x2, x3; adc x0, x4, x5; ret. Neither adc writes NZCV, so the
+  // second one reads the carry of the sum as well.
+  const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0x9a050080, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(data));
+  EXPECT_EQ(run_aarch64_args(data, {~0ULL, 1, 5, 7, 2, 3}), 6U);  // carry 1: 2 + 3 + 1
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 5, 7, 2, 3}), 5U);      // no carry: 2 + 3
 }
 
 // adcs and sbcs set NZCV from the addition, as the architecture defines it, and
