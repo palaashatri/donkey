@@ -2335,4 +2335,104 @@ TEST(Ir, VerifierRejectsABitOperationWithABlockSource) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_bit_op");
 }
 
+/// Runs an AArch64 function on AAPCS64 integer arguments and returns x0.
+std::uint64_t run_aarch64_args(const std::vector<std::byte>& data,
+                               std::initializer_list<std::uint64_t> arguments) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return 0;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  if (!lifted.has_value()) {
+    return 0;
+  }
+  EXPECT_FALSE(lifted.value().partial);
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::AArch64;
+  options.convention = donkey::IrCallingConvention::Aapcs64;
+  const std::vector<std::uint64_t> values(arguments);
+  auto result = donkey::evaluate_ir(lifted.value(), values, memory, options);
+  EXPECT_TRUE(result.has_value()) << (result.has_value() ? "" : result.diagnostic().message);
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, AArch64DivisionMatchesTheArchitectureAtTheEdges) {
+  // AArch64 division by zero gives 0 and INT_MIN / -1 gives INT_MIN; neither faults.
+  const auto udiv64 = aarch64_bytes({0x9ac10800, 0xd65f03c0});  // udiv x0, x0, x1; ret
+  const auto sdiv64 = aarch64_bytes({0x9ac10c00, 0xd65f03c0});  // sdiv x0, x0, x1; ret
+  const auto udiv32 = aarch64_bytes({0x1ac10800, 0xd65f03c0});  // udiv w0, w0, w1; ret
+  const auto sdiv32 = aarch64_bytes({0x1ac10c00, 0xd65f03c0});  // sdiv w0, w0, w1; ret
+  const std::uint64_t int_min = 1ULL << 63;
+  const auto minus = [](std::uint64_t value) {
+    return static_cast<std::uint64_t>(-static_cast<std::int64_t>(value));
+  };
+  EXPECT_EQ(run_aarch64_args(udiv64, {10, 3}), 3U);
+  EXPECT_EQ(run_aarch64_args(udiv64, {10, 0}), 0U);
+  EXPECT_EQ(run_aarch64_args(sdiv64, {minus(7), 2}), minus(3));
+  EXPECT_EQ(run_aarch64_args(sdiv64, {minus(9), 0}), 0U);
+  EXPECT_EQ(run_aarch64_args(sdiv64, {int_min, minus(1)}), int_min);
+  EXPECT_EQ(run_aarch64_args(sdiv64, {5, minus(1)}), minus(5));
+  EXPECT_EQ(run_aarch64_args(udiv32, {10, 3}), 3U);
+  EXPECT_EQ(run_aarch64_args(udiv32, {10, 0}), 0U);
+  EXPECT_EQ(run_aarch64_args(sdiv32, {0xFFFF'FFF9ULL, 2}), 0xFFFF'FFFDULL);  // -7 / 2 = -3
+  EXPECT_EQ(run_aarch64_args(sdiv32, {0x8000'0000ULL, 0xFFFF'FFFFULL}), 0x8000'0000ULL);
+}
+
+TEST(Ir, AArch64HighMultiplyIsTheUpperHalf) {
+  const auto umulh = aarch64_bytes({0x9bc17c00, 0xd65f03c0});  // umulh x0, x0, x1; ret
+  const auto smulh = aarch64_bytes({0x9b417c00, 0xd65f03c0});  // smulh x0, x0, x1; ret
+  const std::uint64_t minus_one = ~0ULL;
+  EXPECT_EQ(run_aarch64_args(umulh, {1ULL << 63, 4}), 2U);         // 2^65 has high half 2
+  EXPECT_EQ(run_aarch64_args(smulh, {minus_one, minus_one}), 0U);  // (-1) * (-1) = 1
+  EXPECT_EQ(run_aarch64_args(smulh, {static_cast<std::uint64_t>(-2), 3}), minus_one);  // -6
+}
+
+TEST(Ir, AArch64CountAndReverseInstructionsMatchTheArchitecture) {
+  const auto clz = aarch64_bytes({0xdac01000, 0xd65f03c0});     // clz x0, x0
+  const auto cls = aarch64_bytes({0xdac01400, 0xd65f03c0});     // cls x0, x0
+  const auto cls32 = aarch64_bytes({0x5ac01400, 0xd65f03c0});   // cls w0, w0
+  const auto rbit = aarch64_bytes({0xdac00000, 0xd65f03c0});    // rbit x0, x0
+  const auto rbit32 = aarch64_bytes({0x5ac00000, 0xd65f03c0});  // rbit w0, w0
+  const auto rev = aarch64_bytes({0xdac00c00, 0xd65f03c0});     // rev x0, x0
+  const auto rev32w = aarch64_bytes({0x5ac00800, 0xd65f03c0});  // rev w0, w0
+  const auto rev16 = aarch64_bytes({0xdac00400, 0xd65f03c0});   // rev16 x0, x0
+  const auto rev32 = aarch64_bytes({0xdac00800, 0xd65f03c0});   // rev32 x0, x0
+  EXPECT_EQ(run_aarch64_args(clz, {1}), 63U);
+  EXPECT_EQ(run_aarch64_args(clz, {0}), 64U);
+  EXPECT_EQ(run_aarch64_args(cls, {0}), 63U);
+  EXPECT_EQ(run_aarch64_args(cls, {~0ULL}), 63U);
+  EXPECT_EQ(run_aarch64_args(cls, {1}), 62U);
+  EXPECT_EQ(run_aarch64_args(cls32, {1}), 30U);
+  EXPECT_EQ(run_aarch64_args(cls32, {0}), 31U);
+  EXPECT_EQ(run_aarch64_args(rbit, {1}), 1ULL << 63);
+  EXPECT_EQ(run_aarch64_args(rbit32, {1}), 0x8000'0000ULL);
+  EXPECT_EQ(run_aarch64_args(rev, {0x0102030405060708ULL}), 0x0807060504030201ULL);
+  EXPECT_EQ(run_aarch64_args(rev32w, {0x01020304ULL}), 0x04030201ULL);
+  EXPECT_EQ(run_aarch64_args(rev16, {0x0102030405060708ULL}), 0x0201040306050807ULL);
+  EXPECT_EQ(run_aarch64_args(rev32, {0x0102030405060708ULL}), 0x0403020108070605ULL);
+}
+
+TEST(Ir, AArch64ExtractAndBitfieldInsertMatchTheArchitecture) {
+  const auto extr = aarch64_bytes({0x93c12000, 0xd65f03c0});   // extr x0, x0, x1, #8
+  const auto bfi = aarch64_bytes({0xb37c1c20, 0xd65f03c0});    // bfi x0, x1, #4, #8
+  const auto bfxil = aarch64_bytes({0xb3442c20, 0xd65f03c0});  // bfxil x0, x1, #4, #8
+  const std::uint64_t n = 0x1122334455667788ULL;
+  const std::uint64_t m = 0xAABBCCDDEEFF0011ULL;
+  EXPECT_EQ(run_aarch64_args(extr, {n, m}), (m >> 8) | (n << 56));
+  EXPECT_EQ(run_aarch64_args(bfi, {0xFFFF, 0xAB}), 0xFABFU);
+  EXPECT_EQ(run_aarch64_args(bfi, {~0ULL, 0}), ~0ULL & ~0xFF0ULL);
+  EXPECT_EQ(run_aarch64_args(bfxil, {~0ULL, 0xABCD}), (~0ULL & ~0xFFULL) | 0xBCULL);
+}
+
+TEST(Ir, AArch64DiscardedResultToTheZeroRegisterLiftsToNothing) {
+  // udiv xzr, x0, x1; ret: the quotient is discarded, so x0 is unchanged.
+  const auto data = aarch64_bytes({0x9ac1081f, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {42, 3}), 42U);
+}
+
 }  // namespace

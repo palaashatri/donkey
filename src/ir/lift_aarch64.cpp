@@ -895,6 +895,291 @@ struct Lifter {
     unsupported(block, instruction);
   }
 
+  /// udiv, sdiv, umulh, smulh, clz, cls, rbit, rev, rev16, rev32, extr, bfi and
+  /// bfxil. AArch64 division by zero yields 0 and never faults, and INT_MIN / -1
+  /// yields INT_MIN, while the IR divide faults in both cases. So the divisor is
+  /// replaced by one where the IR would fault, and the result is then selected by
+  /// 0/1 coefficients computed arithmetically. No flags are written, so the guard
+  /// does not disturb the NZCV state the block's later instructions read.
+  void lift_bit_and_division(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    if (operands.empty() || operands[0].kind != OperandKind::Register) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    if (width != 4 && width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint64_t bits = static_cast<std::uint64_t>(width) * 8U;
+    const std::uint64_t all_ones = width == 8 ? ~0ULL : 0xFFFF'FFFFULL;
+    const auto constant = [&](std::uint64_t value) {
+      return IrOperand::constant_value(value & all_ones, width);
+    };
+    const auto fresh = [&]() { return temp_operand(temporary_id(), width); };
+    const auto emit = [&](IrOp op, const IrOperand& dest, const IrOperand& a, const IrOperand& b,
+                          const IrOperand& c) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = dest;
+      statement.a = a;
+      statement.b = b;
+      statement.c = c;
+      statement.width = width;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    const IrOperand none = IrOperand::none();
+    if (operands[0].kind == OperandKind::Register &&
+        (operands[0].reg == "xzr" || operands[0].reg == "wzr")) {
+      // The result is discarded, and none of these instructions sets flags or
+      // has another effect, so there is nothing to lift.
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], width);
+    const auto is_register = [&](std::size_t index) {
+      return index < operands.size() && operands[index].kind == OperandKind::Register;
+    };
+    const auto is_immediate = [&](std::size_t index) {
+      return index < operands.size() && operands[index].kind == OperandKind::Immediate;
+    };
+
+    if (mnemonic == "udiv" || mnemonic == "sdiv") {
+      if (operands.size() != 3 || !is_register(1) || !is_register(2)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const IrOperand m = to_ir_operand(operands[2], width);
+      // nz = 1 when m != 0: the top bit of m | -m is set exactly when m is non-zero.
+      const IrOperand negm = fresh();
+      emit(IrOp::Sub, negm, constant(0), m, none);
+      const IrOperand orm = fresh();
+      emit(IrOp::Or, orm, m, negm, none);
+      const IrOperand nz = fresh();
+      emit(IrOp::Shr, nz, orm, constant(bits - 1), none);
+      // zero_flag = 1 when m == 0, where the result is 0.
+      const IrOperand zero_flag = fresh();
+      emit(IrOp::Sub, zero_flag, constant(1), nz, none);
+      if (mnemonic == "udiv") {
+        // The divisor is m, or 1 when m == 0 (the quotient is then n, and it is
+        // multiplied by nz = 0).
+        const IrOperand safe = fresh();
+        emit(IrOp::Add, safe, m, zero_flag, none);
+        const IrOperand quotient = fresh();
+        emit(IrOp::DivUnsigned, quotient, constant(0), n, safe);
+        emit(IrOp::Mul, destination, quotient, nz, none);
+        return;
+      }
+      // is_minus_one = 1 when m == -1, where the result is -n. m + 1 == 0 exactly then.
+      const IrOperand m1 = fresh();
+      emit(IrOp::Add, m1, m, constant(1), none);
+      const IrOperand negm1 = fresh();
+      emit(IrOp::Sub, negm1, constant(0), m1, none);
+      const IrOperand orm1 = fresh();
+      emit(IrOp::Or, orm1, m1, negm1, none);
+      const IrOperand nz1 = fresh();
+      emit(IrOp::Shr, nz1, orm1, constant(bits - 1), none);
+      const IrOperand is_minus_one = fresh();
+      emit(IrOp::Sub, is_minus_one, constant(1), nz1, none);
+      // The divisor is 1 where m is 0 or -1: m + zero_flag + 2 * is_minus_one.
+      const IrOperand twice = fresh();
+      emit(IrOp::Add, twice, is_minus_one, is_minus_one, none);
+      const IrOperand shifted = fresh();
+      emit(IrOp::Add, shifted, m, zero_flag, none);
+      const IrOperand safe = fresh();
+      emit(IrOp::Add, safe, shifted, twice, none);
+      // The dividend is n sign-extended to 2 * width bits.
+      const IrOperand high = fresh();
+      emit(IrOp::Sar, high, n, constant(bits - 1), none);
+      const IrOperand quotient = fresh();
+      emit(IrOp::DivSigned, quotient, high, n, safe);
+      // Quotient coefficient: nz - is_minus_one, which is 1 for a normal divisor.
+      const IrOperand quotient_coefficient = fresh();
+      emit(IrOp::Sub, quotient_coefficient, nz, is_minus_one, none);
+      const IrOperand negn = fresh();
+      emit(IrOp::Sub, negn, constant(0), n, none);
+      const IrOperand from_quotient = fresh();
+      emit(IrOp::Mul, from_quotient, quotient, quotient_coefficient, none);
+      const IrOperand from_negation = fresh();
+      emit(IrOp::Mul, from_negation, negn, is_minus_one, none);
+      emit(IrOp::Add, destination, from_quotient, from_negation, none);
+      return;
+    }
+
+    if (mnemonic == "umulh" || mnemonic == "smulh") {
+      if (width != 8 || operands.size() != 3 || !is_register(1) || !is_register(2)) {
+        unsupported(block, instruction);  // only the 64-bit forms exist
+        return;
+      }
+      emit(mnemonic == "umulh" ? IrOp::MulHighUnsigned : IrOp::MulHighSigned, destination,
+           to_ir_operand(operands[1], width), to_ir_operand(operands[2], width), none);
+      return;
+    }
+
+    if (mnemonic == "clz" || mnemonic == "cls") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      if (mnemonic == "clz") {
+        emit(IrOp::CountLeadingZeros, destination, n, none, none);
+        return;
+      }
+      // cls counts the leading bits equal to the sign bit: clz(n ^ sign) - 1.
+      const IrOperand sign = fresh();
+      emit(IrOp::Sar, sign, n, constant(bits - 1), none);
+      const IrOperand differs = fresh();
+      emit(IrOp::Xor, differs, n, sign, none);
+      const IrOperand count = fresh();
+      emit(IrOp::CountLeadingZeros, count, differs, none, none);
+      emit(IrOp::Sub, destination, count, constant(1), none);
+      return;
+    }
+
+    if (mnemonic == "rbit") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      // Swap adjacent groups of 1, 2, 4, ... bits. mask selects the bit positions
+      // whose index has the group bit clear.
+      IrOperand value = to_ir_operand(operands[1], width);
+      for (std::uint64_t group = 1; group < bits; group <<= 1) {
+        std::uint64_t mask = 0;
+        for (std::uint64_t index = 0; index < bits; ++index) {
+          if ((index & group) == 0) {
+            mask |= 1ULL << index;
+          }
+        }
+        const IrOperand low = fresh();
+        emit(IrOp::And, low, value, constant(mask), none);
+        const IrOperand low_up = fresh();
+        emit(IrOp::Shl, low_up, low, constant(group), none);
+        const IrOperand high = fresh();
+        emit(IrOp::Shr, high, value, constant(group), none);
+        const IrOperand high_down = fresh();
+        emit(IrOp::And, high_down, high, constant(mask), none);
+        const IrOperand swapped = fresh();
+        emit(IrOp::Or, swapped, low_up, high_down, none);
+        value = swapped;
+      }
+      emit(IrOp::Assign, destination, value, none, none);
+      return;
+    }
+
+    if (mnemonic == "rev") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      emit(IrOp::ByteSwap, destination, to_ir_operand(operands[1], width), none, none);
+      return;
+    }
+
+    if (mnemonic == "rev16") {
+      // Swap the bytes of each 16-bit half.
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const std::uint64_t mask = 0x00FF'00FF'00FF'00FFULL;
+      const IrOperand low = fresh();
+      emit(IrOp::And, low, n, constant(mask), none);
+      const IrOperand low_up = fresh();
+      emit(IrOp::Shl, low_up, low, constant(8), none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shr, high, n, constant(8), none);
+      const IrOperand high_down = fresh();
+      emit(IrOp::And, high_down, high, constant(mask), none);
+      emit(IrOp::Or, destination, low_up, high_down, none);
+      return;
+    }
+
+    if (mnemonic == "rev32") {
+      // Swap the bytes of each 32-bit half: the full byte swap with its halves exchanged.
+      if (width != 8 || operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand swapped = fresh();
+      emit(IrOp::ByteSwap, swapped, to_ir_operand(operands[1], width), none, none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shl, high, swapped, constant(32), none);
+      const IrOperand low = fresh();
+      emit(IrOp::Shr, low, swapped, constant(32), none);
+      emit(IrOp::Or, destination, high, low, none);
+      return;
+    }
+
+    if (mnemonic == "extr") {
+      // extr Rd, Rn, Rm, #lsb: the low width bits of (Rn:Rm) >> lsb.
+      if (operands.size() != 4 || !is_register(1) || !is_register(2) || !is_immediate(3)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t lsb = static_cast<std::uint64_t>(operands[3].immediate);
+      if (lsb >= bits) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const IrOperand m = to_ir_operand(operands[2], width);
+      if (lsb == 0) {
+        emit(IrOp::Assign, destination, m, none, none);
+        return;
+      }
+      const IrOperand low = fresh();
+      emit(IrOp::Shr, low, m, constant(lsb), none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shl, high, n, constant(bits - lsb), none);
+      emit(IrOp::Or, destination, low, high, none);
+      return;
+    }
+
+    if (mnemonic == "bfi" || mnemonic == "bfxil") {
+      // bfi Rd, Rn, #lsb, #width: insert the low width bits of Rn at lsb.
+      // bfxil Rd, Rn, #lsb, #width: copy the bits [lsb, lsb + width) of Rn to the low end.
+      if (operands.size() != 4 || !is_register(1) || !is_immediate(2) || !is_immediate(3)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t lsb = static_cast<std::uint64_t>(operands[2].immediate);
+      const std::uint64_t field_width = static_cast<std::uint64_t>(operands[3].immediate);
+      if (field_width == 0 || lsb >= bits || lsb + field_width > bits) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t field = field_width >= 64 ? ~0ULL : (1ULL << field_width) - 1;
+      const IrOperand n = to_ir_operand(operands[1], width);
+      if (mnemonic == "bfi") {
+        const std::uint64_t placed = (field << lsb) & all_ones;
+        const IrOperand kept = fresh();
+        emit(IrOp::And, kept, destination, constant(~placed), none);
+        const IrOperand shifted = fresh();
+        emit(IrOp::Shl, shifted, n, constant(lsb), none);
+        const IrOperand inserted = fresh();
+        emit(IrOp::And, inserted, shifted, constant(placed), none);
+        emit(IrOp::Or, destination, kept, inserted, none);
+        return;
+      }
+      const IrOperand kept = fresh();
+      emit(IrOp::And, kept, destination, constant(~field), none);
+      const IrOperand shifted = fresh();
+      emit(IrOp::Shr, shifted, n, constant(lsb), none);
+      const IrOperand extracted = fresh();
+      emit(IrOp::And, extracted, shifted, constant(field), none);
+      emit(IrOp::Or, destination, kept, extracted, none);
+      return;
+    }
+
+    unsupported(block, instruction);
+  }
+
   void lift_extend(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     if (operands.size() != 2 || operands[0].kind != OperandKind::Register ||
@@ -1363,6 +1648,12 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
+      } else if (mnemonic == "udiv" || mnemonic == "sdiv" || mnemonic == "umulh" ||
+                 mnemonic == "smulh" || mnemonic == "clz" || mnemonic == "cls" ||
+                 mnemonic == "rbit" || mnemonic == "rev" || mnemonic == "rev16" ||
+                 mnemonic == "rev32" || mnemonic == "extr" || mnemonic == "bfi" ||
+                 mnemonic == "bfxil") {
+        lifter.lift_bit_and_division(out_block, instruction);
       } else if (mnemonic == "sxtb" || mnemonic == "sxth" || mnemonic == "sxtw" ||
                  mnemonic == "uxtb" || mnemonic == "uxth" || mnemonic == "uxtw") {
         lifter.lift_extend(out_block, instruction);
