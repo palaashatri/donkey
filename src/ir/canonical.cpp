@@ -76,6 +76,10 @@ struct Canonicaliser {
       if (name == "lr") {
         return "x30";
       }
+      // The 16-bit sp alias that register_family knows for x86 is not an AArch64 alias.
+      if (name == "sp") {
+        return "sp";
+      }
       return register_family(name);
     }
     // x86-64: 16-bit sp is the low word of rsp, not an independent register.
