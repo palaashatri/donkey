@@ -42,6 +42,14 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
+Loop structuring (G04-T3, partial): a loop whose body is one block that repeats
+itself is printed as `do { ... } while (...)`, and a branch to the next block is a
+fall-through. A function with an early return therefore prints an if/else around the
+loop instead of labelled blocks with `goto`. Not done: the `for (init; cond; step)`
+form (a bottom-tested loop cannot be rewritten into it without a proof from the entry
+guard), `break`, `continue`, and the integer comparison simplification. Shapes the
+structurer does not recognise keep the labelled-block form.
+
 `tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
 types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), double-width
