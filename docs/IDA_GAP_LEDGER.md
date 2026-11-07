@@ -289,6 +289,10 @@ interpreter.
   2. Model an XMM register as its low lane only. Any instruction that reads
      or writes the upper lanes is Unsupported (Partial), so a function with
      one is Partial too.
+     *Superseded in G01 (clang):* the high 64-bit lane is now a second register
+     (`xmm0_hi`) for `movaps`/`movapd`, the packed logical operations, the zeroing
+     idioms and memory loads. Other instructions that touch the upper lanes are
+     still Unsupported.
   3. In the ABI, float and double arguments go in xmm0-7 on System V and
      xmm0-3 on Win64, where they share positions with integer arguments. The
      return value is in xmm0. Add `IrCallingConvention` support in
@@ -314,10 +318,11 @@ interpreter.
 - **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
   integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
   each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
-  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1 has not
-  been re-measured since the rule. Moves, comparisons and zeroing idioms are lifted; packed and other
-  SSE forms stay Partial. Argument and return registers follow the XMM registers that the function
-  reads and writes.
+  Complete, none wrong. Clang 18.1 at -O0: 6 of 26 Complete, none wrong (the figures and the rule are in
+  `docs/SUPPORT_MATRIX.md`). The clang count needed the high 64-bit lane of an XMM register modelled
+  (see step 2 below), `cmpltsd` lowered as a masked select, and float compares carried across blocks
+  with a memory operand. Other packed and SSE forms stay Partial. Argument and return registers follow
+  the XMM registers that the function reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 

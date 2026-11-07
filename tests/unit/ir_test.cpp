@@ -2151,6 +2151,65 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
 
 // ---- G02-T3: population count, bit scans, byte swap, bit test ----
 
+// The flags of a compare carry into a fall-through block that has no other
+// predecessor, so `setg` after `cmp`/`je` is exact there and the function is
+// Complete. The compare is repeated at the start of that block.
+TEST(Ir, FlagsFromSinglePredecessorAreExact) {
+  donkey::IrFunction
+      carried;  // cmp rdi, rsi; je L; setg al; movzx eax, al; ret; L: mov eax, 42; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x39, 0xf7, 0x74, 0x07, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0,
+                               0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                              carried));
+  EXPECT_FALSE(carried.partial);
+  EXPECT_EQ(run_x86_64(carried, {5, 3}), 1U);
+  EXPECT_EQ(run_x86_64(carried, {3, 5}), 0U);
+  EXPECT_EQ(run_x86_64(carried, {~0ULL, 0}), 0U);  // -1 > 0 is false, signed
+  EXPECT_EQ(run_x86_64(carried, {3, 3}), 42U);     // equal: the je branch
+
+  // The same shape, but rdi is rewritten between the compare and the branch: the
+  // operands the repeated compare would read are not the ones that set the flags.
+  donkey::IrFunction rewritten;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x39, 0xf7, 0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, 0x74, 0x07, 0x0f,
+                       0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                      rewritten));
+  EXPECT_TRUE(rewritten.partial);
+}
+
+// `sp` is the 16-bit name of the stack pointer. After `mov ax, sp; cmp sp, ax`,
+// the push changes the value the compare read, so its flags cannot be carried
+// into the fall-through block.
+TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
+  donkey::IrFunction function;  // mov ax, sp; cmp sp, ax; push rdi; jne L; setne al; L: ret
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x89, 0xe0, 0x66, 0x39, 0xc4, 0x57, 0x75, 0x03, 0x0f, 0x95, 0xc0, 0xc3}, function));
+  EXPECT_TRUE(function.partial);
+}
+
+// bsf and bsr for a nonzero source are the lowest and highest set bit. The
+// result is Partial, because the destination is undefined for a zero source.
+TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
+  donkey::IrFunction forward;  // bsf rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbc, 0xc7, 0xc3}, forward));
+  EXPECT_TRUE(forward.partial);
+  EXPECT_EQ(run_x86_64(forward, {0x18}), 3U);
+  EXPECT_EQ(run_x86_64(forward, {1ULL << 40}), 40U);
+
+  donkey::IrFunction reverse;  // bsr rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbd, 0xc7, 0xc3}, reverse));
+  EXPECT_TRUE(reverse.partial);
+  EXPECT_EQ(run_x86_64(reverse, {0x18}), 4U);
+  EXPECT_EQ(run_x86_64(reverse, {1ULL << 40}), 40U);
+
+  donkey::IrFunction forward32;  // bsf eax, edi; ret: only the low 32 bits are read
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbc, 0xc7, 0xc3}, forward32));
+  EXPECT_EQ(run_x86_64(forward32, {0x100000008ULL}), 3U);
+
+  donkey::IrFunction reverse32;  // bsr eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbd, 0xc7, 0xc3}, reverse32));
+  EXPECT_EQ(run_x86_64(reverse32, {0xffffffffULL}), 31U);
+}
+
 TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
   // popcnt rax, rdi; ret
   donkey::IrFunction popcount;
@@ -3326,10 +3385,28 @@ TEST(Ir, X86ZeroingIdiomClearsTheLowLane) {
   EXPECT_EQ(run_x86_64(f, {double_bits(7.0)}), 0U);
 }
 
-TEST(Ir, X86MovapsIsPartialBecauseItCopiesTheUpperLanes) {
+// movaps copies both 64-bit lanes, which the IR keeps as two registers. xmm1 is the only register
+// the function reads, so it is the argument, and the return value is the low lane of xmm0.
+TEST(Ir, X86MovapsCopiesBothLanesWithoutMakingTheFunctionPartial) {
   donkey::IrFunction f;  // movaps xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x28, 0xc1, 0xc3}, f));
-  EXPECT_TRUE(f.partial);
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(bits_as_double(run_x86_64(f, {double_bits(7.5)})), 7.5);
+}
+
+// cmpltsd xmm0, xmm1 sets the low lane to all ones when xmm0 < xmm1 and to zero otherwise. An
+// unordered comparison is false, so a NaN operand gives zero.
+TEST(Ir, X86CmpltsdIsAnOrderedMask) {
+  donkey::IrFunction f;  // cmpltsd xmm0, xmm1, 1 (less than); ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0xc2, 0xc1, 0x01, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  const std::uint64_t all_ones = ~0ULL;
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(2.0)}), all_ones);
+  EXPECT_EQ(run_x86_64(f, {double_bits(2.0), double_bits(1.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(1.0)}), 0ULL);
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(run_x86_64(f, {double_bits(nan), double_bits(2.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(nan)}), 0ULL);
 }
 
 // AArch64 scalar floating point. The encodings are the assembler's (llvm-mc); the
