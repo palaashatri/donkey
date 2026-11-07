@@ -504,6 +504,85 @@ TEST(Ir, StructuresWhileLoop) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
+// rax = 0; while (rax < 10) { rbx += 2; rax += 1; }: the store before the header is the
+// init and the last statement of the latch is the step, so the loop prints as a for.
+TEST(Ir, StructuresCountedLoopAsFor) {
+  IrFunction function = branch_function();
+  function.blocks.resize(4);
+  function.blocks[0].statements.push_back(assign_register_statement("rax", 0));
+  function.blocks[0].statements.push_back(branch_statement(1));
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("rax", 8);
+  compare.b = IrOperand::constant_value(10, 8);
+  compare.condition = IrCondition::SignedGreaterEqual;
+  compare.width = 8;
+  function.blocks[1].statements.push_back(compare);
+  function.blocks[1].statements.push_back(conditional_branch_statement(3));
+  function.blocks[1].statements.back().condition = IrCondition::SignedGreaterEqual;
+  IrStatement body;
+  body.op = IrOp::Add;
+  body.dest = IrOperand::register_ref("rbx", 8);
+  body.a = IrOperand::register_ref("rbx", 8);
+  body.b = IrOperand::constant_value(2, 8);
+  body.width = 8;
+  IrStatement step;
+  step.op = IrOp::Add;
+  step.dest = IrOperand::register_ref("rax", 8);
+  step.a = IrOperand::register_ref("rax", 8);
+  step.b = IrOperand::constant_value(1, 8);
+  step.width = 8;
+  function.blocks[2].statements.push_back(body);
+  function.blocks[2].statements.push_back(step);
+  function.blocks[2].statements.push_back(branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("for (rax = 0x0; rax < 0xa; rax = rax + 0x1) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rbx = rbx + 0x2;"), std::string::npos) << code;
+  const std::size_t header_init = code.find("rax = 0x0;");
+  EXPECT_EQ(code.find("rax = 0x0;", header_init + 1), std::string::npos)
+      << "the init is printed once, in the header: " << code;
+  EXPECT_EQ(code.find("while ("), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+// The same loop when the preheader's last store is to another register: there is no init
+// for the header to print, so the loop keeps its while form.
+TEST(Ir, LoopWithoutAnInitStaysWhile) {
+  IrFunction function = branch_function();
+  function.blocks.resize(4);
+  function.blocks[0].statements.push_back(assign_register_statement("rdx", 0));
+  function.blocks[0].statements.push_back(branch_statement(1));
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("rax", 8);
+  compare.b = IrOperand::constant_value(10, 8);
+  compare.condition = IrCondition::SignedGreaterEqual;
+  compare.width = 8;
+  function.blocks[1].statements.push_back(compare);
+  function.blocks[1].statements.push_back(conditional_branch_statement(3));
+  function.blocks[1].statements.back().condition = IrCondition::SignedGreaterEqual;
+  IrStatement step;
+  step.op = IrOp::Add;
+  step.dest = IrOperand::register_ref("rax", 8);
+  step.a = IrOperand::register_ref("rax", 8);
+  step.b = IrOperand::constant_value(1, 8);
+  step.width = 8;
+  function.blocks[2].statements.push_back(step);
+  function.blocks[2].statements.push_back(branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("while (rax < 0xa) {"), std::string::npos) << code;
+  EXPECT_EQ(code.find("for ("), std::string::npos) << code;
+  EXPECT_NE(code.find("rdx = 0x0;"), std::string::npos) << code;
+}
+
 TEST(Ir, StructuresDoWhileLoop) {
   IrFunction function = branch_function();
   function.blocks.resize(3);

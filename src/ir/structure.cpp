@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -164,6 +165,15 @@ struct Loop {
   bool negate_condition = false;
 };
 
+/// A while loop that prints as `for (init; test; step)`: the init is statement `init_index`
+/// of the block before the header, the step is statement `step_index` of the latch.
+struct ForPlan {
+  BlockId preheader = 0;
+  std::size_t init_index = 0;
+  BlockId latch = 0;
+  std::size_t step_index = 0;
+};
+
 struct Structurer {
   explicit Structurer(const IrFunction& function) : function_(function) {}
 
@@ -187,6 +197,7 @@ struct Structurer {
     if (!find_loops()) {
       return std::nullopt;
     }
+    plan_for_loops();
     if (!region_closed(0, count)) {
       return std::nullopt;
     }
@@ -208,18 +219,121 @@ struct Structurer {
     lines_.push_back(StructuredLine{std::move(indented), source_address});
   }
 
+  static std::uint64_t statement_key(BlockId block, std::size_t index) {
+    return (static_cast<std::uint64_t>(block) << 32U) | static_cast<std::uint64_t>(index);
+  }
+
   void emit_statements(BlockId block, bool include_terminator) {
     const IrBlock& body = function_.blocks[block];
     const std::size_t limit = include_terminator || body.statements.empty()
                                   ? body.statements.size()
                                   : body.statements.size() - 1;
     for (std::size_t index = 0; index < limit; ++index) {
+      if (in_header_.count(statement_key(block, index)) != 0) {
+        continue;  // printed in the header of the `for` loop it steps
+      }
       const IrStatement* previous = flags_producer(body, index);
       const std::string text = render_statement(function_, body.statements[index], previous);
       if (!text.empty()) {
         line(text, body.statements[index].source_address);
+        line_of_[statement_key(block, index)] = lines_.size() - 1;
       }
     }
+  }
+
+  /// Finds the while loops that can print as `for`: the header's only predecessors are the
+  /// block before it and the latch (the loop's last block, which branches back to the
+  /// header), the block before the header ends by entering the header and last assigns the
+  /// counter, and the latch's last statement before its branch steps the same counter by a
+  /// constant. Then no path skips the step and no path runs the init twice, so the step
+  /// may be printed in the header. Nothing is changed here; emit_counted_loop does that.
+  void plan_for_loops() {
+    for (const auto& [header, loop] : loops_) {
+      if (loop.is_do_while || header == 0 || loop.exit < header + 2) {
+        continue;
+      }
+      const BlockId latch = loop.exit - 1;
+      const IrBlock& preheader = function_.blocks[header - 1];
+      const IrBlock& latch_block = function_.blocks[latch];
+      const IrBlock& header_block = function_.blocks[header];
+      if (preheader.statements.size() < 2 || latch_block.statements.size() < 2 ||
+          header_block.statements.empty()) {
+        continue;
+      }
+      const auto& entries = graph_.predecessors[header];
+      if (entries.size() != 2 ||
+          std::find(entries.begin(), entries.end(), header - 1) == entries.end() ||
+          std::find(entries.begin(), entries.end(), latch) == entries.end()) {
+        continue;
+      }
+      const IrStatement& enter = preheader.statements.back();
+      const IrStatement& back = latch_block.statements.back();
+      if (enter.op != IrOp::Branch || enter.a.block != header || back.op != IrOp::Branch ||
+          back.a.block != header) {
+        continue;
+      }
+      const std::size_t init_index = preheader.statements.size() - 2;
+      const std::size_t step_index = latch_block.statements.size() - 2;
+      const IrStatement& init = preheader.statements[init_index];
+      const IrStatement& step = latch_block.statements[step_index];
+      if (init.op != IrOp::Assign || init.dest.kind != IrOperandKind::Register ||
+          (step.op != IrOp::Add && step.op != IrOp::Sub) ||
+          step.dest.kind != IrOperandKind::Register || step.dest.reg != init.dest.reg ||
+          step.a.kind != IrOperandKind::Register || step.a.reg != step.dest.reg ||
+          step.b.kind != IrOperandKind::Constant) {
+        continue;
+      }
+      // The header's test must read flags set in the header, so the step's flags do not
+      // reach it.
+      if (flags_producer(header_block, header_block.statements.size() - 1) == nullptr) {
+        continue;
+      }
+      for_plans_.emplace(header, ForPlan{header - 1, init_index, latch, step_index});
+    }
+  }
+
+  /// Prints a planned `for` loop, or returns false when the init is not the last line
+  /// emitted before the loop (so the rendering cannot move it). Nothing is changed unless
+  /// it returns true.
+  bool emit_counted_loop(const Loop& loop, const ForPlan& plan) {
+    const auto init_line = line_of_.find(statement_key(plan.preheader, plan.init_index));
+    if (init_line == line_of_.end() || init_line->second + 1 != lines_.size()) {
+      return false;
+    }
+    const IrBlock& preheader = function_.blocks[plan.preheader];
+    const IrBlock& latch_block = function_.blocks[plan.latch];
+    const IrStatement& init = preheader.statements[plan.init_index];
+    const IrStatement& step = latch_block.statements[plan.step_index];
+    std::string init_text =
+        render_statement(function_, init, flags_producer(preheader, plan.init_index));
+    std::string step_text =
+        render_statement(function_, step, flags_producer(latch_block, plan.step_index));
+    if (init_text.size() < 2 || step_text.size() < 2 || init_text.back() != ';' ||
+        step_text.back() != ';') {
+      return false;
+    }
+    init_text.pop_back();
+    step_text.pop_back();
+    const std::string condition = condition_of(loop.header, loop.negate_condition);
+
+    // The init line comes out of the body above; the header prints the init instead.
+    lines_.pop_back();
+    out_.clear();
+    for (const StructuredLine& emitted : lines_) {
+      out_ += emitted.text;
+      out_ += '\n';
+    }
+    const std::uint64_t step_key = statement_key(plan.latch, plan.step_index);
+    in_header_.insert(step_key);
+    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address);
+    ++indent_;
+    frames_.push_back(LoopFrame{loop.exit, 0});
+    emit_range(loop.header + 1, loop.exit, loop.header);
+    frames_.pop_back();
+    --indent_;
+    line("}");
+    in_header_.erase(step_key);
+    return true;
   }
 
   bool find_loops() {
@@ -681,6 +795,10 @@ struct Structurer {
           header.statements.front().op != IrOp::Test) {
         return false;
       }
+      if (const auto plan = for_plans_.find(loop.header);
+          plan != for_plans_.end() && emit_counted_loop(loop, plan->second)) {
+        return true;
+      }
       line("while (" + condition_of(loop.header, loop.negate_condition) + ") {");
       ++indent_;
       frames_.push_back(LoopFrame{loop.exit, 0});
@@ -724,6 +842,12 @@ struct Structurer {
   std::vector<BitSet> dominators_;
   std::vector<BlockId> immediate_post_dominator_;
   std::unordered_map<BlockId, Loop> loops_;
+  /// A while loop's `for` form, keyed by its header (see plan_for_loops).
+  std::unordered_map<BlockId, ForPlan> for_plans_;
+  /// Statements printed in a `for` header rather than in the body (statement_key).
+  std::unordered_set<std::uint64_t> in_header_;
+  /// The index in lines_ of the line each statement was printed on (statement_key).
+  std::unordered_map<std::uint64_t, std::size_t> line_of_;
   std::string out_;
   std::vector<StructuredLine> lines_;
   /// The loops being emitted, innermost last. A branch from a loop body to its exit is a
