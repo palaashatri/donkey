@@ -311,13 +311,13 @@ interpreter.
   - `cvtsi2sd` with a 32-bit source sign-extends.
   - Flags after `ucomisd`: ZF=PF=CF=1 when unordered, which is why compilers
     emit `jp` checks. Map `jp`/`jnp`.
-- **Status:** DONE for x86-64 scalar SSE. GCC 13.3 at -O0: 23 of 26 Complete,
-  none wrong; Clang 18.1 at -O0: 23 of 26 Complete, none wrong. The Partial
-  functions are a `movapd` register copy (GCC) and a packed compare plus a
-  memory-operand compare whose `jp` is in the next block (Clang). The counts
-  are in `docs/SUPPORT_MATRIX.md`. Moves, arithmetic, conversions, comparisons and
-  zeroing idioms are lifted; packed and other SSE forms stay Partial. Argument and
-  return registers now follow the XMM registers that the function reads and writes.
+- **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
+  integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
+  each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
+  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1 has not
+  been re-measured since the rule. Moves, comparisons and zeroing idioms are lifted; packed and other
+  SSE forms stay Partial. Argument and return registers follow the XMM registers that the function
+  reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 
