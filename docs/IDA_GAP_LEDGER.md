@@ -151,25 +151,59 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08). The x86 float corpus (`DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode`) lifts 18 of 26 Complete with GCC 13 and 19 of 26 with Clang 18, every Complete result agreeing with the compiled code; the Clang gain is `ucomisd` flags carried into a single-predecessor block (G02-T4 extension, `Ir.X86FpCompare*`) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
-| G02 | x86 integer gaps | Full integer semantics | `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3, and flags into a single-predecessor fall-through block in G02-T4. Still Partial or Unsupported by design: `bsf`/`bsr` with a zero source, memory forms of `bt` family, flags into a block with several predecessors | P0 | IN PROGRESS (G02-T1, T2, T3, T4 DONE; the rest is by design, see the row text) |
-| G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form and break/continue not done; T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. A bounded C declaration parser for a subset exists (G05-T2). A prototype can be applied to recovered code, naming parameters and pointer structures (G05-T3, partial). No propagation through copies and loads. `donkey-cli project type add|list|apply` store and list types (G05-T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types yet | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
-| G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
-| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has IEEE float operations (G01-T1). x86-64 scalar SSE lifts (G01-T2) and AArch64 scalar FP lifts (G01-T3). An operation that rounds depends on MXCSR or FPCR, which a caller may set, so such a function is Partial with that assumption in its notes. Packed SIMD is not lifted | P0 | IN PROGRESS (T1, T2 DONE; T3 DONE under qemu-aarch64 with GCC; Apple Clang and CI-runner verification open) |
+| G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
+| G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial: the for form is not in the corpus); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: for form not in the corpus) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
+| G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals and the struct, class, union and enum types | P1 | IN PROGRESS (T1 PARTIAL) |
+| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); zlib and zstd compressed DWARF | P1 | IN PROGRESS (separate files and compressed DWARF DONE; .dSYM open: needs macOS to verify) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
-| G10 | C++ (demangling, RTTI, vtables) | Full | No demangler; no RTTI/vtable recovery | P1 | TODO |
-| G11 | Scripting and automation | IDAPython, IDC, plugin SDK | C ABI plugins, `donkey-cli --json`; no scripting API | P1 | TODO |
-| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
-| G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
-| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Linux x86-64/AArch64 and Windows x64 local only | P2 | TODO |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time. Static archives are listed (G15-T1, partial): `donkey-cli archive list`. ELF relocatable objects are laid out and relocated for the common x86-64 and AArch64 types (G15-T1 relocations, partial). Intel HEX and S-record files load as flat images (G15-T3, partial). No ELF cores, minidumps or multi-image projects yet | P2 | IN PROGRESS (G15-T1 PARTIAL; T2 TODO; T3 PARTIAL) |
-| G16 | Scale on real large binaries | Decades of tuning | Synthetic 1 GiB test; no real-world benchmark | P2 | TODO |
-| G17 | UI breadth | Many views, search kinds, command palette | Core views; text search in lists | P3 | TODO |
-| G18 | Signed releases | Signed installers | Ad-hoc signed `.app`, unsigned `.exe` | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate |
-| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform; `docs/ACCESSIBILITY.md`, design written, nothing implemented) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
+| G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
+| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 arrays and strings TODO; T3 local types TODO) |
+| G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian) and RISC-V 64 (RV64GC, little-endian) decode, checked against llvm-objdump. Thumb is not decoded or detected; neither ISA is lifted; no MIPS or PPC | P2 | IN PROGRESS (A32 and RV64GC decode DONE; Thumb, lifting, CFG, MIPS and PPC TODO) |
+| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records and ELF cores (T3, partial). Multi-image projects not started (T2). Windows minidumps not started (T3) | P2 | IN PROGRESS (T1 and T3 PARTIAL; T2 TODO) |
+| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
+| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
+| G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
+| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
+
+### Status at the end of this session
+
+Completed and merged or on the integration branch (see the table for each gap's status):
+
+- G02 (T1 to T4), G03 (T1 to T4), G11 (T1 to T3), G12-T1, G13 A32 and RV64GC decoding.
+- G01-T3 with the AArch64 rounding rule, G01-T2 with the x86 rule, the G04-T3 loop structuring
+  docs, and the G05-T1 review fixes.
+
+Still open, in ledger order:
+
+- G04-T3: the for form in the corpus, and the verification of break and continue in the corpus.
+- G05-T3 step 3 and G05-T4: the type editing UI and undo.
+- G06-T1 and G10-T1 to T4: the remaining PDB forms, MSVC RTTI and call-site resolution, and the GUI
+  demangled-name and class-hierarchy panel.
+- G07: .dSYM files, which need a macOS host to verify.
+- G08 SIMD lifting and G09 library identification: not started.
+- G12-T2 arrays and strings, G12-T3 local types: not started.
+- G13: Thumb, lifting for A32 and RV64, CFG checks, and MIPS and PowerPC. Not started.
+- G14-T1 to T4: remote debugging, FreeBSD, macOS, Windows on Arm, GUI watchpoints and AArch64
+  DBGWVR. The lldb-server oracle is available for T1.
+- G15-T1 remaining TLS forms (`-mtls-dialect=trad`), G15-T2 multi-image projects, and G15-T3
+  Windows minidumps.
+- G16-T2: incremental re-analysis and a real-world corpus.
+- G17: UI breadth (more views, search kinds, command palette).
+- G01: verification with Apple Clang and on CI runners.
+
+Blocked, not in this goal's scope or not closeable here:
+
+- G18 needs the owner's Apple Developer ID and a Windows code-signing certificate.
+- G19 needs owner decisions: the AccessKit waiver, the first platform, and the minimum bar.
+- The session branch and the chain of stacked PRs both implemented some of the same work.
+  The integration branch reconciles them; `main` is updated only after CI is green.
+
 
 ---
 
@@ -1112,6 +1146,10 @@ out-of-process RPC. So scripting is RPC.
   requests and writes the results.
 - **Tests:** CTest cases that pipe requests into `serve` and match the
   responses; a fuzz target for the request parser.
+- **Status:** DONE (G11-T1 to T3). `serve` has the read methods, `decompile`, `annotations.list`,
+  and `rename`, `comment` and `type.apply` behind `--project` and `--allow-write`. Batch mode and the
+  Python client are in place. Tests: `cli.serve_session`, `cli.serve_project`, `cli.batch_script`,
+  `python.rpc_client`. Fuzz: `fuzz_rpc`. Protocol: `docs/RPC.md`.
 
 ### G12 Interactive edits
 
