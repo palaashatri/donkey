@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | Flags do not cross blocks (G02-T4). `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3 | P0 | IN PROGRESS (G02-T1, T2, T3 DONE; T4 TODO) |
+| G02 | x86 integer gaps | Full integer semantics | `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3, and flags into a single-predecessor fall-through block in G02-T4. Still Partial or Unsupported by design: `bsf`/`bsr` with a zero source, memory forms of `bt` family, flags into a block with several predecessors | P0 | IN PROGRESS (G02-T1, T2, T3, T4 DONE; the rest is by design, see the row text) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -451,6 +451,20 @@ interpreter.
   3. Otherwise keep the branch Partial.
 - **Done when:** a hand-written test (`Ir.FlagsFromSinglePredecessorAreExact`)
   passes, and the corpus has no new WRONG.
+- **Status:** DONE on x86-64 (GCC 13.3 and Clang 18.1, native). The rule is
+  implemented as written, with one simplification: the block just before the
+  successor must fall through or end in the conditional branch whose not-taken
+  edge is the successor, and the successor must have no other CFG predecessor
+  (calls and jumps from elsewhere count, and an unresolved indirect branch in
+  the function rules the carry out). The last flag writer must be a two-operand
+  `cmp` or `test` of registers and immediates, and nothing after it may write a
+  register it reads. The compare is repeated from its own instruction at the
+  successor's start. Evidence: `Ir.FlagsFromSinglePredecessorAreExact`, which
+  also checks that a rewritten operand keeps the successor Partial. The GCC
+  x86-64 corpus gains one Complete function at O2 and O3 and under
+  `-march=x86-64-v2` (57/59, 51/59, 52/59), and no result is WRONG. The Clang
+  x86-64 counts are unchanged. Not done: flags carried through a block with more
+  than one predecessor, and flags across a block whose predecessor is a call.
 
 ### G03 AArch64 integer gaps [oracle]
 

@@ -71,6 +71,8 @@ listed where the per-function report was read.
 | GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
 | GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 51/59 | SIMD vectorisation, `bsr`; `c_switch_sparse` Partial (cause not itemised); `c_popcount` Complete |
+| GCC 13.3, x86-64 Linux | locally, after G02-T4 (59 functions) | 57/59 | 57/59 | 51/59 | the causes above, not re-itemised; one more function is Complete at O2 and O3 (cross-block flags) |
+| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T4 (59 functions) | not built | not built | 52/59 | the causes above, not re-itemised; one more function is Complete (cross-block flags) |
 | Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
 | Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
@@ -122,7 +124,10 @@ with a register and a memory operand.
   blocks (G02-T4).
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
-- Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
+- x86 flags read across basic blocks, except into a fall-through block that has
+  no other predecessor, where the compare that set them is repeated (G02-T4).
+  Flags are not carried across blocks on AArch64, so an AArch64 `ccmp`/`ccmn`
+  whose flags before are not exact is Partial.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
 
