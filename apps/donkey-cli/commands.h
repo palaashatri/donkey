@@ -25,5 +25,6 @@ int command_debug(const std::vector<std::string_view>& arguments);
 int command_patch(const std::vector<std::string_view>& arguments);
 int command_plugin(const std::vector<std::string_view>& arguments);
 int command_serve(const std::vector<std::string_view>& arguments);
+int command_batch(const std::vector<std::string_view>& arguments);
 
 }  // namespace donkey::cli

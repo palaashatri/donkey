@@ -26,6 +26,7 @@ namespace donkey::cli {
 namespace {
 
 constexpr int kExitOk = 0;
+constexpr int kExitFailure = 1;
 constexpr std::size_t kMaxMessageBytes = 16U * 1024U * 1024U;
 constexpr std::uint64_t kMaxListLimit = 100000;
 constexpr std::uint64_t kDefaultListLimit = 1000;
@@ -571,6 +572,8 @@ std::string error_line(const std::string& id, const RpcError& error) {
          ", \"data\": {\"donkey_code\": " + quote(error.donkey_code) + "}}}";
 }
 
+std::optional<std::string> handle_request(const JsonValue& request, Session& session);
+
 // One request line in, at most one response line out. Notifications (no id) get no response.
 std::optional<std::string> handle_line(std::string_view line, Session& session) {
   JsonLimits limits;
@@ -581,7 +584,11 @@ std::optional<std::string> handle_line(std::string_view line, Session& session) 
                       RpcError{kParseError, "rpc.parse",
                                parsed.diagnostic().code + ": " + parsed.diagnostic().message});
   }
-  const JsonValue& request = parsed.value();
+  return handle_request(parsed.value(), session);
+}
+
+// One parsed request in, at most one response out. Shared by `serve` and `batch`.
+std::optional<std::string> handle_request(const JsonValue& request, Session& session) {
   if (!request.is_object()) {
     return error_line(
         "null", RpcError{kInvalidRequest, "rpc.invalid_request", "a request is a JSON object"});
@@ -693,6 +700,64 @@ int command_serve(const std::vector<std::string_view>& arguments) {
       write_line(*response);
     }
   }
+  return kExitOk;
+}
+
+int command_batch(const std::vector<std::string_view>& arguments) {
+  if (arguments.size() != 1) {
+    std::fprintf(stderr,
+                 "donkey-cli batch: expected one script file: donkey-cli batch <script.json>\n");
+    return 2;
+  }
+  const std::string path(arguments[0]);
+  std::FILE* file = std::fopen(path.c_str(), "rb");
+  if (file == nullptr) {
+    std::fprintf(stderr, "donkey-cli batch: cannot open %s\n", path.c_str());
+    return kExitFailure;
+  }
+  std::string text;
+  char buffer[65536];
+  std::size_t count = 0;
+  while ((count = std::fread(buffer, 1, sizeof(buffer), file)) > 0) {
+    if (text.size() + count > kMaxMessageBytes) {
+      std::fclose(file);
+      std::fprintf(stderr, "donkey-cli batch: %s is larger than the 16 MiB limit\n", path.c_str());
+      return kExitFailure;
+    }
+    text.append(buffer, count);
+  }
+  std::fclose(file);
+
+  JsonLimits limits;
+  limits.max_bytes = kMaxMessageBytes;
+  auto parsed = parse_json(text, limits);
+  if (!parsed) {
+    std::fprintf(stderr, "donkey-cli batch: %s: %s: %s\n", path.c_str(),
+                 parsed.diagnostic().code.c_str(), parsed.diagnostic().message.c_str());
+    return kExitFailure;
+  }
+  if (!parsed.value().is_array()) {
+    std::fprintf(stderr, "donkey-cli batch: %s must hold a JSON array of requests\n", path.c_str());
+    return kExitFailure;
+  }
+
+  // One session for the whole script, so an `open` early in it serves the requests after it. The
+  // responses are printed as one JSON array, in request order; notifications have none.
+  Session session;
+  std::string out = "[";
+  bool first = true;
+  for (const JsonValue& request : parsed.value().items) {
+    auto response = handle_request(request, session);
+    if (!response.has_value()) {
+      continue;
+    }
+    out += first ? "\n  " : ",\n  ";
+    out += *response;
+    first = false;
+  }
+  out += first ? "]\n" : "\n]\n";
+  std::fwrite(out.data(), 1, out.size(), stdout);
+  std::fflush(stdout);
   return kExitOk;
 }
 

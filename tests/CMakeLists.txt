@@ -212,6 +212,13 @@ add_test(NAME cli.serve_session
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
                  -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve.cmake)
 set_tests_properties(cli.serve_session PROPERTIES TIMEOUT 300)
+add_test(NAME cli.batch_script
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_batch.cmake)
+set_tests_properties(cli.batch_script PROPERTIES TIMEOUT 300)
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
 set_tests_properties(cli.callgraph_json PROPERTIES

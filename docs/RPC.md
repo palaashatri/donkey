@@ -62,6 +62,18 @@ Methods that need an open binary return `rpc.no_image` until `open` succeeds. `d
 - `rename`, `comment` and `type.apply` return `rpc.write_disabled`. Writes need a project and an
   explicit `--allow-write` flag, and neither exists yet. Nothing is written to any file.
 
+## Batch mode
+
+`donkey-cli batch <script.json>` runs a JSON array of requests in order, in one session, and
+prints one JSON array of responses. The script is limited to 16 MiB. Notifications have no
+response, and a malformed element gets its own error in its place. Exit status is 0 when the
+script was read and run (even if some requests failed), 1 when the file is missing, is not valid
+JSON, or is not an array, and 2 for a usage error.
+
+```bash
+donkey-cli batch session.json
+```
+
 ## Errors
 
 An error response has `error.code`, `error.message` and `error.data.donkey_code`. The codes below
@@ -94,7 +106,8 @@ are stable; the messages are for people and may change.
 ```
 
 The notification (`hello` with no `id`) produces no line. The check that runs this session is
-`cmake/checks/check_serve.cmake` (CTest `cli.serve_session`).
+`cmake/checks/check_serve.cmake` (CTest `cli.serve_session`). `cmake/checks/check_batch.cmake`
+(CTest `cli.batch_script`) checks batch mode.
 
 ## Limits and what is not covered
 
@@ -103,5 +116,5 @@ The notification (`hello` with no `id`) produces no line. The check that runs th
 - Lists are capped by `limit`; the caps are reported as counts where a count is cheap to give.
 - The JSON reader (`include/donkey/core/json.h`) rejects duplicate object keys and nesting deeper
   than 64. It is fuzzed (`fuzz_json`).
-- Not covered yet: the Python client and batch mode (G11-T2 and G11-T3), `decompile`,
-  `annotations.list`, write methods, `--allow-write`, and any transport other than stdin/stdout.
+- Not covered yet: the Python client (G11-T2), `decompile`, `annotations.list`, write methods,
+  `--allow-write`, and any transport other than stdin/stdout.

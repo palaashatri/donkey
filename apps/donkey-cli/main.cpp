@@ -87,6 +87,9 @@ int main(int argc, char** argv) {
   if (command == "serve") {
     return donkey::cli::command_serve(rest);
   }
+  if (command == "batch") {
+    return donkey::cli::command_batch(rest);
+  }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),
                command.data());
