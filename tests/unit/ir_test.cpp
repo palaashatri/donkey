@@ -2072,6 +2072,30 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
 
 // ---- G02-T3: population count, bit scans, byte swap, bit test ----
 
+// bsf and bsr for a nonzero source are the lowest and highest set bit. The
+// result is Partial, because the destination is undefined for a zero source.
+TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
+  donkey::IrFunction forward;  // bsf rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbc, 0xc7, 0xc3}, forward));
+  EXPECT_TRUE(forward.partial);
+  EXPECT_EQ(run_x86_64(forward, {0x18}), 3U);
+  EXPECT_EQ(run_x86_64(forward, {1ULL << 40}), 40U);
+
+  donkey::IrFunction reverse;  // bsr rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbd, 0xc7, 0xc3}, reverse));
+  EXPECT_TRUE(reverse.partial);
+  EXPECT_EQ(run_x86_64(reverse, {0x18}), 4U);
+  EXPECT_EQ(run_x86_64(reverse, {1ULL << 40}), 40U);
+
+  donkey::IrFunction forward32;  // bsf eax, edi; ret: only the low 32 bits are read
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbc, 0xc7, 0xc3}, forward32));
+  EXPECT_EQ(run_x86_64(forward32, {0x100000008ULL}), 3U);
+
+  donkey::IrFunction reverse32;  // bsr eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbd, 0xc7, 0xc3}, reverse32));
+  EXPECT_EQ(run_x86_64(reverse32, {0xffffffffULL}), 31U);
+}
+
 TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
   // popcnt rax, rdi; ret
   donkey::IrFunction popcount;
