@@ -219,6 +219,23 @@ add_test(NAME cli.batch_script
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
                  -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_batch.cmake)
 set_tests_properties(cli.batch_script PROPERTIES TIMEOUT 300)
+
+# The optional Python client (G11-T2) is tested with pytest when Python and pytest are installed.
+# The core build never depends on it, so the test is not registered without them.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pytest"
+                  RESULT_VARIABLE donkey_pytest_status
+                  OUTPUT_QUIET ERROR_QUIET)
+  if(donkey_pytest_status EQUAL 0)
+    add_test(NAME python.rpc_client
+             COMMAND ${Python3_EXECUTABLE} -m pytest -p no:cacheprovider -q
+                     ${PROJECT_SOURCE_DIR}/bindings/python/tests)
+    set_tests_properties(python.rpc_client PROPERTIES
+      ENVIRONMENT "DONKEY_CLI=$<TARGET_FILE:donkey-cli>;PYTHONDONTWRITEBYTECODE=1"
+      TIMEOUT 300)
+  endif()
+endif()
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
 set_tests_properties(cli.callgraph_json PROPERTIES

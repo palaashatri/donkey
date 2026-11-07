@@ -116,5 +116,11 @@ The notification (`hello` with no `id`) produces no line. The check that runs th
 - Lists are capped by `limit`; the caps are reported as counts where a count is cheap to give.
 - The JSON reader (`include/donkey/core/json.h`) rejects duplicate object keys and nesting deeper
   than 64. It is fuzzed (`fuzz_json`).
-- Not covered yet: the Python client (G11-T2), `decompile`, `annotations.list`, write methods,
-  `--allow-write`, and any transport other than stdin/stdout.
+- Not covered yet: `decompile`, `annotations.list`, write methods, `--allow-write`, and any
+  transport other than stdin/stdout.
+
+## Python client
+
+`bindings/python/donkey` is an optional package that starts `donkey-cli serve` and wraps the
+implemented methods (see `bindings/python/README.md`). It is not part of the core build; CTest
+runs its pytest suite (`python.rpc_client`) only when Python and pytest are installed.

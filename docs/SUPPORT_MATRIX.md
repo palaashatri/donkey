@@ -224,7 +224,7 @@ compare, because GCC's table code overwrites `x0`.
 |---|---|---|
 | `donkey-cli serve` (JSON-RPC 2.0, `donkey.rpc.v1`, stdin and stdout) | Partial | Read methods `hello`, `open`, `info`, `functions`, `strings`, `xrefs`, `disasm`, `callgraph` are tested (`cli.serve_session`). `decompile` and `annotations.list` are not implemented; write methods are refused (`rpc.write_disabled`). See `docs/RPC.md` |
 | `donkey-cli batch <script.json>` | Implemented | Runs a JSON array of the same requests in one session (`cli.batch_script`) |
-| Python client | Not implemented | G11-T2 in `docs/IDA_GAP_LEDGER.md` |
+| Python client (`bindings/python`, optional) | Partial | Typed wrappers for the implemented methods, tested against the built tool (`python.rpc_client`) |
 
 ## UI
 
