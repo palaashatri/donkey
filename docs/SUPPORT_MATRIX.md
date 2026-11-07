@@ -125,6 +125,8 @@ listed where the per-function report was read.
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
 
+Floating-point results that round (AArch64 `fadd`, `fsub`, `fmul`, `fdiv`, `fsqrt`, `fmadd`, `fmsub`, `scvtf`, `ucvtf` and narrowing `fcvt`) depend on the FPCR rounding mode, which the caller may set. Those functions are Partial, with the assumption written in their notes. A row above is current only if it was measured after that rule. The rows with a CI or local measurement before the rule are kept as measured; CI re-measures on every run, and the local rows are not re-measured here.
+
 On every row, no Complete result disagrees with the compiled code.
 
 The passes that run after lifting (signature inference and pointer-structure
