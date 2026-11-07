@@ -26,3 +26,20 @@ are in `tests/unit/relocate_got_test.cpp`.
 source was written for this repository. The objects hold three COMMON symbols (`shared_counter`,
 `shared_buffer`, `shared_wide`) that the linker must place. The tests are in
 `tests/unit/relocate_common_test.cpp`.
+
+## TLS relocation forms (G15-T1)
+
+- `tls.c`: written for this repository. Three thread-local variables (`tls_counter` and
+  `tls_byte` in `.tdata`, `tls_pair` in `.tbss`) and `read_tls`, which reads them.
+- `tls-local-exec-x86_64.o`: `gcc -c -O0 -fno-pic -ftls-model=local-exec tls.c` (GCC 13.3,
+  Ubuntu 24.04). Its relocations are R_X86_64_TPOFF32.
+  The expected bytes of `read_tls` are the ones `ld -static -nostdlib -e read_tls` puts in the
+  executable (GNU ld 2.42), read with `readelf`/`objdump`: 45 bytes, the thread-pointer offsets
+  -0x20 (tls_counter), -0x1c (tls_byte) and -0x8 (tls_pair+8).
+- `tls-initial-exec.s`: written for this repository, the same variables and `read_tls` in
+  assembly, using `movq sym@gottpoff(%rip), %reg` (R_X86_64_GOTTPOFF). GCC does not emit
+  GOTTPOFF for variables it defines itself, and `ld` relaxes the form in a static link, so the
+  object is assembled with `as` and its expected slot values are the linker's layout of the
+  same TLS block: -0x20, -0x1c and -0x10 (tls_pair at offset 0x10).
+- `tls-global-dynamic-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=global-dynamic tls.c`. Its
+  R_X86_64_TLSGD relocations are not applied (reported, the image is partial).

@@ -6,6 +6,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -23,6 +24,7 @@ constexpr std::uint32_t kShtSymtab = 2;
 constexpr std::uint32_t kShtRela = 4;
 constexpr std::uint32_t kShtNobits = 8;
 constexpr std::uint64_t kShfAlloc = 0x2;
+constexpr std::uint64_t kShfTls = 0x400;
 constexpr std::uint16_t kShnUndef = 0;
 constexpr std::uint16_t kShnAbs = 0xfff1;
 constexpr std::uint16_t kShnCommon = 0xfff2;
@@ -41,6 +43,9 @@ constexpr std::uint32_t kR_X86_64_32S = 11;
 constexpr std::uint32_t kR_X86_64_GOTPCREL = 9;
 constexpr std::uint32_t kR_X86_64_GOTPCRELX = 41;
 constexpr std::uint32_t kR_X86_64_REX_GOTPCRELX = 42;
+constexpr std::uint32_t kR_X86_64_TPOFF64 = 18;
+constexpr std::uint32_t kR_X86_64_GOTTPOFF = 22;
+constexpr std::uint32_t kR_X86_64_TPOFF32 = 23;
 // AArch64 relocation types (ELF for the Arm 64-bit Architecture).
 constexpr std::uint32_t kR_AARCH64_ABS64 = 257;
 constexpr std::uint32_t kR_AARCH64_PREL32 = 261;
@@ -101,7 +106,7 @@ bool fits_int32(std::int64_t value) {
 bool is_got_relocation(std::uint16_t machine, std::uint32_t type) {
   if (machine == kMachineX86_64) {
     return type == kR_X86_64_GOTPCREL || type == kR_X86_64_GOTPCRELX ||
-           type == kR_X86_64_REX_GOTPCRELX;
+           type == kR_X86_64_REX_GOTPCRELX || type == kR_X86_64_GOTTPOFF;
   }
   return type == kR_AARCH64_ADR_GOT_PAGE || type == kR_AARCH64_LD64_GOT_LO12_NC;
 }
@@ -198,24 +203,48 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
     header.entry_size = zero_or(reader.u64(at + 56, endian));
   }
 
-  // Layout: allocated sections, in section order, from kObjectBase.
+  // Layout: the thread-local sections first, as one block, then the other allocated sections
+  // in section order, all from kObjectBase. The block's offsets are what TPOFF relocations
+  // need: with x86-64's variant II the block ends at the thread pointer.
   std::vector<std::optional<std::uint64_t>> placed(static_cast<std::size_t>(count));
   std::uint64_t next = kObjectBase;
-  for (std::size_t i = 1; i < headers.size(); ++i) {
-    const SectionHeader& header = headers[i];
-    if ((header.flags & kShfAlloc) == 0) {
-      continue;
+  std::optional<std::uint64_t> tls_base;
+  std::uint64_t tls_end = 0;
+  std::uint64_t tls_align = 1;
+  for (int pass = 0; pass < 2; ++pass) {
+    for (std::size_t i = 1; i < headers.size(); ++i) {
+      const SectionHeader& header = headers[i];
+      const bool thread_local_section = (header.flags & kShfTls) != 0;
+      if ((header.flags & kShfAlloc) == 0 || thread_local_section != (pass == 0)) {
+        continue;
+      }
+      const std::uint64_t alignment = std::max<std::uint64_t>(header.alignment, 1);
+      next = round_up(next, alignment);
+      if (header.size > std::numeric_limits<std::uint64_t>::max() - next) {
+        return fail("elf.layout_overflow", "the allocated sections do not fit in 64 bits");
+      }
+      placed[i] = next;
+      image.sections[i].address = next;
+      if (thread_local_section) {
+        if (!tls_base) {
+          tls_base = next;
+        }
+        tls_end = next + header.size;
+        tls_align = std::max(tls_align, alignment);
+      }
+      next += header.size;
     }
-    const std::uint64_t alignment = std::max<std::uint64_t>(header.alignment, 1);
-    next = round_up(next, alignment);
-    if (header.size > std::numeric_limits<std::uint64_t>::max() - next) {
-      return fail("elf.layout_overflow", "the allocated sections do not fit in 64 bits");
-    }
-    placed[i] = next;
-    image.sections[i].address = next;
-    next += header.size;
   }
   image.image_base = kObjectBase;
+  // The block is rounded to its alignment, as the static TLS block is.
+  const std::uint64_t tls_size = tls_base ? round_up(tls_end - *tls_base, tls_align) : 0;
+  // The thread-pointer offset of a thread-local address, or nothing outside the block.
+  const auto tp_offset = [&](std::uint64_t address) -> std::optional<std::int64_t> {
+    if (!tls_base || address < *tls_base || address > tls_end) {
+      return std::nullopt;
+    }
+    return static_cast<std::int64_t>(address - *tls_base) - static_cast<std::int64_t>(tls_size);
+  };
 
   // The output: the file, then a copy of each allocated section that has file data.
   std::vector<std::byte> out(file.begin(), file.end());
@@ -346,6 +375,7 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
   // allocated sections. The static link stores the symbol's address in its slot, so a
   // GOT-relative access loads that address.
   std::map<std::uint64_t, std::uint64_t> got_slot;  // symbol index -> slot address
+  std::set<std::uint64_t> tp_symbols;  // symbols whose slot holds a thread-pointer offset
   if (known_machine) {
     std::vector<std::uint64_t> got_symbols;
     for (const SectionHeader& relocations : headers) {
@@ -367,6 +397,9 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
             got_slot.contains(symbol_index)) {
           continue;
         }
+        if (type == kR_X86_64_GOTTPOFF) {
+          tp_symbols.insert(symbol_index);
+        }
         got_slot.emplace(symbol_index, 0);
         got_symbols.push_back(symbol_index);
       }
@@ -381,7 +414,18 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
       for (std::size_t i = 0; i < got_symbols.size(); ++i) {
         const std::uint64_t index = got_symbols[i];
         got_slot[index] = got_address + i * 8;
-        store(out, got_file + i * 8, 8, *symbol_address[index], endian);
+        std::uint64_t value = *symbol_address[index];
+        if (tp_symbols.contains(index)) {
+          const auto offset = tp_offset(value);
+          if (offset) {
+            value = static_cast<std::uint64_t>(*offset);
+          } else {
+            note(Status::Unsupported, "elf.tls_symbol",
+                 "an initial-exec slot names a symbol that is not thread-local");
+            value = 0;
+          }
+        }
+        store(out, got_file + i * 8, 8, value, endian);
       }
       Section got;
       got.id = SectionId{image.sections.size() + 1};
@@ -502,7 +546,8 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
           }
           case kR_X86_64_GOTPCREL:
           case kR_X86_64_GOTPCRELX:
-          case kR_X86_64_REX_GOTPCRELX: {
+          case kR_X86_64_REX_GOTPCRELX:
+          case kR_X86_64_GOTTPOFF: {
             if (where + 4 > target_header.size) {
               note(Status::Unsupported, "elf.relocation_range",
                    "a relocation lies outside its section");
@@ -517,6 +562,30 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
               break;
             }
             store(out, file_place, 4, static_cast<std::uint64_t>(value) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          case kR_X86_64_TPOFF32:
+          case kR_X86_64_TPOFF64: {
+            // Local-exec: the thread-pointer offset of the symbol plus the addend.
+            const std::uint64_t width = type == kR_X86_64_TPOFF32 ? 4 : 8;
+            if (where + width > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const auto offset = tp_offset(symbol + static_cast<std::uint64_t>(addend));
+            if (!offset) {
+              note(Status::Unsupported, "elf.tls_symbol",
+                   "a thread-local relocation names a symbol that is not thread-local");
+              break;
+            }
+            if (width == 4 && !fits_int32(*offset)) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a thread-pointer offset does not fit in 32 bits");
+              break;
+            }
+            store(out, file_place, static_cast<unsigned>(width),
+                  static_cast<std::uint64_t>(*offset), endian);
             break;
           }
           default:
