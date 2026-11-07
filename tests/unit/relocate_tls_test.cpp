@@ -152,3 +152,68 @@ TEST(RelocateTls, GlobalDynamicAccessToAnUndefinedVariableStaysPartial) {
   }
   EXPECT_TRUE(unresolved);
 }
+
+// AArch64 uses variant I: the thread-pointer offset of a block variable is 16 plus its offset in
+// the block. The local-exec object's read_tls is the 64 bytes `ld -static` writes for it (the
+// ADD TPREL immediates); the test is in tests/fixtures/objects/PROVENANCE.md.
+TEST(RelocateTls, LocalExecAArch64ImmediatesAreTheLinkersVariantOneOffsets) {
+  auto loaded = donkey::load_binary(object_path("tls-local-exec-aarch64.o"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  EXPECT_FALSE(loaded.value().image.partial);
+
+  const donkey::Symbol* read = defined_symbol(loaded.value().image, "read_tls");
+  ASSERT_NE(read, nullptr);
+  const std::vector<std::byte> linked = bytes_at(loaded.value(), read->address, 64);
+  ASSERT_EQ(linked.size(), 64U);
+  EXPECT_EQ(linked,
+            hex_bytes("40d03bd50000409100600091000440f9e103002a40d03bd500004091004000"
+                      "91000040b92000000b41d03bd52100409121500091210040390000010bc0035fd6"));
+}
+
+// A TLSDESC access (GCC's default for -fPIC) is relaxed by a static link, as `ld` relaxes it:
+// adrp, ldr, add and blr become movz, movk, nop and nop, and the rest of the sequence is the same.
+// The 112 bytes of read_tls are the bytes `ld -static` writes for the same object.
+TEST(RelocateTls, GlobalDynamicAArch64AccessesRelaxToTheLinkersOffsets) {
+  auto loaded = donkey::load_binary(object_path("tls-global-dynamic-aarch64.o"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  EXPECT_FALSE(loaded.value().image.partial);
+
+  const donkey::Symbol* read = defined_symbol(loaded.value().image, "read_tls");
+  ASSERT_NE(read, nullptr);
+  const std::vector<std::byte> linked = bytes_at(loaded.value(), read->address, 112);
+  ASSERT_EQ(linked.size(), 112U);
+  EXPECT_EQ(linked, hex_bytes("fd7bbfa9fd0300910000a0d2000380f21f2003d51f2003d541d03bd520000"
+                              "08b000440f9e203002a0000a0d2000280f21f2003d51f2003d541d03bd52000"
+                              "008b000040b94100000b0000a0d2800280f21f2003d51f2003d542d03bd54000"
+                              "008b000040392000000bfd7bc1a8c0035fd6"));
+}
+
+// The initial-exec object loads its variables' thread-pointer offsets from GOT slots, which is
+// valid as it stands; each slot holds the offset of its variable (16, 20 and 24, the variant I
+// offsets of tls_counter, tls_byte and tls_pair).
+TEST(RelocateTls, InitialExecAArch64SlotsHoldTheThreadPointerOffsets) {
+  auto loaded = donkey::load_binary(object_path("tls-initial-exec-aarch64.o"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  EXPECT_FALSE(loaded.value().image.partial);
+
+  const donkey::Section* got = nullptr;
+  for (const donkey::Section& section : loaded.value().image.sections) {
+    if (section.name == ".got") {
+      got = &section;
+    }
+  }
+  ASSERT_NE(got, nullptr);
+  ASSERT_EQ(got->file_size, 24U);  // one slot per thread-local symbol the code names
+  const std::vector<std::byte> bytes = bytes_at(loaded.value(), got->address, 24);
+  ASSERT_EQ(bytes.size(), 24U);
+  std::vector<std::uint64_t> slots;
+  for (std::size_t i = 0; i < 24; i += 8) {
+    std::uint64_t value = 0;
+    for (std::size_t b = 0; b < 8; ++b) {
+      value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(bytes[i + b])) << (8 * b);
+    }
+    slots.push_back(value);
+  }
+  std::sort(slots.begin(), slots.end());
+  EXPECT_EQ(slots, (std::vector<std::uint64_t>{0x10, 0x14, 0x18}));
+}

@@ -53,3 +53,12 @@ source was written for this repository. The objects hold three COMMON symbols (`
 - `tls-global-dynamic-extern-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=global-dynamic
   tls-extern.c` (GCC 13.3.0; written for this repository). It accesses a thread-local variable
   the object does not define, so the access cannot be relaxed and the image stays partial.
+- `tls-local-exec-aarch64.o`, `tls-initial-exec-aarch64.o`, `tls-global-dynamic-aarch64.o`:
+  `aarch64-linux-gnu-gcc -c -O0 -fPIC -ftls-model=<model> tls.c` (GCC 13.3.0), from the same
+  source as the x86-64 objects. The AArch64 default for the global-dynamic model is TLSDESC, so
+  the global-dynamic object carries R_AARCH64_TLSDESC_* relocations. The expected bytes of
+  `read_tls` in the local-exec object (64 bytes) and the global-dynamic object (112 bytes) are
+  the bytes `aarch64-linux-gnu-ld -static -nostdlib -e read_tls` (GNU ld 2.42) writes. The
+  initial-exec object's slots are checked against the variant I offsets 0x10, 0x14 and 0x18
+  (tls_counter, tls_byte, tls_pair); `ld` relaxes that model to movz/movk instead, and the
+  slot form used here is equally valid.
