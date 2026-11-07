@@ -103,6 +103,9 @@ struct BinaryImage {
   std::uint64_t file_size = 0;
   std::string sha256;
   std::string format_detail;
+  /// The Mach-O LC_UUID as 32 lowercase hex digits, which a .dSYM file must share. Empty when the
+  /// image has none (every other format).
+  std::string uuid;
 
   std::vector<Segment> segments;
   std::vector<Section> sections;

@@ -1,9 +1,10 @@
 #pragma once
 
-// Finding the separate debug file of a binary (G07): the GNU build-id route
+// Finding the separate debug file of a binary (G07): the Mach-O route (`<binary>.dSYM/Contents/
+// Resources/DWARF/<name>`, whose LC_UUID must equal the executable's), the GNU build-id route
 // (`<dir>/.build-id/xx/yyyy.debug`) and the debuglink route (`.gnu_debuglink`, a file name and a
-// CRC-32 of the file). The file is validated before it is returned: its build-id must equal the
-// binary's, or its CRC-32 must equal the link's. Nothing is loaded or executed here.
+// CRC-32 of the file). The file is validated before it is returned: its UUID or build-id must equal
+// the binary's, or its CRC-32 must equal the link's. Nothing is loaded or executed here.
 
 #include <cstddef>
 #include <cstdint>
@@ -37,5 +38,13 @@ struct SeparateDebugOptions {
 [[nodiscard]] Result<std::string> find_separate_debug_file(
     const BinaryImage& image, std::span<const std::byte> data, const std::string& binary_path,
     const SeparateDebugOptions& options = {});
+
+/// Checks a debug file the user names (`donkey-cli debuginfo --debug-file`), with the rules of the
+/// search: the UUID for a Mach-O, else the build-id, else the debuglink CRC-32. It returns the path
+/// when the file matches. A mismatch is a diagnostic (`debug.uuid`, `debug.build_id` or
+/// `debug.crc`), and the file is never used.
+[[nodiscard]] Result<std::string> check_separate_debug_file(const BinaryImage& image,
+                                                            std::span<const std::byte> data,
+                                                            const std::string& debug_path);
 
 }  // namespace donkey

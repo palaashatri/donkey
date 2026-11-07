@@ -107,72 +107,140 @@ std::string build_id_hex(const BinaryImage& image, std::span<const std::byte> da
   return desc ? hex(desc.value()) : std::string();
 }
 
+namespace {
+
+/// The `.gnu_debuglink` section: the debug file's name and the CRC-32 of its contents.
+struct DebugLink {
+  bool present = false;
+  std::string name;
+  std::uint32_t crc = 0;
+};
+
+DebugLink read_debug_link(const BinaryImage& image, std::span<const std::byte> data) {
+  DebugLink link;
+  if (const auto bytes = section_bytes(image, data, ".gnu_debuglink"); bytes) {
+    const std::string name =
+        trim_nul(std::string_view(reinterpret_cast<const char*>(bytes->data()), bytes->size()));
+    // The name is NUL-terminated and padded to 4 bytes; the CRC-32 follows it.
+    const std::uint64_t crc_at = (name.size() + 1 + 3U) & ~std::uint64_t{3};
+    const ByteReader reader(*bytes);
+    const auto crc = reader.u32(crc_at, image.endian);
+    if (!name.empty() && crc) {
+      link.present = true;
+      link.name = name;
+      link.crc = crc.value();
+    }
+  }
+  return link;
+}
+
+}  // namespace
+
+Result<std::string> check_separate_debug_file(const BinaryImage& image,
+                                              std::span<const std::byte> data,
+                                              const std::string& debug_path) {
+  const DebugLink link = read_debug_link(image, data);
+  const std::string build_id = build_id_hex(image, data);
+  if (image.uuid.empty() && build_id.empty() && !link.present) {
+    return Result<std::string>(diagnostic("no_link", "the binary names no separate debug file"));
+  }
+  const auto bytes = read_file(debug_path);
+  if (!bytes) {
+    return Result<std::string>(diagnostic("not_found", "the named debug file cannot be read"));
+  }
+  // The same rules as the search: the UUID for a Mach-O, else the build-id, else the CRC-32.
+  if (!image.uuid.empty()) {
+    auto candidate = parse_binary(*bytes, debug_path);
+    if (!candidate || candidate.value().uuid != image.uuid) {
+      return Result<std::string>(diagnostic("uuid", "the named file has another Mach-O UUID"));
+    }
+    return debug_path;
+  }
+  if (!build_id.empty()) {
+    auto candidate = parse_binary(*bytes, debug_path);
+    if (!candidate || build_id_hex(candidate.value(), *bytes) != build_id) {
+      return Result<std::string>(diagnostic("build_id", "the named file has another build-id"));
+    }
+    return debug_path;
+  }
+  if (gnu_crc32(*bytes) != link.crc) {
+    return Result<std::string>(diagnostic("crc", "the named file has another CRC-32"));
+  }
+  return debug_path;
+}
+
 Result<std::string> find_separate_debug_file(const BinaryImage& image,
                                              std::span<const std::byte> data,
                                              const std::string& binary_path,
                                              const SeparateDebugOptions& options) {
   const std::string build_id = build_id_hex(image, data);
-  std::string link_name;
-  std::uint32_t link_crc = 0;
-  bool has_link = false;
-  if (const auto link = section_bytes(image, data, ".gnu_debuglink"); link) {
-    const std::string name =
-        trim_nul(std::string_view(reinterpret_cast<const char*>(link->data()), link->size()));
-    // The name is NUL-terminated and padded to 4 bytes; the CRC-32 follows it.
-    const std::uint64_t crc_at = (name.size() + 1 + 3U) & ~std::uint64_t{3};
-    const ByteReader reader(*link);
-    const auto crc = reader.u32(crc_at, image.endian);
-    if (!name.empty() && crc) {
-      link_name = name;
-      link_crc = crc.value();
-      has_link = true;
-    }
-  }
-  if (build_id.empty() && !has_link) {
+  const DebugLink link = read_debug_link(image, data);
+  const bool has_link = link.present;
+  const std::string& link_name = link.name;
+  const std::uint32_t link_crc = link.crc;
+  if (build_id.empty() && !has_link && image.uuid.empty()) {
     return Result<std::string>(diagnostic("no_link", "the binary names no separate debug file"));
   }
 
-  // The candidates, in the order gdb uses them: the build-id tree first, then the debuglink
-  // beside the binary, in its .debug subdirectory, and under each debug directory.
-  std::vector<std::pair<std::filesystem::path, bool>> candidates;  // path, checked by build-id
+  // How a candidate is checked: by build-id, by the debuglink CRC-32, or by Mach-O UUID.
+  enum class Check { BuildId, Link, Uuid };
+  // The candidates, in the order the tools use them: the Mach-O .dSYM bundle beside the binary,
+  // then the build-id tree, then the debuglink beside the binary, in its .debug subdirectory,
+  // and under each debug directory.
+  std::vector<std::pair<std::filesystem::path, Check>> candidates;
+  if (!image.uuid.empty()) {
+    candidates.emplace_back(std::filesystem::path(binary_path + ".dSYM") / "Contents" /
+                                "Resources" / "DWARF" /
+                                std::filesystem::path(binary_path).filename(),
+                            Check::Uuid);
+  }
   for (const std::string& directory : options.debug_directories) {
     if (build_id.size() > 2) {
       candidates.emplace_back(std::filesystem::path(directory) / ".build-id" /
                                   build_id.substr(0, 2) / (build_id.substr(2) + ".debug"),
-                              true);
+                              Check::BuildId);
     }
   }
   if (has_link) {
     const std::filesystem::path binary = std::filesystem::path(binary_path).parent_path();
-    candidates.emplace_back(binary / link_name, false);
-    candidates.emplace_back(binary / ".debug" / link_name, false);
+    candidates.emplace_back(binary / link_name, Check::Link);
+    candidates.emplace_back(binary / ".debug" / link_name, Check::Link);
     for (const std::string& directory : options.debug_directories) {
       candidates.emplace_back(std::filesystem::path(directory) / binary.relative_path() / link_name,
-                              false);
+                              Check::Link);
     }
   }
 
   // The first candidate that matches wins. One that exists but names a different file is
   // skipped, and reported if nothing matches: it is never used.
   std::optional<Diagnostic> mismatch;
-  for (const auto& [path, by_build_id] : candidates) {
+  for (const auto& [path, check] : candidates) {
     const auto bytes = read_file(path);
     if (!bytes) {
       continue;
     }
-    if (by_build_id) {
-      auto candidate = parse_binary(*bytes, path.string());
-      if (!candidate || build_id_hex(candidate.value(), *bytes) != build_id) {
+    if (check == Check::Link) {
+      if (gnu_crc32(*bytes) != link_crc) {
         if (!mismatch) {
-          mismatch = diagnostic("build_id", "a file at the build-id path has another build-id");
+          mismatch = diagnostic("crc", "a file named by the debuglink has another CRC-32");
         }
         continue;
       }
       return path.string();
     }
-    if (gnu_crc32(*bytes) != link_crc) {
+    auto candidate = parse_binary(*bytes, path.string());
+    if (check == Check::Uuid) {
+      if (!candidate || candidate.value().uuid != image.uuid) {
+        if (!mismatch) {
+          mismatch = diagnostic("uuid", "a .dSYM file has another Mach-O UUID");
+        }
+        continue;
+      }
+      return path.string();
+    }
+    if (!candidate || build_id_hex(candidate.value(), *bytes) != build_id) {
       if (!mismatch) {
-        mismatch = diagnostic("crc", "a file named by the debuglink has another CRC-32");
+        mismatch = diagnostic("build_id", "a file at the build-id path has another build-id");
       }
       continue;
     }

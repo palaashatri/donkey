@@ -272,6 +272,21 @@ endif()
 add_test(NAME cli.debuginfo_reports_absence
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
 set_tests_properties(cli.debuginfo_reports_absence PROPERTIES WILL_FAIL TRUE)
+# G07-T2: the Mach-O executable's .dSYM is found by its UUID, and a file named with --debug-file is
+# used only when it matches the executable (the mismatch below must fail).
+add_test(NAME cli.debuginfo_dsym
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg)
+set_tests_properties(cli.debuginfo_dsym PROPERTIES
+  PASS_REGULAR_EXPRESSION "separate debug file: .*dbg.dSYM/Contents/Resources/DWARF/dbg")
+add_test(NAME cli.debuginfo_debug_file
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
+                 --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg.dSYM/Contents/Resources/DWARF/dbg)
+set_tests_properties(cli.debuginfo_debug_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "DWARF 4-4, 1 compile units")
+add_test(NAME cli.debuginfo_debug_file_mismatch
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
+                 --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.debuginfo_debug_file_mismatch PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME sbom.valid
   COMMAND ${CMAKE_COMMAND} -DSBOM=${PROJECT_BINARY_DIR}/donkey.spdx.json

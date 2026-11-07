@@ -157,7 +157,7 @@ P0 is the most important, P3 the least.
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial: the for form is not in the corpus); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: for form not in the corpus) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals and the struct, class, union and enum types | P1 | IN PROGRESS (T1 PARTIAL) |
-| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); zlib and zstd compressed DWARF | P1 | IN PROGRESS (separate files and compressed DWARF DONE; .dSYM open: needs macOS to verify) |
+| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | IN PROGRESS (T1 DONE; T2 DONE on Linux with LLVM-made Mach-O fixtures; the check against Apple's dsymutil on a macOS host is open) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
 | G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
@@ -186,7 +186,7 @@ Still open, in ledger order:
 - G05-T3 step 3 and G05-T4: the type editing UI and undo.
 - G06-T1 and G10-T1 to T4: the remaining PDB forms, MSVC RTTI and call-site resolution, and the GUI
   demangled-name and class-hierarchy panel.
-- G07: .dSYM files, which need a macOS host to verify.
+- G07: the .dSYM check against Apple's `dsymutil` on a macOS host (the Linux tests use LLVM's output).
 - G08 SIMD lifting and G09 library identification: not started.
 - G12-T2 arrays and strings, G12-T3 local types: not started.
 - G13: Thumb, lifting for A32, RV64, MIPS32 and PowerPC32, CFG checks (MIPS delay slots first),
@@ -1031,6 +1031,12 @@ own code.
   3. A mismatch is a diagnostic, never silently used.
 - **Tests:** on macOS CI, build the debuggee and run `dsymutil`. On Linux,
   use `objcopy --only-keep-debug` and `--add-gnu-debuglink`.
+  **Status:** the lookup, UUID check, `--debug-file` and the refusal of a
+  mismatched bundle are DONE on Linux (`SeparateDebug.DsymFindsTheBundleWhoseUuidMatches`,
+  `SeparateDebug.ADsymWithAnotherUuidIsRefused`, `SeparateDebug.AMachOExecutableWithoutItsBundleIsNotFound`,
+  `cli.debuginfo_dsym`, `cli.debuginfo_debug_file`, `cli.debuginfo_debug_file_mismatch`). The
+  fixture is `tests/fixtures/dsym`, made with `ld64.lld-18` and `llvm-dsymutil`. Not done: the
+  same check with Apple's `dsymutil` on a macOS host.
 
 ### G08 SIMD (after G01)
 

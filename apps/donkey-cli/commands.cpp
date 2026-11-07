@@ -786,7 +786,7 @@ void print_usage(std::FILE* out) {
       "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
       "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
       "  donkey-cli core <file> [--json]\n"
-      "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
+      "  donkey-cli debuginfo <binary> [--json] [--max-items N] [--debug-file PATH]\n"
       "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
       "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
@@ -1126,6 +1126,7 @@ int command_core(const std::vector<std::string_view>& arguments) {
 
 int command_debuginfo(const std::vector<std::string_view>& arguments) {
   std::string path;
+  std::string debug_file;
   bool json = false;
   std::size_t max_items = 1000;
   LoadOptions load_options;
@@ -1141,6 +1142,12 @@ int command_debuginfo(const std::vector<std::string_view>& arguments) {
         return usage_error("--max-items needs a positive value");
       }
       max_items = static_cast<std::size_t>(parsed);
+    } else if (argument == "--debug-file") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--debug-file needs a path");
+      }
+      debug_file = std::string(value);
     } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
       if (flag_error != nullptr) {
         return usage_error(flag_error);
@@ -1165,7 +1172,21 @@ int command_debuginfo(const std::vector<std::string_view>& arguments) {
   // its debuglink (G07). That file is read in place of the binary's own sections.
   std::optional<LoadedBinary> separate;
   std::string separate_path;
-  if (!result && result.diagnostic().code == "dwarf.not_present") {
+  if (!debug_file.empty()) {
+    // A file the user names is checked against the binary, and a mismatch is an error: it is
+    // never used silently in place of the binary's own debug information.
+    auto checked = check_separate_debug_file(loaded.image, loaded.data, debug_file);
+    if (!checked) {
+      return fail(checked.diagnostic());
+    }
+    auto opened = donkey::load_binary(checked.value());
+    if (!opened) {
+      return fail(opened.diagnostic());
+    }
+    separate_path = checked.value();
+    separate = std::move(opened.value());
+    result = read_debug_info(separate->image, separate->data);
+  } else if (!result && result.diagnostic().code == "dwarf.not_present") {
     if (auto found = find_separate_debug_file(loaded.image, loaded.data, path)) {
       if (auto opened = donkey::load_binary(found.value())) {
         separate_path = found.value();
