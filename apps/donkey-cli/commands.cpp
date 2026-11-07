@@ -14,17 +14,24 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/archive.h"
+#include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
+#include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/lift.h"
 #include "donkey/patch/patch.h"
 #include "donkey/plugin/plugin.h"
+#include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/types.h"
 #include "json.h"
 
 namespace donkey::cli {
@@ -199,6 +206,20 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
   return false;
 }
 
+/// The demangling of `name` (Itanium `_Z` or MSVC `?`), or an empty string when `name` is not a
+/// mangled name or the demangler does not read it. The raw name is always printed too.
+std::string demangled_name(const std::string& name) {
+  if (is_msvc_name(name)) {
+    const auto demangled = demangle_msvc(name);
+    return demangled.has_value() ? demangled.value() : std::string();
+  }
+  if (!is_itanium_name(name)) {
+    return {};
+  }
+  const auto demangled = demangle_itanium(name);
+  return demangled.has_value() ? demangled.value() : std::string();
+}
+
 void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("File:      %s\n", image.path.c_str());
   std::printf("Size:      %" PRIu64 " bytes\n", image.file_size);
@@ -257,6 +278,9 @@ void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
                 hex(symbol.address).c_str());
     if (!symbol.module.empty()) {
       std::printf(" (%s)", symbol.module.c_str());
+    }
+    if (const std::string demangled = demangled_name(symbol.name); !demangled.empty()) {
+      std::printf("  [%s]", demangled.c_str());
     }
     std::printf("\n");
   }
@@ -347,7 +371,9 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
     }
     out += written == 0 ? "\n" : ",\n";
     out += "    {\"kind\": " + quote(symbol.imported ? "import" : "export") +
-           ", \"name\": " + quote(symbol.name) + ", \"module\": " + quote(symbol.module) +
+           ", \"name\": " + quote(symbol.name) +
+           ", \"demangled\": " + quote(demangled_name(symbol.name)) +
+           ", \"module\": " + quote(symbol.module) +
            ", \"address\": " + quote(hex(symbol.address)) +
            ", \"size\": " + std::to_string(symbol.size) +
            ", \"binding\": " + quote(symbol_binding_name(symbol.binding)) + "}";
@@ -745,45 +771,51 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
 }  // namespace
 
 void print_usage(std::FILE* out) {
-  std::fprintf(out,
-               "donkey-cli %s - headless binary analysis\n"
-               "\n"
-               "Usage:\n"
-               "  donkey-cli --version\n"
-               "  donkey-cli --help\n"
-               "  donkey-cli info <binary> [--json] [--max-symbols N]\n"
-               "  donkey-cli disasm <binary> [--json] [--address A] [--count N]"
-               " [--section NAME]\n"
-               "  donkey-cli strings <binary> [--json] [--min-length N]"
-               " [--max-strings N]\n"
-               "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
-               "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
-               "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
-               "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
-               "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
-               "  donkey-cli xrefs <binary> [--json] [--address A]\n"
-               "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
-               "  donkey-cli project save <database> <binary> [--json]\n"
-               "  donkey-cli project info <database> [--json]\n"
-               "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
-               "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
-               "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
-               "  donkey-cli project annotations <database> <image-id> [--json]\n"
-               "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
-               "  donkey-cli project restore <database> <backup> [--json]\n"
-               "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--run]"
-               " [--mock] [--json]\n"
-               "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
-               "<hex>] --output <out> [--force] [--json]\n"
-               "  donkey-cli plugin info <plugin-lib> [--json]\n"
-               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
-               "<mask|name>] [--json]\n"
-               "\n"
-               "Every command except `debug launch` only reads files and never executes them.\n"
-               "`debug launch` runs the program under the native debugger (it stops at the\n"
-               "entry point; --run continues through breakpoints and terminates the target\n"
-               "when done).\n",
-               std::string(version()).c_str());
+  std::fprintf(
+      out,
+      "donkey-cli %s - headless binary analysis\n"
+      "\n"
+      "Usage:\n"
+      "  donkey-cli --version\n"
+      "  donkey-cli --help\n"
+      "  donkey-cli info <binary> [--json] [--max-symbols N]\n"
+      "  donkey-cli disasm <binary> [--json] [--address A] [--count N]"
+      " [--section NAME]\n"
+      "  donkey-cli strings <binary> [--json] [--min-length N]"
+      " [--max-strings N]\n"
+      "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
+      "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
+      "  donkey-cli core <file> [--json]\n"
+      "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
+      "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
+      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
+      "  donkey-cli xrefs <binary> [--json] [--address A]\n"
+      "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
+      "  donkey-cli project save <database> <binary> [--json]\n"
+      "  donkey-cli project info <database> [--json]\n"
+      "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
+      "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
+      "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
+      "  donkey-cli project annotations <database> <image-id> [--json]\n"
+      "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
+      "  donkey-cli project restore <database> <backup> [--json]\n"
+      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
+      "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
+      " [--mock] [--json]\n"
+      "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
+      "<hex>] --output <out> [--force] [--json]\n"
+      "  donkey-cli plugin info <plugin-lib> [--json]\n"
+      "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
+      "<mask|name>] [--json]\n"
+      "  donkey-cli serve [--project <db>] [--allow-write]\n"
+      "                                   JSON-RPC 2.0 on stdin/stdout (see docs/RPC.md)\n"
+      "  donkey-cli batch <script.json>   run a JSON array of RPC requests, print the responses\n"
+      "\n"
+      "Every command except `debug launch` only reads files and never executes them.\n"
+      "`debug launch` runs the program under the native debugger (it stops at the\n"
+      "entry point; --run continues through breakpoints and terminates the target\n"
+      "when done).\n",
+      std::string(version()).c_str());
 }
 
 int command_info(const std::vector<std::string_view>& arguments) {
@@ -1021,6 +1053,77 @@ int command_callgraph(const std::vector<std::string_view>& arguments) {
   return command_analysis(request, "callgraph");
 }
 
+int command_core(const std::vector<std::string_view>& arguments) {
+  std::string path;
+  bool json = false;
+  LoadOptions load_options;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
+    if (argument == "--json") {
+      json = true;
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for core");
+    } else if (path.empty()) {
+      path = std::string(argument);
+    } else {
+      return usage_error("core accepts exactly one file");
+    }
+  }
+  if (path.empty()) {
+    return usage_error("core needs a file path");
+  }
+  LoadedBinary loaded;
+  if (!load(path, loaded, load_options)) {
+    return kExitFailure;
+  }
+  auto result = read_elf_core(loaded.image, loaded.data);
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const CoreInfo& info = result.value();
+  if (json) {
+    std::string out = "{\n  \"process\": " + quote(info.process_name) + ",\n";
+    out += "  \"partial\": " + std::string(info.partial ? "true" : "false") + ",\n";
+    out += "  \"threads\": [";
+    for (std::size_t i = 0; i < info.threads.size(); ++i) {
+      const CoreThread& thread = info.threads[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"pid\": " + std::to_string(thread.pid) +
+             ", \"signal\": " + std::to_string(thread.signal) +
+             ", \"pc\": " + quote(hex(thread.pc)) + ", \"sp\": " + quote(hex(thread.sp)) + "}";
+    }
+    out += "\n  ],\n  \"mappings\": [";
+    for (std::size_t i = 0; i < info.mappings.size(); ++i) {
+      const CoreMapping& mapping = info.mappings[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"start\": " + quote(hex(mapping.start)) +
+             ", \"end\": " + quote(hex(mapping.end)) +
+             ", \"file_offset\": " + quote(hex(mapping.file_offset)) +
+             ", \"path\": " + quote(mapping.path) + "}";
+    }
+    out += "\n  ]\n}\n";
+    std::fputs(out.c_str(), stdout);
+    return kExitOk;
+  }
+  std::printf("core of %s: %zu thread%s, %zu mapping%s%s\n", info.process_name.c_str(),
+              info.threads.size(), info.threads.size() == 1 ? "" : "s", info.mappings.size(),
+              info.mappings.size() == 1 ? "" : "s", info.partial ? " (partial)" : "");
+  for (const CoreThread& thread : info.threads) {
+    std::printf("thread %u  signal %d  pc %s  sp %s\n", static_cast<unsigned>(thread.pid),
+                static_cast<int>(thread.signal), hex(thread.pc).c_str(), hex(thread.sp).c_str());
+  }
+  for (const CoreMapping& mapping : info.mappings) {
+    std::printf("%s-%s  offset %s  %s\n", hex(mapping.start).c_str(), hex(mapping.end).c_str(),
+                hex(mapping.file_offset).c_str(), mapping.path.c_str());
+  }
+  return kExitOk;
+}
+
 int command_debuginfo(const std::vector<std::string_view>& arguments) {
   std::string path;
   bool json = false;
@@ -1058,10 +1161,26 @@ int command_debuginfo(const std::vector<std::string_view>& arguments) {
     return kExitFailure;
   }
   auto result = read_debug_info(loaded.image, loaded.data);
+  // A stripped binary keeps its debug information in a separate file, found by its build-id or
+  // its debuglink (G07). That file is read in place of the binary's own sections.
+  std::optional<LoadedBinary> separate;
+  std::string separate_path;
+  if (!result && result.diagnostic().code == "dwarf.not_present") {
+    if (auto found = find_separate_debug_file(loaded.image, loaded.data, path)) {
+      if (auto opened = donkey::load_binary(found.value())) {
+        separate_path = found.value();
+        separate = std::move(opened.value());
+        result = read_debug_info(separate->image, separate->data);
+      }
+    }
+  }
   if (!result) {
     return fail(result.diagnostic());
   }
   const DebugInfo& info = result.value();
+  if (!separate_path.empty() && !json) {
+    std::printf("separate debug file: %s\n", separate_path.c_str());
+  }
   if (!json) {
     std::printf("DWARF %u-%u, %zu compile units, %zu functions, %zu variables, %zu types%s\n",
                 static_cast<unsigned>(info.min_version), static_cast<unsigned>(info.max_version),
@@ -1466,6 +1585,22 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     }
   }
 
+  // The DWARF of the binary, when it has any, names the parameters and the frame slots of
+  // each function (G04-T4). Naming is display-only and changes no statement.
+  std::optional<DebugInfo> debug;
+  if (auto read = read_debug_info(loaded.image, loaded.data); read.has_value()) {
+    debug = std::move(read.value());
+  }
+  auto lift_named = [&](const Function& function) {
+    auto lifted = lift_function(loaded.image, analysis.value(), function);
+    if (lifted && debug) {
+      if (const DebugFunction* named = debug->function_at(function.address)) {
+        (void)apply_debug_parameter_names(lifted.value(), *named, *debug);
+        (void)apply_debug_stack_names(lifted.value(), *named, *debug);
+      }
+    }
+    return lifted;
+  };
   if (request.json) {
     std::string out;
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
@@ -1477,7 +1612,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       if (written >= request.max_items) {
         break;
       }
-      auto lifted = lift_function(loaded.image, analysis.value(), *function);
+      auto lifted = lift_named(*function);
       out += written == 0 ? "\n" : ",\n";
       if (!lifted) {
         out += "    {\"address\": " + quote(hex(function->address)) +
@@ -1525,7 +1660,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       std::printf("\n");
     }
     first = false;
-    auto lifted = lift_function(loaded.image, analysis.value(), *function);
+    auto lifted = lift_named(*function);
     if (!lifted) {
       std::printf("// %s: unsupported (%s)\n", display_name(function->name).c_str(),
                   lifted.diagnostic().code.c_str());
@@ -1542,9 +1677,276 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+namespace {
+
+/// `project type add|list|apply`: the C types a project holds, and which address each
+/// applies to (G05-T4). The declarations are read from a C header of the supported subset.
+int command_project_type(const std::vector<std::string_view>& positional, bool json) {
+  if (positional.empty()) {
+    return usage_error("project type needs a subcommand: add, list or apply");
+  }
+  const std::string_view action = positional[0];
+  const std::vector<std::string_view> rest(positional.begin() + 1, positional.end());
+
+  if (action == "add") {
+    if (rest.size() != 2) {
+      return usage_error("project type add needs a database and a C declarations file");
+    }
+    const std::string database(rest[0]);
+    const std::string path(rest[1]);
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+      return usage_error("cannot open the declarations file");
+    }
+    // Read at most one byte past the limit, so an oversized file is reported as such.
+    std::string text;
+    char buffer[4096];
+    while (file && text.size() <= donkey::kMaxCDeclarationBytes) {
+      file.read(buffer, sizeof(buffer));
+      text.append(buffer, static_cast<std::size_t>(file.gcount()));
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto known = project.value().types();
+    if (!known) {
+      return fail(known.diagnostic());
+    }
+    auto declared = donkey::parse_c_declarations(text, known.value());
+    if (!declared) {
+      return fail(declared.diagnostic());
+    }
+    donkey::TypeTable table = known.value();
+    for (const donkey::TypeDefinition& definition : declared.value()) {
+      table.put(definition);
+    }
+    auto saved = project.value().replace_types(table);
+    if (!saved) {
+      return fail(saved.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"declarations\": " + quote(path) + ",\n";
+      out += "  \"added\": " + std::to_string(declared.value().size()) + "\n}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Added %zu types from %s\n", declared.value().size(), path.c_str());
+    }
+    return kExitOk;
+  }
+
+  if (action == "list") {
+    if (rest.size() != 1) {
+      return usage_error("project type list needs a database");
+    }
+    const std::string database(rest[0]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    const std::vector<donkey::TypeDefinition> types = table.value().list();
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"types\": [";
+      for (std::size_t i = 0; i < types.size(); ++i) {
+        const donkey::TypeDefinition& type = types[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"id\": " + std::to_string(type.id.value()) +
+               ", \"kind\": " + quote(donkey::type_kind_name(type.kind)) +
+               ", \"name\": " + quote(type.name) + ", \"size\": " + std::to_string(type.size) +
+               ", \"provenance\": " + quote(donkey::type_provenance_name(type.provenance)) + "}";
+      }
+      out += types.empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("%zu types\n", types.size());
+      for (const donkey::TypeDefinition& type : types) {
+        std::printf("  #%-5llu %-9s %-20s %llu bytes\n",
+                    static_cast<unsigned long long>(type.id.value()),
+                    donkey::type_kind_name(type.kind), type.name.c_str(),
+                    static_cast<unsigned long long>(type.size));
+      }
+    }
+    return kExitOk;
+  }
+
+  if (action == "apply") {
+    if (rest.size() != 4) {
+      return usage_error(
+          "project type apply needs a database, an image id, an address and a type name");
+    }
+    const std::string database(rest[0]);
+    std::uint64_t image_id = 0;
+    if (!parse_u64(rest[1], image_id) || image_id == 0 ||
+        image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t address = 0;
+    if (!parse_u64(rest[2], address)) {
+      return usage_error("invalid address");
+    }
+    const std::string name(rest[3]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    // The first type with that name. A function type applies as a prototype; any other
+    // type applies to a data slot.
+    const std::vector<donkey::TypeDefinition> types = table.value().list();
+    const donkey::TypeDefinition* chosen = nullptr;
+    for (const donkey::TypeDefinition& type : types) {
+      if (type.name == name) {
+        chosen = &type;
+        break;
+      }
+    }
+    if (chosen == nullptr) {
+      return usage_error("no type with that name in the project");
+    }
+    const donkey::TypeApplicationKind kind = chosen->kind == donkey::TypeKind::Function
+                                                 ? donkey::TypeApplicationKind::FunctionPrototype
+                                                 : donkey::TypeApplicationKind::DataSlot;
+    auto applied = project.value().set_type_application(static_cast<std::int64_t>(image_id), kind,
+                                                        address, chosen->id);
+    if (!applied) {
+      return fail(applied.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+      out += "  \"address\": " + quote(hex(address)) + ",\n";
+      out += "  \"type\": " + quote(name) + ",\n";
+      out += "  \"applied_as\": " +
+             quote(kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype" : "data") +
+             "\n}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Applied %s to %s in image %llu\n", name.c_str(), hex(address).c_str(),
+                  static_cast<unsigned long long>(image_id));
+    }
+    return kExitOk;
+  }
+
+  return usage_error("project type needs a subcommand: add, list or apply");
+}
+
+}  // namespace
+
+namespace {
+
+/// A member mode in the octal form that `ar tv` and `ls` use, such as "644".
+std::string octal_mode(std::uint32_t mode) {
+  char buffer[16];
+  std::snprintf(buffer, sizeof(buffer), "%o", static_cast<unsigned>(mode));
+  return buffer;
+}
+
+}  // namespace
+
+int command_archive(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty()) {
+    return usage_error("archive needs a subcommand: list");
+  }
+  if (arguments[0] != "list") {
+    return usage_error("unknown archive subcommand (expected list)");
+  }
+  bool json = false;
+  std::vector<std::string_view> positional;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    if (arguments[i] == "--json") {
+      json = true;
+    } else if (!arguments[i].empty() && arguments[i].front() == '-') {
+      return usage_error("unknown option for archive list");
+    } else {
+      positional.push_back(arguments[i]);
+    }
+  }
+  if (positional.size() != 1) {
+    return usage_error("archive list needs one archive file");
+  }
+  const std::string path(positional[0]);
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return usage_error("cannot open the archive file");
+  }
+  // Archives are read whole here; the limit keeps a huge file from exhausting memory.
+  constexpr std::uintmax_t kMaxArchiveFileBytes = std::uintmax_t{1} << 30;
+  std::vector<std::byte> bytes;
+  std::vector<char> buffer(1 << 20);
+  while (file) {
+    file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = static_cast<std::size_t>(file.gcount());
+    bytes.insert(bytes.end(), reinterpret_cast<const std::byte*>(buffer.data()),
+                 reinterpret_cast<const std::byte*>(buffer.data()) + count);
+    if (bytes.size() > kMaxArchiveFileBytes) {
+      std::fprintf(stderr, "error [archive.too_large]: the file is larger than 1 GiB\n");
+      return kExitFailure;
+    }
+  }
+  auto index = donkey::read_archive(bytes);
+  if (!index) {
+    return fail(index.diagnostic());
+  }
+  const std::vector<donkey::ArchiveMember>& members = index.value().members;
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"file\": " + quote(path) + ",\n";
+    out += "  \"partial\": " + std::string(index.value().partial ? "true" : "false") + ",\n";
+    out += "  \"note\": " + quote(index.value().note) + ",\n";
+    out += "  \"members\": [";
+    for (std::size_t i = 0; i < members.size(); ++i) {
+      const donkey::ArchiveMember& member = members[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"name\": " + quote(member.name) +
+             ", \"kind\": " + quote(donkey::archive_member_kind_name(member.kind)) +
+             ", \"offset\": " + quote(hex(member.offset)) +
+             ", \"size\": " + std::to_string(member.size) +
+             ", \"modified\": " + std::to_string(member.modified) +
+             ", \"mode\": " + quote(octal_mode(member.mode)) + "}";
+    }
+    out += members.empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu members%s\n", members.size(),
+                index.value().partial ? (" (partial: " + index.value().note + ")").c_str() : "");
+    for (const donkey::ArchiveMember& member : members) {
+      std::printf("  %-18s %10llu  %-12s %s\n", hex(member.offset).c_str(),
+                  static_cast<unsigned long long>(member.size),
+                  donkey::archive_member_kind_name(member.kind), member.name.c_str());
+    }
+  }
+  return kExitOk;
+}
+
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
-    return usage_error("project needs a subcommand: save or info");
+    return usage_error("project needs a subcommand: save, info or type");
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
@@ -1570,6 +1972,10 @@ int command_project(const std::vector<std::string_view>& arguments) {
     } else {
       positional.push_back(argument);
     }
+  }
+
+  if (subcommand == "type") {
+    return command_project_type(positional, json);
   }
 
   if (subcommand == "save") {
@@ -1881,7 +2287,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
 
   return usage_error(
       "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
-      "backup or restore)");
+      "backup, restore or type)");
 }
 
 namespace {
@@ -1936,6 +2342,7 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::string binary_path;
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
+  std::vector<std::string> watch_specs;
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -1945,12 +2352,18 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       mock = true;
     } else if (arg == "--run") {
       run = true;
-    } else if (arg == "--arg" || arg == "--break") {
+    } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
-        return usage_error(arg == "--arg" ? "--arg needs a value" : "--break needs a value");
+        return usage_error(arg == "--arg"     ? "--arg needs a value"
+                           : arg == "--watch" ? "--watch needs a value"
+                                              : "--break needs a value");
       }
-      (arg == "--arg" ? args : break_specs).emplace_back(val);
+      if (arg == "--watch") {
+        watch_specs.emplace_back(val);
+      } else {
+        (arg == "--arg" ? args : break_specs).emplace_back(val);
+      }
     } else if (!arg.empty() && arg.front() == '-') {
       return usage_error("unknown option for debug launch");
     } else if (binary_path.empty()) {
@@ -2022,6 +2435,46 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     if (!bp) {
       (void)adapter->terminate();
       return fail(bp.diagnostic());
+    }
+  }
+  // A watch is TARGET[:LENGTH][:rw]: the target's address, its size in bytes (default 4), and the
+  // access (default write; rw traps on reads and writes too). The debug registers take it only
+  // while the target is stopped, which it is here.
+  for (const std::string& spec : watch_specs) {
+    const auto first = spec.find(':');
+    const std::string target = spec.substr(0, first);
+    std::uint64_t length = 4;
+    auto kind = debug::WatchKind::Write;
+    if (first != std::string::npos) {
+      const std::string rest = spec.substr(first + 1);
+      const auto second = rest.find(':');
+      std::uint64_t parsed = 0;
+      if (!parse_u64(rest.substr(0, second), parsed) ||
+          (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+        (void)adapter->terminate();
+        return usage_error("--watch length must be 1, 2, 4 or 8 bytes");
+      }
+      length = parsed;
+      if (second != std::string::npos) {
+        if (rest.substr(second + 1) != "rw") {
+          (void)adapter->terminate();
+          return usage_error("--watch access must be rw (the default is write)");
+        }
+        kind = debug::WatchKind::ReadWrite;
+      }
+    }
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, target, address)) {
+      (void)adapter->terminate();
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_watch",
+                             "no symbol or address '" + target + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto watch = adapter->set_watchpoint(translator.static_to_runtime(address),
+                                         static_cast<std::uint8_t>(length), kind);
+    if (!watch) {
+      (void)adapter->terminate();
+      return fail(watch.diagnostic());
     }
   }
 

@@ -41,6 +41,13 @@ DEBUGGEE_EXPORT DEBUGGEE_NOINLINE void donkey_debuggee_tick(void) {
 
 typedef int (*donkey_answer_fn)(int);
 
+/* A struct that the program defines and uses, so every compiler emits its DWARF type. */
+struct donkey_pair {
+  int first;
+  long second;
+};
+struct donkey_pair donkey_pair_value = {1, 2};
+
 /* Runtime address of donkey_module_answer once the module is loaded. */
 DEBUGGEE_EXPORT volatile uint64_t donkey_debuggee_module_function = 0;
 

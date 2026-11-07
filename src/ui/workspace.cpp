@@ -108,6 +108,16 @@ void Workspace::draw(bool& quit) {
     } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false) &&
                state_.selected_address != 0 && session_.document()) {
       open_annotation_editor(AnnotationKind::Comment, state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      session_.set_annotation(AnnotationKind::CodeStart, state_.selected_address, "code");
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_D, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      // One byte of data; a longer type needs the data-type editor (G12-T2).
+      session_.set_annotation(AnnotationKind::DataRange, state_.selected_address, "1:1");
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_U, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      session_.undefine(state_.selected_address);
     }
   }
 
@@ -618,24 +628,32 @@ void Workspace::draw_panels() {
   state_.annotations = annotations.get();
 
   if (document && document.get() != last_document_) {
-    last_document_ = document.get();
     const BinaryImage& image = document->loaded.image;
-    std::uint64_t initial = 0;
-    if (image.has_entry_point() && image.va_to_file_offset(image.entry_point)) {
-      initial = image.entry_point;
-    } else {
-      for (const Section& section : image.sections) {
-        if (section.address != 0 && section.has_file_data &&
-            image.va_to_file_offset(section.address)) {
-          initial = section.address;
-          break;
+    // A re-analysis after an edit publishes a new document of the same file. Keep the
+    // selection then, so the next key press still acts on the address the user chose.
+    const bool same_file = !last_image_path_.empty() && last_image_path_ == image.path;
+    last_document_ = document.get();
+    last_image_path_ = image.path;
+    const bool keep_selection =
+        same_file && image.section_for_va(state_.selected_address) != nullptr;
+    if (!keep_selection) {
+      std::uint64_t initial = 0;
+      if (image.has_entry_point() && image.va_to_file_offset(image.entry_point)) {
+        initial = image.entry_point;
+      } else {
+        for (const Section& section : image.sections) {
+          if (section.address != 0 && section.has_file_data &&
+              image.va_to_file_offset(section.address)) {
+            initial = section.address;
+            break;
+          }
         }
       }
-    }
-    state_.selected_address = initial;
-    state_.selected_section.clear();
-    if (const Section* section = image.section_for_va(initial); section != nullptr) {
-      state_.selected_section = section->name;
+      state_.selected_address = initial;
+      state_.selected_section.clear();
+      if (const Section* section = image.section_for_va(initial); section != nullptr) {
+        state_.selected_section = section->name;
+      }
     }
   }
 

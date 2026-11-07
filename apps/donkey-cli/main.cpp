@@ -51,6 +51,9 @@ int main(int argc, char** argv) {
   if (command == "callgraph") {
     return donkey::cli::command_callgraph(rest);
   }
+  if (command == "core") {
+    return donkey::cli::command_core(rest);
+  }
   if (command == "debuginfo") {
     return donkey::cli::command_debuginfo(rest);
   }
@@ -69,6 +72,9 @@ int main(int argc, char** argv) {
   if (command == "project") {
     return donkey::cli::command_project(rest);
   }
+  if (command == "archive") {
+    return donkey::cli::command_archive(rest);
+  }
   if (command == "debug") {
     return donkey::cli::command_debug(rest);
   }
@@ -77,6 +83,12 @@ int main(int argc, char** argv) {
   }
   if (command == "plugin") {
     return donkey::cli::command_plugin(rest);
+  }
+  if (command == "serve") {
+    return donkey::cli::command_serve(rest);
+  }
+  if (command == "batch") {
+    return donkey::cli::command_batch(rest);
   }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),

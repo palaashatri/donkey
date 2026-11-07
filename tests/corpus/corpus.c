@@ -257,3 +257,90 @@ CORPUS long long c_many_args(long long a, long long b, long long c, long long d,
 CORPUS int c_narrow_args(signed char a, short b, unsigned char c, unsigned short d) {
   return a * 1000 + b + c + d;
 }
+
+/* ---- carry and borrow: 128-bit arithmetic from 64-bit halves (adc, sbb) ---- */
+CORPUS unsigned long long c_add128_hi(unsigned long long alo, unsigned long long ahi,
+                                      unsigned long long blo, unsigned long long bhi) {
+  unsigned __int128 a = ((unsigned __int128)ahi << 64) | alo;
+  unsigned __int128 b = ((unsigned __int128)bhi << 64) | blo;
+  return (unsigned long long)((a + b) >> 64);
+}
+CORPUS unsigned long long c_sub128_hi(unsigned long long alo, unsigned long long ahi,
+                                      unsigned long long blo, unsigned long long bhi) {
+  unsigned __int128 a = ((unsigned __int128)ahi << 64) | alo;
+  unsigned __int128 b = ((unsigned __int128)bhi << 64) | blo;
+  return (unsigned long long)((a - b) >> 64);
+}
+CORPUS int c_add_wraps(unsigned long long x, unsigned long long y) {
+  return x + y < x;
+}
+
+/* ---- double-width multiply and divide (mul, imul, div, idiv) ----
+ * Division by zero and INT_MIN / -1 trap on x86, so the signed forms return 0
+ * for them; the native code never traps. */
+CORPUS unsigned long long c_mulhi_u64(unsigned long long a, unsigned long long b) {
+  return (unsigned long long)(((unsigned __int128)a * b) >> 64);
+}
+CORPUS long long c_mulhi_s64(long long a, long long b) {
+  return (long long)(((__int128)a * b) >> 64);
+}
+CORPUS unsigned int c_udiv32(unsigned int x, unsigned int y) {
+  return y ? x / y : 0;
+}
+CORPUS unsigned int c_urem32(unsigned int x, unsigned int y) {
+  return y ? x % y : 0;
+}
+CORPUS int c_sdiv32(int x, int y) {
+  if (y == 0 || (y == -1 && x == (-2147483647 - 1))) {
+    return 0;
+  }
+  return x / y;
+}
+CORPUS int c_srem32(int x, int y) {
+  if (y == 0 || (y == -1 && x == (-2147483647 - 1))) {
+    return 0;
+  }
+  return x % y;
+}
+CORPUS unsigned long long c_udiv64(unsigned long long x, unsigned long long y) {
+  return y ? x / y : 0;
+}
+CORPUS unsigned long long c_urem64(unsigned long long x, unsigned long long y) {
+  return y ? x % y : 0;
+}
+CORPUS long long c_sdiv64(long long x, long long y) {
+  if (y == 0 || (y == -1 && x == (-9223372036854775807LL - 1))) {
+    return 0;
+  }
+  return x / y;
+}
+CORPUS long long c_srem64(long long x, long long y) {
+  if (y == 0 || (y == -1 && x == (-9223372036854775807LL - 1))) {
+    return 0;
+  }
+  return x % y;
+}
+CORPUS unsigned long long c_div10(unsigned long long x) {
+  return x / 10;
+}
+
+/* ---- bit operations: population count, bit scans, byte swap, bit test ----
+ * The scans are guarded because the result of bsf and bsr is undefined for 0. */
+CORPUS unsigned int c_popcount64(unsigned long long x) {
+  return (unsigned int)__builtin_popcountll(x);
+}
+CORPUS unsigned int c_ctz64_guarded(unsigned long long x) {
+  return x ? (unsigned int)__builtin_ctzll(x) : 64U;
+}
+CORPUS unsigned int c_clz64_guarded(unsigned long long x) {
+  return x ? (unsigned int)__builtin_clzll(x) : 64U;
+}
+CORPUS unsigned int c_bswap32(unsigned int x) {
+  return __builtin_bswap32(x);
+}
+CORPUS unsigned long long c_bswap64(unsigned long long x) {
+  return __builtin_bswap64(x);
+}
+CORPUS int c_bit_test(unsigned long long x, unsigned int n) {
+  return (int)((x >> (n & 63U)) & 1U);
+}

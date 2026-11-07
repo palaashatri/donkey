@@ -44,8 +44,14 @@ TEST(Decode, RejectsUnsupportedArchitectures) {
   ASSERT_FALSE(raw.has_value());
   EXPECT_EQ(raw.diagnostic().code, "decode.unsupported_architecture");
 
-  auto riscv = donkey::Decoder::create(donkey::Architecture::RiscV64, donkey::Endian::Little);
-  ASSERT_FALSE(riscv.has_value());
+  // A32 and RV64GC little-endian are decoded (G13); big-endian of either is refused by name.
+  EXPECT_TRUE(
+      donkey::Decoder::create(donkey::Architecture::Arm, donkey::Endian::Little).has_value());
+  EXPECT_TRUE(
+      donkey::Decoder::create(donkey::Architecture::RiscV64, donkey::Endian::Little).has_value());
+  auto riscv_big = donkey::Decoder::create(donkey::Architecture::RiscV64, donkey::Endian::Big);
+  ASSERT_FALSE(riscv_big.has_value());
+  EXPECT_EQ(riscv_big.diagnostic().code, "decode.big_endian_riscv");
 }
 
 TEST(Decode, X86_64KnownPrologueAndCallTarget) {

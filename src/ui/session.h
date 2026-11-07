@@ -40,7 +40,19 @@ struct Annotations {
   /// User function-boundary edits: "define" adds a start, "remove" drops a
   /// discovered one. Changing them re-runs analysis.
   std::unordered_map<std::uint64_t, std::string> functions;
+  /// User code starts ("code") and data ranges ("<element size>:<count>", see
+  /// parse_data_range_text). Changing either re-runs analysis (G12-T1).
+  std::unordered_map<std::uint64_t, std::string> code_starts;
+  std::unordered_map<std::uint64_t, std::string> data_ranges;
 
+  [[nodiscard]] const std::string* code_start_at(std::uint64_t address) const {
+    const auto it = code_starts.find(address);
+    return it == code_starts.end() ? nullptr : &it->second;
+  }
+  [[nodiscard]] const std::string* data_range_at(std::uint64_t address) const {
+    const auto it = data_ranges.find(address);
+    return it == data_ranges.end() ? nullptr : &it->second;
+  }
   [[nodiscard]] const std::string* rename_at(std::uint64_t address) const {
     const auto it = renames.find(address);
     return it == renames.end() ? nullptr : &it->second;
@@ -144,6 +156,10 @@ class Session {
   /// Define a function starting at `address`, remove the discovered one, or
   /// (with an empty action) drop the edit. Re-runs analysis on the worker.
   void set_function_edit(std::uint64_t address, const std::string& action);
+  /// The `U` key (G12-T1): clears a user data range or code start at `address` if there is one;
+  /// otherwise declares the bytes of the instruction there undefined, so analysis will not decode
+  /// them. One call is one undo step.
+  void undefine(std::uint64_t address);
 
   /// True when a function-boundary edit is waiting for the worker to be free.
   [[nodiscard]] bool reanalysis_pending() const;

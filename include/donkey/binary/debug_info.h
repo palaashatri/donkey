@@ -55,6 +55,7 @@ struct DebugType {
   std::uint64_t byte_size = 0;
   std::uint64_t target = 0;          ///< referenced type for pointers, typedefs, arrays...
   std::uint64_t element_count = 0;   ///< arrays: elements of the first dimension (0 unknown)
+  std::uint8_t encoding = 0;         ///< base types: DW_AT_encoding (0 when absent)
   std::vector<DebugMember> members;  ///< structs, unions, classes
   DebugProvenance provenance;
 };
@@ -64,6 +65,17 @@ struct DebugParameter {
   std::uint64_t type = 0;
 };
 
+/// A parameter or local of a function that lives in its frame. `cfa_offset` is the offset
+/// from the canonical frame address (the stack pointer before the call pushed the return
+/// address, plus 8). A standard x86-64 frame pointer prologue sets rbp to CFA - 16.
+struct DebugStackSlot {
+  std::string name;
+  std::uint64_t type = 0;
+  std::int64_t cfa_offset = 0;
+  bool is_parameter = false;
+  std::uint32_t line = 0;
+};
+
 struct DebugFunction {
   std::uint64_t address = 0;
   std::uint64_t size = 0;  ///< 0 when only the start is known
@@ -71,6 +83,10 @@ struct DebugFunction {
   std::string linkage_name;
   std::uint64_t return_type = 0;  ///< 0 = void or unknown
   std::vector<DebugParameter> parameters;
+  /// Parameters and locals kept in the frame, when the frame base is the CFA or rbp (rbp is
+  /// taken as CFA - 16, the standard prologue). Only direct children of the subprogram are
+  /// listed; nested lexical blocks are not read yet.
+  std::vector<DebugStackSlot> stack_slots;
   bool variadic = false;
   bool external = false;
   std::string file;

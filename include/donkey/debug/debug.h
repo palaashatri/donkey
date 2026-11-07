@@ -35,6 +35,7 @@ enum class StopReason : std::uint8_t {
   Exception,
   UserPause,
   Exited,
+  Watchpoint,
 };
 
 const char* stop_reason_name(StopReason reason) noexcept;
@@ -77,6 +78,23 @@ struct Breakpoint {
   std::string condition;
 };
 
+/// The access a hardware watchpoint traps on. x86 debug registers have no read-only
+/// trap, so a read watch is a read-or-write watch.
+enum class WatchKind : std::uint8_t {
+  Write = 0,
+  ReadWrite = 1,
+};
+
+/// A hardware watchpoint: a trap when the target writes (or reads or writes) `length` bytes at
+/// `address`. The CPU's debug registers hold them, so only a few can be set at once.
+struct Watchpoint {
+  std::uint64_t id = 0;
+  std::uint64_t address = 0;
+  std::uint8_t length = 0;  ///< 1, 2, 4 or 8
+  WatchKind kind = WatchKind::Write;
+  std::uint64_t hit_count = 0;
+};
+
 struct StopInfo {
   StopReason reason = StopReason::None;
   std::uint64_t thread_id = 0;
@@ -101,6 +119,7 @@ struct DebugCapabilities {
   bool can_write_memory = true;
   bool can_software_breakpoints = true;
   bool can_hardware_breakpoints = false;
+  bool can_hardware_watchpoints = false;
 };
 
 /// Translates target runtime addresses into static binary image addresses
@@ -156,6 +175,11 @@ class DebugAdapter {
   [[nodiscard]] virtual Result<bool> step_out() = 0;
   [[nodiscard]] virtual Result<Breakpoint> set_breakpoint(std::uint64_t address) = 0;
   [[nodiscard]] virtual Result<bool> remove_breakpoint(std::uint64_t id_or_address) = 0;
+  /// Hardware watchpoints. The default refuses with `Unsupported`: a host or adapter
+  /// without them never pretends to set one. Watches change only while the target is stopped.
+  [[nodiscard]] virtual Result<Watchpoint> set_watchpoint(std::uint64_t address,
+                                                          std::uint8_t length, WatchKind kind);
+  [[nodiscard]] virtual Result<bool> remove_watchpoint(std::uint64_t id);
   [[nodiscard]] virtual Result<std::vector<std::byte>> read_memory(std::uint64_t address,
                                                                    std::size_t size) = 0;
   [[nodiscard]] virtual Result<std::size_t> write_memory(std::uint64_t address,

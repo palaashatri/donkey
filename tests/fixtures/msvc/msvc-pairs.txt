@@ -1,0 +1,95 @@
+??0Box@ns@@QEAA@XZ	public: __cdecl ns::Box::Box(void)
+??0Ops@ops@@QEAA@XZ	public: __cdecl ops::Ops::Ops(void)
+??1Box@ns@@QEAA@XZ	public: __cdecl ns::Box::~Box(void)
+??1Ops@ops@@QEAA@XZ	public: __cdecl ops::Ops::~Ops(void)
+??2Ops@ops@@SAPEAX_K@Z	public: static void * __cdecl ops::Ops::operator new(unsigned __int64)
+??3Ops@ops@@SAXPEAX@Z	public: static void __cdecl ops::Ops::operator delete(void *)
+??4Box@ns@@QEAAAEAU01@AEBU01@@Z	public: struct ns::Box & __cdecl ns::Box::operator=(struct ns::Box const &)
+??5Ops@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator>>(struct ops::Ops const &) const
+??6Ops@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator<<(struct ops::Ops const &) const
+??7Ops@ops@@QEBA_NXZ	public: bool __cdecl ops::Ops::operator!(void) const
+??8Ops@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator==(struct ops::Ops const &) const
+??9Ops@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator!=(struct ops::Ops const &) const
+??AOps@ops@@QEBAHH@Z	public: int __cdecl ops::Ops::operator[](int) const
+??COps@ops@@QEBAPEAU01@XZ	public: struct ops::Ops * __cdecl ops::Ops::operator->(void) const
+??DOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator*(struct ops::Ops const &) const
+??EOps@ops@@QEAA?AU01@H@Z	public: struct ops::Ops __cdecl ops::Ops::operator++(int)
+??EOps@ops@@QEAAAEAU01@XZ	public: struct ops::Ops & __cdecl ops::Ops::operator++(void)
+??FOps@ops@@QEAA?AU01@H@Z	public: struct ops::Ops __cdecl ops::Ops::operator--(int)
+??FOps@ops@@QEAAAEAU01@XZ	public: struct ops::Ops & __cdecl ops::Ops::operator--(void)
+??GOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator-(struct ops::Ops const &) const
+??GOps@ops@@QEBA?AU01@XZ	public: struct ops::Ops __cdecl ops::Ops::operator-(void) const
+??HBox@ns@@QEBA?AU01@H@Z	public: struct ns::Box __cdecl ns::Box::operator+(int) const
+??HOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator+(struct ops::Ops const &) const
+??HOps@ops@@QEBA?AU01@XZ	public: struct ops::Ops __cdecl ops::Ops::operator+(void) const
+??IOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator&(struct ops::Ops const &) const
+??JOps@ops@@QEBAPEQ01@HPEQ01@H@Z	public: int ops::Ops::* __cdecl ops::Ops::operator->*(int ops::Ops::*) const
+??KOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator/(struct ops::Ops const &) const
+??LOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator%(struct ops::Ops const &) const
+??MOps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator<(struct ops::Ops const &) const
+??NOps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator<=(struct ops::Ops const &) const
+??OOps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator>(struct ops::Ops const &) const
+??POps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator>=(struct ops::Ops const &) const
+??QOps@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator,(struct ops::Ops const &)
+??ROps@ops@@QEBAHHH@Z	public: int __cdecl ops::Ops::operator()(int, int) const
+??SOps@ops@@QEBA?AU01@XZ	public: struct ops::Ops __cdecl ops::Ops::operator~(void) const
+??TOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator^(struct ops::Ops const &) const
+??UOps@ops@@QEBA?AU01@AEBU01@@Z	public: struct ops::Ops __cdecl ops::Ops::operator|(struct ops::Ops const &) const
+??VOps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator&&(struct ops::Ops const &) const
+??WOps@ops@@QEBA_NAEBU01@@Z	public: bool __cdecl ops::Ops::operator||(struct ops::Ops const &) const
+??XOps@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator*=(struct ops::Ops const &)
+??YOps@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator+=(struct ops::Ops const &)
+??ZOps@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator-=(struct ops::Ops const &)
+??_0Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator/=(struct ops::Ops const &)
+??_1Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator%=(struct ops::Ops const &)
+??_2Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator>>=(struct ops::Ops const &)
+??_3Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator<<=(struct ops::Ops const &)
+??_4Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator&=(struct ops::Ops const &)
+??_5Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator|=(struct ops::Ops const &)
+??_6Ops@ops@@QEAAAEAU01@AEBU01@@Z	public: struct ops::Ops & __cdecl ops::Ops::operator^=(struct ops::Ops const &)
+??_7Box@ns@@6B@	const ns::Box::`vftable'
+??_7Ops@ops@@6B@	const ops::Ops::`vftable'
+??_C@_01FJMABOPO@x?$AA@	"x"
+??_C@_04CIMGMMMG@text?$AA@	"text"
+??_UOps@ops@@SAPEAX_K@Z	public: static void * __cdecl ops::Ops::operator new[](unsigned __int64)
+??_VOps@ops@@SAXPEAX@Z	public: static void __cdecl ops::Ops::operator delete[](void *)
+??__Eg_box@@YAXXZ	void __cdecl `dynamic initializer for 'g_box''(void)
+??__Fg_box@@YAXXZ	void __cdecl `dynamic atexit destructor for 'g_box''(void)
+?add_longs@@YAHJK_J_K@Z	int __cdecl add_longs(long, unsigned long, __int64, unsigned __int64)
+?array_param@@YAXQEAHQEAY02$$CBH@Z	void __cdecl array_param(int *const, int const (*const)[3])
+?check@@YA_N_N_WCEFG@Z	bool __cdecl check(bool, wchar_t, signed char, unsigned char, short, unsigned short)
+?count@Box@ns@@SAHXZ	public: static int __cdecl ns::Box::count(void)
+?cv_method@Ops@ops@@QEDAXXZ	public: void __cdecl ops::Ops::cv_method(void) const volatile
+?double_pointer@@YAPEAPEAHPEAPEAH@Z	int ** __cdecl double_pointer(int **)
+?draw@Box@ns@@UEAAXPEAD@Z	public: virtual void __cdecl ns::Box::draw(char *)
+?first_char@@YAPEADPEADPEBD@Z	char * __cdecl first_char(char *, char const *)
+?free_fn@@YAXHPEADAEB_K@Z	void __cdecl free_fn(int, char *, unsigned __int64 const &)
+?g_box@@3UBox@ns@@A	struct ns::Box g_box
+?g_mode@@3W4Mode@ns@@A	enum ns::Mode g_mode
+?g_pointer@@3PEAHEA	int *g_pointer
+?g_text@@3PEBDEB	char const *g_text
+?g_value@@3HA	int g_value
+?get@Box@ns@@QEBAHH@Z	public: int __cdecl ns::Box::get(int) const
+?make_pair@@YA?AUPair@ns@@HH@Z	struct ns::Pair __cdecl make_pair(int, int)
+?name_of@@YAPEBDAEBUBox@ns@@W4Mode@2@@Z	char const * __cdecl name_of(struct ns::Box const &, enum ns::Mode)
+?ops_use@ops@@YAHPEAUOps@1@@Z	int __cdecl ops::ops_use(struct ops::Ops *)
+?plain@@YAXXZ	void __cdecl plain(void)
+?private_member@Box@ns@@AEAAXI@Z	private: void __cdecl ns::Box::private_member(unsigned int)
+?private_static@Ops@ops@@CAXXZ	private: static void __cdecl ops::Ops::private_static(void)
+?private_virtual@Ops@ops@@EEAAXXZ	private: virtual void __cdecl ops::Ops::private_virtual(void)
+?private_virtual_base@Ops@ops@@UEAAXXZ	public: virtual void __cdecl ops::Ops::private_virtual_base(void)
+?protected_member@Box@ns@@IEAAHJ@Z	protected: int __cdecl ns::Box::protected_member(long)
+?protected_static@Ops@ops@@SAXXZ	public: static void __cdecl ops::Ops::protected_static(void)
+?protected_static_method@Ops@ops@@KAXXZ	protected: static void __cdecl ops::Ops::protected_static_method(void)
+?protected_virtual@Ops@ops@@MEAAXXZ	protected: virtual void __cdecl ops::Ops::protected_virtual(void)
+?ptr_volatile@Box@ns@@QECAPECHPECH@Z	public: int volatile * __cdecl ns::Box::ptr_volatile(int volatile *) volatile
+?reset@Box@ns@@SAXN@Z	public: static void __cdecl ns::Box::reset(double)
+?scale@@YAMMN@Z	float __cdecl scale(float, double)
+?set@Box@ns@@QEAAXH@Z	public: void __cdecl ns::Box::set(int)
+?shared@Ops@ops@@2HA	public: static int ops::Ops::shared
+?take_pair@@YAXUPair@ns@@@Z	void __cdecl take_pair(struct ns::Pair)
+?take_rvalue@@YAX$$QEAH@Z	void __cdecl take_rvalue(int &&)
+?take_union@@YAXTVariant@ns@@@Z	void __cdecl take_union(union ns::Variant)
+?use_all@@YAXPEAUBox@ns@@N@Z	void __cdecl use_all(struct ns::Box *, double)
+?variadic@@YAXPEBDZZ	void __cdecl variadic(char const *, ...)
+?volatile_method@Ops@ops@@QECAXXZ	public: void __cdecl ops::Ops::volatile_method(void) volatile

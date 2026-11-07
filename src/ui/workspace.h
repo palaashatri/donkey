@@ -276,6 +276,9 @@ class Workspace {
 
   Session& session_;
   const Document* last_document_ = nullptr;
+  /// The file the last shown document was made from. A new document of the same file keeps the
+  /// selection; see draw_panels.
+  std::string last_image_path_;
   UiState state_;
   bool layout_initialized_ = false;
   bool show_overview_ = true;

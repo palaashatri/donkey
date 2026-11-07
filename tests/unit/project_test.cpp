@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -27,6 +29,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
 #include "test_io.h"
 
@@ -332,7 +335,13 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations", nullptr, nullptr, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=1", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=1",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     sqlite3_close(db);
   }
 
@@ -389,7 +398,13 @@ TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
               SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db, "DROP TABLE annotations_v3_temp", nullptr, nullptr, nullptr),
               SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db, "PRAGMA user_version=2", nullptr, nullptr, nullptr), SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=2",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     sqlite3_close(db);
   }
 
@@ -988,19 +1003,22 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(db,
-                           "DROP TABLE annotations;"
-                           "CREATE TABLE annotations ("
-                           "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
-                           "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
-                           "  address INTEGER NOT NULL, text TEXT NOT NULL,"
-                           "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
-                           "  PRIMARY KEY (image_id, kind, address));"
-                           "INSERT INTO annotations(image_id, kind, address, text) "
-                           "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
-                           "PRAGMA user_version=3;",
-                           nullptr, nullptr, nullptr),
-              SQLITE_OK);
+    ASSERT_EQ(
+        sqlite3_exec(
+            db,
+            "DROP TABLE annotations;"
+            "CREATE TABLE annotations ("
+            "  image_id INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,"
+            "  kind TEXT NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark')),"
+            "  address INTEGER NOT NULL, text TEXT NOT NULL,"
+            "  updated_at TEXT NOT NULL DEFAULT (datetime('now')),"
+            "  PRIMARY KEY (image_id, kind, address));"
+            "INSERT INTO annotations(image_id, kind, address, text) "
+            "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
+            "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=3;",
+            nullptr, nullptr, nullptr),
+        SQLITE_OK);
     // The old constraint really rejects the new kind.
     EXPECT_NE(sqlite3_exec(db,
                            "INSERT INTO annotations(image_id, kind, address, text) "
@@ -1012,7 +1030,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 4);
+    EXPECT_EQ(project.value().schema_version(), 6);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1040,4 +1058,563 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   EXPECT_TRUE(found);
 }
 
+// ---- Types (G05-T1) ---------------------------------------------------------
+
+namespace {
+
+donkey::TypeDefinition scalar(donkey::TypeId id, donkey::TypeKind kind, const char* name,
+                              std::uint64_t size, bool is_signed = false) {
+  donkey::TypeDefinition definition;
+  definition.id = id;
+  definition.kind = kind;
+  definition.name = name;
+  definition.size = size;
+  definition.is_signed = is_signed;
+  return definition;
+}
+
+donkey::TypeDefinition record(donkey::TypeId id, donkey::TypeKind kind, const char* name,
+                              std::uint64_t size, std::vector<donkey::TypeField> fields) {
+  donkey::TypeDefinition definition = scalar(id, kind, name, size);
+  definition.fields = std::move(fields);
+  return definition;
+}
+
+donkey::TypeField member(const char* name, std::uint64_t offset, donkey::TypeId type) {
+  donkey::TypeField field;
+  field.name = name;
+  field.offset = offset;
+  field.type = type;
+  return field;
+}
+
 }  // namespace
+
+TEST(Types, RoundTripThroughTheProject) {
+  TempPath path("types-round-trip");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  const donkey::TypeId int32(1);
+  const donkey::TypeId point(2);
+  const donkey::TypeId point_pointer(3);
+  const donkey::TypeId color(4);
+  donkey::TypeTable table;
+  table.put(scalar(int32, donkey::TypeKind::Integer, "int", 4, true));
+  table.put(record(point, donkey::TypeKind::Struct, "point", 8,
+                   {member("x", 0, int32), member("y", 4, int32)}));
+  donkey::TypeDefinition pointer = scalar(point_pointer, donkey::TypeKind::Pointer, "", 8);
+  pointer.target = point;
+  table.put(std::move(pointer));
+  donkey::TypeDefinition colour = scalar(color, donkey::TypeKind::Enum, "color", 4);
+  colour.enumerators = {donkey::TypeEnumerator{"RED", 0}, donkey::TypeEnumerator{"GREEN", 1}};
+  table.put(std::move(colour));
+  const donkey::TypeId function(5);
+  donkey::TypeDefinition signature = scalar(function, donkey::TypeKind::Function, "", 0);
+  signature.target = int32;
+  table.put(std::move(signature));
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value());
+    image_id = imported.value();
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+    ASSERT_TRUE(project.value()
+                    .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                          0x400100, function)
+                    .has_value());
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto stored = reopened.value().types();
+  ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+  ASSERT_EQ(stored.value().size(), 5U);
+  const donkey::TypeDefinition* read_point = stored.value().find(point);
+  ASSERT_NE(read_point, nullptr);
+  EXPECT_EQ(read_point->name, "point");
+  ASSERT_EQ(read_point->fields.size(), 2U);
+  EXPECT_EQ(read_point->fields[1].name, "y");
+  EXPECT_EQ(read_point->fields[1].offset, 4U);
+  EXPECT_EQ(read_point->fields[1].type, int32);
+  const donkey::TypeDefinition* read_color = stored.value().find(color);
+  ASSERT_NE(read_color, nullptr);
+  ASSERT_EQ(read_color->enumerators.size(), 2U);
+  EXPECT_EQ(read_color->enumerators[1].name, "GREEN");
+  EXPECT_EQ(read_color->enumerators[1].value, 1);
+  EXPECT_EQ(stored.value().find(point_pointer)->target, point);
+  EXPECT_TRUE(stored.value().validate().has_value());
+
+  auto applications = reopened.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 1U);
+  EXPECT_EQ(applications.value()[0].address, 0x400100U);
+  EXPECT_EQ(applications.value()[0].type_id, function);
+  EXPECT_EQ(applications.value()[0].type_id, function);
+}
+
+TEST(Types, MigratesFromSchemaV4) {
+  TempPath path("types-migrate-v4");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    EXPECT_EQ(project.value().schema_version(), 6);
+  }
+  // A v4 project has no type tables; drop them and set the version back to 4.
+  {
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "DROP TABLE type_applications; DROP TABLE type_enumerators; "
+                           "DROP TABLE type_fields; DROP TABLE types; PRAGMA user_version=4;",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 6);
+  auto empty = reopened.value().types();
+  ASSERT_TRUE(empty.has_value());
+  EXPECT_EQ(empty.value().size(), 0U);
+  // The migrated project accepts type writes.
+  donkey::TypeTable table;
+  table.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "int", 4, true));
+  EXPECT_TRUE(reopened.value().replace_types(table).has_value());
+}
+
+TEST(Types, RejectsCyclesWithoutPointer) {
+  // A struct that holds itself by value has no size.
+  donkey::TypeTable direct;
+  direct.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "self", 8,
+                    {member("next", 0, donkey::TypeId(1))}));
+  auto refused = direct.validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "type.contains_itself");
+
+  // Two structs that hold each other by value.
+  donkey::TypeTable mutual;
+  mutual.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "a", 8,
+                    {member("b", 0, donkey::TypeId(2))}));
+  mutual.put(record(donkey::TypeId(2), donkey::TypeKind::Struct, "b", 8,
+                    {member("a", 0, donkey::TypeId(1))}));
+  EXPECT_EQ(mutual.validate().diagnostic().code, "type.contains_itself");
+
+  // The same shape through a pointer is a list, and is allowed.
+  donkey::TypeTable linked;
+  linked.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "node", 16,
+                    {member("value", 0, donkey::TypeId(2)), member("next", 8, donkey::TypeId(3))}));
+  linked.put(scalar(donkey::TypeId(2), donkey::TypeKind::Integer, "long", 8, true));
+  donkey::TypeDefinition next = scalar(donkey::TypeId(3), donkey::TypeKind::Pointer, "", 8);
+  next.target = donkey::TypeId(1);
+  linked.put(std::move(next));
+  EXPECT_TRUE(linked.validate().has_value());
+}
+
+TEST(Types, SizeAndAlignmentFollowTheAbi) {
+  const donkey::TypeId c_char(1);
+  const donkey::TypeId c_int(2);
+  donkey::TypeTable table;
+  table.put(scalar(c_char, donkey::TypeKind::Integer, "char", 1, true));
+  table.put(scalar(c_int, donkey::TypeKind::Integer, "int", 4, true));
+
+  // struct { char c; int i; }: the int sits at 4, so the struct is 8 bytes, aligned to 4.
+  table.put(record(donkey::TypeId(3), donkey::TypeKind::Struct, "pair", 8,
+                   {member("c", 0, c_char), member("i", 4, c_int)}));
+  EXPECT_EQ(table.size_of(donkey::TypeId(3)).value(), 8U);
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(3)).value(), 4U);
+
+  // An array of three of them: 24 bytes, still aligned to 4.
+  donkey::TypeDefinition array = scalar(donkey::TypeId(4), donkey::TypeKind::Array, "", 0);
+  array.target = donkey::TypeId(3);
+  array.count = 3;
+  table.put(std::move(array));
+  EXPECT_EQ(table.size_of(donkey::TypeId(4)).value(), 24U);
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(4)).value(), 4U);
+
+  // A union is as large as its largest member, and every member sits at 0.
+  donkey::TypeTable unions = table;
+  unions.put(record(donkey::TypeId(5), donkey::TypeKind::Union, "either", 4,
+                    {member("c", 0, c_char), member("i", 0, c_int)}));
+  EXPECT_EQ(unions.size_of(donkey::TypeId(5)).value(), 4U);
+
+  // A stored size that is not the padded end of the members is refused.
+  donkey::TypeTable wrong = table;
+  wrong.put(record(donkey::TypeId(6), donkey::TypeKind::Struct, "short", 5,
+                   {member("c", 0, c_char), member("i", 4, c_int)}));
+  EXPECT_EQ(wrong.validate().diagnostic().code, "type.size_mismatch");
+
+  // An int at offset 2 is misaligned.
+  donkey::TypeTable misaligned = table;
+  misaligned.put(record(donkey::TypeId(7), donkey::TypeKind::Struct, "gap", 8,
+                        {member("c", 0, c_char), member("i", 2, c_int)}));
+  EXPECT_EQ(misaligned.validate().diagnostic().code, "type.misaligned_field");
+
+  // Integers, pointers and enums have ABI sizes only.
+  donkey::TypeTable sizes;
+  sizes.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "int24", 3, true));
+  EXPECT_EQ(sizes.validate().diagnostic().code, "type.bad_integer_size");
+  donkey::TypeTable pointers;
+  pointers.put(scalar(donkey::TypeId(1), donkey::TypeKind::Pointer, "", 6));
+  EXPECT_EQ(pointers.validate().diagnostic().code, "type.bad_pointer_size");
+
+  // A function has no size by value.
+  donkey::TypeTable functions;
+  donkey::TypeDefinition function = scalar(donkey::TypeId(1), donkey::TypeKind::Function, "", 0);
+  functions.put(std::move(function));
+  EXPECT_FALSE(functions.size_of(donkey::TypeId(1)).has_value());
+}
+
+namespace {
+
+const donkey::TypeDefinition* named_type(const std::vector<donkey::TypeDefinition>& types,
+                                         const std::string& name) {
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.name == name) {
+      return &type;
+    }
+  }
+  return nullptr;
+}
+
+const donkey::TypeDefinition* type_by_id(const std::vector<donkey::TypeDefinition>& types,
+                                         donkey::TypeId id) {
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.id == id) {
+      return &type;
+    }
+  }
+  return nullptr;
+}
+
+/// Parses `text` and checks that it is refused with `code`, and that the message
+/// begins with `location` (for example "line 1, column 18: ").
+void expect_located_error(std::string_view text, const char* code, std::string_view location) {
+  const auto result = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_FALSE(result.has_value()) << text;
+  EXPECT_EQ(result.diagnostic().code, code) << text;
+  EXPECT_TRUE(std::string_view(result.diagnostic().message).starts_with(location))
+      << result.diagnostic().message;
+}
+
+}  // namespace
+
+TEST(Types, ParsesCDeclarations) {
+  const char* text = R"(
+typedef unsigned char u8;
+struct point { int32_t x; int32_t y; };
+struct record { uint8_t tag; struct point at; double weight; char name[5]; };
+union value { uint32_t word; float real; };
+enum mode { MODE_A, MODE_B = 4, MODE_C };
+typedef struct { uint16_t lo, hi; } pair;
+struct list { struct list *next; int count; };
+int64_t sum(const struct point *points, size_t count, ...);
+void reset(void);
+)";
+  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const std::vector<donkey::TypeDefinition>& types = parsed.value();
+
+  // Ids start where the empty table left off, one per declared type.
+  ASSERT_FALSE(types.empty());
+  EXPECT_EQ(types.front().id.value(), 1U);
+  EXPECT_EQ(types.front().provenance, donkey::TypeProvenance::User);
+
+  // struct point: two int32_t members.
+  const auto* point = named_type(types, "point");
+  ASSERT_NE(point, nullptr);
+  EXPECT_EQ(point->kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(point->size, 8U);
+  ASSERT_EQ(point->fields.size(), 2U);
+  EXPECT_EQ(point->fields[1].offset, 4U);
+
+  // struct record: tag at 0, the point at 4 (align 4), weight at 16 (align 8), name at
+  // 24. The members end at 29, padded to 32 for the 8-byte alignment of the double.
+  const auto* record = named_type(types, "record");
+  ASSERT_NE(record, nullptr);
+  EXPECT_EQ(record->size, 32U);
+  ASSERT_EQ(record->fields.size(), 4U);
+  EXPECT_EQ(record->fields[1].offset, 4U);
+  EXPECT_EQ(record->fields[2].offset, 16U);
+  EXPECT_EQ(record->fields[3].offset, 24U);
+
+  const auto* value = named_type(types, "value");
+  ASSERT_NE(value, nullptr);
+  EXPECT_EQ(value->kind, donkey::TypeKind::Union);
+  EXPECT_EQ(value->size, 4U);
+  EXPECT_EQ(value->fields[1].offset, 0U);
+
+  const auto* mode = named_type(types, "mode");
+  ASSERT_NE(mode, nullptr);
+  EXPECT_EQ(mode->kind, donkey::TypeKind::Enum);
+  ASSERT_EQ(mode->enumerators.size(), 3U);
+  EXPECT_EQ(mode->enumerators[1].value, 4);
+  EXPECT_EQ(mode->enumerators[2].value, 5);
+
+  // An untagged struct takes the typedef's name.
+  const auto* pair = named_type(types, "pair");
+  ASSERT_NE(pair, nullptr);
+  EXPECT_EQ(pair->kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(pair->size, 4U);
+  ASSERT_EQ(pair->fields.size(), 2U);
+  EXPECT_EQ(pair->fields[1].offset, 2U);
+
+  // A pointer to the struct being defined refers back to it.
+  const auto* list = named_type(types, "list");
+  ASSERT_NE(list, nullptr);
+  EXPECT_EQ(list->size, 16U);
+  const auto* next = type_by_id(types, list->fields[0].type);
+  ASSERT_NE(next, nullptr);
+  EXPECT_EQ(next->kind, donkey::TypeKind::Pointer);
+  EXPECT_EQ(next->target, list->id);
+
+  // A prototype: a variadic function of a struct pointer and a size_t, returning
+  // int64_t. A void return has no target.
+  const auto* sum = named_type(types, "sum");
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(sum->kind, donkey::TypeKind::Function);
+  EXPECT_TRUE(sum->variadic);
+  ASSERT_EQ(sum->fields.size(), 2U);
+  const auto* returned = type_by_id(types, sum->target);
+  ASSERT_NE(returned, nullptr);
+  EXPECT_EQ(returned->name, "int64_t");
+  EXPECT_EQ(returned->size, 8U);
+  EXPECT_TRUE(returned->is_signed);
+  const auto* first_parameter = type_by_id(types, sum->fields[0].type);
+  ASSERT_NE(first_parameter, nullptr);
+  EXPECT_EQ(first_parameter->kind, donkey::TypeKind::Pointer);
+  EXPECT_EQ(first_parameter->target, point->id);
+  const auto* reset = named_type(types, "reset");
+  ASSERT_NE(reset, nullptr);
+  EXPECT_FALSE(reset->variadic);
+  EXPECT_TRUE(reset->fields.empty());
+  EXPECT_EQ(type_by_id(types, reset->target), nullptr);
+
+  // The whole result passes the type store's checks.
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& type : types) {
+    table.put(type);
+  }
+  EXPECT_TRUE(table.validate().has_value());
+
+  // A second parse sees the first one's types. The int32_t it needs is reused, not
+  // declared again.
+  donkey::TypeTable known = table;
+  const auto second = donkey::parse_c_declarations(
+      "typedef struct point point_t; struct pair2 { point_t p; int32_t extra; };", known);
+  ASSERT_TRUE(second.has_value()) << second.diagnostic().message;
+  const auto* pair2 = named_type(second.value(), "pair2");
+  ASSERT_NE(pair2, nullptr);
+  EXPECT_EQ(pair2->size, 12U);
+  EXPECT_EQ(named_type(second.value(), "int32_t"), nullptr);
+
+  // The ILP32 model: 4-byte pointers and long, and an unsigned plain char.
+  donkey::CDeclarationOptions ilp32;
+  ilp32.pointer_size = 4;
+  ilp32.long_size = 4;
+  ilp32.char_is_signed = false;
+  const auto narrow = donkey::parse_c_declarations("struct s { long a; char *p; char c; };",
+                                                   donkey::TypeTable{}, ilp32);
+  ASSERT_TRUE(narrow.has_value()) << narrow.diagnostic().message;
+  const auto* s = named_type(narrow.value(), "s");
+  ASSERT_NE(s, nullptr);
+  EXPECT_EQ(s->size, 12U);
+  EXPECT_EQ(s->fields[1].offset, 4U);
+  const auto* plain_char = type_by_id(narrow.value(), s->fields[2].type);
+  ASSERT_NE(plain_char, nullptr);
+  EXPECT_FALSE(plain_char->is_signed);
+}
+
+TEST(Types, ParserErrorsAreLocated) {
+  expect_located_error("struct s { int x }", "cdecl.unexpected_token", "line 1, column 18: ");
+  expect_located_error("typedef int T;\n  #define X 1\n", "cdecl.preprocessor",
+                       "line 2, column 3: ");
+  expect_located_error("/* abc\n  def", "cdecl.unterminated_comment", "line 1, column 1: ");
+  expect_located_error("typedef int T $;", "cdecl.bad_character", "line 1, column 15: ");
+  expect_located_error("foo x;", "cdecl.unknown_type", "line 1, column 1: ");
+  expect_located_error("struct s { int a[]; };", "cdecl.array_size_required",
+                       "line 1, column 17: ");
+  expect_located_error("struct s { int a : 3; };", "cdecl.bitfield_unsupported",
+                       "line 1, column 18: ");
+  expect_located_error("struct s { int a; }; struct s { int b; };", "cdecl.redefinition",
+                       "line 1, column 29: ");
+  expect_located_error("struct s {", "cdecl.unexpected_token", "line 1, column 11: ");
+  expect_located_error("struct list2 { struct nope n; };", "cdecl.incomplete_type",
+                       "line 1, column 28: ");
+  expect_located_error("enum e { A = 3000000000 };", "cdecl.enum_value_range",
+                       "line 1, column 14: ");
+  expect_located_error("typedef char c[99999999999999999999];", "cdecl.number_too_large",
+                       "line 1, column 16: ");
+  expect_located_error(std::string("typedef int ") + std::string(65, '*') + "p;", "cdecl.nesting",
+                       "line 1, column 77: ");
+  // An array of arrays whose total size does not fit in 64 bits is refused by the
+  // type store's whole-table check.
+  expect_located_error("typedef long long huge[9223372036854775807][4];", "cdecl.invalid_type", "");
+
+  const std::string huge(donkey::kMaxCDeclarationBytes + 1, ' ');
+  const auto too_large = donkey::parse_c_declarations(huge, donkey::TypeTable{});
+  ASSERT_FALSE(too_large.has_value());
+  EXPECT_EQ(too_large.diagnostic().status, donkey::Status::ResourceLimit);
+  EXPECT_EQ(too_large.diagnostic().code, "cdecl.too_large");
+
+  donkey::CDeclarationOptions bad;
+  bad.pointer_size = 3;
+  const auto refused = donkey::parse_c_declarations("int x;", donkey::TypeTable{}, bad);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "cdecl.bad_options");
+}
+
+TEST(Types, DwarfStructsMatchTheirByteSize) {
+  auto loaded = donkey::load_binary(DONKEY_TEST_DEBUGGEE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  if (!info && info.diagnostic().code == "dwarf.not_present") {
+    GTEST_SKIP() << "the toolchain put no DWARF in the debuggee";
+  }
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().code;
+  const donkey::TypeTable table = donkey::types_from_debug_info(info.value());
+  const auto valid = table.validate();
+  std::size_t checked = 0;
+  for (const auto& [offset, source] : info.value().types) {
+    if (source.kind != donkey::DebugTypeKind::Struct &&
+        source.kind != donkey::DebugTypeKind::Union) {
+      continue;
+    }
+    if (source.byte_size == 0) {
+      continue;  // a declaration only: no size to compare
+    }
+    const donkey::TypeId id(offset + 1);
+    auto size = table.size_of(id);
+    ASSERT_TRUE(size.has_value()) << source.name << ": " << size.diagnostic().message;
+    EXPECT_EQ(size.value(), source.byte_size) << source.name;
+    ++checked;
+  }
+  EXPECT_GT(checked, 0U) << "the debuggee has structs to check";
+}
+
+}  // namespace
+
+// The DataRange text is "<element size>:<count>", canonical and bounded: no signs, no leading
+// zeros, sizes 0, 1, 2, 4 or 8, and at most 16 MiB covered.
+TEST(Project, DataRangeTextIsCanonicalAndBounded) {
+  std::uint64_t element_size = 0;
+  std::uint64_t count = 0;
+  EXPECT_TRUE(donkey::parse_data_range_text("0:1", element_size, count));
+  EXPECT_EQ(element_size, 0U);
+  EXPECT_EQ(count, 1U);
+  EXPECT_TRUE(donkey::parse_data_range_text("8:2097152", element_size, count));
+  EXPECT_EQ(element_size, 8U);
+  EXPECT_EQ(count, 2097152U);
+  EXPECT_EQ(donkey::format_data_range_text(8, 2097152), "8:2097152");
+  EXPECT_EQ(donkey::format_data_range_text(0, 5), "0:5");
+  for (const char* bad : {"", "3:2", "1:0", "1:", ":4", "01:4", "+1:4", "1:-4", "1 :4", "1:4:5",
+                          "8:2097153", "0:16777217", "16:1", "1:99999999999999999999"}) {
+    EXPECT_FALSE(donkey::parse_data_range_text(bad, element_size, count)) << bad;
+  }
+}
+
+// G12-T1: a code start and data ranges are stored, come back in order after a reopen, and text
+// that does not fit the kind is refused with a code, never stored.
+TEST(Project, StoresCodeStartsAndDataRangesAndRefusesOtherText) {
+  TempPath path("code-data-kinds");
+  const std::int64_t image_id = make_project(path.str(), "kept");
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::CodeStart, 0x400109, "code")
+                  .has_value());
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x40010c, "1:4")
+                  .has_value());
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x400200, "0:8")
+                  .has_value());
+
+  const std::pair<donkey::AnnotationKind, const char*> refused[] = {
+      {donkey::AnnotationKind::CodeStart, "yes"},
+      {donkey::AnnotationKind::DataRange, "3:2"},
+      {donkey::AnnotationKind::DataRange, "8:2097153"},
+  };
+  for (const auto& [kind, text] : refused) {
+    auto result = project.value().set_annotation(image_id, kind, 0x400300, text);
+    ASSERT_FALSE(result.has_value()) << text;
+    EXPECT_EQ(result.diagnostic().code, "project.annotation_text_invalid") << text;
+  }
+
+  // A batch with one bad row is refused as a whole, so the good row is not written either.
+  const std::vector<donkey::Annotation> batch{
+      {donkey::AnnotationKind::CodeStart, 0x400500, "code"},
+      {donkey::AnnotationKind::DataRange, 0x400504, "4:0"},
+  };
+  auto replaced = project.value().replace_annotations(image_id, batch);
+  ASSERT_FALSE(replaced.has_value());
+  EXPECT_EQ(replaced.diagnostic().code, "project.annotation_text_invalid");
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto rows = reopened.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value()) << rows.diagnostic().message;
+  std::vector<std::string> seen;
+  for (const donkey::Annotation& row : rows.value()) {
+    seen.push_back(std::string(donkey::annotation_kind_name(row.kind)) + "@" +
+                   std::to_string(row.address) + "=" + row.text);
+  }
+  // The helper stores its own comment at 0x10; the three below are the ones this test added.
+  EXPECT_EQ(seen.size(), 4U);
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "comment@16=kept"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "code@4194569=code"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "data@4194572=1:4"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "data@4194816=0:8"), seen.end());
+}
+
+// The v5 fixture was saved by the v5 build (tests/fixtures/projects/PROVENANCE.md): one image with
+// a rename, a comment and a bookmark at 0x400109. Opening it must migrate to v6, keep all three,
+// and accept the new kinds.
+TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
+  TempPath path("migrate-v5");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  EXPECT_EQ(project.value().schema_version(), 6);
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  const std::int64_t image_id = images.value()[0].id;
+
+  auto kept = project.value().annotations(image_id);
+  ASSERT_TRUE(kept.has_value()) << kept.diagnostic().message;
+  ASSERT_EQ(kept.value().size(), 3U);
+  bool rename = false;
+  bool comment = false;
+  bool bookmark = false;
+  for (const donkey::Annotation& row : kept.value()) {
+    rename = rename || (row.kind == donkey::AnnotationKind::Rename && row.text == "entry_main");
+    comment =
+        comment || (row.kind == donkey::AnnotationKind::Comment && row.text == "reviewed in v5");
+    bookmark = bookmark || (row.kind == donkey::AnnotationKind::Bookmark && row.text == "keep");
+  }
+  EXPECT_TRUE(rename && comment && bookmark);
+
+  // The rebuilt table accepts the new kinds, and they survive a reopen.
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::CodeStart, 0x400109, "code")
+                  .has_value());
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x40010c, "1:4")
+                  .has_value());
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 6);
+  auto rows = reopened.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value());
+  EXPECT_EQ(rows.value().size(), 5U);
+}
