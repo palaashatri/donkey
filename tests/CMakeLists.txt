@@ -1,5 +1,14 @@
 include(GoogleTest)
 
+# The package presets link the shipped executables with a static libstdc++ (DONKEY_STATIC_RUNTIME,
+# set in the top-level CMakeLists). The test targets here link it dynamically. A static libstdc++
+# adds its own typeinfo objects, and its __cxa_pure_virtual is not in the dynamic symbols, so the
+# RTTI reader names the pure-virtual slots differently and reports classes the fixture does not
+# define. donkey-cli, which the tests run, keeps the static runtime.
+if(DONKEY_STATIC_RUNTIME AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_property(DIRECTORY PROPERTY LINK_OPTIONS)
+endif()
+
 add_library(test_plugin_valid MODULE fixtures/plugins/valid_plugin.c)
 target_include_directories(test_plugin_valid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 

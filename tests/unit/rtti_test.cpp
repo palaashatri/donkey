@@ -125,7 +125,9 @@ void expect_hierarchy(const donkey::RttiInfo& info) {
 /// The file's bytes with every pointer that a RELATIVE relocation fills set to zero. What is
 /// left in the file is then only the relocation table, so the reader can learn those
 /// pointers from `.rela.dyn` alone.
-std::vector<std::byte> without_relative_pointers(const donkey::LoadedBinary& loaded) {
+/// `addends_in_place`, when given, is set if the file holds a non-zero addend at a relocated place.
+std::vector<std::byte> without_relative_pointers(const donkey::LoadedBinary& loaded,
+                                                 bool* addends_in_place = nullptr) {
   std::vector<std::byte> bytes = loaded.data.to_vector();
   auto u64_at = [&bytes](std::uint64_t offset) {
     std::uint64_t value = 0;
@@ -150,6 +152,9 @@ std::vector<std::byte> without_relative_pointers(const donkey::LoadedBinary& loa
       const auto place = loaded.image.va_to_file_offset(u64_at(entry));
       if (!place) {
         continue;
+      }
+      if (addends_in_place != nullptr && u64_at(place.value()) != 0) {
+        *addends_in_place = true;
       }
       for (std::uint64_t i = 0; i < 8; ++i) {
         bytes[place.value() + i] = std::byte{0};
@@ -184,10 +189,16 @@ TEST(Rtti, PiePointersComeFromTheRelocationTableNotTheFile) {
   }
   auto loaded = donkey::load_binary(DONKEY_TEST_HIERARCHY_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
-  const std::vector<std::byte> zeroed = without_relative_pointers(loaded.value());
-  // The copy differs from the file only in relocated places, and it must still describe the
-  // same hierarchy: the vtable and typeinfo pointers come from `.rela.dyn` alone.
-  EXPECT_NE(zeroed, loaded.value().data.to_vector());
+  bool addends_in_place = false;
+  const std::vector<std::byte> zeroed =
+      without_relative_pointers(loaded.value(), &addends_in_place);
+  // GNU ld writes each addend into its place too, so zeroing changes the copy. lld keeps the
+  // addends in `.rela.dyn` only, and the places are already zero, so the copy equals the file.
+  // The hierarchy read below is then the proof: it needs the relocation table.
+  if (addends_in_place) {
+    EXPECT_NE(zeroed, loaded.value().data.to_vector());
+  }
+  // The copy describes the same hierarchy: the vtable and typeinfo pointers come from `.rela.dyn`.
   auto info = donkey::read_itanium_rtti(loaded.value().image, zeroed);
   ASSERT_TRUE(info.has_value()) << info.diagnostic().code;
   expect_hierarchy(info.value());
