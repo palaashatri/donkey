@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -56,6 +59,79 @@ bool scalar_of(const DebugInfo& info, std::uint64_t type, std::uint8_t& width, b
 }
 
 }  // namespace
+
+Result<bool> apply_debug_stack_names(IrFunction& function, const DebugFunction& debug,
+                                     const DebugInfo& info) {
+  // The frame slots that can be named: one scalar slot per CFA offset, with an identifier
+  // name. An offset held by two slots, or by a slot that is not a scalar, names nothing.
+  struct Slot {
+    std::string name;
+    std::uint8_t width = 0;
+    bool usable = false;
+  };
+  std::map<std::int64_t, Slot> slots;
+  std::map<std::int64_t, std::size_t> occurrences;
+  for (const DebugStackSlot& slot : debug.stack_slots) {
+    ++occurrences[slot.cfa_offset];
+    Slot& entry = slots[slot.cfa_offset];
+    std::uint8_t width = 0;
+    bool floating = false;
+    entry.usable = is_identifier(slot.name) && scalar_of(info, slot.type, width, floating);
+    entry.name = slot.name;
+    entry.width = width;
+  }
+
+  // Pass 1: the stack pointer must move only by constants, and the frame must balance. Then
+  // the offset of an access from the CFA is -8 + delta + displacement, where delta is the
+  // stack pointer's movement from the entry value (the entry value is CFA - 8). Anything
+  // else leaves the offsets unknown, so the function is left unnamed.
+  std::int64_t delta = 0;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg != "rsp") {
+        continue;
+      }
+      if ((statement.op != IrOp::Add && statement.op != IrOp::Sub) ||
+          statement.a.kind != IrOperandKind::Register || statement.a.reg != "rsp" ||
+          statement.b.kind != IrOperandKind::Constant) {
+        return false;
+      }
+      const auto amount = static_cast<std::int64_t>(statement.b.constant);
+      delta += statement.op == IrOp::Add ? amount : -amount;
+    }
+  }
+  if (delta != 0) {
+    return false;
+  }
+
+  // Pass 2: name each rsp-based access whose CFA offset is a usable slot of its width.
+  bool named = false;
+  delta = 0;
+  for (IrBlock& block : function.blocks) {
+    for (IrStatement& statement : block.statements) {
+      for (IrOperand* operand : {&statement.dest, &statement.a, &statement.b, &statement.c}) {
+        if (operand->kind != IrOperandKind::Memory || operand->reg != "rsp" ||
+            !operand->index.empty()) {
+          continue;
+        }
+        const auto displacement = static_cast<std::int64_t>(operand->constant);
+        const std::int64_t cfa_offset = -8 + delta + displacement;
+        const auto found = slots.find(cfa_offset);
+        if (found == slots.end() || !found->second.usable || occurrences[cfa_offset] != 1 ||
+            found->second.width != operand->width) {
+          continue;
+        }
+        operand->name = found->second.name;
+        named = true;
+      }
+      if (statement.dest.kind == IrOperandKind::Register && statement.dest.reg == "rsp") {
+        const auto amount = static_cast<std::int64_t>(statement.b.constant);
+        delta += statement.op == IrOp::Add ? amount : -amount;
+      }
+    }
+  }
+  return named;
+}
 
 Result<bool> apply_debug_parameter_names(IrFunction& function, const DebugFunction& debug,
                                          const DebugInfo& info) {

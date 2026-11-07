@@ -1204,4 +1204,59 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
   EXPECT_EQ(kept.value(), before.value());
 }
 
+#if defined(DONKEY_TEST_LOCALS_PATH)
+// At -O0 the parameters and locals of donkey_locals_sum are stored at rsp offsets the
+// frame adjustment moves: the debug information's CFA offsets name them (G04-T4). A function
+// whose debug information lists no slots is unchanged.
+TEST(DecompilerCorpus, FrameSlotsTakeTheNamesOfTheDebugInformation) {
+  auto loaded = donkey::load_binary(DONKEY_TEST_LOCALS_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& candidate : analysis.value().functions) {
+    if (candidate.name == "donkey_locals_sum") {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  const donkey::DebugFunction* debug = info.value().function_at(function->address);
+  ASSERT_NE(debug, nullptr);
+  ASSERT_EQ(debug->stack_slots.size(), 4U);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+
+  donkey::IrFunction named = lifted.value();
+  auto before = donkey::format_pseudocode(named);
+  ASSERT_TRUE(before.has_value());
+  // GCC stores the locals at rsp - 0x8 .. 0x18; Clang at rsp - 0x4 .. 0x10. Both are frame slots.
+  EXPECT_NE(before.value().find("*(u32 *)(rsp - "), std::string::npos) << before.value();
+
+  auto applied = donkey::apply_debug_stack_names(named, *debug, info.value());
+  ASSERT_TRUE(applied.has_value()) << applied.diagnostic().code;
+  EXPECT_TRUE(applied.value());
+  auto text = donkey::format_pseudocode(named);
+  ASSERT_TRUE(text.has_value());
+  // The parameter stores and the loads and stores of the locals use the slot names.
+  EXPECT_NE(text.value().find("first = (u32)rdi;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("second = (u32)rsi;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("total = (u32)rax;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("scaled = (u32)rax;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("*(u32 *)(rsp - "), std::string::npos) << text.value();
+
+  // With no slots in the debug information nothing is named, and the text is unchanged.
+  donkey::DebugFunction bare = *debug;
+  bare.stack_slots.clear();
+  donkey::IrFunction unchanged = lifted.value();
+  auto none = donkey::apply_debug_stack_names(unchanged, bare, info.value());
+  ASSERT_TRUE(none.has_value());
+  EXPECT_FALSE(none.value());
+  auto kept = donkey::format_pseudocode(unchanged);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(kept.value(), before.value());
+}
+#endif
+
 }  // namespace

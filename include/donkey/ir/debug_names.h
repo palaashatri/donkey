@@ -22,4 +22,12 @@ namespace donkey {
                                                        const DebugFunction& debug,
                                                        const DebugInfo& info);
 
+/// Names the memory operands that are frame slots of `function` after the parameters and
+/// locals of `debug` (G04-T4). The stack pointer's movement is tracked from the entry: the
+/// slot of an access at `rsp + k` is the one whose CFA offset is `-8 + delta + k`. A
+/// function whose stack pointer moves in any other way, or whose frame does not balance, is
+/// left unnamed. Only the operands' display names change. Returns whether any name was set.
+[[nodiscard]] Result<bool> apply_debug_stack_names(IrFunction& function, const DebugFunction& debug,
+                                                   const DebugInfo& info);
+
 }  // namespace donkey

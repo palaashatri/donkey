@@ -139,6 +139,9 @@ struct IrOperand {
   std::uint32_t block = 0;
   /// Access/operation width in bytes.
   std::uint8_t width = 0;
+  /// Display name for a memory operand that is a named frame slot (G04-T4). The access is
+  /// unchanged; only the text of the operand is replaced. Empty when the slot is unnamed.
+  std::string name;
 
   [[nodiscard]] static IrOperand none() { return {}; }
   [[nodiscard]] static IrOperand constant_value(std::uint64_t value, std::uint8_t width);

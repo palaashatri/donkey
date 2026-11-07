@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
@@ -1486,6 +1487,22 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     }
   }
 
+  // The DWARF of the binary, when it has any, names the parameters and the frame slots of
+  // each function (G04-T4). Naming is display-only and changes no statement.
+  std::optional<DebugInfo> debug;
+  if (auto read = read_debug_info(loaded.image, loaded.data); read.has_value()) {
+    debug = std::move(read.value());
+  }
+  auto lift_named = [&](const Function& function) {
+    auto lifted = lift_function(loaded.image, analysis.value(), function);
+    if (lifted && debug) {
+      if (const DebugFunction* named = debug->function_at(function.address)) {
+        (void)apply_debug_parameter_names(lifted.value(), *named, *debug);
+        (void)apply_debug_stack_names(lifted.value(), *named, *debug);
+      }
+    }
+    return lifted;
+  };
   if (request.json) {
     std::string out;
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
@@ -1497,7 +1514,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       if (written >= request.max_items) {
         break;
       }
-      auto lifted = lift_function(loaded.image, analysis.value(), *function);
+      auto lifted = lift_named(*function);
       out += written == 0 ? "\n" : ",\n";
       if (!lifted) {
         out += "    {\"address\": " + quote(hex(function->address)) +
@@ -1545,7 +1562,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       std::printf("\n");
     }
     first = false;
-    auto lifted = lift_function(loaded.image, analysis.value(), *function);
+    auto lifted = lift_named(*function);
     if (!lifted) {
       std::printf("// %s: unsupported (%s)\n", display_name(function->name).c_str(),
                   lifted.diagnostic().code.c_str());
