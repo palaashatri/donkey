@@ -3476,4 +3476,14 @@ TEST(Ir, DeadRegisterWriteIsRemoved) {
   EXPECT_EQ(run_x86_64(f, {5, 7}), 7U);
 }
 
+// Windows x64 and x86-32 keep rsi and rdi across calls, so the epilogue's restore of rsi is not
+// a dead write even though nothing in the function reads it afterwards.
+TEST(Ir, CalleeSavedRsiWriteIsKeptAtReturn) {
+  donkey::IrFunction f;  // mov rsi, rdx; mov eax, 1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xd6, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rsi"), std::string::npos) << text.value();
+}
+
 }  // namespace
