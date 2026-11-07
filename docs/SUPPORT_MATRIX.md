@@ -210,6 +210,14 @@ compare, because GCC's table code overwrites `x0`.
   (`ir.unreachable_block`) and the function is never shown as Complete.
 - Varargs and struct passing by value.
 
+## Debugger
+
+| Capability | Linux x86-64 | Linux AArch64 | Windows x64 | Other |
+|---|---|---|---|---|
+| Software breakpoints, stepping, memory and registers | yes (ptrace) | yes (ptrace) | yes (Win32 debug API) | Unsupported |
+| Hardware watchpoints (`set_watchpoint`, library API) | yes: up to four write or read-or-write watches of 1, 2, 4 or 8 bytes (DR0-DR3, DR7), set while stopped | not implemented (DBGWVR) | not implemented | Unsupported |
+| Hardware watchpoints in the CLI or GUI | not yet | not yet | not yet | not yet |
+
 ## Automation
 
 | Surface | Status | Notes |
