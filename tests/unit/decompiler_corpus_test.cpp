@@ -1178,7 +1178,8 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& candidate : analysis.value().functions) {
-    if (candidate.name == "donkey_module_answer") {
+    // Mach-O prefixes every C symbol with an underscore.
+    if (candidate.name == "donkey_module_answer" || candidate.name == "_donkey_module_answer") {
       function = &candidate;
     }
   }
