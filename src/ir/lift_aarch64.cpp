@@ -930,10 +930,9 @@ struct Lifter {
   /// modelled, so they stay Unsupported.
   void lift_add_with_carry(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
-    if (!flags_exact || operands.size() != 3 ||
-        operands[0].kind != OperandKind::Register || operands[1].kind != OperandKind::Register ||
-        operands[2].kind != OperandKind::Register || operands[0].reg == "xzr" ||
-        operands[0].reg == "wzr") {
+    if (!flags_exact || operands.size() != 3 || operands[0].kind != OperandKind::Register ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        operands[0].reg == "xzr" || operands[0].reg == "wzr") {
       unsupported(block, instruction);
       return;
     }
