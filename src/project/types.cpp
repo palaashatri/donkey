@@ -57,6 +57,12 @@ struct Layout {
 /// size 0. Each struct or union is laid out from its members: they must sit at
 /// aligned offsets (a union member at zero), and the stored size must be the
 /// padded end of the last member.
+/// Whether a + b does not fit in 64 bits. Offsets and sizes come from untrusted DWARF, so a sum
+/// that wraps must be refused rather than validated as small.
+bool sum_overflows(std::uint64_t a, std::uint64_t b) {
+  return a > std::numeric_limits<std::uint64_t>::max() - b;
+}
+
 Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId id, int depth) {
   if (!id.valid()) {
     return Layout{};
@@ -128,6 +134,11 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
     case TypeKind::Struct:
     case TypeKind::Union: {
       const bool is_union = definition.kind == TypeKind::Union;
+      if (definition.fields.empty() && (definition.size == 0 || definition.size == 1)) {
+        // No members: an empty C struct has size 0, and an empty C++ class has the ABI's
+        // minimum of one byte. Either is accepted as declared.
+        return Layout{definition.size, 1};
+      }
       std::uint64_t alignment = 1;
       std::uint64_t end = 0;
       for (const TypeField& field : definition.fields) {
@@ -148,8 +159,13 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
             return fail<Layout>("type.bad_bit_field", name + " has a bit-field '" + field.name +
                                                           "' that does not fit its type");
           }
-          member_end = field.offset +
-                       (static_cast<std::uint64_t>(field.bit_offset) + field.bit_size + 7) / 8;
+          const std::uint64_t bytes =
+              (static_cast<std::uint64_t>(field.bit_offset) + field.bit_size + 7) / 8;
+          if (sum_overflows(field.offset, bytes)) {
+            return fail<Layout>("type.member_overflow", name + " has a member '" + field.name +
+                                                            "' whose offset wraps past 64 bits");
+          }
+          member_end = field.offset + bytes;
         } else {
           if (is_union && field.offset != 0) {
             return fail<Layout>("type.union_member_offset",
@@ -162,10 +178,17 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
                                     std::to_string(field.offset) + ", not aligned to " +
                                     std::to_string(layout.alignment));
           }
+          if (sum_overflows(field.offset, layout.size)) {
+            return fail<Layout>("type.member_overflow", name + " has a member '" + field.name +
+                                                            "' whose offset wraps past 64 bits");
+          }
           member_end = field.offset + layout.size;
         }
         end = std::max(end, member_end);
         alignment = std::max(alignment, layout.alignment);
+      }
+      if (sum_overflows(end, alignment - 1)) {
+        return fail<Layout>("type.member_overflow", name + " is too large to round up");
       }
       const std::uint64_t computed = round_up(end, alignment);
       if (computed != definition.size) {
@@ -243,6 +266,12 @@ std::uint64_t resolve_qualifiers(const DebugInfo& info, std::uint64_t offset) {
 
 TypeId dwarf_id(std::uint64_t offset) {
   return TypeId(offset + 1);
+}
+
+/// The id of the part type a complex or imaginary base type is built from. The high bit keeps it
+/// apart from every DWARF offset.
+TypeId dwarf_part_id(std::uint64_t offset) {
+  return TypeId(offset + 1 + (std::uint64_t{1} << 62));
 }
 
 TypeId dwarf_reference(const DebugInfo& info, std::uint64_t offset) {
@@ -442,7 +471,25 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
       case DebugTypeKind::Base:
         // DW_ATE: 2 boolean, 4 float, 5 signed, 6 signed_char, 7 unsigned,
         // 8 unsigned_char, 16 UTF. Anything else is taken as unsigned.
-        if (source.encoding == 4 || source.encoding == 3) {
+        if (source.encoding == 3 || source.encoding == 9) {
+          // A complex value is two floats side by side and an imaginary value is one float. Both
+          // are kept as an array of their parts: the layout matches the compiler's, and no scalar
+          // type is claimed for them.
+          const bool complex = source.encoding == 3;
+          TypeDefinition part;
+          part.id = dwarf_part_id(offset);
+          part.kind = TypeKind::Float;
+          part.provenance = TypeProvenance::Dwarf;
+          part.name = source.name + " (part)";
+          part.size = complex ? source.byte_size / 2 : source.byte_size;
+          table.put(std::move(part));
+          definition.kind = TypeKind::Array;
+          definition.target = dwarf_part_id(offset);
+          definition.count = complex ? 2 : 1;
+          definition.size = 0;
+          break;
+        }
+        if (source.encoding == 4) {
           definition.kind = TypeKind::Float;
         } else {
           definition.kind = TypeKind::Integer;
@@ -483,6 +530,13 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
         definition.kind = TypeKind::Function;
         definition.target = dwarf_reference(info, source.target);
         definition.size = 0;
+        // The reader keeps the formal parameters in `members`; they become the function's fields.
+        for (const DebugMember& parameter : source.members) {
+          TypeField field;
+          field.name = parameter.name;
+          field.type = parameter.type == 0 ? TypeId{} : dwarf_reference(info, parameter.type);
+          definition.fields.push_back(std::move(field));
+        }
         break;
       case DebugTypeKind::Const:
       case DebugTypeKind::Volatile:
@@ -492,6 +546,10 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
     table.put(std::move(definition));
   }
   return table;
+}
+
+bool TypeTable::names_function(TypeId id) const {
+  return names_a_function(types_, id);
 }
 
 }  // namespace donkey
