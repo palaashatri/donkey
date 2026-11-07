@@ -309,10 +309,14 @@ bool kills_family(const IrStatement& statement) {
 /// Writes to them stay, so an epilogue that restores them is not removed.
 void add_return_obligations(Live& live) {
   static const char* const kNames[] = {
-      // x86-64 (and x86-32 by family)
+      // x86-64 (and x86-32 by family). rsi and rdi are callee-saved under the Windows x64 and
+      // x86-32 conventions, and this pass does not know which convention applies, so their
+      // writes stay too: keeping a dead write is safe, removing a restore the caller needs is not.
       "rsp",
       "rbp",
       "rbx",
+      "rsi",
+      "rdi",
       "r12",
       "r13",
       "r14",

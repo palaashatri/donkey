@@ -92,6 +92,10 @@ class TypeTable {
 
   [[nodiscard]] const TypeDefinition* find(TypeId id) const;
 
+  /// Whether `id` is a function type, or a typedef that leads to one. A prototype application
+  /// needs such a type.
+  [[nodiscard]] bool names_function(TypeId id) const;
+
   /// Every type, ordered by id.
   [[nodiscard]] std::vector<TypeDefinition> list() const;
 

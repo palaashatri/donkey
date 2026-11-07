@@ -1075,6 +1075,18 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
                              "no type with id " + std::to_string(type_id.value()));
     }
   }
+  if (kind == TypeApplicationKind::FunctionPrototype) {
+    auto table = types();
+    if (!table) {
+      return make_void_error(table.diagnostic().status, table.diagnostic().code,
+                             table.diagnostic().message);
+    }
+    if (!table.value().names_function(type_id)) {
+      return make_void_error(Status::InvalidInput, "project.type_not_function",
+                             "type " + std::to_string(type_id.value()) +
+                                 " is not a function type, so it cannot be a prototype");
+    }
+  }
   Statement image_check(db, "SELECT 1 FROM images WHERE id = ?1");
   image_check.bind(1, image_id);
   if (!image_check.ok() || !image_check.step()) {
