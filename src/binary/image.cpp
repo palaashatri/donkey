@@ -8,10 +8,10 @@
 #include <iterator>
 #include <tuple>
 
+#include "donkey/binary/relocate.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/sha256.h"
 #include "parsers.h"
-#include "donkey/binary/relocate.h"
 
 namespace donkey {
 namespace {
@@ -454,8 +454,7 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
   }
   // An ELF object is laid out and relocated. Its analysed bytes are a patched copy, so
   // the buffer that the image's file offsets refer to is replaced with that copy.
-  if (image.value().format == BinaryFormat::Elf &&
-      is_relocatable_elf(data.span())) {
+  if (image.value().format == BinaryFormat::Elf && is_relocatable_elf(data.span())) {
     auto linked = link_relocatable_object(data.span(), image.value());
     if (!linked) {
       return linked.diagnostic();
