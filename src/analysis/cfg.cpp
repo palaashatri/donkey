@@ -1072,7 +1072,19 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         block_by_address.emplace(address, graph.blocks.size());
         graph.blocks.push_back(block);
         if (graph.blocks.size() > kMaxBlocks) {
+          // A partial result says why: the block bound is a resource limit, not a decoding failure.
+          // The reason is recorded once, however many seeds reach the bound.
           graph.partial = true;
+          const bool reported = std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(),
+                                            [](const Diagnostic& diagnostic) {
+                                              return diagnostic.code == "analysis.block_limit";
+                                            });
+          if (!reported) {
+            graph.diagnostics.push_back(
+                Diagnostic::make(Status::ResourceLimit, "analysis.block_limit",
+                                 "control-flow graph stopped at the block limit; blocks beyond it "
+                                 "are not reported"));
+          }
           break;
         }
       }

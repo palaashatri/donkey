@@ -387,4 +387,32 @@ TEST(Cfg, RespectsInstructionLimit) {
   EXPECT_EQ(result.value().instructions.size(), 2U);
 }
 
+// A run of two-byte jumps to the next instruction makes a block at every instruction. Past the
+// block bound (200,000) the graph stops, and the result says so once, rather than being partial
+// without a reason.
+TEST(Cfg, TheBlockBoundIsReportedOnce) {
+  const std::size_t jumps = 210'000;
+  std::vector<std::byte> data;
+  data.reserve(jumps * 2);
+  for (std::size_t i = 0; i < jumps; ++i) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(std::byte{0x00});
+  }
+  const auto image = synthetic_image(data.size());
+  AnalysisOptions options;
+  options.max_instructions = 400'000;
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value());
+  EXPECT_TRUE(result.value().partial);
+  EXPECT_TRUE(result.value().cfg.partial);
+  std::size_t reported = 0;
+  for (const auto& diagnostic : result.value().cfg.diagnostics) {
+    if (diagnostic.code == "analysis.block_limit") {
+      ++reported;
+      EXPECT_EQ(diagnostic.status, donkey::Status::ResourceLimit);
+    }
+  }
+  EXPECT_EQ(reported, 1U);
+}
+
 }  // namespace
