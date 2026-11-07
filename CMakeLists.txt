@@ -80,6 +80,7 @@ add_library(donkey_binary STATIC
   src/binary/core.cpp
   src/binary/inflate.cpp
   src/binary/separate_debug.cpp
+  src/binary/pdb.cpp
   src/binary/records.cpp
   src/binary/relocate.cpp
 )
@@ -291,6 +292,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_inflate PRIVATE cxx_std_20)
   target_compile_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_pdb fuzz/fuzz_pdb.cpp)
+  target_link_libraries(fuzz_pdb PRIVATE donkey::binary)
+  target_compile_features(fuzz_pdb PRIVATE cxx_std_20)
+  target_compile_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_core fuzz/fuzz_core.cpp)
   target_link_libraries(fuzz_core PRIVATE donkey::binary)
   target_compile_features(fuzz_core PRIVATE cxx_std_20)

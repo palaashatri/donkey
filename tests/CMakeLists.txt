@@ -124,6 +124,7 @@ add_executable(donkey_unit_tests
   unit/inflate_test.cpp
   unit/debug_compressed_test.cpp
   unit/debug_separate_test.cpp
+  unit/pdb_test.cpp
   unit/archive_test.cpp
   unit/relocate_test.cpp
   unit/relocate_aarch64_test.cpp
