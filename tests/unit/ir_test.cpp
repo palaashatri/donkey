@@ -1783,4 +1783,615 @@ TEST(Ir, AcceptanceScenarioA17_GracefulUnresolvedJumpTable) {
   EXPECT_NE(code.find("[partial]"), std::string::npos) << code;
 }
 
+// ---- G02-T1: add and subtract with carry (adc, sbb) ----
+
+/// Lifts one raw x86-64 function. Returns false when lifting or analysis fails.
+bool lift_raw_x86_64(const std::vector<std::uint8_t>& raw, donkey::IrFunction& out) {
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return false;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  if (!lifted.has_value()) {
+    return false;
+  }
+  out = lifted.value();
+  return true;
+}
+
+/// Runs an x86-64 function on SysV integer arguments and returns rax.
+std::uint64_t run_x86_64(const donkey::IrFunction& function,
+                         std::initializer_list<std::uint64_t> arguments) {
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values(arguments);
+  auto result = donkey::evaluate_ir(function, values, memory, options);
+  EXPECT_TRUE(result.has_value()) << (result.has_value() ? "" : result.diagnostic().message);
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, X86AddWithCarryMatchesHardwareFlags) {
+  // add rdi, rsi; adc rdx, rcx; mov rax, rdx; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x01, 0xf7, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  // rdi and rsi are the low halves, rdx and rcx the high halves. The carry out of
+  // the low add is 1 exactly when the 64-bit sum wraps, and it is added upward.
+  EXPECT_EQ(run_x86_64(f, {1, 2, 5, 7}), 12U);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 1, 5, 7}), 13U);  // low sum wraps: 5 + 7 + 1
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 0, 5, 7}), 12U);  // no wrap: 5 + 7
+  EXPECT_EQ(run_x86_64(f, {1ULL << 63, 1ULL << 63, 0, 0}), 1U);
+}
+
+TEST(Ir, X86SubWithBorrowMatchesHardwareFlags) {
+  // sub rdi, rsi; sbb rdx, rcx; mov rax, rdx; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x29, 0xf7, 0x48, 0x19, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {1, 2, 10, 3}), 6U);  // low borrows: 10 - 3 - 1
+  EXPECT_EQ(run_x86_64(f, {2, 1, 10, 3}), 7U);  // no borrow: 10 - 3
+  EXPECT_EQ(run_x86_64(f, {0, 0, 10, 3}), 7U);
+}
+
+TEST(Ir, X86AddOfARegisterToItselfCarriesFromTheOriginalValue) {
+  // add rdi, rdi; adc rsi, rdx; mov rax, rsi; ret
+  // The operation overwrites rdi, so the carry must come from the value it read.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x01, 0xff, 0x48, 0x11, 0xd6, 0x48, 0x89, 0xf0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {1ULL << 63, 5, 7, 0}), 13U);  // top bit carries out: 5 + 7 + 1
+  EXPECT_EQ(run_x86_64(f, {1, 5, 7, 0}), 12U);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 5, 7, 0}), 13U);
+}
+
+TEST(Ir, X86SubOfARegisterFromItselfKeepsTheOriginalForSignedBranches) {
+  // sub rdi, rdi; jl +6; mov eax, 1; ret; mov eax, 2; ret
+  // The result is zero, so `jl` is never taken, whatever rdi held. Comparing with
+  // the overwritten rdi would take the branch for negative inputs.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x29, 0xff, 0x7c, 0x06, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+                               0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3},
+                              f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 0, 0, 0}) & 0xffffffffU, 1U);
+  EXPECT_EQ(run_x86_64(f, {5, 0, 0, 0}) & 0xffffffffU, 1U);
+  EXPECT_EQ(run_x86_64(f, {1ULL << 63, 0, 0, 0}) & 0xffffffffU, 1U);
+}
+
+TEST(Ir, X86AddFollowedByACarryBranchIsExact) {
+  // add rdi, rsi; jb +6; mov eax, 0; ret; mov eax, 1; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x01, 0xf7, 0x72, 0x06, 0xb8, 0x00, 0x00, 0x00, 0x00, 0xc3,
+                               0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3},
+                              f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 1, 0, 0}) & 0xffffffffU, 1U);  // the sum wraps
+  EXPECT_EQ(run_x86_64(f, {1, 2, 0, 0}) & 0xffffffffU, 0U);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 0, 0, 0}) & 0xffffffffU, 0U);
+}
+
+/// Builds: Compare rdi, rsi; <op> rax = rdx (+|-) rcx (+|-) CF; return rax.
+donkey::IrFunction carry_function(donkey::IrOp op) {
+  donkey::IrFunction function;
+  function.name = "carry";
+  donkey::IrBlock block;
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::Compare;
+  compare.a = donkey::IrOperand::register_ref("rdi", 8);
+  compare.b = donkey::IrOperand::register_ref("rsi", 8);
+  compare.condition = donkey::IrCondition::UnsignedLess;  // only the carry is used below
+  compare.width = 8;
+  block.statements.push_back(compare);
+  donkey::IrStatement carry;
+  carry.op = op;
+  carry.dest = donkey::IrOperand::register_ref("rax", 8);
+  carry.a = donkey::IrOperand::register_ref("rdx", 8);
+  carry.b = donkey::IrOperand::register_ref("rcx", 8);
+  carry.width = 8;
+  block.statements.push_back(carry);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  function.blocks.push_back(std::move(block));
+  return function;
+}
+
+TEST(Ir, AddCarryMatchesHardwareFlags) {
+  // CF after `cmp rdi, rsi` is rdi < rsi. adc: rdx + rcx + CF.
+  const donkey::IrFunction f = carry_function(donkey::IrOp::AddCarry);
+  ASSERT_TRUE(donkey::verify_ir(f).has_value());
+  EXPECT_EQ(run_x86_64(f, {1, 2, 10, 20}), 31U);  // CF = 1
+  EXPECT_EQ(run_x86_64(f, {2, 1, 10, 20}), 30U);  // CF = 0
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 0, 10, 20}), 30U);
+}
+
+TEST(Ir, SubBorrowMatchesHardwareFlags) {
+  // sbb: rdx - rcx - CF, with CF the borrow of the compare.
+  const donkey::IrFunction f = carry_function(donkey::IrOp::SubBorrow);
+  ASSERT_TRUE(donkey::verify_ir(f).has_value());
+  EXPECT_EQ(run_x86_64(f, {1, 2, 10, 20}), static_cast<std::uint64_t>(-11));  // 10 - 20 - 1
+  EXPECT_EQ(run_x86_64(f, {2, 1, 10, 20}), static_cast<std::uint64_t>(-10));  // 10 - 20 - 0
+}
+
+TEST(Ir, VerifierRejectsCarryWithoutAFlagWriterInItsBlock) {
+  // With no Compare or Test before it, the carry is unknown.
+  donkey::IrFunction without = carry_function(donkey::IrOp::AddCarry);
+  without.blocks.front().statements.erase(without.blocks.front().statements.begin());
+  const auto rejected = donkey::verify_ir(without);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.carry_without_flags");
+
+  // An unsupported statement between the flag writer and the carry may have changed
+  // the flags, so it is rejected too.
+  donkey::IrFunction interrupted = carry_function(donkey::IrOp::AddCarry);
+  donkey::IrStatement unsupported;
+  unsupported.op = donkey::IrOp::Unsupported;
+  unsupported.text = "unknown";
+  unsupported.width = 8;
+  auto& statements = interrupted.blocks.front().statements;
+  statements.insert(statements.begin() + 1, unsupported);
+  const auto interrupted_result = donkey::verify_ir(interrupted);
+  ASSERT_FALSE(interrupted_result.has_value());
+  EXPECT_EQ(interrupted_result.diagnostic().code, "ir.carry_without_flags");
+}
+
+// ---- G02-T2: double-width multiply and divide ----
+
+/// Evaluates an x86-64 function on SysV arguments and returns the whole result,
+/// so that a fault can be checked.
+donkey::Result<donkey::IrEvalResult> evaluate_x86_64(
+    const donkey::IrFunction& function, std::initializer_list<std::uint64_t> arguments) {
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values(arguments);
+  return donkey::evaluate_ir(function, values, memory, options);
+}
+
+TEST(Ir, X86MulAndImulReturnTheHighHalfOfTheProduct) {
+  // mov rax, rdi; mul rsi; mov rax, rdx; ret
+  donkey::IrFunction unsigned_high;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0xf7, 0xe6, 0x48, 0x89, 0xd0, 0xc3}, unsigned_high));
+  EXPECT_FALSE(unsigned_high.partial);
+  EXPECT_EQ(run_x86_64(unsigned_high, {1ULL << 63, 4}), 2U);        // 2^65 >> 64
+  EXPECT_EQ(run_x86_64(unsigned_high, {~0ULL, ~0ULL}), ~0ULL - 1);  // (2^64-1)^2 >> 64
+  EXPECT_EQ(run_x86_64(unsigned_high, {3, 5}), 0U);
+
+  // mov rax, rdi; imul rsi; mov rax, rdx; ret
+  donkey::IrFunction signed_high;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0xf7, 0xee, 0x48, 0x89, 0xd0, 0xc3}, signed_high));
+  EXPECT_FALSE(signed_high.partial);
+  EXPECT_EQ(run_x86_64(signed_high, {~0ULL, ~0ULL}), 0U);      // (-1) * (-1) = 1
+  EXPECT_EQ(run_x86_64(signed_high, {1ULL << 63, 2}), ~0ULL);  // -2^64 >> 64 = -1
+  EXPECT_EQ(run_x86_64(signed_high, {5, static_cast<std::uint64_t>(-3)}), ~0ULL);  // -15 >> 64
+}
+
+TEST(Ir, X86DivAndIdivReturnTheQuotientAndTheRemainder) {
+  // mov rax, rdi; xor edx, edx; div rsi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0xc3}, quotient));
+  EXPECT_FALSE(quotient.partial);
+  EXPECT_EQ(run_x86_64(quotient, {100, 7}), 14U);
+  EXPECT_EQ(run_x86_64(quotient, {~0ULL, 2}), 0x7fffffffffffffffULL);
+  EXPECT_EQ(run_x86_64(quotient, {9, 1}), 9U);
+
+  // mov rax, rdi; xor edx, edx; div rsi; mov rax, rdx; ret
+  donkey::IrFunction remainder;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0x48, 0x89, 0xd0, 0xc3}, remainder));
+  EXPECT_EQ(run_x86_64(remainder, {100, 7}), 2U);
+  EXPECT_EQ(run_x86_64(remainder, {~0ULL, 2}), 1U);
+
+  // mov rax, rdi; cqo; idiv rsi; ret
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  EXPECT_FALSE(signed_quotient.partial);
+  const auto neg = [](std::uint64_t v) {
+    return static_cast<std::uint64_t>(-static_cast<std::int64_t>(v));
+  };
+  EXPECT_EQ(run_x86_64(signed_quotient, {neg(100), 7}), neg(14));
+  EXPECT_EQ(run_x86_64(signed_quotient, {100, neg(7)}), neg(14));
+  EXPECT_EQ(run_x86_64(signed_quotient, {neg(100), neg(7)}), 14U);
+
+  // mov rax, rdi; cqo; idiv rsi; mov rax, rdx; ret
+  donkey::IrFunction signed_remainder;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0x48, 0x89, 0xd0, 0xc3}, signed_remainder));
+  EXPECT_EQ(run_x86_64(signed_remainder, {neg(100), 7}),
+            neg(2));  // the remainder keeps the dividend's sign
+  EXPECT_EQ(run_x86_64(signed_remainder, {100, neg(7)}), 2U);
+}
+
+TEST(Ir, X86DivideFaultsWhereTheHardwareDivideErrors) {
+  // mov rax, rdi; xor edx, edx; div rsi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0xc3}, quotient));
+  const auto zero = evaluate_x86_64(quotient, {5, 0});
+  ASSERT_FALSE(zero.has_value());
+  EXPECT_EQ(zero.diagnostic().code, "ir.eval_fault");
+
+  // mov rax, rdi; cqo; idiv rsi; ret. INT64_MIN / -1 needs 2^63, which does not fit.
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x99, 0x48, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  const auto overflow = evaluate_x86_64(signed_quotient, {1ULL << 63, ~0ULL});
+  ASSERT_FALSE(overflow.has_value());
+  EXPECT_EQ(overflow.diagnostic().code, "ir.eval_fault");
+}
+
+TEST(Ir, X86ThirtyTwoBitDivideUsesEdxAndEax) {
+  // mov eax, edi; xor edx, edx; div esi; ret
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x89, 0xf8, 0x31, 0xd2, 0xf7, 0xf6, 0xc3}, quotient));
+  EXPECT_FALSE(quotient.partial);
+  EXPECT_EQ(run_x86_64(quotient, {0xffffffffULL, 2}) & 0xffffffffU, 0x7fffffffU);
+
+  // mov eax, edi; cdq; idiv esi; ret
+  donkey::IrFunction signed_quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x89, 0xf8, 0x99, 0xf7, 0xfe, 0xc3}, signed_quotient));
+  EXPECT_FALSE(signed_quotient.partial);
+  EXPECT_EQ(run_x86_64(signed_quotient, {static_cast<std::uint64_t>(-100), 7}) & 0xffffffffU,
+            0xfffffff2U);  // -14
+}
+
+TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.width = 8;  // c is left unset
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
+}
+
+// ---- G02-T3: population count, bit scans, byte swap, bit test ----
+
+// The flags of a compare carry into a fall-through block that has no other
+// predecessor, so `setg` after `cmp`/`je` is exact there and the function is
+// Complete. The compare is repeated at the start of that block.
+TEST(Ir, FlagsFromSinglePredecessorAreExact) {
+  donkey::IrFunction
+      carried;  // cmp rdi, rsi; je L; setg al; movzx eax, al; ret; L: mov eax, 42; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x39, 0xf7, 0x74, 0x07, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0,
+                               0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                              carried));
+  EXPECT_FALSE(carried.partial);
+  EXPECT_EQ(run_x86_64(carried, {5, 3}), 1U);
+  EXPECT_EQ(run_x86_64(carried, {3, 5}), 0U);
+  EXPECT_EQ(run_x86_64(carried, {~0ULL, 0}), 0U);  // -1 > 0 is false, signed
+  EXPECT_EQ(run_x86_64(carried, {3, 3}), 42U);     // equal: the je branch
+
+  // The same shape, but rdi is rewritten between the compare and the branch: the
+  // operands the repeated compare would read are not the ones that set the flags.
+  donkey::IrFunction rewritten;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x39, 0xf7, 0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, 0x74, 0x07, 0x0f,
+                       0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                      rewritten));
+  EXPECT_TRUE(rewritten.partial);
+}
+
+// `sp` is the 16-bit name of the stack pointer. After `mov ax, sp; cmp sp, ax`,
+// the push changes the value the compare read, so its flags cannot be carried
+// into the fall-through block.
+TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
+  donkey::IrFunction function;  // mov ax, sp; cmp sp, ax; push rdi; jne L; setne al; L: ret
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x89, 0xe0, 0x66, 0x39, 0xc4, 0x57, 0x75, 0x03, 0x0f, 0x95, 0xc0, 0xc3}, function));
+  EXPECT_TRUE(function.partial);
+}
+
+// bsf and bsr for a nonzero source are the lowest and highest set bit. The
+// result is Partial, because the destination is undefined for a zero source.
+TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
+  donkey::IrFunction forward;  // bsf rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbc, 0xc7, 0xc3}, forward));
+  EXPECT_TRUE(forward.partial);
+  EXPECT_EQ(run_x86_64(forward, {0x18}), 3U);
+  EXPECT_EQ(run_x86_64(forward, {1ULL << 40}), 40U);
+
+  donkey::IrFunction reverse;  // bsr rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbd, 0xc7, 0xc3}, reverse));
+  EXPECT_TRUE(reverse.partial);
+  EXPECT_EQ(run_x86_64(reverse, {0x18}), 4U);
+  EXPECT_EQ(run_x86_64(reverse, {1ULL << 40}), 40U);
+
+  donkey::IrFunction forward32;  // bsf eax, edi; ret: only the low 32 bits are read
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbc, 0xc7, 0xc3}, forward32));
+  EXPECT_EQ(run_x86_64(forward32, {0x100000008ULL}), 3U);
+
+  donkey::IrFunction reverse32;  // bsr eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbd, 0xc7, 0xc3}, reverse32));
+  EXPECT_EQ(run_x86_64(reverse32, {0xffffffffULL}), 31U);
+}
+
+TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
+  // popcnt rax, rdi; ret
+  donkey::IrFunction popcount;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xb8, 0xc7, 0xc3}, popcount));
+  EXPECT_FALSE(popcount.partial);
+  EXPECT_EQ(run_x86_64(popcount, {0xff}), 8U);
+  EXPECT_EQ(run_x86_64(popcount, {~0ULL}), 64U);
+  EXPECT_EQ(run_x86_64(popcount, {0}), 0U);
+
+  // tzcnt rax, rdi; ret
+  donkey::IrFunction trailing;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbc, 0xc7, 0xc3}, trailing));
+  EXPECT_EQ(run_x86_64(trailing, {8}), 3U);
+  EXPECT_EQ(run_x86_64(trailing, {0}), 64U);  // tzcnt of zero is the operand width
+
+  // lzcnt rax, rdi; ret
+  donkey::IrFunction leading;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbd, 0xc7, 0xc3}, leading));
+  EXPECT_EQ(run_x86_64(leading, {1}), 63U);
+  EXPECT_EQ(run_x86_64(leading, {0}), 64U);
+
+  // mov rax, rdi; bswap rax; ret
+  donkey::IrFunction swap;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x0f, 0xc8, 0xc3}, swap));
+  EXPECT_FALSE(swap.partial);
+  EXPECT_EQ(run_x86_64(swap, {0x0102030405060708ULL}), 0x0807060504030201ULL);
+}
+
+TEST(Ir, X86BitTestCarriesTheSelectedBit) {
+  // bt rdi, rsi; setc al; movzx eax, al; ret
+  donkey::IrFunction register_index;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xa3, 0xf7, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3},
+                              register_index));
+  EXPECT_FALSE(register_index.partial);
+  EXPECT_EQ(run_x86_64(register_index, {4, 2}) & 0xffU, 1U);   // bit 2 of 4 is set
+  EXPECT_EQ(run_x86_64(register_index, {4, 1}) & 0xffU, 0U);   // bit 1 of 4 is clear
+  EXPECT_EQ(run_x86_64(register_index, {4, 66}) & 0xffU, 1U);  // the index is taken modulo 64
+
+  // bt rdi, 3; setc al; movzx eax, al; ret
+  donkey::IrFunction immediate_index;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x0f, 0xba, 0xe7, 0x03, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, immediate_index));
+  EXPECT_FALSE(immediate_index.partial);
+  EXPECT_EQ(run_x86_64(immediate_index, {8}) & 0xffU, 1U);
+  EXPECT_EQ(run_x86_64(immediate_index, {4}) & 0xffU, 0U);
+}
+
+TEST(Ir, FunctionWithADirectCallIsNotComplete) {
+  // call +0; mov eax, 1; ret. The call's effects are not modelled, so the result
+  // must be Partial even though every instruction lifts.
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0xe8, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+}
+
+TEST(Ir, VerifierRejectsADivisorTemporaryThatIsNeverDefined) {
+  // The divisor is an operand like the others: an undefined temporary there is
+  // rejected instead of being read as zero.
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.c = donkey::IrOperand::register_ref("var_7", 8);
+  divide.width = 8;
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.undefined_variable");
+}
+
+TEST(Ir, VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled) {
+  // Compare; AddCarry; AddCarry: the second carry would read the compare's CF,
+  // not the carry out of the first add, which the IR does not represent.
+  donkey::IrFunction chained = carry_function(donkey::IrOp::AddCarry);
+  auto& statements = chained.blocks.front().statements;
+  statements.insert(statements.begin() + 2, statements[1]);
+  const auto rejected = donkey::verify_ir(chained);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.carry_without_flags");
+}
+
+TEST(Ir, VerifierRejectsACarryWithABlockOperand) {
+  donkey::IrFunction f = carry_function(donkey::IrOp::AddCarry);
+  f.blocks.front().statements[1].b = donkey::IrOperand::block_ref(0);
+  const auto rejected = donkey::verify_ir(f);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_carry");
+}
+
+TEST(Ir, VerifierRejectsACarryConstantWiderThanItsDestination) {
+  donkey::IrFunction f = carry_function(donkey::IrOp::AddCarry);
+  donkey::IrStatement& carry = f.blocks.front().statements[1];
+  carry.dest = donkey::IrOperand::register_ref("rax", 4);
+  carry.a = donkey::IrOperand::register_ref("rdx", 4);
+  carry.b = donkey::IrOperand::constant_value(1, 8);
+  carry.width = 4;
+  const auto rejected = donkey::verify_ir(f);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.type_width_mismatch");
+}
+
+/// Runs an x86-64 function whose only memory is one qword at `address`, passed
+/// in rdi. Reads of any other address fail the evaluation.
+std::uint64_t run_x86_64_on_qword(const donkey::IrFunction& function, std::uint64_t address,
+                                  std::uint64_t value) {
+  donkey::IrEvalMemory memory;
+  std::vector<std::uint8_t> bytes(8);
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    bytes[i] = static_cast<std::uint8_t>(value >> (8 * i));
+  }
+  EXPECT_TRUE(memory.add_region(address, bytes));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values{address};
+  auto result = donkey::evaluate_ir(function, values, memory, options);
+  EXPECT_TRUE(result.has_value()) << (result.has_value() ? "" : result.diagnostic().message);
+  return result.has_value() ? result.value().return_value : 0;
+}
+
+TEST(Ir, X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue) {
+  // add rdi, [rdi]; setb al; movzx eax, al; ret
+  // The compare for the carry must not re-read [rdi] at the new value of rdi.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x03, 0x3f, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  // The sum wraps to zero: 0x1000 + (2^64 - 0x1000) carries out.
+  EXPECT_EQ(run_x86_64_on_qword(f, 0x1000, 0xFFFF'FFFF'FFFF'F000ULL), 1U);
+  // No wrap: 0x1000 + 5 does not carry out.
+  EXPECT_EQ(run_x86_64_on_qword(f, 0x1000, 5), 0U);
+}
+
+TEST(Ir, X86CarryReachesAnAdcAcrossARegisterExchange) {
+  // add rdi, rsi; xchg rdx, rcx; adc rdx, rcx; mov rax, rdx; ret
+  // The exchange does not write the flags, so the adc reads the add's carry.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x01, 0xf7, 0x48, 0x87, 0xca, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {~0ULL, 1, 5, 7}), 13U);  // the sum wraps: 5 + 7 + 1
+  EXPECT_EQ(run_x86_64(f, {1, 2, 5, 7}), 12U);
+}
+
+TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
+  // cmp rdi, rsi; xchg [rdi], rax; adc rdx, rcx; mov rax, rdx; ret
+  // The memory exchange is Unsupported and may have changed the flags, so the
+  // adc must not be lifted with the compare's carry.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x39, 0xf7, 0x48, 0x87, 0x07, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      EXPECT_NE(statement.op, donkey::IrOp::AddCarry);
+    }
+  }
+}
+
+TEST(Ir, X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature) {
+  // mov rax, rdi; mov edx, 0; div rsi; ret: the divisor is rsi, the second argument.
+  // (mov, not xor, for rdx: an xor reads its register and would add rdx as an input.)
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0xf8, 0xba, 0x00, 0x00, 0x00, 0x00, 0x48, 0xf7, 0xf6, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  ASSERT_EQ(f.parameters.size(), 2U);
+  EXPECT_EQ(f.parameters[1].abi_register, "rsi");
+  EXPECT_EQ(run_x86_64(f, {10, 3}), 3U);
+}
+
+TEST(Ir, X86BitTestAndSetResetAndComplementWriteTheBit) {
+  // bts rdi, rsi; mov rax, rdi; ret. The bit index is rsi modulo 64.
+  donkey::IrFunction bts;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xab, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, bts));
+  EXPECT_FALSE(bts.partial);
+  EXPECT_EQ(run_x86_64(bts, {0, 3}), 8U);
+  EXPECT_EQ(run_x86_64(bts, {8, 3}), 8U);   // already set
+  EXPECT_EQ(run_x86_64(bts, {0, 66}), 4U);  // 66 mod 64 = 2
+
+  // btr rdi, rsi; mov rax, rdi; ret
+  donkey::IrFunction btr;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xb3, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, btr));
+  EXPECT_FALSE(btr.partial);
+  EXPECT_EQ(run_x86_64(btr, {0xF, 1}), 0xDU);
+  EXPECT_EQ(run_x86_64(btr, {0, 1}), 0U);
+
+  // btc rdi, rsi; mov rax, rdi; ret
+  donkey::IrFunction btc;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbb, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, btc));
+  EXPECT_FALSE(btc.partial);
+  EXPECT_EQ(run_x86_64(btc, {0, 2}), 4U);
+  EXPECT_EQ(run_x86_64(btc, {4, 2}), 0U);
+}
+
+TEST(Ir, X86BitTestAndSetCarriesTheBitBeforeTheWrite) {
+  // bts rdi, rsi; setb al; movzx eax, al; ret: CF is the bit as it was before the set.
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x0f, 0xab, 0xf7, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {0, 3}), 0U);  // bit clear before: CF = 0, then set
+  EXPECT_EQ(run_x86_64(f, {8, 3}), 1U);  // bit set before: CF = 1
+}
+
+TEST(Ir, X86MovbeLoadsAndStoresTheBytesReversed) {
+  // movbe rax, [rdi]; ret
+  donkey::IrFunction loads;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0x38, 0xf0, 0x07, 0xc3}, loads));
+  EXPECT_FALSE(loads.partial);
+  EXPECT_EQ(run_x86_64_on_qword(loads, 0x1000, 0x0102030405060708ULL), 0x0807060504030201ULL);
+
+  // mov rax, rsi; movbe [rdi], rax; ret: the stored bytes are the reversed value.
+  donkey::IrFunction stores;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf0, 0x48, 0x0f, 0x38, 0xf1, 0x07, 0xc3}, stores));
+  EXPECT_FALSE(stores.partial);
+  donkey::IrEvalMemory memory;
+  ASSERT_TRUE(memory.add_region(0x1000, std::vector<std::uint8_t>(8, 0)));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values{0x1000, 0x0102030405060708ULL};
+  ASSERT_TRUE(donkey::evaluate_ir(stores, values, memory, options).has_value());
+  const std::vector<std::uint8_t>* bytes = memory.region(0x1000);
+  ASSERT_NE(bytes, nullptr);
+  // bswap(0x0102030405060708) = 0x0807060504030201, which is stored little-endian
+  // as the bytes 01 02 .. 08.
+  const std::vector<std::uint8_t> expected{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  EXPECT_EQ(*bytes, expected);
+}
+
+TEST(Ir, VerifierRejectsABitOperationWithABlockSource) {
+  // A block reference is not a value; the evaluator cannot read it.
+  donkey::IrBlock block;
+  donkey::IrStatement popcount;
+  popcount.op = donkey::IrOp::PopCount;
+  popcount.dest = donkey::IrOperand::register_ref("rax", 8);
+  popcount.a = donkey::IrOperand::block_ref(0);
+  popcount.width = 8;
+  block.statements.push_back(popcount);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "popcount";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_bit_op");
+}
+
 }  // namespace

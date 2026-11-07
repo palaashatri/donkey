@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `adc`/`sbb`, double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks | P0 | TODO |
+| G02 | x86 integer gaps | Full integer semantics | `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3, and flags into a single-predecessor fall-through block in G02-T4. Still Partial or Unsupported by design: `bsf`/`bsr` with a zero source, memory forms of `bt` family, flags into a block with several predecessors | P0 | IN PROGRESS (G02-T1, T2, T3, T4 DONE; the rest is by design, see the row text) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -335,6 +335,35 @@ interpreter.
   from the Intel SDM definitions.
 - **Done when:** the `adc` Partial on Clang -O2 (`docs/SUPPORT_MATRIX.md`)
   becomes Complete and verified.
+- **Status:** DONE. Evidence: `Ir.X86AddWithCarryMatchesHardwareFlags`,
+  `Ir.X86SubWithBorrowMatchesHardwareFlags`,
+  `Ir.X86AddOfARegisterToItselfCarriesFromTheOriginalValue`,
+  `Ir.X86SubOfARegisterFromItselfKeepsTheOriginalForSignedBranches`,
+  `Ir.X86AddFollowedByACarryBranchIsExact`, `Ir.AddCarryMatchesHardwareFlags`,
+  `Ir.SubBorrowMatchesHardwareFlags`,
+  `Ir.VerifierRejectsCarryWithoutAFlagWriterInItsBlock`, and the corpus
+  functions `c_add128_hi`, `c_sub128_hi`, `c_add_wraps` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`. On Clang 18.1
+  x86-64 those three are Complete and verified at O0, O2 and O3, so the
+  `adc` Partial on Clang -O2 is gone. Also fixed in this task: `sub x, x`
+  followed by a signed branch compared against the overwritten register; an
+  `add`/`sub` whose memory source is addressed by its own destination
+  (`add rdi, [rdi]; setb`), which now copies the source before the write
+  (`Ir.X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue`);
+  a register `xchg` between a flag writer and its consumer, which now passes the
+  flags through (`Ir.X86CarryReachesAnAdcAcrossARegisterExchange`); an
+  unsupported memory `xchg`, which now drops the flag state
+  (`Ir.X86CarryIsNotReadAcrossAnUnsupportedExchange`); and the verifier
+  rejects a second carry op that would read a carry out the IR does not
+  represent (`Ir.VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled`),
+  a block operand (`Ir.VerifierRejectsACarryWithABlockOperand`), and a
+  constant wider than the destination (`Ir.VerifierRejectsACarryConstantWiderThanItsDestination`).
+- **Deviations from the steps above:** the carry is read from the flag state
+  of the last `Compare`/`Test` in the block, as `CondAssign` already does,
+  rather than from a separate operand. The carry out of `adc`/`sbb` is not
+  modelled, so `adc; adc` chains are Partial. `xchg reg, reg` and a memory
+  source for `adc`/`sbb` are lifted. AArch64 `adc`/`sbc`/`cmn` are not lifted;
+  that is G03-T4.
 
 **G02-T2 Double-width multiply and divide** (depends: none)
 
@@ -351,6 +380,23 @@ interpreter.
      division by a constant (compilers emit multiply-high).
 - **Done when:** the new functions are Complete and verified on GCC and Clang
   at O0/O2/O3.
+- **Status:** DONE (stacked on G02-T1; see the PR for its base). Evidence:
+  `Ir.X86MulAndImulReturnTheHighHalfOfTheProduct`,
+  `Ir.X86DivAndIdivReturnTheQuotientAndTheRemainder`,
+  `Ir.X86DivideFaultsWhereTheHardwareDivideErrors`,
+  `Ir.X86ThirtyTwoBitDivideUsesEdxAndEax`,
+  `Ir.VerifierRejectsDivideWithoutItsDivisor`,
+  `Ir.VerifierRejectsADivisorTemporaryThatIsNeverDefined`,
+  `Ir.X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature`, and the corpus functions
+  `c_mulhi_u64`, `c_mulhi_s64`, `c_udiv32`, `c_urem32`, `c_sdiv32`,
+  `c_srem32`, `c_udiv64`, `c_urem64`, `c_sdiv64`, `c_srem64`, `c_div10` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
+- **Deviations from the steps above:** division needs three operands, so
+  `IrStatement` gained a third operand `c` (the divisor). The dividend is the
+  pair `a` (high) and `b` (low). The 8- and 16-bit forms are Unsupported. The
+  flags after `mul`/`div` are not modelled. The signed corpus functions guard
+  `INT_MIN / -1` and division by zero, because the native code traps there;
+  the interpreter reports `ir.eval_fault` for both instead of returning 0.
 
 **G02-T3 Bit operations**
 
@@ -364,6 +410,31 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 (x86-64, native). Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+  64 bit) and `bt` with a register or immediate index (the IR ops
+  `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
+  Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
+  `Ir.X86BitTestCarriesTheSelectedBit`, and the corpus functions
+  `c_popcount64`, `c_ctz64_guarded`, `c_clz64_guarded`, `c_bswap32`,
+  `c_bswap64`, `c_bit_test`. Also fixed: a function containing a direct call
+  was reported Complete. It is now Partial, which changed the expected status
+  of `_start` in two CLI tests (`cli.decompile_elf_json`,
+  `cli.decompile_elf_i386`) from Complete to Partial. Since then: `bts`, `btr`
+  and `btc` with a register destination (`Ir.X86BitTestAndSetResetAndComplementWriteTheBit`,
+  `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
+  and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
+  `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
+  at O3 with `popcnt`. `bsf` and `bsr` are lifted with a register or memory
+  source (`Ir.X86BitScanForwardAndReverseAreExactForANonzeroSource`): exact for
+  a nonzero source, and the function is Partial because the zero-source result
+  is undefined. ZF is not modelled. The guarded use `c_clz64_guarded` is Partial
+  and agrees with the compiled code, and it can only become Complete once flags
+  and path facts cross blocks (G02-T4). `c_ctz64_guarded` is Complete because
+  GCC encodes it as `rep bsf`, which is `tzcnt`. Not done in this task: the
+  `bsf`/`bsr` zero-source case itself, which the ledger's plan allows to stay
+  Partial.
+  Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
+  can lie outside the operand).
 
 **G02-T4 Flags across blocks**
 
@@ -380,6 +451,20 @@ interpreter.
   3. Otherwise keep the branch Partial.
 - **Done when:** a hand-written test (`Ir.FlagsFromSinglePredecessorAreExact`)
   passes, and the corpus has no new WRONG.
+- **Status:** DONE on x86-64 (GCC 13.3 and Clang 18.1, native). The rule is
+  implemented as written, with one simplification: the block just before the
+  successor must fall through or end in the conditional branch whose not-taken
+  edge is the successor, and the successor must have no other CFG predecessor
+  (calls and jumps from elsewhere count, and an unresolved indirect branch in
+  the function rules the carry out). The last flag writer must be a two-operand
+  `cmp` or `test` of registers and immediates, and nothing after it may write a
+  register it reads. The compare is repeated from its own instruction at the
+  successor's start. Evidence: `Ir.FlagsFromSinglePredecessorAreExact`, which
+  also checks that a rewritten operand keeps the successor Partial. The GCC
+  x86-64 corpus gains one Complete function at O2 and O3 and under
+  `-march=x86-64-v2` (57/59, 51/59, 52/59), and no result is WRONG. The Clang
+  x86-64 counts are unchanged. Not done: flags carried through a block with more
+  than one predecessor, and flags across a block whose predecessor is a call.
 
 ### G03 AArch64 integer gaps [oracle]
 
@@ -407,6 +492,12 @@ interpreter.
   - The interpreter must branch on architecture for these.
 - **Done when:** the corpus division functions from G02-T2 are Complete and
   verified on aarch64.
+- **Note (added by G02-T2):** the IR ops `MulHighUnsigned`, `MulHighSigned`,
+  `DivUnsigned`, `DivSigned`, `RemUnsigned` and `RemSigned` exist, with the
+  divisor as the third operand `c`. They fault on a zero divisor or a quotient
+  overflow, so AArch64 `udiv`/`sdiv` must guard the zero case in the IR (a
+  compare and a conditional select to zero) to match AArch64's result. Do not
+  lower them to the faulting op unguarded.
 
 **G03-T3 AArch64 jump tables**
 
@@ -427,6 +518,17 @@ interpreter.
   AArch64 instead of skipping.
 - **Done when:** that test passes on `ubuntu-24.04-arm` and `macos-15`, and
   `c_switch_dense` is Complete and verified.
+
+**G03-T4 AArch64 carry chain** (depends: G02-T1; added when G02-T1 landed)
+
+- **Goal:** lift AArch64 `adc`, `adcs`, `sbc`, `sbcs`, `adds`, `subs`, `cmn`
+  and `cmp` (`cmn` is `adds` into the zero register), with C and V from the
+  existing NZCV model. The IR already has `AddCarry` and `SubBorrow`
+  (G02-T1), and `condition_holds(Carry)` already gives AArch64 C.
+- **Files:** `src/ir/lift_aarch64.cpp`, the corpus is unchanged.
+- **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
+  and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
+  counts in `docs/SUPPORT_MATRIX.md`.
 
 ### G04 Decompiler readability
 

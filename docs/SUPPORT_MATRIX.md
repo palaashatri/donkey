@@ -55,10 +55,14 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
-`tests/corpus/corpus.c` has 39 integer functions: arithmetic, branches,
-loops, arrays, structs, dense and sparse switches, stack arguments and
-narrow types. The test suite builds it at -O0, -O2 and -O3 with the host's C
-compiler. `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
+`tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
+loops, arrays, structs, dense and sparse switches, stack arguments, narrow
+types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), double-width
+multiply and divide (`mul`, `imul`, `div`, `idiv`), and bit operations
+(population count, guarded bit scans, byte swap, bit test and bit set, reset
+and complement, `movbe`). The test suite builds it at -O0, -O2 and -O3 with
+the host's C compiler, and on x86-64 hosts also at -O3 with
+`-march=x86-64-v2` (which adds POPCNT). `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
 every function from the built library and runs the IR in an interpreter on
 48 input vectors. It calls the compiled function itself with the same inputs
 and compares return values and memory written through pointers.
@@ -75,10 +79,22 @@ listed where the per-function report was read.
 
 | Compiler, target | Where measured | -O0 | -O2 | -O3 | Partial causes |
 |---|---|---|---|---|---|
-| GCC 13.3, x86-64 Linux | CI ubuntu-24.04 | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
-| Clang 18.1, x86-64 Linux | locally | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
+| GCC 13.3, x86-64 Linux | CI ubuntu-24.04 (before G02-T1, 39 functions) | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 41/42 | 35/42 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
+| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 51/59 | SIMD vectorisation, `bsr`; `c_switch_sparse` Partial (cause not itemised); `c_popcount` Complete |
+| GCC 13.3, x86-64 Linux | locally, after G02-T4 (59 functions) | 57/59 | 57/59 | 51/59 | the causes above, not re-itemised; one more function is Complete at O2 and O3 (cross-block flags) |
+| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T4 (59 functions) | not built | not built | 52/59 | the causes above, not re-itemised; one more function is Complete (cross-block flags) |
+| Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
+| Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
+| Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
+| Clang 18.1, x86-64 Linux | locally, after G02-T3 (59 functions) | 58/59 | 53/59 | 53/59 | SIMD vectorisation, `bsr` |
+| Clang 18.1, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 52/59 | SIMD vectorisation, `bsr`, `shld` (`c_rotl5`, not lifted) |
 | MinGW-w64 GCC 14.2, x64 Windows | CI windows-2022 | 39/39 | 36/39 | 30/39 | not itemised |
 | GCC 13.3, AArch64 Linux | CI ubuntu-24.04-arm | 39/39 | 36/39 | 30/39 | SIMD, `ccmp` |
+| GCC 13.3, AArch64 Linux | locally, after G02-T1 (42 functions), under qemu-aarch64 | 40/42 | 36/42 | 30/42 | SIMD, `ccmp`, `adc`/`sbc`/`cmn` (not lifted yet) |
+| GCC 13.3, AArch64 Linux | locally, after G02-T2 (53 functions), under qemu-aarch64 | 40/53 | 36/53 | 30/53 | SIMD, `ccmp`, `adc`/`sbc`/`cmn`, `umulh`/`smulh`, `udiv`/`sdiv` (not lifted yet) |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -106,15 +122,25 @@ arithmetic on x86. On AArch64 it tracks NZCV within a block: a branch or
 conditional select is exact when the block's last flag writer is `cmp`,
 `tst`, `subs` or `ands`, and Partial otherwise. It also models the `csel`
 family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
-`ubfx`/`sbfx` and `mvn`.
+`ubfx`/`sbfx` and `mvn`. On x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
+`bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
+with a register and a memory operand.
 
 ### Known unsupported classes
 
 - Floating point and SIMD: vectorised loops are Partial.
-- Calls' effects on registers and memory: functions that call are
-  rendered, but the oracle does not evaluate them.
-- `adc`/`sbb`, double-width `mul`/`imul`/`div`.
-- Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
+- Calls: a function that calls is Partial. Its call is rendered, and the
+  callee's effects on registers and memory are not modelled.
+- `bsf`/`bsr` with a zero source: the destination is undefined there, and ZF is
+  not modelled. They are lifted, and a function that uses them is Partial with a
+  note. A guarded use such as `c_clz64_guarded` stays Partial until flags cross
+  blocks (G02-T4).
+- Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
+  operand, so they are Unsupported.
+- x86 flags read across basic blocks, except into a fall-through block that has
+  no other predecessor, where the compare that set them is repeated (G02-T4).
+  Flags are not carried across blocks on AArch64, so an AArch64 `ccmp`/`ccmn`
+  whose flags before are not exact is Partial.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
 

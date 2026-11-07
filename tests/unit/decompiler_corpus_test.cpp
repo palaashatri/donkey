@@ -86,6 +86,26 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_switch_sparse", 'i', "i"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
+    {"c_add128_hi", 'U', "UUUU"},
+    {"c_sub128_hi", 'U', "UUUU"},
+    {"c_add_wraps", 'i', "UU"},
+    {"c_mulhi_u64", 'U', "UU"},
+    {"c_mulhi_s64", 'U', "UU"},
+    {"c_udiv32", 'u', "uu"},
+    {"c_urem32", 'u', "uu"},
+    {"c_sdiv32", 'i', "ii"},
+    {"c_srem32", 'i', "ii"},
+    {"c_udiv64", 'U', "UU"},
+    {"c_urem64", 'U', "UU"},
+    {"c_sdiv64", 'U', "UU"},
+    {"c_srem64", 'U', "UU"},
+    {"c_div10", 'U', "U"},
+    {"c_popcount64", 'u', "U"},
+    {"c_ctz64_guarded", 'u', "U"},
+    {"c_clz64_guarded", 'u', "U"},
+    {"c_bswap32", 'u', "u"},
+    {"c_bswap64", 'U', "U"},
+    {"c_bit_test", 'i', "Uu"},
 };
 
 struct Library {
@@ -97,6 +117,9 @@ const Library kLibraries[] = {
     {"O0", DONKEY_CORPUS_O0_PATH},
     {"O2", DONKEY_CORPUS_O2_PATH},
     {"O3", DONKEY_CORPUS_O3_PATH},
+#ifdef DONKEY_CORPUS_O3_V2_PATH
+    {"O3-x86-64-v2", DONKEY_CORPUS_O3_V2_PATH},
+#endif
 };
 
 constexpr std::uint64_t kP = 0x10000000ULL;
@@ -565,6 +588,22 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
                                   << " is reported Complete but computes something else: "
                                   << o.detail;
   }
+
+  // The carry-chain functions are Complete under Clang 18.1 on x86-64 at every
+  // level. A fall back to Partial would hide a wrong carry, so it must fail here.
+#if defined(__x86_64__) || defined(_M_X64)
+  if (std::strstr(DONKEY_CORPUS_COMPILER, "Clang 18") != nullptr) {
+    for (const Outcome& o : outcomes) {
+      if (o.function != "c_add128_hi" && o.function != "c_sub128_hi" &&
+          o.function != "c_add_wraps") {
+        continue;
+      }
+      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function;
+      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+    }
+  }
+#endif
 }
 
 // A17: the dense switch compiled without optimisation dispatches through a

@@ -307,6 +307,35 @@ class Renderer {
       case IrOp::CondAssign:
         return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
                operand(statement.a) + ";";
+      case IrOp::AddCarry:
+      case IrOp::SubBorrow: {
+        const bool add = statement.op == IrOp::AddCarry;
+        return operand(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
+               operand(statement.b) + (add ? " + CF;" : " - CF;");
+      }
+      case IrOp::MulHighUnsigned:
+      case IrOp::MulHighSigned:
+        return operand(statement.dest) + " = mulh" +
+               (statement.op == IrOp::MulHighSigned ? "s(" : "u(") + operand(statement.a) + ", " +
+               operand(statement.b) + ");";
+      case IrOp::DivUnsigned:
+      case IrOp::DivSigned:
+      case IrOp::RemUnsigned:
+      case IrOp::RemSigned: {
+        const bool quotient = statement.op == IrOp::DivUnsigned || statement.op == IrOp::DivSigned;
+        const bool is_signed = statement.op == IrOp::DivSigned || statement.op == IrOp::RemSigned;
+        return operand(statement.dest) + " = (" + operand(statement.a) + ":" +
+               operand(statement.b) + (is_signed ? " signed) " : " unsigned) ") +
+               (quotient ? "/ " : "% ") + operand(statement.c) + ";";
+      }
+      case IrOp::CountTrailingZeros:
+        return operand(statement.dest) + " = ctz(" + operand(statement.a) + ");";
+      case IrOp::CountLeadingZeros:
+        return operand(statement.dest) + " = clz(" + operand(statement.a) + ");";
+      case IrOp::PopCount:
+        return operand(statement.dest) + " = popcount(" + operand(statement.a) + ");";
+      case IrOp::ByteSwap:
+        return operand(statement.dest) + " = bswap(" + operand(statement.a) + ");";
     }
     return "";
   }
@@ -324,6 +353,26 @@ class Renderer {
 }  // namespace
 
 namespace detail {
+
+/// True when a Compare or Test earlier in the block sets the flags, with no call
+/// or unsupported statement after it that could change them. The interpreter
+/// keeps the operand values the flag writer read, so later writes to those
+/// operands do not change the flags. An add or subtract with carry in between
+/// does not qualify: its carry out is not represented in the IR, so the carry
+/// the later statement reads would still be the earlier flag writer's.
+bool flags_written_in_block(const IrBlock& block, std::size_t index) {
+  for (std::size_t i = index; i-- > 0;) {
+    const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
+      return true;
+    }
+    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
+        candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) {
+      return false;  // flags may have changed in a way the IR does not show
+    }
+  }
+  return false;
+}
 
 const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   std::vector<std::string> written;
@@ -420,6 +469,30 @@ const char* ir_op_name(IrOp op) noexcept {
       return "unsupported";
     case IrOp::CondAssign:
       return "cond_assign";
+    case IrOp::AddCarry:
+      return "add_carry";
+    case IrOp::SubBorrow:
+      return "sub_borrow";
+    case IrOp::MulHighUnsigned:
+      return "mul_high_unsigned";
+    case IrOp::MulHighSigned:
+      return "mul_high_signed";
+    case IrOp::DivUnsigned:
+      return "div_unsigned";
+    case IrOp::DivSigned:
+      return "div_signed";
+    case IrOp::RemUnsigned:
+      return "rem_unsigned";
+    case IrOp::RemSigned:
+      return "rem_signed";
+    case IrOp::CountTrailingZeros:
+      return "count_trailing_zeros";
+    case IrOp::CountLeadingZeros:
+      return "count_leading_zeros";
+    case IrOp::PopCount:
+      return "popcount";
+    case IrOp::ByteSwap:
+      return "byte_swap";
   }
   return "unknown";
 }
@@ -554,7 +627,8 @@ Result<bool> verify_ir(const IrFunction& function) {
       return fail("ir.empty_block", "block has no statements");
     }
     bool seen_terminator = false;
-    for (const IrStatement& statement : block.statements) {
+    for (std::size_t index = 0; index < block.statements.size(); ++index) {
+      const IrStatement& statement = block.statements[index];
       if (seen_terminator) {
         return fail("ir.dead_statements_after_terminator",
                     "block contains statements after terminator");
@@ -585,9 +659,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         return std::nullopt;
       };
 
-      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b};
-      const char* roles[] = {"dest", "a", "b"};
-      for (std::size_t i = 0; i < 3; ++i) {
+      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b, &statement.c};
+      const char* roles[] = {"dest", "a", "b", "c"};
+      for (std::size_t i = 0; i < 4; ++i) {
         if (auto problem = check_operand(*operands[i], roles[i]); problem.has_value()) {
           return make_error<bool>(Status::InternalError, problem->code, problem->message,
                                   problem->offset);
@@ -634,6 +708,79 @@ Result<bool> verify_ir(const IrFunction& function) {
                statement.a.width != statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "conditional assign source and destination widths must match");
+          }
+          break;
+        case IrOp::MulHighUnsigned:
+        case IrOp::MulHighSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None) {
+            return fail("ir.malformed_mul_high",
+                        "high multiply needs a register destination and two sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "high multiply operand widths must match statement width");
+          }
+          break;
+        case IrOp::DivUnsigned:
+        case IrOp::DivSigned:
+        case IrOp::RemUnsigned:
+        case IrOp::RemSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.c.kind == IrOperandKind::None) {
+            return fail("ir.malformed_divide",
+                        "divide needs a register destination and a 2-part dividend and divisor");
+          }
+          if (statement.dest.width != statement.width || statement.a.width != statement.width ||
+              statement.b.width != statement.width ||
+              (statement.c.kind == IrOperandKind::Register &&
+               statement.c.width != statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "divide operand widths must match statement width");
+          }
+          break;
+        case IrOp::CountTrailingZeros:
+        case IrOp::CountLeadingZeros:
+        case IrOp::PopCount:
+        case IrOp::ByteSwap:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block) {
+            return fail("ir.malformed_bit_op",
+                        "bit operation needs a register destination and a value source");
+          }
+          if (statement.dest.width != statement.width || statement.a.width != statement.width) {
+            return fail("ir.type_width_mismatch",
+                        "bit operation operand widths must match statement width");
+          }
+          break;
+        case IrOp::AddCarry:
+        case IrOp::SubBorrow:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block) {
+            return fail(
+                "ir.malformed_carry",
+                "add or subtract with carry needs a register destination and two value sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.dest.width) ||
+              (statement.b.kind == IrOperandKind::Constant &&
+               statement.b.width > statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "add or subtract with carry operand widths must match statement width");
+          }
+          // The carry must come from a flag writer earlier in this block; otherwise
+          // it is not known.
+          if (!detail::flags_written_in_block(block, index)) {
+            return fail("ir.carry_without_flags",
+                        "add or subtract with carry has no flag writer earlier in its block");
           }
           break;
         case IrOp::Add:
@@ -932,6 +1079,9 @@ Result<bool> verify_ir(const IrFunction& function) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
         if (auto diag = check_use(stmt.b); diag.has_value()) {
+          return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
+        }
+        if (auto diag = check_use(stmt.c); diag.has_value()) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
         if (stmt.op == IrOp::Switch) {
