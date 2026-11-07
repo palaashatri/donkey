@@ -805,6 +805,7 @@ void print_usage(std::FILE* out) {
                "  donkey-cli plugin info <plugin-lib> [--json]\n"
                "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
                "<mask|name>] [--json]\n"
+               "  donkey-cli serve                 JSON-RPC 2.0 on stdin/stdout (see docs/RPC.md)\n"
                "\n"
                "Every command except `debug launch` only reads files and never executes them.\n"
                "`debug launch` runs the program under the native debugger (it stops at the\n"

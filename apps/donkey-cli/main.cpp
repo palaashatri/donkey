@@ -84,6 +84,9 @@ int main(int argc, char** argv) {
   if (command == "plugin") {
     return donkey::cli::command_plugin(rest);
   }
+  if (command == "serve") {
+    return donkey::cli::command_serve(rest);
+  }
 
   std::fprintf(stderr, "donkey-cli: unknown command '%.*s'\n", static_cast<int>(command.size()),
                command.data());

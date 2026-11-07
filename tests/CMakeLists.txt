@@ -138,6 +138,7 @@ add_executable(donkey_unit_tests
   unit/debug_test.cpp
   unit/decode_test.cpp
   unit/foundation_test.cpp
+  unit/json_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/large_file_test.cpp
@@ -204,6 +205,13 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set_tests_properties(large.load_and_analyse_1gib PROPERTIES TIMEOUT 600 LABELS large)
 endif()
 
+add_test(NAME cli.serve_session
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve.cmake)
+set_tests_properties(cli.serve_session PROPERTIES TIMEOUT 300)
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
 set_tests_properties(cli.callgraph_json PROPERTIES

@@ -210,6 +210,13 @@ compare, because GCC's table code overwrites `x0`.
   (`ir.unreachable_block`) and the function is never shown as Complete.
 - Varargs and struct passing by value.
 
+## Automation
+
+| Surface | Status | Notes |
+|---|---|---|
+| `donkey-cli serve` (JSON-RPC 2.0, `donkey.rpc.v1`, stdin and stdout) | Partial | Read methods `hello`, `open`, `info`, `functions`, `strings`, `xrefs`, `disasm`, `callgraph` are tested (`cli.serve_session`). `decompile` and `annotations.list` are not implemented; write methods are refused (`rpc.write_disabled`). See `docs/RPC.md` |
+| Python client, batch mode | Not implemented | G11-T2 and G11-T3 in `docs/IDA_GAP_LEDGER.md` |
+
 ## UI
 
 Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform

@@ -46,6 +46,7 @@ include(DonkeyStorageDependencies)
 
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
+  src/foundation/json.cpp
   src/foundation/scheduler.cpp
   src/foundation/thread_priority.cpp
   src/foundation/sha256.cpp
@@ -292,6 +293,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_inflate PRIVATE cxx_std_20)
   target_compile_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_json fuzz/fuzz_json.cpp)
+  target_link_libraries(fuzz_json PRIVATE donkey::foundation)
+  target_compile_features(fuzz_json PRIVATE cxx_std_20)
+  target_compile_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_pdb fuzz/fuzz_pdb.cpp)
   target_link_libraries(fuzz_pdb PRIVATE donkey::binary)
   target_compile_features(fuzz_pdb PRIVATE cxx_std_20)
