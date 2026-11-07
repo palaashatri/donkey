@@ -291,6 +291,19 @@ DROP TABLE annotations_v5_old;
 PRAGMA user_version=6;
 )sql";
 
+/// v7 adds the user names of locals (G12-T3). The table is new, so no rows are copied.
+constexpr const char* kMigrateV6ToV7 = R"sql(
+CREATE TABLE local_names (
+  image_id         INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  function_address INTEGER NOT NULL,
+  variable         TEXT    NOT NULL,
+  name             TEXT    NOT NULL,
+  updated_at       TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (image_id, function_address, variable)
+);
+PRAGMA user_version=7;
+)sql";
+
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
   return Diagnostic::make(Status::InternalError, std::move(code),
@@ -573,6 +586,20 @@ Result<Project> Project::open(const std::string& path) {
       }
       schema = 6;
     }
+    if (schema == 6) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV6ToV7, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v6->v7: " + message);
+      }
+      schema = 7;
+    }
     project.impl_->schema_version = schema;
     return project;
   }
@@ -824,6 +851,170 @@ Result<std::vector<ProjectImage>> Project::images() const {
     return make_error<std::vector<ProjectImage>>(
         Status::InternalError, "project.query_failed",
         storage_error(impl_->db, "project.query_failed", "read images").message);
+  }
+  return out;
+}
+
+namespace {
+
+constexpr std::size_t kMaxLocalKeyBytes = 64;
+constexpr std::size_t kMaxLocalNameBytes = 128;
+constexpr std::uint64_t kMaxLocalIndex = 1023;
+constexpr std::uint64_t kMaxFrameOffset = 1ULL << 40;
+
+bool is_identifier_char(char c, bool first) noexcept {
+  const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+  const bool digit = c >= '0' && c <= '9';
+  return letter || (digit && !first);
+}
+
+/// A C identifier of at most kMaxLocalNameBytes bytes.
+bool local_name_valid(const std::string& name) noexcept {
+  if (name.empty() || name.size() > kMaxLocalNameBytes) {
+    return false;
+  }
+  for (std::size_t i = 0; i < name.size(); ++i) {
+    if (!is_identifier_char(name[i], i == 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+bool local_variable_key_valid(const std::string& variable) noexcept {
+  if (variable.size() > kMaxLocalKeyBytes) {
+    return false;
+  }
+  if (variable.rfind("arg:", 0) == 0) {
+    std::uint64_t index = 0;
+    return parse_decimal(variable.substr(4), index) && index <= kMaxLocalIndex;
+  }
+  if (variable.rfind("frame:", 0) == 0) {
+    const std::string rest = variable.substr(6);
+    const std::size_t colon = rest.find(':');
+    if (colon == std::string::npos || colon == 0 || colon > 16) {
+      return false;
+    }
+    for (std::size_t i = 0; i < colon; ++i) {
+      const char c = rest[i];
+      const bool alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+      if (!alnum) {
+        return false;
+      }
+    }
+    std::string digits = rest.substr(colon + 1);
+    const bool negative = !digits.empty() && digits[0] == '-';
+    if (negative) {
+      digits.erase(0, 1);
+    }
+    std::uint64_t magnitude = 0;
+    if (!parse_decimal(digits, magnitude) || magnitude > kMaxFrameOffset) {
+      return false;
+    }
+    // "-0" is not a canonical offset, so each offset has exactly one text.
+    return !(negative && magnitude == 0);
+  }
+  return false;
+}
+
+Result<void> Project::set_local_name(std::int64_t image_id, std::uint64_t function_address,
+                                     const std::string& variable, const std::string& name) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (!fits_storage(function_address)) {
+    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                           "local function address does not fit the storage integer range",
+                           function_address);
+  }
+  if (!local_variable_key_valid(variable)) {
+    return make_void_error(Status::InvalidInput, "project.local_key_invalid",
+                           "local key must be arg:<index> or frame:<base register>:<offset>");
+  }
+  if (!name.empty() && !local_name_valid(name)) {
+    return make_void_error(Status::InvalidInput, "project.local_name_invalid",
+                           "local name must be a C identifier of at most 128 bytes");
+  }
+
+  sqlite3* db = impl_->db;
+  if (name.empty()) {
+    Statement remove(db,
+                     "DELETE FROM local_names WHERE image_id = ?1 AND function_address = ?2 "
+                     "AND variable = ?3");
+    remove.bind(1, image_id);
+    remove.bind(2, static_cast<std::int64_t>(function_address));
+    remove.bind(3, variable);
+    if (!remove.execute_statement()) {
+      return make_void_error(
+          Status::InternalError, "project.local_name_delete_failed",
+          storage_error(db, "project.local_name_delete_failed", "delete local name").message);
+    }
+    return Result<void>();
+  }
+
+  {
+    Statement check(db, "SELECT 1 FROM images WHERE id = ?1");
+    check.bind(1, image_id);
+    if (!check.ok() || !check.step()) {
+      if (!check.done()) {
+        return make_void_error(
+            Status::InternalError, "project.query_failed",
+            storage_error(db, "project.query_failed", "lookup image for local name").message);
+      }
+      return make_void_error(Status::InvalidInput, "project.image_not_found",
+                             "no image with id " + std::to_string(image_id));
+    }
+  }
+
+  Statement upsert(db,
+                   "INSERT INTO local_names(image_id, function_address, variable, name) "
+                   "VALUES(?1, ?2, ?3, ?4) ON CONFLICT(image_id, function_address, variable) "
+                   "DO UPDATE SET name = excluded.name, updated_at = datetime('now')");
+  upsert.bind(1, image_id);
+  upsert.bind(2, static_cast<std::int64_t>(function_address));
+  upsert.bind(3, variable);
+  upsert.bind(4, name);
+  if (!upsert.execute_statement()) {
+    return make_void_error(
+        Status::InternalError, "project.local_name_write_failed",
+        storage_error(db, "project.local_name_write_failed", "write local name").message);
+  }
+  return Result<void>();
+}
+
+Result<std::vector<LocalName>> Project::local_names(std::int64_t image_id) const {
+  if (!is_open()) {
+    return make_error<std::vector<LocalName>>(Status::InvalidInput, "project.not_open",
+                                              "no project database is open");
+  }
+  Statement query(impl_->db,
+                  "SELECT function_address, variable, name FROM local_names WHERE image_id = ?1 "
+                  "ORDER BY function_address, variable");
+  query.bind(1, image_id);
+  if (!query.ok()) {
+    return make_error<std::vector<LocalName>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(impl_->db, "project.query_failed", "list local names").message);
+  }
+  std::vector<LocalName> out;
+  while (query.step()) {
+    LocalName entry;
+    entry.function_address = static_cast<std::uint64_t>(query.integer(0));
+    entry.variable = query.text(1);
+    entry.name = query.text(2);
+    if (!local_variable_key_valid(entry.variable) || !local_name_valid(entry.name)) {
+      return make_error<std::vector<LocalName>>(Status::CorruptProject,
+                                                "project.local_name_invalid",
+                                                "local name row has an invalid key or name");
+    }
+    out.push_back(std::move(entry));
+  }
+  if (!query.done()) {
+    return make_error<std::vector<LocalName>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(impl_->db, "project.query_failed", "read local names").message);
   }
   return out;
 }

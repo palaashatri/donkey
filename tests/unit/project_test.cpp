@@ -339,7 +339,8 @@ TEST(Project, MigratesVersionOneDatabaseForward) {
         sqlite3_exec(
             db,
             "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
-            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=1",
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; DROP TABLE IF EXISTS "
+            "local_names; PRAGMA user_version=1",
             nullptr, nullptr, nullptr),
         SQLITE_OK);
     sqlite3_close(db);
@@ -402,7 +403,8 @@ TEST(Project, MigratesVersionTwoDatabaseToVersionThree) {
         sqlite3_exec(
             db,
             "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
-            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=2",
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; DROP TABLE IF EXISTS "
+            "local_names; PRAGMA user_version=2",
             nullptr, nullptr, nullptr),
         SQLITE_OK);
     sqlite3_close(db);
@@ -1016,7 +1018,8 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
             "INSERT INTO annotations(image_id, kind, address, text) "
             "  VALUES (1, 'comment', 16, 'kept'), (1, 'bookmark', 32, 'mark');"
             "DROP TABLE IF EXISTS type_applications; DROP TABLE IF EXISTS type_enumerators; DROP "
-            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; PRAGMA user_version=3;",
+            "TABLE IF EXISTS type_fields; DROP TABLE IF EXISTS types; DROP TABLE IF EXISTS "
+            "local_names; PRAGMA user_version=3;",
             nullptr, nullptr, nullptr),
         SQLITE_OK);
     // The old constraint really rejects the new kind.
@@ -1030,7 +1033,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 6);
+    EXPECT_EQ(project.value().schema_version(), 7);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1162,7 +1165,7 @@ TEST(Types, MigratesFromSchemaV4) {
   {
     auto project = Project::create(path.str());
     ASSERT_TRUE(project.has_value());
-    EXPECT_EQ(project.value().schema_version(), 6);
+    EXPECT_EQ(project.value().schema_version(), 7);
   }
   // A v4 project has no type tables; drop them and set the version back to 4.
   {
@@ -1170,14 +1173,15 @@ TEST(Types, MigratesFromSchemaV4) {
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db,
                            "DROP TABLE type_applications; DROP TABLE type_enumerators; "
-                           "DROP TABLE type_fields; DROP TABLE types; PRAGMA user_version=4;",
+                           "DROP TABLE type_fields; DROP TABLE types; DROP TABLE IF EXISTS "
+                           "local_names; PRAGMA user_version=4;",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(db);
   }
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 6);
+  EXPECT_EQ(reopened.value().schema_version(), 7);
   auto empty = reopened.value().types();
   ASSERT_TRUE(empty.has_value());
   EXPECT_EQ(empty.value().size(), 0U);
@@ -1628,7 +1632,7 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
 
   auto project = Project::open(path.str());
   ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-  EXPECT_EQ(project.value().schema_version(), 6);
+  EXPECT_EQ(project.value().schema_version(), 7);
   auto images = project.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -1657,8 +1661,112 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
                   .has_value());
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 6);
+  EXPECT_EQ(reopened.value().schema_version(), 7);
   auto rows = reopened.value().annotations(image_id);
   ASSERT_TRUE(rows.has_value());
   EXPECT_EQ(rows.value().size(), 5U);
+}
+
+// Version 7 adds the local_names table and nothing else. A version 6 database is therefore one
+// without that table, and opening it must add the table and keep every annotation.
+TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
+  TempPath path("migrate-v6-v7");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+
+  std::int64_t image_id = 0;
+  {
+    auto project = Project::open(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    EXPECT_EQ(project.value().schema_version(), 7);
+    auto images = project.value().images();
+    ASSERT_TRUE(images.has_value());
+    ASSERT_EQ(images.value().size(), 1U);
+    image_id = images.value()[0].id;
+  }
+
+  // Make the file a version 6 database again.
+  {
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE local_names; PRAGMA user_version=6", nullptr, nullptr,
+                           nullptr),
+              SQLITE_OK);
+    sqlite3_close(raw);
+  }
+
+  auto migrated = Project::open(path.str());
+  ASSERT_TRUE(migrated.has_value()) << migrated.diagnostic().message;
+  EXPECT_EQ(migrated.value().schema_version(), 7);
+  auto rows = migrated.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value());
+  EXPECT_EQ(rows.value().size(), 3U);
+  auto names = migrated.value().local_names(image_id);
+  ASSERT_TRUE(names.has_value()) << names.diagnostic().message;
+  EXPECT_TRUE(names.value().empty());
+  EXPECT_TRUE(
+      migrated.value().set_local_name(image_id, 0x400100, "frame:rbp:-8", "total").has_value());
+}
+
+TEST(Project, StoresLocalNamesAndRefusesBadKeysAndNames) {
+  TempPath path("local-names");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  const std::int64_t image_id = images.value()[0].id;
+
+  ASSERT_TRUE(
+      project.value().set_local_name(image_id, 0x400100, "frame:rbp:-8", "total").has_value());
+  ASSERT_TRUE(project.value().set_local_name(image_id, 0x400100, "arg:0", "count").has_value());
+  // A later name for the same key replaces the first.
+  ASSERT_TRUE(project.value().set_local_name(image_id, 0x400100, "arg:0", "items").has_value());
+
+  for (const char* variable : {"arg:", "arg:x", "arg:1024", "frame:rbp", "frame:rbp:08",
+                               "frame:rbp:-0", "frame::8", "frame:r-p:8", "local:1"}) {
+    EXPECT_FALSE(project.value().set_local_name(image_id, 0x400100, variable, "name").has_value())
+        << variable;
+    EXPECT_FALSE(donkey::local_variable_key_valid(variable)) << variable;
+  }
+  for (const char* name : {"1x", "a b", "a-b"}) {
+    const auto refused = project.value().set_local_name(image_id, 0x400100, "arg:0", name);
+    ASSERT_FALSE(refused.has_value()) << name;
+    EXPECT_EQ(refused.diagnostic().code, "project.local_name_invalid");
+  }
+  const std::string too_long(129, 'a');
+  EXPECT_FALSE(project.value().set_local_name(image_id, 0x400100, "arg:0", too_long).has_value());
+  EXPECT_TRUE(donkey::local_variable_key_valid("frame:rsp:-1048576"));
+  EXPECT_TRUE(donkey::local_variable_key_valid("arg:0"));
+
+  const auto unknown_image = project.value().set_local_name(999, 0x400100, "arg:0", "x");
+  ASSERT_FALSE(unknown_image.has_value());
+  EXPECT_EQ(unknown_image.diagnostic().code, "project.image_not_found");
+  EXPECT_FALSE(project.value().set_local_name(image_id, ~0ULL, "arg:0", "x").has_value());
+
+  auto listed = project.value().local_names(image_id);
+  ASSERT_TRUE(listed.has_value()) << listed.diagnostic().message;
+  ASSERT_EQ(listed.value().size(), 2U);
+  EXPECT_EQ(listed.value()[0].variable, "arg:0");
+  EXPECT_EQ(listed.value()[0].name, "items");
+  EXPECT_EQ(listed.value()[1].variable, "frame:rbp:-8");
+  EXPECT_EQ(listed.value()[1].name, "total");
+
+  // An empty name clears the entry; clearing an absent one succeeds.
+  ASSERT_TRUE(project.value().set_local_name(image_id, 0x400100, "arg:0", "").has_value());
+  ASSERT_TRUE(project.value().set_local_name(image_id, 0x400100, "arg:0", "").has_value());
+
+  // The names survive a reopen.
+  project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto reopened = project.value().local_names(image_id);
+  ASSERT_TRUE(reopened.has_value());
+  ASSERT_EQ(reopened.value().size(), 1U);
+  EXPECT_EQ(reopened.value()[0].variable, "frame:rbp:-8");
+  EXPECT_EQ(reopened.value()[0].function_address, 0x400100U);
 }

@@ -16,7 +16,7 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 6;
+constexpr int kProjectSchemaVersion = 7;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
@@ -63,6 +63,20 @@ struct Annotation {
   std::uint64_t address = 0;
   std::string text;
 };
+
+/// A user name for one local of one function (G12-T3). `variable` is the local's key in the
+/// function's IR: "arg:<index>" for a parameter, or "frame:<base register>:<offset>" for a frame
+/// slot, where the offset is signed decimal. The key is checked for shape here. Whether it still
+/// names a local after re-analysis is decided when the name is applied, so a name whose key no
+/// longer exists is kept but has no effect.
+struct LocalName {
+  std::uint64_t function_address = 0;
+  std::string variable;
+  std::string name;
+};
+
+/// True when `variable` has the shape of a local key (see LocalName).
+[[nodiscard]] bool local_variable_key_valid(const std::string& variable) noexcept;
 
 /// Where a type is applied (G05-T3 uses these): a function prototype at its entry, or a
 /// data slot (a stack slot or a global) at its address.
@@ -144,6 +158,15 @@ class Project {
   /// the desktop shell to flush its in-memory annotation snapshot.
   [[nodiscard]] Result<void> replace_annotations(std::int64_t image_id,
                                                  const std::vector<Annotation>& annotations);
+
+  /// Set or replace the user name of one local of the function at `function_address` (G12-T3).
+  /// Empty text clears the name. The key must have the shape of a LocalName variable, and the
+  /// name must be a C identifier of at most 128 bytes.
+  [[nodiscard]] Result<void> set_local_name(std::int64_t image_id, std::uint64_t function_address,
+                                            const std::string& variable, const std::string& name);
+
+  /// Every user local name for one image, ordered by function address then key.
+  [[nodiscard]] Result<std::vector<LocalName>> local_names(std::int64_t image_id) const;
 
   /// Every type in the project's type store (G05-T1), validated as a whole.
   [[nodiscard]] Result<TypeTable> types() const;

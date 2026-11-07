@@ -162,7 +162,7 @@ P0 is the most important, P3 the least.
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
 | G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
-| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows, no UTF-16). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows, no UTF-16; T3 local types TODO) |
+| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows, no UTF-16). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows, no UTF-16; T3 PARTIAL: local names for parameters and frame slots, headless and CLI; no local types, no GUI rename or undo) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
@@ -194,7 +194,8 @@ Still open, in ledger order:
   demangled-name and class-hierarchy panel.
 - G07: the .dSYM check against Apple's `dsymutil` on a macOS host (the Linux tests use LLVM's output).
 - G08 SIMD lifting and G09 library identification: not started.
-- G12-T2 arrays and strings, G12-T3 local types: not started.
+- G12-T2 inline listing rows and UTF-16 strings; G12-T3 local types, the GUI rename and undo: not
+  done. G12-T3 local names exist headless and in the CLI only.
 - G13: Thumb, lifting for A32, RV64, MIPS and PowerPC, CFG checks, the MIPS branch-likely forms,
   and VLE detection. Not done. MIPS16 and microMIPS images are refused, and 64-bit MIPS and PowerPC
   decode, both with evidence in the decoder tests.
@@ -1211,8 +1212,23 @@ out-of-process RPC. So scripting is RPC.
   - Stored per function and IR variable, keyed by stack offset or register
     and definition address. They survive re-analysis when the key still
     exists.
-- **Tests:** session tests for each kind; a UI script `tests/ui/edits.donkeyui`
-  covering keys, undo and persistence.
+  - **Status:** PARTIAL. Local names are stored per image and function in
+    schema v7 (`local_names`, `LocalName`), keyed `arg:<index>` for a parameter
+    and `frame:<base>:<offset>` for a frame slot. `apply_user_local_names`
+    applies them after the debug names, and a name wins over a debug name on
+    the same slot. A slot the function accesses gets a local even when the
+    decompiler recovered none, and a key that names nothing leaves a note.
+    `donkey-cli project local-name` and `local-names` set and list them, and
+    `decompile --project` shows them. A name that the decompiler refuses
+    (a C keyword, a collision) fails the command. Not done: the definition
+    address in the key, so two lifetimes of one slot share a name; register
+    locals (`var_N`); local types; `serve` methods; a session API; the GUI
+    rename with undo; `tests/ui/edits.donkeyui`.
+  - **Tests:** `Project.MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations`,
+    `Project.StoresLocalNamesAndRefusesBadKeysAndNames`, `LocalNames.*`
+    (`tests/unit/local_names_test.cpp`) and `cli.local_names`
+    (`cmake/checks/check_local_names.cmake`, fixture `tests/fixtures/names`).
+    Still to add: session tests and the UI script.
 
 ### G13 Processor coverage
 

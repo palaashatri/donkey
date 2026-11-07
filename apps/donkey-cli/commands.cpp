@@ -7,6 +7,7 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <optional>
 #include <span>
 #include <string>
@@ -28,6 +29,7 @@
 #include "donkey/decode/decode.h"
 #include "donkey/ir/debug_names.h"
 #include "donkey/ir/lift.h"
+#include "donkey/ir/local_names.h"
 #include "donkey/patch/patch.h"
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
@@ -118,6 +120,8 @@ struct AnalysisRequest {
   std::size_t min_string_length = 4;
   std::size_t max_items = 1000;
   std::vector<std::uint64_t> function_starts;
+  /// A project whose saved local names are applied to the decompiled output (G12-T3).
+  std::string project_path;
   LoadOptions load_options;
 };
 
@@ -789,7 +793,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli core <file> [--json]\n"
       "  donkey-cli debuginfo <binary> [--json] [--max-items N] [--debug-file PATH]\n"
       "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
-      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
+      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] [--project "
+      "DB]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
       "  donkey-cli project save <database> <binary> [--json]\n"
@@ -798,6 +803,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
       "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
       "  donkey-cli project annotations <database> <image-id> [--json]\n"
+      "  donkey-cli project local-name <database> <image-id> <function> <variable> <name>|--clear\n"
+      "  donkey-cli project local-names <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
       "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
@@ -1624,6 +1631,12 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (argument == "--project") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("--project needs a database path");
+      }
+      request.project_path = std::string(value);
     } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
       if (flag_error != nullptr) {
         return usage_error(flag_error);
@@ -1670,6 +1683,39 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     }
   }
 
+  // The local names the project saved for this binary (G12-T3). They are applied after the debug
+  // names, so a user name wins.
+  std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
+  if (!request.project_path.empty()) {
+    auto project = Project::open(request.project_path);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    std::optional<std::int64_t> image_id;
+    for (const ProjectImage& image : images.value()) {
+      if (image.sha256 == loaded.image.sha256) {
+        image_id = image.id;
+        break;
+      }
+    }
+    if (!image_id) {
+      return fail(Diagnostic::make(
+          Status::InvalidInput, "cli.project_image_missing",
+          "the project has no image of this binary; save it with project save first"));
+    }
+    auto names = project.value().local_names(*image_id);
+    if (!names) {
+      return fail(names.diagnostic());
+    }
+    for (const LocalName& entry : names.value()) {
+      user_names[entry.function_address].push_back(UserLocalName{entry.variable, entry.name});
+    }
+  }
+
   // The DWARF of the binary, when it has any, names the parameters and the frame slots of
   // each function (G04-T4). Naming is display-only and changes no statement.
   std::optional<DebugInfo> debug;
@@ -1684,8 +1730,28 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         (void)apply_debug_stack_names(lifted.value(), *named, *debug);
       }
     }
+    if (lifted) {
+      if (const auto found = user_names.find(function.address); found != user_names.end()) {
+        auto applied = apply_user_local_names(lifted.value(), found->second);
+        if (!applied) {
+          return make_error<IrFunction>(applied.diagnostic().status, applied.diagnostic().code,
+                                        applied.diagnostic().message);
+        }
+      }
+    }
     return lifted;
   };
+  // A name the decompiler refuses fails the command before any output, instead of showing up as
+  // an unsupported function.
+  for (const Function* function : selected) {
+    if (user_names.count(function->address) == 0) {
+      continue;
+    }
+    auto checked = lift_named(*function);
+    if (!checked && checked.diagnostic().code.rfind("ir.local_", 0) == 0) {
+      return fail(checked.diagnostic());
+    }
+  }
   if (request.json) {
     std::string out;
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
@@ -2236,6 +2302,103 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
+  if (subcommand == "local-name") {
+    // project local-name <db> <image-id> <function> <variable> <name>, or ... --clear without name.
+    if (clear ? positional.size() != 4 : positional.size() != 5) {
+      return usage_error(
+          "project local-name needs a database, image id, function address, variable key and "
+          "name (or --clear without the name)");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t function_address = 0;
+    if (!parse_u64(positional[2], function_address)) {
+      return usage_error("invalid function address");
+    }
+    const std::string variable(positional[3]);
+    const std::string name = clear ? std::string() : std::string(positional[4]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto written = project.value().set_local_name(static_cast<std::int64_t>(parsed_id),
+                                                  function_address, variable, name);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"function\": " + quote(hex(function_address)) + ",\n";
+      out += "  \"variable\": " + quote(variable) + ",\n";
+      out += "  \"name\": " + (clear ? std::string("null") : quote(name)) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else if (clear) {
+      std::printf("Cleared the local name of %s in %s\n", variable.c_str(),
+                  hex(function_address).c_str());
+    } else {
+      std::printf("Named %s in %s as %s\n", variable.c_str(), hex(function_address).c_str(),
+                  name.c_str());
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "local-names") {
+    if (positional.size() != 2) {
+      return usage_error("project local-names needs a database and an image id");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto found = project.value().local_names(static_cast<std::int64_t>(parsed_id));
+    if (!found) {
+      return fail(found.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"local_names\": [";
+      for (std::size_t i = 0; i < found.value().size(); ++i) {
+        const LocalName& entry = found.value()[i];
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"function\": " + quote(hex(entry.function_address)) +
+               ", \"variable\": " + quote(entry.variable) + ", \"name\": " + quote(entry.name) +
+               "}";
+      }
+      out += found.value().empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Image %llu: %zu local names\n", static_cast<unsigned long long>(parsed_id),
+                  found.value().size());
+      for (const LocalName& entry : found.value()) {
+        std::printf("  %-18s %-24s %s\n", hex(entry.function_address).c_str(),
+                    entry.variable.c_str(), entry.name.c_str());
+      }
+    }
+    return kExitOk;
+  }
+
   if (subcommand == "annotations") {
     if (positional.size() != 2) {
       return usage_error("project annotations needs a database and an image id");
@@ -2372,7 +2535,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
 
   return usage_error(
       "unknown project subcommand (expected save, info, rename, comment, bookmark, annotations, "
-      "backup, restore or type)");
+      "local-name, local-names, backup, restore or type)");
 }
 
 namespace {
