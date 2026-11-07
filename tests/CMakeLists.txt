@@ -65,6 +65,14 @@ foreach(level O0 O2 O3)
   list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_${level})
 endforeach()
 
+# The same source for x86-64-v2 (which adds POPCNT and SSE4.2) at -O3, so that the
+# instructions of a newer baseline are measured too. The flag is x86 only.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_library(donkey_corpus_O3_v2 SHARED corpus/corpus.c)
+  target_compile_options(donkey_corpus_O3_v2 PRIVATE -O3 -march=x86-64-v2 -fno-stack-protector)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_O3_v2)
+endif()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/decompiler_corpus_test.cpp
@@ -99,6 +107,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
+  $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
@@ -367,8 +376,9 @@ set_tests_properties(cli.cfg_elf_json PROPERTIES
 
 add_test(NAME cli.decompile_elf_json
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+# _start contains a direct call, whose effects are not modelled, so it is Partial.
 set_tests_properties(cli.decompile_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Complete\".*u64 _start")
+  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Partial\".*u64 _start")
 
 add_test(NAME cli.decompile_elf_function_filter
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
@@ -390,7 +400,7 @@ add_test(NAME cli.decompile_elf_i386
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
 set_tests_properties(cli.decompile_elf_i386 PROPERTIES
   PASS_REGULAR_EXPRESSION
-    "\"name\": \"_start\".*\"status\": \"Complete\".*u32 _start\\(void\\).*esp = esp - 0x4")
+    "\"name\": \"_start\".*\"status\": \"Partial\".*u32 _start\\(void\\).*esp = esp - 0x4")
 
 # ---------------------------------------------------------------------------
 # Project persistence CLI.

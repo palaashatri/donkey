@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2) | P0 | IN PROGRESS (G02-T1, T2 DONE; T3-T4 TODO) |
+| G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -385,7 +385,9 @@ interpreter.
   `Ir.X86DivAndIdivReturnTheQuotientAndTheRemainder`,
   `Ir.X86DivideFaultsWhereTheHardwareDivideErrors`,
   `Ir.X86ThirtyTwoBitDivideUsesEdxAndEax`,
-  `Ir.VerifierRejectsDivideWithoutItsDivisor`, and the corpus functions
+  `Ir.VerifierRejectsDivideWithoutItsDivisor`,
+  `Ir.VerifierRejectsADivisorTemporaryThatIsNeverDefined`,
+  `Ir.X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature`, and the corpus functions
   `c_mulhi_u64`, `c_mulhi_s64`, `c_udiv32`, `c_urem32`, `c_sdiv32`,
   `c_srem32`, `c_udiv64`, `c_urem64`, `c_sdiv64`, `c_srem64`, `c_div10` in
   `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
@@ -408,6 +410,24 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
+- **Status:** IN PROGRESS. Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+  64 bit) and `bt` with a register or immediate index (the IR ops
+  `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
+  Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
+  `Ir.X86BitTestCarriesTheSelectedBit`, and the corpus functions
+  `c_popcount64`, `c_ctz64_guarded`, `c_clz64_guarded`, `c_bswap32`,
+  `c_bswap64`, `c_bit_test`. Also fixed: a function containing a direct call
+  was reported Complete. It is now Partial, which changed the expected status
+  of `_start` in two CLI tests (`cli.decompile_elf_json`,
+  `cli.decompile_elf_i386`) from Complete to Partial. Since then: `bts`, `btr`
+  and `btc` with a register destination (`Ir.X86BitTestAndSetResetAndComplementWriteTheBit`,
+  `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
+  and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
+  `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
+  at O3 with `popcnt`. Still not done, so the task stays IN PROGRESS: `bsf`/`bsr`
+  (needs a zero-flag state, or G02-T4 for the guarded form in `c_clz64_guarded`).
+  Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
+  can lie outside the operand).
 
 **G02-T4 Flags across blocks**
 

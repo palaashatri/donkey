@@ -100,6 +100,12 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_sdiv64", 'U', "UU"},
     {"c_srem64", 'U', "UU"},
     {"c_div10", 'U', "U"},
+    {"c_popcount64", 'u', "U"},
+    {"c_ctz64_guarded", 'u', "U"},
+    {"c_clz64_guarded", 'u', "U"},
+    {"c_bswap32", 'u', "u"},
+    {"c_bswap64", 'U', "U"},
+    {"c_bit_test", 'i', "Uu"},
 };
 
 struct Library {
@@ -111,6 +117,9 @@ const Library kLibraries[] = {
     {"O0", DONKEY_CORPUS_O0_PATH},
     {"O2", DONKEY_CORPUS_O2_PATH},
     {"O3", DONKEY_CORPUS_O3_PATH},
+#ifdef DONKEY_CORPUS_O3_V2_PATH
+    {"O3-x86-64-v2", DONKEY_CORPUS_O3_V2_PATH},
+#endif
 };
 
 constexpr std::uint64_t kP = 0x10000000ULL;

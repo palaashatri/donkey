@@ -2070,6 +2070,64 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
 }
 
+// ---- G02-T3: population count, bit scans, byte swap, bit test ----
+
+TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
+  // popcnt rax, rdi; ret
+  donkey::IrFunction popcount;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xb8, 0xc7, 0xc3}, popcount));
+  EXPECT_FALSE(popcount.partial);
+  EXPECT_EQ(run_x86_64(popcount, {0xff}), 8U);
+  EXPECT_EQ(run_x86_64(popcount, {~0ULL}), 64U);
+  EXPECT_EQ(run_x86_64(popcount, {0}), 0U);
+
+  // tzcnt rax, rdi; ret
+  donkey::IrFunction trailing;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbc, 0xc7, 0xc3}, trailing));
+  EXPECT_EQ(run_x86_64(trailing, {8}), 3U);
+  EXPECT_EQ(run_x86_64(trailing, {0}), 64U);  // tzcnt of zero is the operand width
+
+  // lzcnt rax, rdi; ret
+  donkey::IrFunction leading;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x48, 0x0f, 0xbd, 0xc7, 0xc3}, leading));
+  EXPECT_EQ(run_x86_64(leading, {1}), 63U);
+  EXPECT_EQ(run_x86_64(leading, {0}), 64U);
+
+  // mov rax, rdi; bswap rax; ret
+  donkey::IrFunction swap;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x0f, 0xc8, 0xc3}, swap));
+  EXPECT_FALSE(swap.partial);
+  EXPECT_EQ(run_x86_64(swap, {0x0102030405060708ULL}), 0x0807060504030201ULL);
+}
+
+TEST(Ir, X86BitTestCarriesTheSelectedBit) {
+  // bt rdi, rsi; setc al; movzx eax, al; ret
+  donkey::IrFunction register_index;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xa3, 0xf7, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3},
+                              register_index));
+  EXPECT_FALSE(register_index.partial);
+  EXPECT_EQ(run_x86_64(register_index, {4, 2}) & 0xffU, 1U);   // bit 2 of 4 is set
+  EXPECT_EQ(run_x86_64(register_index, {4, 1}) & 0xffU, 0U);   // bit 1 of 4 is clear
+  EXPECT_EQ(run_x86_64(register_index, {4, 66}) & 0xffU, 1U);  // the index is taken modulo 64
+
+  // bt rdi, 3; setc al; movzx eax, al; ret
+  donkey::IrFunction immediate_index;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x0f, 0xba, 0xe7, 0x03, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, immediate_index));
+  EXPECT_FALSE(immediate_index.partial);
+  EXPECT_EQ(run_x86_64(immediate_index, {8}) & 0xffU, 1U);
+  EXPECT_EQ(run_x86_64(immediate_index, {4}) & 0xffU, 0U);
+}
+
+TEST(Ir, FunctionWithADirectCallIsNotComplete) {
+  // call +0; mov eax, 1; ret. The call's effects are not modelled, so the result
+  // must be Partial even though every instruction lifts.
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0xe8, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+}
+
 TEST(Ir, VerifierRejectsADivisorTemporaryThatIsNeverDefined) {
   // The divisor is an operand like the others: an undefined temporary there is
   // rejected instead of being read as zero.
@@ -2193,6 +2251,88 @@ TEST(Ir, X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature) {
   ASSERT_EQ(f.parameters.size(), 2U);
   EXPECT_EQ(f.parameters[1].abi_register, "rsi");
   EXPECT_EQ(run_x86_64(f, {10, 3}), 3U);
+}
+
+TEST(Ir, X86BitTestAndSetResetAndComplementWriteTheBit) {
+  // bts rdi, rsi; mov rax, rdi; ret. The bit index is rsi modulo 64.
+  donkey::IrFunction bts;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xab, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, bts));
+  EXPECT_FALSE(bts.partial);
+  EXPECT_EQ(run_x86_64(bts, {0, 3}), 8U);
+  EXPECT_EQ(run_x86_64(bts, {8, 3}), 8U);   // already set
+  EXPECT_EQ(run_x86_64(bts, {0, 66}), 4U);  // 66 mod 64 = 2
+
+  // btr rdi, rsi; mov rax, rdi; ret
+  donkey::IrFunction btr;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xb3, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, btr));
+  EXPECT_FALSE(btr.partial);
+  EXPECT_EQ(run_x86_64(btr, {0xF, 1}), 0xDU);
+  EXPECT_EQ(run_x86_64(btr, {0, 1}), 0U);
+
+  // btc rdi, rsi; mov rax, rdi; ret
+  donkey::IrFunction btc;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbb, 0xf7, 0x48, 0x89, 0xf8, 0xc3}, btc));
+  EXPECT_FALSE(btc.partial);
+  EXPECT_EQ(run_x86_64(btc, {0, 2}), 4U);
+  EXPECT_EQ(run_x86_64(btc, {4, 2}), 0U);
+}
+
+TEST(Ir, X86BitTestAndSetCarriesTheBitBeforeTheWrite) {
+  // bts rdi, rsi; setb al; movzx eax, al; ret: CF is the bit as it was before the set.
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x0f, 0xab, 0xf7, 0x0f, 0x92, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {0, 3}), 0U);  // bit clear before: CF = 0, then set
+  EXPECT_EQ(run_x86_64(f, {8, 3}), 1U);  // bit set before: CF = 1
+}
+
+TEST(Ir, X86MovbeLoadsAndStoresTheBytesReversed) {
+  // movbe rax, [rdi]; ret
+  donkey::IrFunction loads;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0x38, 0xf0, 0x07, 0xc3}, loads));
+  EXPECT_FALSE(loads.partial);
+  EXPECT_EQ(run_x86_64_on_qword(loads, 0x1000, 0x0102030405060708ULL), 0x0807060504030201ULL);
+
+  // mov rax, rsi; movbe [rdi], rax; ret: the stored bytes are the reversed value.
+  donkey::IrFunction stores;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf0, 0x48, 0x0f, 0x38, 0xf1, 0x07, 0xc3}, stores));
+  EXPECT_FALSE(stores.partial);
+  donkey::IrEvalMemory memory;
+  ASSERT_TRUE(memory.add_region(0x1000, std::vector<std::uint8_t>(8, 0)));
+  donkey::IrEvalOptions options;
+  options.architecture = Architecture::X86_64;
+  options.convention = donkey::IrCallingConvention::SysV64;
+  const std::vector<std::uint64_t> values{0x1000, 0x0102030405060708ULL};
+  ASSERT_TRUE(donkey::evaluate_ir(stores, values, memory, options).has_value());
+  const std::vector<std::uint8_t>* bytes = memory.region(0x1000);
+  ASSERT_NE(bytes, nullptr);
+  // bswap(0x0102030405060708) = 0x0807060504030201, which is stored little-endian
+  // as the bytes 01 02 .. 08.
+  const std::vector<std::uint8_t> expected{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  EXPECT_EQ(*bytes, expected);
+}
+
+TEST(Ir, VerifierRejectsABitOperationWithABlockSource) {
+  // A block reference is not a value; the evaluator cannot read it.
+  donkey::IrBlock block;
+  donkey::IrStatement popcount;
+  popcount.op = donkey::IrOp::PopCount;
+  popcount.dest = donkey::IrOperand::register_ref("rax", 8);
+  popcount.a = donkey::IrOperand::block_ref(0);
+  popcount.width = 8;
+  block.statements.push_back(popcount);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "popcount";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_bit_op");
 }
 
 }  // namespace

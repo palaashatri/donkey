@@ -25,6 +25,45 @@ std::int64_t sign_extend(std::uint64_t value, std::uint8_t width) {
   return static_cast<std::int64_t>((value ^ sign) - sign);
 }
 
+/// The bit operations on a `width`-byte value: trailing and leading zero counts
+/// (both give the operand width for zero, as tzcnt and lzcnt do), population
+/// count, and byte swap.
+std::uint64_t bit_operation(IrOp op, std::uint64_t value, std::uint8_t width) {
+  const unsigned bits = width * 8U;
+  switch (op) {
+    case IrOp::CountTrailingZeros: {
+      unsigned count = 0;
+      while (count < bits && ((value >> count) & 1U) == 0) {
+        ++count;
+      }
+      return count;
+    }
+    case IrOp::CountLeadingZeros: {
+      unsigned count = 0;
+      while (count < bits && ((value >> (bits - 1U - count)) & 1U) == 0) {
+        ++count;
+      }
+      return count;
+    }
+    case IrOp::PopCount: {
+      std::uint64_t count = 0;
+      for (unsigned bit = 0; bit < bits; ++bit) {
+        count += (value >> bit) & 1U;
+      }
+      return count;
+    }
+    case IrOp::ByteSwap: {
+      std::uint64_t swapped = 0;
+      for (unsigned byte = 0; byte < width; ++byte) {
+        swapped |= ((value >> (8U * byte)) & 0xffU) << (8U * (width - 1U - byte));
+      }
+      return swapped;
+    }
+    default:
+      return 0;
+  }
+}
+
 /// High 64 bits of the unsigned 128-bit product a * b.
 std::uint64_t mul_high_unsigned(std::uint64_t a, std::uint64_t b) {
   const std::uint64_t a_lo = a & 0xffffffffULL;
@@ -521,6 +560,14 @@ class Machine {
               ok = v.has_value() && assign(s.dest, w, *v);
             }
             break;
+          case IrOp::CountTrailingZeros:
+          case IrOp::CountLeadingZeros:
+          case IrOp::PopCount:
+          case IrOp::ByteSwap: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() && assign(s.dest, w, bit_operation(s.op, *x & mask(w), w) & mask(w));
+            break;
+          }
           case IrOp::AddCarry:
           case IrOp::SubBorrow: {
             // The carry (x86 CF, AArch64 C) and the borrow of a subtraction are

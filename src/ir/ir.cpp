@@ -328,6 +328,14 @@ class Renderer {
                operand(statement.b) + (is_signed ? " signed) " : " unsigned) ") +
                (quotient ? "/ " : "% ") + operand(statement.c) + ";";
       }
+      case IrOp::CountTrailingZeros:
+        return operand(statement.dest) + " = ctz(" + operand(statement.a) + ");";
+      case IrOp::CountLeadingZeros:
+        return operand(statement.dest) + " = clz(" + operand(statement.a) + ");";
+      case IrOp::PopCount:
+        return operand(statement.dest) + " = popcount(" + operand(statement.a) + ");";
+      case IrOp::ByteSwap:
+        return operand(statement.dest) + " = bswap(" + operand(statement.a) + ");";
     }
     return "";
   }
@@ -477,6 +485,14 @@ const char* ir_op_name(IrOp op) noexcept {
       return "rem_unsigned";
     case IrOp::RemSigned:
       return "rem_signed";
+    case IrOp::CountTrailingZeros:
+      return "count_trailing_zeros";
+    case IrOp::CountLeadingZeros:
+      return "count_leading_zeros";
+    case IrOp::PopCount:
+      return "popcount";
+    case IrOp::ByteSwap:
+      return "byte_swap";
   }
   return "unknown";
 }
@@ -725,6 +741,20 @@ Result<bool> verify_ir(const IrFunction& function) {
                statement.c.width != statement.width)) {
             return fail("ir.type_width_mismatch",
                         "divide operand widths must match statement width");
+          }
+          break;
+        case IrOp::CountTrailingZeros:
+        case IrOp::CountLeadingZeros:
+        case IrOp::PopCount:
+        case IrOp::ByteSwap:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block) {
+            return fail("ir.malformed_bit_op",
+                        "bit operation needs a register destination and a value source");
+          }
+          if (statement.dest.width != statement.width || statement.a.width != statement.width) {
+            return fail("ir.type_width_mismatch",
+                        "bit operation operand widths must match statement width");
           }
           break;
         case IrOp::AddCarry:

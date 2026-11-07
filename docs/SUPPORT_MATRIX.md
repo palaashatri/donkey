@@ -42,12 +42,14 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
-`tests/corpus/corpus.c` has 53 integer functions: arithmetic, branches,
+`tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
-types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), and double-width
-multiply and divide (`mul`, `imul`, `div`, `idiv`). The test
-suite builds it at -O0, -O2 and -O3 with the host's C
-compiler. `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
+types, carry-propagating 128-bit arithmetic (`adc`, `sbb`), double-width
+multiply and divide (`mul`, `imul`, `div`, `idiv`), and bit operations
+(population count, guarded bit scans, byte swap, bit test and bit set, reset
+and complement, `movbe`). The test suite builds it at -O0, -O2 and -O3 with
+the host's C compiler, and on x86-64 hosts also at -O3 with
+`-march=x86-64-v2` (which adds POPCNT). `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
 every function from the built library and runs the IR in an interpreter on
 48 input vectors. It calls the compiled function itself with the same inputs
 and compares return values and memory written through pointers.
@@ -67,9 +69,13 @@ listed where the per-function report was read.
 | GCC 13.3, x86-64 Linux | CI ubuntu-24.04 (before G02-T1, 39 functions) | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 41/42 | 35/42 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
+| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 51/59 | SIMD vectorisation, `bsr`; `c_switch_sparse` Partial (cause not itemised); `c_popcount` Complete |
 | Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
 | Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
+| Clang 18.1, x86-64 Linux | locally, after G02-T3 (59 functions) | 58/59 | 53/59 | 53/59 | SIMD vectorisation, `bsr` |
+| Clang 18.1, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 52/59 | SIMD vectorisation, `bsr`, `shld` (`c_rotl5`, not lifted) |
 | MinGW-w64 GCC 14.2, x64 Windows | CI windows-2022 | 39/39 | 36/39 | 30/39 | not itemised |
 | GCC 13.3, AArch64 Linux | CI ubuntu-24.04-arm | 39/39 | 36/39 | 30/39 | SIMD, `ccmp` |
 | GCC 13.3, AArch64 Linux | locally, after G02-T1 (42 functions), under qemu-aarch64 | 40/42 | 36/42 | 30/42 | SIMD, `ccmp`, `adc`/`sbc`/`cmn` (not lifted yet) |
@@ -101,13 +107,19 @@ arithmetic on x86. On AArch64 it tracks NZCV within a block: a branch or
 conditional select is exact when the block's last flag writer is `cmp`,
 `tst`, `subs` or `ands`, and Partial otherwise. It also models the `csel`
 family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
-`ubfx`/`sbfx` and `mvn`.
+`ubfx`/`sbfx` and `mvn`. On x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
+`bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
+with a register and a memory operand.
 
 ### Known unsupported classes
 
 - Floating point and SIMD: vectorised loops are Partial.
-- Calls' effects on registers and memory: functions that call are
-  rendered, but the oracle does not evaluate them.
+- Calls: a function that calls is Partial. Its call is rendered, and the
+  callee's effects on registers and memory are not modelled.
+- `bsf`/`bsr`: the result is undefined for a zero source, so they are
+  Unsupported until a zero-flag state exists.
+- Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
+  operand, so they are Unsupported.
 - Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
