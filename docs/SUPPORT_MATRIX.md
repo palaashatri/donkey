@@ -103,7 +103,8 @@ conversions, single-precision arithmetic, loops over a local array, and branches
 `DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode` compares every Complete
 result with the compiled code on 48 vectors. NaN equals NaN; otherwise the bits
 must match, so the sign of a zero is checked. Partial functions are not compared.
-Results at -O0 on x86-64, GCC 13.3: 6 of 26 Complete, none wrong. The other 20 are Partial. Every scalar SSE arithmetic operation and every integer-to-float conversion depends on the MXCSR rounding mode. The caller may set a mode other than round to nearest, and this lifter does not model MXCSR, so each function that rounds is Partial with that assumption written in its notes (review of #39). Before this rule the count was 18 of 26: three functions copied a register with `movapd`, whose upper lanes are not modelled, and five wrote both `rax` and `xmm0` on a path to the return, which the return rule now keeps Partial. Every Partial function is still compared with the compiled code on all 48 vectors. Clang 18.1, measured on the same corpus after the rule: 5 of 26 Complete, none wrong (before the rule: 23 of 26). The corpus test requires at least 5 with either compiler.
+Results at -O0 on x86-64, GCC 13.3: 6 of 26 Complete, none wrong. The other 20 are Partial. Every scalar SSE arithmetic operation and every integer-to-float conversion depends on the MXCSR rounding mode. The caller may set a mode other than round to nearest, and this lifter does not model MXCSR, so each function that rounds is Partial with that assumption written in its notes (review of #39). Before this rule the count was 18 of 26: three functions copied a register with `movapd`, and five wrote both `rax` and `xmm0` on a path to the return, which the return rule now keeps Partial. Every Partial function is still compared with the compiled code on all 48 vectors.
+Clang 18.1 at -O0 (the FreeBSD job builds the corpus with clang): 6 of 26 Complete, none wrong, checked by the same test on the clang-built corpus. The count reaches 6 because the lifter models both 64-bit lanes of an XMM register (`xmm0` and `xmm0_hi`) for `movaps`/`movapd`, the packed logical operations (`andps`/`andpd`/`andnps`/`andnpd`/`orps`/`orpd`/`xorps`/`xorpd`/`pxor`), the zeroing idioms and the memory loads; it lowers `cmpltsd` as a masked select with the flags it does not keep; and it carries `ucomisd`/`comisd` with a memory operand across a block boundary when nothing after the compare touches memory.
 
 On AArch64, GCC 13.3 at -O0 gives 20 of 26 Complete, none wrong, run under
 qemu-aarch64 against the native AArch64 code (48 vectors each). The six Partial functions
@@ -124,8 +125,6 @@ listed where the per-function report was read.
 | GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
 | GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 51/59 | SIMD vectorisation, `bsr`; `c_switch_sparse` Partial (cause not itemised); `c_popcount` Complete |
-| GCC 13.3, x86-64 Linux | locally, after G02-T4 (59 functions) | 57/59 | 57/59 | 51/59 | the causes above, not re-itemised; one more function is Complete at O2 and O3 (cross-block flags) |
-| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T4 (59 functions) | not built | not built | 52/59 | the causes above, not re-itemised; one more function is Complete (cross-block flags) |
 | Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
 | Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
@@ -177,9 +176,9 @@ results (division by zero gives 0, and `INT_MIN / -1` gives `INT_MIN`, with no
 fault), `umulh`/`smulh`, `clz`, `cls`, `rbit`, `rev`/`rev16`/`rev32`, `extr`,
 `bfi` and `bfxil`, `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`
 and `smnegl` (each 32-bit source is extended to 64 bits first), `ccmp`/`ccmn`, `cmn`
-and `adds`, `adc`/`sbc` and `adcs`/`sbcs` when the flags
-before them are exact (a second carry reader in a block needs its own flag
-writer, since the carry out of `adc`/`sbc` is not modelled). On
+and `adds`, `adc`/`sbc` and `adcs`/`sbcs` when the flags before them are exact (`adc`/`sbc`
+without S do not write NZCV, so several of them in a block read the same carry; the carry out
+of `adcs`/`sbcs` is modelled as their NZCV). On
 x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
 `bswap`, `bt`, `bts`, `btr`, `btc` with a register destination, and `movbe`
 with a register and a memory operand.
@@ -199,22 +198,19 @@ compare, because GCC's table code overwrites `x0`.
 - Floating point and SIMD: scalar `ss`/`sd` arithmetic, moves, conversions and
   comparisons are lifted on x86-64 (G01-T2) and the scalar `s`/`d` forms on AArch64
   (G01-T3), including the fused `fmadd`/`fmsub`. Anything else is Partial: packed
-  and vector forms, `movaps`/`movapd` (their upper lanes are not modelled), x87,
+  and vector forms, `movaps`/`movapd` and the packed logical operations (both lanes are modelled), other packed forms, x87,
   `fcvtzu` (the IR has no unsigned float-to-integer conversion), and the negated
-  fused forms `fnmadd`/`fnmsub`. Only the low lane of an XMM register or the scalar
-  view of a SIMD&FP register is modelled. The IR's IEEE operations are tested against
+  fused forms `fnmadd`/`fnmsub`. An XMM register is modelled as two 64-bit lanes (`xmm0` and
+  `xmm0_hi`): scalar instructions write the low lane, and `movaps`/`movapd`, the packed logical
+  operations, the zeroing idioms and the memory loads write both lanes. The scalar view of a
+  SIMD&FP register is modelled on AArch64. The IR's IEEE operations are tested against
   native execution (G01-T1).
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
-- `bsf`/`bsr` with a zero source: the destination is undefined there, and ZF is
-  not modelled. They are lifted, and a function that uses them is Partial with a
-  note. A guarded use such as `c_clz64_guarded` stays Partial until flags cross
-  blocks (G02-T4).
+- `bsf`/`bsr`: the result is undefined for a zero source, so they are
+  Unsupported until a zero-flag state exists.
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
-- Carry out of `adc`/`sbb` is not modelled, so `adc; adc` chains stay Partial. An `adc`/`sbb`
-  after an instruction that emitted Unsupported is not lifted with the earlier carry (G02-T1).
-  AArch64 `adc`/`sbc`/`cmn` are not lifted.
 - Flags read across basic blocks, except into a fall-through block with one
   predecessor: there the cmp or test that set them is repeated (G02-T4 on x86-64,
   G03-T4 on AArch64). Any other flag writer is not repeated, so a branch on its

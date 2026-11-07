@@ -161,15 +161,21 @@ bool is_setcc(const std::string& mnemonic) {
   return mnemonic.rfind("set", 0) == 0 && suffix_condition(mnemonic, 3) != IrCondition::None;
 }
 
-/// Scalar single and double SSE instructions that the lifter models. Only the low
-/// lane of an XMM register is modelled, so an instruction that needs the upper
-/// lanes is not in this list.
+/// The name of the high 64-bit lane of an XMM register. The IR keeps the two lanes of
+/// an XMM register as two registers, so an instruction that changes the high lane names it.
+std::string high_lane(const std::string& xmm) {
+  return xmm + "_hi";
+}
+
+/// Scalar single and double SSE instructions that the lifter models, and the packed
+/// logical operations that combine both lanes of two registers.
 bool is_scalar_sse(const std::string& mnemonic) {
   static const char* const kNames[] = {
       "addss",    "addsd",    "subss",     "subsd",     "mulss",    "mulsd",    "divss",
       "divsd",    "sqrtss",   "sqrtsd",    "movss",     "movsd",    "movaps",   "movapd",
       "cvtsi2ss", "cvtsi2sd", "cvttss2si", "cvttsd2si", "cvtss2sd", "cvtsd2ss", "ucomiss",
-      "ucomisd",  "comiss",   "comisd",    "xorps",     "xorpd",    "pxor",
+      "ucomisd",  "comiss",   "comisd",    "xorps",     "xorpd",    "pxor",     "andps",
+      "andpd",    "andnps",   "andnpd",    "orps",      "orpd",     "cmpltsd",
   };
   return std::find(std::begin(kNames), std::end(kNames), mnemonic) != std::end(kNames);
 }
@@ -187,7 +193,8 @@ bool preserves_flags(const std::string& mnemonic) {
          mnemonic == "nop" || mnemonic == "endbr64" || mnemonic == "endbr32" ||
          mnemonic == "cdqe" || mnemonic == "cdq" || mnemonic == "cqo" || mnemonic == "cwde" ||
          mnemonic == "cbw" || mnemonic == "cwd" || mnemonic == "not" || is_cmov(mnemonic) ||
-         is_setcc(mnemonic) || (is_scalar_sse(mnemonic) && !is_sse_compare(mnemonic));
+         is_setcc(mnemonic) ||
+         (is_scalar_sse(mnemonic) && !is_sse_compare(mnemonic) && mnemonic != "cmpltsd");
 }
 
 /// xchg of two registers: a swap that leaves the flags alone. The memory forms
@@ -704,24 +711,20 @@ struct Lifter {
       return std::nullopt;
     }
     const Instruction& compare = analysis.instructions[*writer];
-    const bool fp_compare = is_sse_compare(compare.mnemonic);
-    if ((!fp_compare && compare.mnemonic != "cmp" && compare.mnemonic != "test") ||
+    // A float compare (ucomis*, comis*) may read memory. The block after it re-reads that
+    // memory, so nothing after the compare may access memory: a store could change it.
+    const bool float_compare = is_sse_compare(compare.mnemonic);
+    if ((compare.mnemonic != "cmp" && compare.mnemonic != "test" && !float_compare) ||
         compare.structured_operands.size() != 2) {
       return std::nullopt;
     }
-    if (fp_compare && !is_xmm(compare.structured_operands[0])) {
-      return std::nullopt;
-    }
+    bool compare_reads_memory = false;
     std::vector<std::string> read;
-    // A memory operand of an FP compare is re-read at the start of the next block. That is
-    // exact only when nothing between the compare and the block's end can store to memory or
-    // write the address registers: the compare must be followed by the terminator alone.
-    bool memory_operand = false;
     for (const Operand& operand : compare.structured_operands) {
       if (operand.kind == OperandKind::Register) {
         read.push_back(internal::register_family(operand.reg));
-      } else if (operand.kind == OperandKind::Memory && fp_compare) {
-        memory_operand = true;
+      } else if (operand.kind == OperandKind::Memory && float_compare) {
+        compare_reads_memory = true;
         if (!operand.memory.base.empty()) {
           read.push_back(internal::register_family(operand.memory.base));
         }
@@ -737,8 +740,12 @@ struct Lifter {
       if (later.classification == InstructionClass::ConditionalJump && i + 1 == end) {
         continue;  // the block's terminator
       }
-      if (memory_operand) {
-        return std::nullopt;
+      if (compare_reads_memory) {
+        for (const Operand& operand : later.structured_operands) {
+          if (operand.kind == OperandKind::Memory) {
+            return std::nullopt;  // the memory the compare read may have changed
+          }
+        }
       }
       // cdq, cqo, cdqe, cwde, cbw and cwd write rax or rdx without an operand.
       if (later.classification != InstructionClass::Other || !preserves_flags(later.mnemonic) ||
@@ -1387,11 +1394,16 @@ struct Lifter {
         return true;
       }
       if (is_xmm(ops[0]) && ops[1].kind == OperandKind::Memory) {
-        // A load zeroes the rest of the register, as the architecture does.
+        // A load zeroes the rest of the register, as the architecture does: the low lane
+        // gets the loaded value (a single zero-extends within the low lane) and the high
+        // lane becomes zero.
         IrOperand address = memory_operand(ops[1], instruction);
         address.width = width;
         push(block, statement_of(IrOp::Load, IrOperand::register_ref(ops[0].reg, width), address,
                                  IrOperand::none(), width, instruction));
+        push(block,
+             statement_of(IrOp::Assign, IrOperand::register_ref(high_lane(ops[0].reg), 8),
+                          IrOperand::constant_value(0, 8), IrOperand::none(), 8, instruction));
         return true;
       }
       if (ops[0].kind == OperandKind::Memory && is_xmm(ops[1])) {
@@ -1404,11 +1416,13 @@ struct Lifter {
       return false;
     }
     if ((m == "movaps" || m == "movapd") && is_xmm(ops[0]) && is_xmm(ops[1])) {
-      // Copies all 128 bits; the upper lanes are not modelled, so the function is Partial.
+      // Copies all 128 bits: the low lane and the high lane.
       push(block,
            statement_of(IrOp::Assign, IrOperand::register_ref(ops[0].reg, 8),
                         IrOperand::register_ref(ops[1].reg, 8), IrOperand::none(), 8, instruction));
-      mark_partial("movaps and movapd copy the upper lanes, which are not modelled");
+      push(block, statement_of(IrOp::Assign, IrOperand::register_ref(high_lane(ops[0].reg), 8),
+                               IrOperand::register_ref(high_lane(ops[1].reg), 8), IrOperand::none(),
+                               8, instruction));
       return true;
     }
 
@@ -1494,11 +1508,63 @@ struct Lifter {
       return true;
     }
 
-    // Zeroing idioms: xorps x, x and pxor x, x set the register to zero.
+    // Zeroing idioms: xorps x, x and pxor x, x set both lanes to zero.
     if ((m == "xorps" || m == "xorpd" || m == "pxor") && is_xmm(ops[0]) && is_xmm(ops[1]) &&
         ops[0].reg == ops[1].reg) {
       push(block, statement_of(IrOp::Assign, IrOperand::register_ref(ops[0].reg, 8),
                                IrOperand::constant_value(0, 8), IrOperand::none(), 8, instruction));
+      push(block, statement_of(IrOp::Assign, IrOperand::register_ref(high_lane(ops[0].reg), 8),
+                               IrOperand::constant_value(0, 8), IrOperand::none(), 8, instruction));
+      return true;
+    }
+
+    // cmpltsd x, y: the low lane of x becomes all ones when x < y and zero otherwise, and an
+    // unordered comparison is false. The flags of ucomisd y, x say y > x, which is false when the
+    // operands are unordered, so the mask is the "above" condition over them. The high lane is
+    // kept. cmpltsd does not change the flags, but the flags of the compare above replace them in
+    // the IR, so they are not kept (see preserves_flags).
+    if (m == "cmpltsd" && is_xmm(ops[0]) && is_xmm(ops[1])) {
+      IrStatement compare =
+          statement_of(IrOp::FCompare, IrOperand::none(), IrOperand::register_ref(ops[1].reg, 8),
+                       IrOperand::register_ref(ops[0].reg, 8), 8, instruction);
+      compare.float_model = IrFloatModel::X86;
+      push(block, std::move(compare));
+      const std::uint32_t mask = temporary_id();
+      push(block, statement_of(IrOp::Assign, temp_operand(mask, 8), IrOperand::constant_value(0, 8),
+                               IrOperand::none(), 8, instruction));
+      IrStatement select;
+      select.op = IrOp::CondAssign;
+      select.condition = IrCondition::UnsignedGreater;
+      select.dest = temp_operand(mask, 8);
+      select.a = IrOperand::constant_value(~0ULL, 8);
+      select.width = 8;
+      select.source_address = instruction.address;
+      push(block, std::move(select));
+      push(block, statement_of(IrOp::Assign, IrOperand::register_ref(ops[0].reg, 8),
+                               temp_operand(mask, 8), IrOperand::none(), 8, instruction));
+      return true;
+    }
+
+    // Packed logical operations on two registers. Each lane is combined with the same lane of
+    // the source, so both lanes are modelled. andn is ~dest & source.
+    const bool logical = m == "andps" || m == "andpd" || m == "andnps" || m == "andnpd" ||
+                         m == "orps" || m == "orpd" || m == "xorps" || m == "xorpd" || m == "pxor";
+    if (logical && is_xmm(ops[0]) && is_xmm(ops[1])) {
+      const bool negate = m == "andnps" || m == "andnpd";
+      const IrOp op = m[0] == 'a' ? IrOp::And : (m[0] == 'o' ? IrOp::Or : IrOp::Xor);
+      for (const bool high : {false, true}) {
+        const std::string destination = high ? high_lane(ops[0].reg) : ops[0].reg;
+        const std::string source = high ? high_lane(ops[1].reg) : ops[1].reg;
+        IrOperand left = IrOperand::register_ref(destination, 8);
+        if (negate) {
+          const std::uint32_t id = temporary_id();
+          push(block, statement_of(IrOp::Xor, temp_operand(id, 8), left,
+                                   IrOperand::constant_value(~0ULL, 8), 8, instruction));
+          left = temp_operand(id, 8);
+        }
+        push(block, statement_of(op, IrOperand::register_ref(destination, 8), left,
+                                 IrOperand::register_ref(source, 8), 8, instruction));
+      }
       return true;
     }
     return false;
@@ -1968,13 +2034,14 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           const Instruction& compare = analysis.instructions[*writer];
           if (compare.mnemonic == "cmp") {
             lifter.lift_compare(out_block, compare);
-            lifter.flags_state = entering;
-          } else if (compare.mnemonic == "test") {
+          } else if (is_sse_compare(compare.mnemonic)) {
+            if (!lifter.lift_scalar_sse(out_block, compare)) {
+              lifter.unsupported(out_block, compare);
+            }
+          } else {
             lifter.lift_test(out_block, compare);
-            lifter.flags_state = entering;
-          } else if (lifter.lift_scalar_sse(out_block, compare)) {
-            lifter.flags_state = entering;  // the FP comparison sets the flags it reads
           }
+          lifter.flags_state = entering;
         }
       }
     }

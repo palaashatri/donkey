@@ -57,6 +57,41 @@ struct Layout {
   std::uint64_t alignment = 1;
 };
 
+/// The layout of an integer, float, enum or pointer: its size, and an alignment that is the size
+/// unless the table gives a smaller one. A stored alignment must be a power of two no larger than
+/// the size, so a scalar can be aligned less than its size but never more.
+Result<Layout> scalar_layout(const TypeDefinition& definition, const std::string& name) {
+  const std::uint64_t alignment =
+      definition.alignment == 0 ? definition.size : definition.alignment;
+  if (alignment == 0 || (alignment & (alignment - 1)) != 0 || alignment > definition.size) {
+    return fail<Layout>("type.bad_alignment",
+                        name + " is aligned to " + std::to_string(alignment) +
+                            " bytes; a scalar of " + std::to_string(definition.size) +
+                            " bytes is aligned to a power of two no larger than its size");
+  }
+  return Layout{definition.size, alignment};
+}
+
+/// The array of unknown bound that `id` names, directly or through typedefs; null when it names
+/// none. Such an array has no size of its own: a struct may end with one (a flexible array member),
+/// and anywhere else its layout is refused.
+const TypeDefinition* unbounded_array(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
+  for (int hop = 0; hop < kMaxNesting && id.valid(); ++hop) {
+    const auto found = types.find(id);
+    if (found == types.end()) {
+      return nullptr;
+    }
+    if (found->second.kind == TypeKind::Array) {
+      return found->second.count_known ? nullptr : &found->second;
+    }
+    if (found->second.kind != TypeKind::Typedef) {
+      return nullptr;
+    }
+    id = found->second.target;
+  }
+  return nullptr;
+}
+
 /// The size and alignment of a type, checked as it is computed. Void (id 0) is
 /// size 0. Each struct or union is laid out from its members: they must sit at
 /// aligned offsets (a union member at zero), and the stored size must be the
@@ -93,33 +128,37 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
                             name + " is an integer of " + std::to_string(definition.size) +
                                 " bytes; the ABI sizes are 1, 2, 4, 8 and 16");
       }
-      return Layout{definition.size, definition.size};
+      return scalar_layout(definition, name);
     case TypeKind::Float:
       if (!valid_float_size(definition.size)) {
         return fail<Layout>("type.bad_float_size", name + " is a float of " +
                                                        std::to_string(definition.size) +
                                                        " bytes; the sizes are 4, 8 and 16");
       }
-      return Layout{definition.size, definition.size};
+      return scalar_layout(definition, name);
     case TypeKind::Enum:
       if (!valid_enum_size(definition.size)) {
         return fail<Layout>("type.bad_enum_size", name + " is an enum of " +
                                                       std::to_string(definition.size) +
                                                       " bytes; the sizes are 1, 2, 4 and 8");
       }
-      return Layout{definition.size, definition.size};
+      return scalar_layout(definition, name);
     case TypeKind::Pointer:
       if (!valid_pointer_size(definition.size)) {
         return fail<Layout>("type.bad_pointer_size", name + " is a pointer of " +
                                                          std::to_string(definition.size) +
                                                          " bytes; the sizes are 4 and 8");
       }
-      return Layout{definition.size, definition.size};
+      return scalar_layout(definition, name);
     case TypeKind::Typedef:
       return layout_of(types, definition.target, depth + 1);
     case TypeKind::Array: {
       if (!definition.target.valid()) {
         return fail<Layout>("type.array_without_element", name + " has no element type");
+      }
+      if (!definition.count_known) {
+        return fail<Layout>("type.incomplete_array",
+                            name + " is an array of unknown bound and has no size");
       }
       auto element = layout_of(types, definition.target, depth + 1);
       if (!element) {
@@ -149,6 +188,33 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
         if (!field.type.valid()) {
           return fail<Layout>("type.void_member",
                               name + " has a member '" + field.name + "' of type void");
+        }
+        // A flexible array member: the last member of a struct, of an array of unknown bound. It
+        // adds no size of its own, but its element sets the alignment, and it sits at an aligned
+        // offset.
+        if (const TypeDefinition* unbounded = unbounded_array(types, field.type);
+            unbounded != nullptr) {
+          const bool last = &field == &definition.fields.back();
+          if (is_union || !last || field.bit_size != 0) {
+            return fail<Layout>(
+                "type.flexible_member_not_last",
+                name + " has an array member '" + field.name +
+                    "' of unknown bound; only the last member of a struct may be one");
+          }
+          auto element = layout_of(types, unbounded->target, depth + 1);
+          if (!element) {
+            return element;
+          }
+          const std::uint64_t element_alignment = element.value().alignment;
+          if (element_alignment == 0 || field.offset % element_alignment != 0) {
+            return fail<Layout>("type.misaligned_field",
+                                name + " has member '" + field.name + "' at offset " +
+                                    std::to_string(field.offset) + ", not aligned to " +
+                                    std::to_string(element_alignment));
+          }
+          alignment = std::max(alignment, element_alignment);
+          end = std::max(end, field.offset);
+          continue;
         }
         auto member = layout_of(types, field.type, depth + 1);
         if (!member) {
@@ -425,7 +491,9 @@ Result<void> TypeTable::validate() const {
   }
 
   for (const auto& [id, definition] : types_) {
-    if (names_a_function(types_, id)) {
+    // A function has no size, and an array of unknown bound has none of its own: each is checked
+    // where a complete type uses it by value.
+    if (names_a_function(types_, id) || unbounded_array(types_, id) != nullptr) {
       continue;
     }
     auto layout = layout_of(types_, id, 0);
@@ -466,6 +534,7 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
     definition.provenance = TypeProvenance::Dwarf;
     definition.name = source.name;
     definition.size = source.byte_size;
+    definition.alignment = source.alignment;
     switch (source.kind) {
       case DebugTypeKind::Void:
       case DebugTypeKind::Unspecified:
@@ -528,6 +597,7 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
         definition.kind = TypeKind::Array;
         definition.target = dwarf_reference(info, source.target);
         definition.count = source.element_count;
+        definition.count_known = source.bound_known;
         definition.size = 0;  // derived from the element
         break;
       case DebugTypeKind::Function:

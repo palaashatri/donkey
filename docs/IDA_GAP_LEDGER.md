@@ -151,7 +151,7 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has IEEE float operations (G01-T1). x86-64 scalar SSE lifts (G01-T2) and AArch64 scalar FP lifts (G01-T3). An operation that rounds depends on MXCSR or FPCR, which a caller may set, so such a function is Partial with that assumption in its notes. Packed SIMD is not lifted | P0 | IN PROGRESS (T1, T2 DONE; T3 DONE under qemu-aarch64 with GCC; Apple Clang and CI-runner verification open) |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial: the for form is not in the corpus); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: for form not in the corpus) |
@@ -338,6 +338,10 @@ interpreter.
   2. Model an XMM register as its low lane only. Any instruction that reads
      or writes the upper lanes is Unsupported (Partial), so a function with
      one is Partial too.
+     *Superseded in G01 (clang):* the high 64-bit lane is now a second register
+     (`xmm0_hi`) for `movaps`/`movapd`, the packed logical operations, the zeroing
+     idioms and memory loads. Other instructions that touch the upper lanes are
+     still Unsupported.
   3. In the ABI, float and double arguments go in xmm0-7 on System V and
      xmm0-3 on Win64, where they share positions with integer arguments. The
      return value is in xmm0. Add `IrCallingConvention` support in
@@ -363,10 +367,11 @@ interpreter.
 - **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
   integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
   each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
-  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1: 5 of 26
-  Complete, none wrong. Moves, comparisons and zeroing idioms are lifted; packed and other
-  SSE forms stay Partial. Argument and return registers follow the XMM registers that the function
-  reads and writes.
+  Complete, none wrong. Clang 18.1 at -O0: 6 of 26 Complete, none wrong (the figures and the rule are in
+  `docs/SUPPORT_MATRIX.md`). The clang count needed the high 64-bit lane of an XMM register modelled
+  (see step 2 below), `cmpltsd` lowered as a masked select, and float compares carried across blocks
+  with a memory operand. Other packed and SSE forms stay Partial. Argument and return registers follow
+  the XMM registers that the function reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 
@@ -504,7 +509,7 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
-- **Status:** DONE on GCC 13.3 and Clang 18.1 (x86-64, native). Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+- **Status:** IN PROGRESS. Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
   64 bit) and `bt` with a register or immediate index (the IR ops
   `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
   Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
@@ -518,15 +523,8 @@ interpreter.
   `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
   and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
   `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
-  at O3 with `popcnt`. `bsf` and `bsr` are lifted with a register or memory
-  source (`Ir.X86BitScanForwardAndReverseAreExactForANonzeroSource`): exact for
-  a nonzero source, and the function is Partial because the zero-source result
-  is undefined. ZF is not modelled. The guarded use `c_clz64_guarded` is Partial
-  and agrees with the compiled code, and it can only become Complete once flags
-  and path facts cross blocks (G02-T4). `c_ctz64_guarded` is Complete because
-  GCC encodes it as `rep bsf`, which is `tzcnt`. Not done in this task: the
-  `bsf`/`bsr` zero-source case itself, which the ledger's plan allows to stay
-  Partial.
+  at O3 with `popcnt`. Still not done, so the task stays IN PROGRESS: `bsf`/`bsr`
+  (needs a zero-flag state, or G02-T4 for the guarded form in `c_clz64_guarded`).
   Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
   can lie outside the operand).
 
@@ -545,20 +543,6 @@ interpreter.
   3. Otherwise keep the branch Partial.
 - **Done when:** a hand-written test (`Ir.FlagsFromSinglePredecessorAreExact`)
   passes, and the corpus has no new WRONG.
-- **Status:** DONE on x86-64 (GCC 13.3 and Clang 18.1, native). The rule is
-  implemented as written, with one simplification: the block just before the
-  successor must fall through or end in the conditional branch whose not-taken
-  edge is the successor, and the successor must have no other CFG predecessor
-  (calls and jumps from elsewhere count, and an unresolved indirect branch in
-  the function rules the carry out). The last flag writer must be a two-operand
-  `cmp` or `test` of registers and immediates, and nothing after it may write a
-  register it reads. The compare is repeated from its own instruction at the
-  successor's start. Evidence: `Ir.FlagsFromSinglePredecessorAreExact`, which
-  also checks that a rewritten operand keeps the successor Partial. The GCC
-  x86-64 corpus gains one Complete function at O2 and O3 and under
-  `-march=x86-64-v2` (57/59, 51/59, 52/59), and no result is WRONG. The Clang
-  x86-64 counts are unchanged. Not done: flags carried through a block with more
-  than one predecessor, and flags across a block whose predecessor is a call.
 
 ### G03 AArch64 integer gaps [oracle]
 
@@ -680,8 +664,9 @@ interpreter.
   register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
   the flags before). The unconditional form is `IrCondition::None` in
   `CondCompare`/`CondCompareAdd`. Lifting `adc`/`sbc` needs exact flags, and a
-  second carry reader in a block is Partial, since the carry out is not modelled.
-  Also fixed in this task: an unsupported
+  AArch64 `adc`/`sbc` without S do not write NZCV, so every carry reader in a block reads the
+  same carry. On x86 the carry out of `adc`/`sbb` is not modelled, so a second carry reader in a
+  block is Partial. `adcs`/`sbcs` set NZCV from the addition and are modelled. Also fixed in this task: an unsupported
   statement now clears the exact-flags state, so a later `adc` cannot read a
   carry through it. Evidence: `Ir.AArch64CarryChainAddsThenAdcUsesTheSumsCarry`,
   `Ir.AArch64SubtractWithBorrowUsesTheCompareBorrow`,

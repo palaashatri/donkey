@@ -3167,10 +3167,13 @@ TEST(Ir, AArch64CarryWithoutAFlagWriterIsPartial) {
   EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0x9a030040, 0xd65f03c0})));
 }
 
-TEST(Ir, AArch64SecondCarryReaderIsPartial) {
-  // adds; adc; adc; ret. The carry out of the first adc is not modelled.
-  EXPECT_TRUE(
-      aarch64_lifts_partial(aarch64_bytes({0xab010000, 0x9a030040, 0x9a030040, 0xd65f03c0})));
+TEST(Ir, AArch64CarryReadersShareTheCarryOfTheFlagWriter) {
+  // adds x0, x0, x1; adc x0, x2, x3; adc x0, x4, x5; ret. Neither adc writes NZCV, so the
+  // second one reads the carry of the sum as well.
+  const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0x9a050080, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(data));
+  EXPECT_EQ(run_aarch64_args(data, {~0ULL, 1, 5, 7, 2, 3}), 6U);  // carry 1: 2 + 3 + 1
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 5, 7, 2, 3}), 5U);      // no carry: 2 + 3
 }
 
 // adcs and sbcs set NZCV from the addition, as the architecture defines it, and
@@ -3717,10 +3720,28 @@ TEST(Ir, X86ZeroingIdiomClearsTheLowLane) {
   EXPECT_EQ(run_x86_64(f, {double_bits(7.0)}), 0U);
 }
 
-TEST(Ir, X86MovapsIsPartialBecauseItCopiesTheUpperLanes) {
+// movaps copies both 64-bit lanes, which the IR keeps as two registers. xmm1 is the only register
+// the function reads, so it is the argument, and the return value is the low lane of xmm0.
+TEST(Ir, X86MovapsCopiesBothLanesWithoutMakingTheFunctionPartial) {
   donkey::IrFunction f;  // movaps xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x28, 0xc1, 0xc3}, f));
-  EXPECT_TRUE(f.partial);
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(bits_as_double(run_x86_64(f, {double_bits(7.5)})), 7.5);
+}
+
+// cmpltsd xmm0, xmm1 sets the low lane to all ones when xmm0 < xmm1 and to zero otherwise. An
+// unordered comparison is false, so a NaN operand gives zero.
+TEST(Ir, X86CmpltsdIsAnOrderedMask) {
+  donkey::IrFunction f;  // cmpltsd xmm0, xmm1, 1 (less than); ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0xc2, 0xc1, 0x01, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  const std::uint64_t all_ones = ~0ULL;
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(2.0)}), all_ones);
+  EXPECT_EQ(run_x86_64(f, {double_bits(2.0), double_bits(1.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(1.0)}), 0ULL);
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(run_x86_64(f, {double_bits(nan), double_bits(2.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(nan)}), 0ULL);
 }
 
 // AArch64 scalar floating point. The encodings are the assembler's (llvm-mc); the

@@ -260,7 +260,9 @@ CREATE TABLE types (
   is_signed   INTEGER NOT NULL,
   count       INTEGER NOT NULL CHECK (count >= 0),
   target      INTEGER NOT NULL,
-  variadic    INTEGER NOT NULL
+  variadic    INTEGER NOT NULL,
+  count_known INTEGER NOT NULL CHECK (count_known IN (0, 1)),
+  alignment   INTEGER NOT NULL CHECK (alignment >= 0)
 );
 CREATE TABLE type_fields (
   type_id     INTEGER NOT NULL REFERENCES types(id) ON DELETE CASCADE,
@@ -1164,7 +1166,8 @@ Result<TypeTable> Project::types() const {
   }
   sqlite3* db = impl_->db;
   Statement rows(db,
-                 "SELECT id, kind, name, provenance, size, is_signed, count, target, variadic "
+                 "SELECT id, kind, name, provenance, size, is_signed, count, target, variadic, "
+                 "count_known, alignment "
                  "FROM types ORDER BY id");
   if (!rows.ok()) {
     return make_error<TypeTable>(Status::InternalError, "project.query_failed",
@@ -1188,6 +1191,8 @@ Result<TypeTable> Project::types() const {
     definition.count = static_cast<std::uint64_t>(rows.integer(6));
     definition.target = TypeId(static_cast<std::uint64_t>(rows.integer(7)));
     definition.variadic = rows.integer(8) != 0;
+    definition.count_known = rows.integer(9) != 0;
+    definition.alignment = static_cast<std::uint64_t>(rows.integer(10));
     definitions.push_back(std::move(definition));
   }
   if (!rows.done()) {
@@ -1243,7 +1248,8 @@ Result<void> Project::replace_types(const TypeTable& table) {
   const std::vector<TypeDefinition> definitions = table.list();
   for (const TypeDefinition& definition : definitions) {
     if (!fits_storage(definition.id.value()) || !definition.id.valid() ||
-        !fits_storage(definition.size) || !fits_storage(definition.count)) {
+        !fits_storage(definition.size) || !fits_storage(definition.count) ||
+        !fits_storage(definition.alignment)) {
       return make_void_error(Status::InvalidInput, "project.value_out_of_range",
                              "a type's id or size does not fit the storage integer range");
     }
@@ -1286,11 +1292,13 @@ Result<void> Project::replace_types(const TypeTable& table) {
     {
       Statement upsert(db,
                        "INSERT INTO types(id, kind, name, provenance, size, is_signed, count, "
-                       "target, variadic) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) "
+                       "target, variadic, count_known, alignment) "
+                       "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) "
                        "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, "
                        "provenance = excluded.provenance, size = excluded.size, "
                        "is_signed = excluded.is_signed, count = excluded.count, "
-                       "target = excluded.target, variadic = excluded.variadic");
+                       "target = excluded.target, variadic = excluded.variadic, "
+                       "count_known = excluded.count_known, alignment = excluded.alignment");
       upsert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       upsert.bind(2, static_cast<std::int64_t>(definition.kind));
       upsert.bind(3, definition.name);
@@ -1300,6 +1308,8 @@ Result<void> Project::replace_types(const TypeTable& table) {
       upsert.bind(7, static_cast<std::int64_t>(definition.count));
       upsert.bind(8, static_cast<std::int64_t>(definition.target.value()));
       upsert.bind(9, static_cast<std::int64_t>(definition.variadic ? 1 : 0));
+      upsert.bind(10, static_cast<std::int64_t>(definition.count_known ? 1 : 0));
+      upsert.bind(11, static_cast<std::int64_t>(definition.alignment));
       if (!upsert.execute_statement()) {
         return fail("project.type_write_failed", "write a type");
       }

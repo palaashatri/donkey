@@ -77,6 +77,12 @@ struct TypeDefinition {
   bool variadic = false;
   std::vector<TypeField> fields;
   std::vector<TypeEnumerator> enumerators;
+  /// Arrays: false when the producer gave no bound (a flexible array member). Such an array has no
+  /// size of its own; as the last member of a struct it adds none, and anywhere else it is refused.
+  bool count_known = true;
+  /// Scalars: the alignment when the target aligns the scalar less than its size (for example an
+  /// eight-byte scalar in a 32-bit System V unit). 0 means the size.
+  std::uint64_t alignment = 0;
 };
 
 /// A set of types, keyed by id. `validate` checks the whole set; the other

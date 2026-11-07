@@ -649,7 +649,25 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
       table = &candidate;
     }
   }
-  ASSERT_NE(table, nullptr) << "no jump table recovered in " << name;
+  if (table == nullptr) {
+    // Diagnostic for the failure: the function's bytes, so a run on another toolchain shows
+    // the table lowering that was not recognised.
+    std::string dump;
+    const auto start = loaded.value().image.va_to_file_offset(function->address);
+    if (start.has_value()) {
+      for (std::uint64_t at = start.value();
+           at < start.value() + (function->end_address - function->address) &&
+           at < loaded.value().data.size();
+           ++at) {
+        char byte[4];
+        std::snprintf(
+            byte, sizeof(byte), "%02x",
+            static_cast<unsigned>(std::to_integer<std::uint8_t>(loaded.value().data[at])));
+        dump += byte;
+      }
+    }
+    FAIL() << "no jump table recovered in " << name << "; function bytes " << dump;
+  }
   EXPECT_EQ(table->targets.size(), aarch64 ? 16U : 8U);
   for (const std::uint64_t target : table->targets) {
     EXPECT_GE(target, function->address);
@@ -1149,8 +1167,7 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
   // functions that round are Partial (see the lifter's rounding note). Only the ones whose
   // results do not round can be Complete, and every value above is still checked against the
   // compiled code either way. The measured counts at -O0 are 6 of 26 with GCC 13.3 and 5 of 26
-  // with Clang 18.1, so the floor is the smaller of the two.
-  EXPECT_GE(complete, 5) << complete << " of " << total << " float functions are Complete";
+  EXPECT_GE(complete, 6) << complete << " of " << total << " float functions are Complete";
 #endif
 }
 #else
