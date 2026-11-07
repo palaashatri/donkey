@@ -128,4 +128,17 @@ class TypeTable {
 /// and come out empty. The result is not validated; call `validate` on it.
 [[nodiscard]] TypeTable types_from_debug_info(const DebugInfo& info);
 
+struct PdbInfo;
+
+/// Converts the PDB types (G06-T3) into a table with the provenance Pdb. A record's id is its type
+/// index. A CodeView primitive takes its index with bit 61 set, so it cannot collide with a record.
+/// Qualifiers do not get a type of their own, as with DWARF, and a forward reference is the
+/// complete type of the same name. Enumerators are not read, so an enum has none. A type that
+/// cannot be expressed is left out and described in `unmapped`: a struct whose fields are not all
+/// read (a base class, a virtual table or a method changes its layout), a pointer to a member, and
+/// any type built from one of these. A reference to a left-out type fails `validate`, so the table
+/// is never silently incomplete. The result is not validated; call `validate` on it.
+[[nodiscard]] TypeTable types_from_pdb(const PdbInfo& info,
+                                       std::vector<Diagnostic>* unmapped = nullptr);
+
 }  // namespace donkey

@@ -5,9 +5,13 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "donkey/binary/pdb.h"
 
 namespace donkey {
 namespace {
@@ -550,6 +554,392 @@ TypeTable types_from_debug_info(const DebugInfo& info) {
 
 bool TypeTable::names_function(TypeId id) const {
   return names_a_function(types_, id);
+}
+
+namespace {
+
+/// The id of a CodeView primitive type: its index with bit 61 set, apart from every record index.
+constexpr std::uint64_t kPdbPrimitiveBase = std::uint64_t{1} << 61;
+
+/// The CodeView primitive types (index below 0x1000). The low byte is the kind; bits 8 to 10 are
+/// the mode, which is direct for a value, 4 for a 32-bit pointer and 6 for a 64-bit pointer.
+struct PdbPrimitive {
+  std::uint32_t code = 0;
+  const char* name = "";
+  TypeKind kind = TypeKind::Integer;
+  std::uint64_t size = 0;
+  bool is_signed = false;
+};
+
+constexpr PdbPrimitive kPdbPrimitives[] = {
+    {0x03, "void", TypeKind::Void, 0, false},
+    {0x10, "signed char", TypeKind::Integer, 1, true},
+    {0x20, "unsigned char", TypeKind::Integer, 1, false},
+    {0x30, "bool", TypeKind::Integer, 1, false},
+    {0x70, "char", TypeKind::Integer, 1, true},
+    {0x71, "wchar_t", TypeKind::Integer, 2, false},
+    {0x11, "short", TypeKind::Integer, 2, true},
+    {0x21, "unsigned short", TypeKind::Integer, 2, false},
+    {0x72, "int16", TypeKind::Integer, 2, true},
+    {0x73, "uint16", TypeKind::Integer, 2, false},
+    {0x12, "long", TypeKind::Integer, 4, true},
+    {0x13, "unsigned long", TypeKind::Integer, 4, false},
+    {0x74, "int", TypeKind::Integer, 4, true},
+    {0x75, "unsigned int", TypeKind::Integer, 4, false},
+    {0x76, "int64", TypeKind::Integer, 8, true},
+    {0x77, "uint64", TypeKind::Integer, 8, false},
+    {0x40, "float", TypeKind::Float, 4, false},
+    {0x41, "double", TypeKind::Float, 8, false},
+};
+
+const PdbPrimitive* find_primitive(std::uint32_t code) {
+  for (const PdbPrimitive& primitive : kPdbPrimitives) {
+    if (primitive.code == code) {
+      return &primitive;
+    }
+  }
+  return nullptr;
+}
+
+bool is_qualifier_kind(const std::string& kind) {
+  return kind == "const" || kind == "volatile" || kind == "const volatile" || kind == "unaligned";
+}
+
+/// Converts PDB records into table entries, on demand, from the type a reference names.
+class PdbMapper {
+ public:
+  PdbMapper(const PdbInfo& info, std::vector<Diagnostic>* unmapped)
+      : info_(info), unmapped_(unmapped) {
+    for (const PdbType& type : info.types) {
+      if (!type.forward) {
+        records_[type.index] = &type;
+      }
+    }
+    for (const PdbDerived& derived : info.derived) {
+      derived_[derived.index] = &derived;
+    }
+    // A forward reference names the complete type of the same group and name (struct and class
+    // share a group, since the other kinds are their own).
+    for (const PdbType& forward : info.types) {
+      if (!forward.forward) {
+        continue;
+      }
+      for (const PdbType& complete : info.types) {
+        if (!complete.forward && complete.name == forward.name &&
+            group(complete) == group(forward)) {
+          forward_to_complete_[forward.index] = complete.index;
+          break;
+        }
+      }
+    }
+  }
+
+  TypeTable run() {
+    for (const PdbType& type : info_.types) {
+      if (!type.forward) {
+        map(type.index, 0);
+      }
+    }
+    for (const PdbDerived& derived : info_.derived) {
+      map(derived.index, 0);
+    }
+    return std::move(table_);
+  }
+
+ private:
+  static std::string group(const PdbType& type) {
+    return type.kind == "union" ? "union" : type.kind == "enum" ? "enum" : "struct";
+  }
+
+  /// The index a reference finally names: qualifiers are transparent, and a forward reference is
+  /// its complete type.
+  std::uint32_t resolve(std::uint32_t index) const {
+    for (int hops = 0; hops < 32 && index >= 0x1000; ++hops) {
+      const auto derived = derived_.find(index);
+      if (derived != derived_.end() && is_qualifier_kind(derived->second->kind)) {
+        index = derived->second->referent;
+        continue;
+      }
+      const auto complete = forward_to_complete_.find(index);
+      if (complete != forward_to_complete_.end()) {
+        index = complete->second;
+        continue;
+      }
+      break;
+    }
+    return index;
+  }
+
+  void unmapped(std::uint32_t index, const std::string& reason) {
+    if (unmapped_ != nullptr) {
+      unmapped_->push_back(Diagnostic::make(Status::Partial, "pdb.type_unmapped",
+                                            "type 0x" + hex(index) + " is not mapped: " + reason,
+                                            index));
+    }
+  }
+
+  static std::string hex(std::uint32_t value) {
+    static constexpr char kDigits[] = "0123456789abcdef";
+    std::string text;
+    do {
+      text.insert(text.begin(), kDigits[value & 0xfU]);
+      value >>= 4U;
+    } while (value != 0);
+    return text;
+  }
+
+  /// The size of a type reference, or nothing when it has none (a function, a void, or an
+  /// unmapped kind).
+  std::optional<std::uint64_t> size_of(std::uint32_t reference, int depth) const {
+    if (depth > 64) {
+      return std::nullopt;
+    }
+    const std::uint32_t index = resolve(reference);
+    if (index < 0x1000) {
+      const std::uint32_t mode = (index >> 8U) & 0x7U;
+      const PdbPrimitive* primitive = find_primitive(index & 0xffU);
+      if (primitive == nullptr) {
+        return std::nullopt;
+      }
+      if (mode == 4) {
+        return std::uint64_t{4};
+      }
+      if (mode == 6) {
+        return std::uint64_t{8};
+      }
+      return primitive->size == 0 ? std::nullopt : std::optional<std::uint64_t>(primitive->size);
+    }
+    const auto derived = derived_.find(index);
+    if (derived != derived_.end()) {
+      if (derived->second->kind == "pointer" || derived->second->kind == "reference" ||
+          derived->second->kind == "array") {
+        return derived->second->size == 0 ? std::nullopt
+                                          : std::optional<std::uint64_t>(derived->second->size);
+      }
+      return std::nullopt;
+    }
+    const auto record = records_.find(index);
+    if (record == records_.end()) {
+      return std::nullopt;
+    }
+    if (record->second->kind == "enum") {
+      return size_of(record->second->underlying, depth + 1);
+    }
+    return record->second->size == 0 ? std::nullopt
+                                     : std::optional<std::uint64_t>(record->second->size);
+  }
+
+  std::optional<TypeId> map_primitive(std::uint32_t index) {
+    const std::uint32_t mode = (index >> 8U) & 0x7U;
+    const PdbPrimitive* primitive = find_primitive(index & 0xffU);
+    if (primitive == nullptr) {
+      unmapped(index, "an unknown primitive type");
+      return std::nullopt;
+    }
+    if (mode == 0) {
+      if (primitive->kind == TypeKind::Void) {
+        return TypeId{};  // void is the id 0
+      }
+      return primitive_definition(*primitive, primitive->kind, primitive->size,
+                                  primitive->is_signed, index);
+    }
+    if (mode == 4 || mode == 6) {
+      // A pointer to a primitive: the pointee is the primitive itself, and its size is the mode's.
+      const std::optional<TypeId> target =
+          primitive->kind == TypeKind::Void
+              ? std::optional<TypeId>(TypeId{})
+              : primitive_definition(*primitive, primitive->kind, primitive->size,
+                                     primitive->is_signed, index & 0xffU);
+      if (!target) {
+        return std::nullopt;
+      }
+      TypeDefinition definition;
+      definition.id = TypeId(kPdbPrimitiveBase + index);
+      definition.kind = TypeKind::Pointer;
+      definition.provenance = TypeProvenance::Pdb;
+      definition.name = std::string(primitive->name) + " *";
+      definition.size = mode == 6 ? 8 : 4;
+      definition.target = target.value();
+      table_.put(std::move(definition));
+      return TypeId(kPdbPrimitiveBase + index);
+    }
+    unmapped(index, "a primitive pointer of a segmented mode");
+    return std::nullopt;
+  }
+
+  std::optional<TypeId> primitive_definition(const PdbPrimitive& primitive, TypeKind kind,
+                                             std::uint64_t size, bool is_signed,
+                                             std::uint32_t index) {
+    TypeDefinition definition;
+    definition.id = TypeId(kPdbPrimitiveBase + index);
+    definition.kind = kind;
+    definition.provenance = TypeProvenance::Pdb;
+    definition.name = primitive.name;
+    definition.size = size;
+    definition.is_signed = is_signed;
+    table_.put(std::move(definition));
+    return TypeId(kPdbPrimitiveBase + index);
+  }
+
+  /// The table id of a type reference, mapping the type on first use. A reference to a type that
+  /// cannot be mapped is nothing, and the reason is reported once, where the type is first named.
+  std::optional<TypeId> map(std::uint32_t reference, int depth) {
+    if (depth > 64) {
+      return std::nullopt;
+    }
+    const std::uint32_t index = resolve(reference);
+    if (index < 0x1000) {
+      return map_primitive(index);
+    }
+    const auto known = memo_.find(index);
+    if (known != memo_.end()) {
+      return known->second;
+    }
+    if (in_progress_.count(index) != 0) {
+      return TypeId(index);  // a type that refers to itself through a pointer
+    }
+    in_progress_.insert(index);
+    const std::optional<TypeId> result = map_record(index, depth + 1);
+    in_progress_.erase(index);
+    memo_[index] = result;
+    return result;
+  }
+
+  std::optional<TypeId> map_record(std::uint32_t index, int depth) {
+    const auto derived = derived_.find(index);
+    if (derived != derived_.end()) {
+      return map_derived(*derived->second, depth);
+    }
+    const auto record = records_.find(index);
+    if (record == records_.end()) {
+      unmapped(index, "it is not a type this reader describes");
+      return std::nullopt;
+    }
+    const PdbType& type = *record->second;
+    if (type.kind == "enum") {
+      const auto underlying = map(type.underlying, depth + 1);
+      const auto size = size_of(type.underlying, depth + 1);
+      if (!underlying || !size) {
+        unmapped(index, "its underlying type is not mapped");
+        return std::nullopt;
+      }
+      TypeDefinition definition;
+      definition.id = TypeId(index);
+      definition.kind = TypeKind::Enum;
+      definition.provenance = TypeProvenance::Pdb;
+      definition.name = type.name;
+      definition.size = size.value();
+      table_.put(std::move(definition));
+      return TypeId(index);
+    }
+    if (!type.members_complete) {
+      unmapped(index, "its fields are not all read (a base class, a virtual table or a method)");
+      return std::nullopt;
+    }
+    TypeDefinition definition;
+    definition.id = TypeId(index);
+    definition.kind = type.kind == "union" ? TypeKind::Union : TypeKind::Struct;
+    definition.provenance = TypeProvenance::Pdb;
+    definition.name = type.name;
+    definition.size = type.size;
+    for (const PdbMember& member : type.members) {
+      const auto member_type = map(member.type, depth + 1);
+      if (!member_type) {
+        unmapped(index, "field '" + member.name + "' has a type that is not mapped");
+        return std::nullopt;
+      }
+      TypeField field;
+      field.name = member.name;
+      field.offset = member.offset;
+      field.type = member_type.value();
+      definition.fields.push_back(std::move(field));
+    }
+    table_.put(std::move(definition));
+    return TypeId(index);
+  }
+
+  std::optional<TypeId> map_derived(const PdbDerived& derived, int depth) {
+    if (derived.kind == "pointer" || derived.kind == "reference") {
+      // A C++ reference is laid out as a pointer, so it is kept as one.
+      const auto target = map(derived.referent, depth + 1);
+      if (!target || derived.size == 0) {
+        unmapped(derived.index, "its target is not mapped");
+        return std::nullopt;
+      }
+      TypeDefinition definition;
+      definition.id = TypeId(derived.index);
+      definition.kind = TypeKind::Pointer;
+      definition.provenance = TypeProvenance::Pdb;
+      definition.size = derived.size;
+      definition.target = target.value();
+      table_.put(std::move(definition));
+      return TypeId(derived.index);
+    }
+    if (derived.kind == "array") {
+      const auto element = map(derived.referent, depth + 1);
+      const auto element_size = size_of(derived.referent, depth + 1);
+      if (!element || !element_size || derived.size % element_size.value() != 0) {
+        unmapped(derived.index,
+                 "its element type is not mapped, or the size is not a multiple of it");
+        return std::nullopt;
+      }
+      TypeDefinition definition;
+      definition.id = TypeId(derived.index);
+      definition.kind = TypeKind::Array;
+      definition.provenance = TypeProvenance::Pdb;
+      definition.target = element.value();
+      definition.count = derived.size / element_size.value();
+      table_.put(std::move(definition));
+      return TypeId(derived.index);
+    }
+    if (derived.kind == "procedure") {
+      const auto returns = map(derived.referent, depth + 1);
+      if (!returns) {
+        unmapped(derived.index, "its return type is not mapped");
+        return std::nullopt;
+      }
+      TypeDefinition definition;
+      definition.id = TypeId(derived.index);
+      definition.kind = TypeKind::Function;
+      definition.provenance = TypeProvenance::Pdb;
+      definition.target = returns.value();
+      for (std::size_t i = 0; i < derived.arguments.size(); ++i) {
+        const std::uint32_t argument = derived.arguments[i];
+        if (argument == 0 && i + 1 == derived.arguments.size()) {
+          definition.variadic = true;  // T_NOTYPE closes a variable argument list
+          break;
+        }
+        const auto parameter = map(argument, depth + 1);
+        if (!parameter) {
+          unmapped(derived.index, "a parameter type is not mapped");
+          return std::nullopt;
+        }
+        TypeField field;
+        field.type = parameter.value();
+        definition.fields.push_back(std::move(field));
+      }
+      table_.put(std::move(definition));
+      return TypeId(derived.index);
+    }
+    unmapped(derived.index, "a pointer to a member is not mapped");
+    return std::nullopt;
+  }
+
+  const PdbInfo& info_;
+  std::vector<Diagnostic>* unmapped_;
+  TypeTable table_;
+  std::map<std::uint32_t, const PdbType*> records_;
+  std::map<std::uint32_t, const PdbDerived*> derived_;
+  std::map<std::uint32_t, std::uint32_t> forward_to_complete_;
+  std::map<std::uint32_t, std::optional<TypeId>> memo_;
+  std::set<std::uint32_t> in_progress_;
+};
+
+}  // namespace
+
+TypeTable types_from_pdb(const PdbInfo& info, std::vector<Diagnostic>* unmapped) {
+  PdbMapper mapper(info, unmapped);
+  return mapper.run();
 }
 
 }  // namespace donkey

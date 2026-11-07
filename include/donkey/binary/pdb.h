@@ -59,6 +59,13 @@ struct PdbVariable {
   std::uint32_t type = 0;
 };
 
+/// One instance field of a struct, class or union: an LF_MEMBER of its field list.
+struct PdbMember {
+  std::string name;
+  std::uint32_t type = 0;    ///< the field's type index; below 0x1000 it is a primitive
+  std::uint64_t offset = 0;  ///< byte offset from the start of the aggregate
+};
+
 /// A struct, class, union or enum from the type stream. A forward reference has no size and
 /// names the complete type; the complete one is the entry with `forward == false`.
 struct PdbType {
@@ -67,6 +74,23 @@ struct PdbType {
   std::string name;
   std::uint64_t size = 0;
   bool forward = false;
+  std::uint32_t field_list = 0;  ///< the LF_FIELDLIST index, 0 when there is none
+  std::uint32_t underlying = 0;  ///< an enum's underlying integer type index, 0 for the others
+  /// The instance fields, in field-list order. Only meaningful when `members_complete`: a base
+  /// class, a virtual table or any other entry that changes the layout makes the list incomplete,
+  /// and the fields read before it are then not the whole layout.
+  std::vector<PdbMember> members;
+  bool members_complete = false;
+};
+
+/// A type built from another one: a pointer or reference, an array, a const or volatile
+/// modifier, or a procedure. `referent` is the pointee, element, modified or return type.
+struct PdbDerived {
+  std::uint32_t index = 0;
+  std::string kind;  ///< "pointer", "reference", "array", "const", "volatile" or "procedure"
+  std::uint32_t referent = 0;
+  std::uint64_t size = 0;  ///< a pointer's or an array's size in bytes, 0 when not stated
+  std::vector<std::uint32_t> arguments;  ///< a procedure's parameter types, in order
 };
 
 struct PdbInfo {
@@ -77,6 +101,7 @@ struct PdbInfo {
   std::vector<PdbFunction> functions;
   std::vector<PdbVariable> variables;  ///< the data symbols of the global symbol records
   std::vector<PdbType> types;
+  std::vector<PdbDerived> derived;  ///< pointers, arrays, modifiers and procedures
   std::vector<Diagnostic> diagnostics;
   bool partial = false;
   /// The GUID as Microsoft prints it: {DCD7BA01-17F5-EA32-4C4C-44205044422E}.

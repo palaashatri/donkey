@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <map>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -251,7 +252,99 @@ std::optional<std::pair<std::uint64_t, std::uint64_t>> numeric(const ByteReader&
   }
 }
 
-/// The type stream: the class-like types it names, with their sizes and forward references.
+constexpr std::uint16_t kLfModifier = 0x1001;
+constexpr std::uint16_t kLfPointer = 0x1002;
+constexpr std::uint16_t kLfProcedure = 0x1008;
+constexpr std::uint16_t kLfArgList = 0x1201;
+constexpr std::uint16_t kLfFieldList = 0x1203;
+constexpr std::uint16_t kLfIndex = 0x1404;
+constexpr std::uint16_t kLfArray = 0x1503;
+constexpr std::uint16_t kLfMember = 0x150d;
+
+/// An LF_FIELDLIST record: its instance fields, an LF_INDEX continuation to another list, and
+/// whether a subrecord this reader does not decode ended it early (then it is incomplete).
+struct FieldList {
+  std::vector<PdbMember> members;
+  std::uint32_t continuation = 0;
+  bool complete = true;
+};
+
+/// Reads the subrecords of an LF_FIELDLIST body in [begin, end). Subrecords are padded to 4
+/// bytes with bytes of 0xF0 and up. A subrecord kind this reader does not decode (a base class,
+/// a virtual table, a method) ends the list as incomplete: the fields after it are not read.
+FieldList read_field_list(const ByteReader& reader, std::uint64_t begin, std::uint64_t end) {
+  FieldList list;
+  std::uint64_t at = begin;
+  while (at < end) {
+    const auto lead = reader.u8(at);
+    if (!lead) {
+      list.complete = false;
+      break;
+    }
+    if (lead.value() >= 0xf0) {
+      ++at;  // padding before the next subrecord
+      continue;
+    }
+    const auto leaf = reader.u16(at, Endian::Little);
+    if (!leaf) {
+      list.complete = false;
+      break;
+    }
+    if (leaf.value() == kLfMember) {
+      const auto type = reader.u32(at + 4, Endian::Little);
+      const auto offset = numeric(reader, at + 8);
+      if (!type || !offset) {
+        list.complete = false;
+        break;
+      }
+      const std::uint64_t name_at = at + 8 + offset->second;
+      const auto name = reader.c_string(name_at, 4096);
+      if (!name) {
+        list.complete = false;
+        break;
+      }
+      PdbMember member;
+      member.name = text_of(name.value());
+      member.type = type.value();
+      member.offset = offset->first;
+      list.members.push_back(std::move(member));
+      at = name_at + name.value().size() + 1;
+    } else if (leaf.value() == kLfIndex) {
+      const auto continuation = reader.u32(at + 4, Endian::Little);
+      if (!continuation) {
+        list.complete = false;
+        break;
+      }
+      list.continuation = continuation.value();
+      at += 8;
+    } else {
+      list.complete = false;
+      break;
+    }
+  }
+  return list;
+}
+
+/// Appends the fields of field list `index` and of its continuations. Depth is limited, so a
+/// continuation cycle is reported as incomplete rather than followed forever.
+void collect_members(const std::map<std::uint32_t, FieldList>& lists, std::uint32_t index,
+                     std::vector<PdbMember>& out, bool& complete, int depth) {
+  const auto found = lists.find(index);
+  if (depth > 16 || found == lists.end()) {
+    complete = false;
+    return;
+  }
+  out.insert(out.end(), found->second.members.begin(), found->second.members.end());
+  if (!found->second.complete) {
+    complete = false;
+  }
+  if (found->second.continuation != 0) {
+    collect_members(lists, found->second.continuation, out, complete, depth + 1);
+  }
+}
+
+/// The type stream: the class-like types it names, with their sizes and forward references, and
+/// the fields, pointers, arrays, modifiers and procedures that the rest of it describes.
 void read_types(const Msf& msf, PdbInfo& info, const PdbLimits& limits) {
   const auto stream = msf.stream(kStreamTypes);
   if (!stream) {
@@ -267,6 +360,9 @@ void read_types(const Msf& msf, PdbInfo& info, const PdbLimits& limits) {
   std::uint64_t at = header_size.value();
   std::uint32_t index = begin.value();
   std::size_t records = 0;
+  std::map<std::uint32_t, FieldList> field_lists;
+  std::map<std::uint32_t, std::vector<std::uint32_t>> argument_lists;
+  std::map<std::uint32_t, std::uint32_t> procedure_arglists;  // procedure index -> arglist index
   while (at + 4 <= stream->size()) {
     if (++records > limits.max_types) {
       note(info, Status::ResourceLimit, "pdb.type_limit", "more types than the limit", at);
@@ -309,11 +405,135 @@ void read_types(const Msf& msf, PdbInfo& info, const PdbLimits& limits) {
       }
       if (type.forward) {
         type.size = 0;
+      } else if (const auto field_list =
+                     reader.u32(leaf == kLfEnum ? body + 8 : body + 4, Endian::Little)) {
+        type.field_list = field_list.value();  // enum: its enumerators, not read here
+      }
+      if (leaf == kLfEnum) {
+        if (const auto underlying = reader.u32(body + 4, Endian::Little)) {
+          type.underlying = underlying.value();
+        }
       }
       info.types.push_back(std::move(type));
+    } else if (leaf == kLfFieldList) {
+      field_lists.emplace(index, read_field_list(reader, body, end));
+    } else if (leaf == kLfArgList) {
+      const auto count = reader.u32(body, Endian::Little);
+      // Each argument is 4 bytes after the count; a count past the record is reported.
+      const std::uint64_t room = end >= body + 4 ? (end - body - 4) / 4 : 0;
+      if (!count || count.value() > room) {
+        note(info, Status::Partial, "pdb.arglist", "an argument list runs past its record", at);
+      } else {
+        std::vector<std::uint32_t> arguments;
+        for (std::uint64_t i = 0; i < count.value(); ++i) {
+          const auto argument = reader.u32(body + 4 + 4 * i, Endian::Little);
+          if (!argument) {
+            break;
+          }
+          arguments.push_back(argument.value());
+        }
+        argument_lists[index] = std::move(arguments);
+      }
+    } else if (leaf == kLfPointer) {
+      const auto referent = reader.u32(body, Endian::Little);
+      const auto attributes = reader.u32(body + 4, Endian::Little);
+      if (!referent || !attributes) {
+        note(info, Status::Partial, "pdb.pointer", "a pointer record is truncated", at);
+      } else {
+        PdbDerived derived;
+        derived.index = index;
+        derived.referent = referent.value();
+        const std::uint32_t form = attributes.value() & 0x1fU;         // CV_ptrtype_e
+        const std::uint32_t mode = (attributes.value() >> 5U) & 0x7U;  // CV_ptrmode_e
+        derived.kind = mode == 0                ? "pointer"
+                       : mode == 1 || mode == 2 ? "reference"
+                                                : "pointer to member";
+        derived.size = (attributes.value() >> 13U) & 0x3fU;
+        if (derived.size == 0) {
+          derived.size = form == 0x0c ? 8 : form == 0x0a ? 4 : 0;  // ptr64, near32
+        }
+        info.derived.push_back(std::move(derived));
+      }
+    } else if (leaf == kLfArray) {
+      const auto element = reader.u32(body, Endian::Little);
+      const auto bytes = numeric(reader, body + 8);
+      if (!element || !bytes) {
+        note(info, Status::Partial, "pdb.array", "an array record is truncated", at);
+      } else {
+        PdbDerived derived;
+        derived.index = index;
+        derived.kind = "array";
+        derived.referent = element.value();
+        derived.size = bytes->first;
+        info.derived.push_back(std::move(derived));
+      }
+    } else if (leaf == kLfModifier) {
+      const auto modified = reader.u32(body, Endian::Little);
+      const auto modifier = reader.u16(body + 4, Endian::Little);
+      if (!modified || !modifier) {
+        note(info, Status::Partial, "pdb.modifier", "a modifier record is truncated", at);
+      } else {
+        PdbDerived derived;
+        derived.index = index;
+        derived.referent = modified.value();
+        const bool is_const = (modifier.value() & 0x1U) != 0;
+        const bool is_volatile = (modifier.value() & 0x2U) != 0;
+        // An unaligned-only modifier changes nothing, and is kept as "unaligned".
+        derived.kind = is_const && is_volatile ? "const volatile"
+                       : is_const              ? "const"
+                       : is_volatile           ? "volatile"
+                                               : "unaligned";
+        info.derived.push_back(std::move(derived));
+      }
+    } else if (leaf == kLfProcedure) {
+      const auto returns = reader.u32(body, Endian::Little);
+      const auto arglist = reader.u32(body + 8, Endian::Little);
+      if (!returns || !arglist) {
+        note(info, Status::Partial, "pdb.procedure", "a procedure record is truncated", at);
+      } else {
+        PdbDerived derived;
+        derived.index = index;
+        derived.kind = "procedure";
+        derived.referent = returns.value();
+        procedure_arglists[index] = arglist.value();
+        info.derived.push_back(std::move(derived));
+      }
     }
     at = end;
     ++index;
+  }
+
+  // Resolve the references the records named: a complete struct's fields, and a procedure's
+  // parameters. A reference to a record that is not there is reported, not guessed.
+  for (PdbType& type : info.types) {
+    if (type.forward) {
+      continue;
+    }
+    if (type.field_list == 0) {
+      type.members_complete = type.kind != "enum";  // no fields: complete, unless an enum
+      continue;
+    }
+    if (type.kind == "enum") {
+      continue;  // enumerators are not read, so the enum keeps no members
+    }
+    bool complete = true;
+    collect_members(field_lists, type.field_list, type.members, complete, 0);
+    type.members_complete = complete;
+  }
+  for (PdbDerived& derived : info.derived) {
+    if (derived.kind != "procedure") {
+      continue;
+    }
+    const auto arglist = procedure_arglists.find(derived.index);
+    const auto arguments = arglist == procedure_arglists.end()
+                               ? argument_lists.end()
+                               : argument_lists.find(arglist->second);
+    if (arguments == argument_lists.end()) {
+      note(info, Status::Partial, "pdb.arglist", "a procedure names a missing argument list",
+           derived.index);
+      continue;
+    }
+    derived.arguments = arguments->second;
   }
 }
 
