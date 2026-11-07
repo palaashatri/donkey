@@ -513,7 +513,8 @@ bool flags_written_in_block(const IrBlock& block, std::size_t index) {
       return true;
     }
     if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
-        candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) {
+        ((candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) &&
+         candidate.writes_flags)) {
       return false;  // flags may have changed in a way the IR does not show
     }
   }
