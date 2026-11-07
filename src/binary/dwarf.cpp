@@ -1212,6 +1212,12 @@ class Reader {
     type.kind = kind;
     type.name = e.name;
     type.byte_size = e.byte_size;
+    // DW_AT_byte_size is optional on a pointer or reference, and llvm-mingw leaves it out. Such a
+    // pointer is as wide as the addresses of its unit.
+    if ((kind == DebugTypeKind::Pointer || kind == DebugTypeKind::Reference) &&
+        type.byte_size == 0) {
+      type.byte_size = unit.address_size;
+    }
     type.encoding = e.encoding;
     type.target = e.type;
     type.provenance = provenance(e, unit);
