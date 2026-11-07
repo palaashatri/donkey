@@ -799,7 +799,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project annotations <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
-      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--run]"
+      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
+      "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
       " [--mock] [--json]\n"
       "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
       "<hex>] --output <out> [--force] [--json]\n"
@@ -2340,6 +2341,7 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::string binary_path;
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
+  std::vector<std::string> watch_specs;
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -2349,12 +2351,18 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       mock = true;
     } else if (arg == "--run") {
       run = true;
-    } else if (arg == "--arg" || arg == "--break") {
+    } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
-        return usage_error(arg == "--arg" ? "--arg needs a value" : "--break needs a value");
+        return usage_error(arg == "--arg"     ? "--arg needs a value"
+                           : arg == "--watch" ? "--watch needs a value"
+                                              : "--break needs a value");
       }
-      (arg == "--arg" ? args : break_specs).emplace_back(val);
+      if (arg == "--watch") {
+        watch_specs.emplace_back(val);
+      } else {
+        (arg == "--arg" ? args : break_specs).emplace_back(val);
+      }
     } else if (!arg.empty() && arg.front() == '-') {
       return usage_error("unknown option for debug launch");
     } else if (binary_path.empty()) {
@@ -2426,6 +2434,46 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     if (!bp) {
       (void)adapter->terminate();
       return fail(bp.diagnostic());
+    }
+  }
+  // A watch is TARGET[:LENGTH][:rw]: the target's address, its size in bytes (default 4), and the
+  // access (default write; rw traps on reads and writes too). The debug registers take it only
+  // while the target is stopped, which it is here.
+  for (const std::string& spec : watch_specs) {
+    const auto first = spec.find(':');
+    const std::string target = spec.substr(0, first);
+    std::uint64_t length = 4;
+    auto kind = debug::WatchKind::Write;
+    if (first != std::string::npos) {
+      const std::string rest = spec.substr(first + 1);
+      const auto second = rest.find(':');
+      std::uint64_t parsed = 0;
+      if (!parse_u64(rest.substr(0, second), parsed) ||
+          (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+        (void)adapter->terminate();
+        return usage_error("--watch length must be 1, 2, 4 or 8 bytes");
+      }
+      length = parsed;
+      if (second != std::string::npos) {
+        if (rest.substr(second + 1) != "rw") {
+          (void)adapter->terminate();
+          return usage_error("--watch access must be rw (the default is write)");
+        }
+        kind = debug::WatchKind::ReadWrite;
+      }
+    }
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, target, address)) {
+      (void)adapter->terminate();
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_watch",
+                             "no symbol or address '" + target + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto watch = adapter->set_watchpoint(translator.static_to_runtime(address),
+                                         static_cast<std::uint8_t>(length), kind);
+    if (!watch) {
+      (void)adapter->terminate();
+      return fail(watch.diagnostic());
     }
   }
 

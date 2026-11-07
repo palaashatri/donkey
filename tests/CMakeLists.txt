@@ -718,6 +718,21 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
                    --break donkey_debuggee_tick --run --json)
   set_tests_properties(cli.debug_native_run_json PROPERTIES
     PASS_REGULAR_EXPRESSION "\"adapter\": \"native\".*\"stop_reason\": \"Entrypoint\".*\"stops\": \\[.*\"Breakpoint\".*donkey_debuggee_tick.*\"Breakpoint\".*\"Breakpoint\".*\"exit_code\": 42")
+  # Hardware watchpoints from the command line (G14-T5): the debuggee writes its counter once per
+  # tick, so the watch stops three times, then the program exits with its own code.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_test(NAME cli.debug_native_watch_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --watch donkey_debuggee_counter --run --json)
+    set_tests_properties(cli.debug_native_watch_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"Watchpoint\".*\"Watchpoint\".*\"exit_code\": 42")
+  endif()
+  # The simulation adapter has no watchpoints, and the command says so rather than pretending.
+  add_test(NAME cli.debug_mock_watch_is_unsupported
+           COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                   --mock --watch _start)
+  set_tests_properties(cli.debug_mock_watch_is_unsupported PROPERTIES
+    PASS_REGULAR_EXPRESSION "debug\\.watchpoints_unsupported")
 else()
   add_test(NAME cli.debug_native_unsupported
            COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>)
