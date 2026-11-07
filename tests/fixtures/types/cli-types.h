@@ -3,4 +3,4 @@ struct point {
   int y;
 };
 typedef struct point point_t;
-long long point_sum(const struct point *p);
+long long point_sum(const struct point* p);
