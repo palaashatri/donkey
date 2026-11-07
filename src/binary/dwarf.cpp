@@ -707,6 +707,7 @@ class Reader {
     std::uint64_t byte_size = 0;
     std::uint8_t encoding = 0;
     std::uint64_t count = 0;
+    bool has_count = false;  ///< DW_AT_count was given (it may be zero)
     std::optional<std::int64_t> upper_bound;
     std::uint64_t member_offset = 0;
     std::optional<std::uint64_t> location;
@@ -918,6 +919,7 @@ class Reader {
       case kAtCount:
         if (is_constant_form(v.form)) {
           e.count = v.u;
+          e.has_count = true;
         }
         break;
       case kAtUpperBound:
@@ -1081,10 +1083,16 @@ class Reader {
         if (auto it = out_.types.find(parent); it != out_.types.end() &&
                                                it->second.kind == DebugTypeKind::Array &&
                                                it->second.element_count == 0) {
-          if (e.count != 0) {
+          // A bound of zero (DW_AT_count 0, or DW_AT_upper_bound -1) is a zero-length array; only
+          // a subrange with neither attribute is unbounded, which makes a flexible array member.
+          if (e.has_count) {
             it->second.element_count = e.count;
-          } else if (e.upper_bound.has_value() && *e.upper_bound >= 0) {
-            it->second.element_count = static_cast<std::uint64_t>(*e.upper_bound) + 1;
+          } else if (e.upper_bound.has_value()) {
+            if (*e.upper_bound >= 0) {
+              it->second.element_count = static_cast<std::uint64_t>(*e.upper_bound) + 1;
+            }
+          } else {
+            it->second.bound_known = false;
           }
         }
         return;
@@ -1153,6 +1161,10 @@ class Reader {
     if ((kind == DebugTypeKind::Pointer || kind == DebugTypeKind::Reference) &&
         type.byte_size == 0) {
       type.byte_size = unit.address_size;
+    }
+    // An eight-byte scalar in a 32-bit unit is aligned to four (the System V i386 rule).
+    if (kind == DebugTypeKind::Base && type.byte_size == 8 && unit.address_size == 4) {
+      type.alignment = 4;
     }
     type.encoding = e.encoding;
     type.target = e.type;
