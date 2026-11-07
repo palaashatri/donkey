@@ -1110,6 +1110,10 @@ TEST(Types, RoundTripThroughTheProject) {
   donkey::TypeDefinition colour = scalar(color, donkey::TypeKind::Enum, "color", 4);
   colour.enumerators = {donkey::TypeEnumerator{"RED", 0}, donkey::TypeEnumerator{"GREEN", 1}};
   table.put(std::move(colour));
+  const donkey::TypeId function(5);
+  donkey::TypeDefinition signature = scalar(function, donkey::TypeKind::Function, "", 0);
+  signature.target = int32;
+  table.put(std::move(signature));
 
   std::int64_t image_id = 0;
   {
@@ -1121,7 +1125,7 @@ TEST(Types, RoundTripThroughTheProject) {
     ASSERT_TRUE(project.value().replace_types(table).has_value());
     ASSERT_TRUE(project.value()
                     .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
-                                          0x400100, point)
+                                          0x400100, function)
                     .has_value());
   }
 
@@ -1129,7 +1133,7 @@ TEST(Types, RoundTripThroughTheProject) {
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
   auto stored = reopened.value().types();
   ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
-  ASSERT_EQ(stored.value().size(), 4U);
+  ASSERT_EQ(stored.value().size(), 5U);
   const donkey::TypeDefinition* read_point = stored.value().find(point);
   ASSERT_NE(read_point, nullptr);
   EXPECT_EQ(read_point->name, "point");
@@ -1149,7 +1153,7 @@ TEST(Types, RoundTripThroughTheProject) {
   ASSERT_TRUE(applications.has_value());
   ASSERT_EQ(applications.value().size(), 1U);
   EXPECT_EQ(applications.value()[0].address, 0x400100U);
-  EXPECT_EQ(applications.value()[0].type_id, point);
+  EXPECT_EQ(applications.value()[0].type_id, function);
 }
 
 TEST(Types, MigratesFromSchemaV4) {
@@ -1492,3 +1496,91 @@ TEST(Types, DwarfStructsMatchTheirByteSize) {
 }
 
 }  // namespace
+
+// The C++ ABI gives an empty class one byte, and an empty C struct none. Both sizes are accepted as
+// declared, so a DWARF type with either size validates and reports that size.
+TEST(Types, EmptyStructsKeepTheirDeclaredSize) {
+  donkey::TypeTable table;
+  table.put(record(donkey::TypeId(1), donkey::TypeKind::Struct, "empty_class", 1, {}));
+  table.put(record(donkey::TypeId(2), donkey::TypeKind::Struct, "empty_c", 0, {}));
+  const auto valid = table.validate();
+  ASSERT_TRUE(valid.has_value()) << valid.diagnostic().message;
+  auto one = table.size_of(donkey::TypeId(1));
+  ASSERT_TRUE(one.has_value());
+  EXPECT_EQ(one.value(), 1U);
+  auto none = table.size_of(donkey::TypeId(2));
+  ASSERT_TRUE(none.has_value());
+  EXPECT_EQ(none.value(), 0U);
+}
+
+// A member whose offset is near the top of the address space wraps when its end is added. That is
+// refused, rather than validated as a small struct.
+TEST(Types, MemberOffsetsThatWrapAreRefused) {
+  donkey::TypeTable table;
+  table.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "int", 4, true));
+  table.put(
+      record(donkey::TypeId(2), donkey::TypeKind::Struct, "wraps", 8,
+             {member("x", std::numeric_limits<std::uint64_t>::max() - 3, donkey::TypeId(1))}));
+  const auto valid = table.validate();
+  ASSERT_FALSE(valid.has_value());
+  EXPECT_EQ(valid.diagnostic().code, "type.member_overflow");
+}
+
+// The formal parameters of a DWARF subroutine type come through as the function's fields, with
+// their types, so a prototype read from DWARF keeps its signature.
+TEST(Types, DwarfSubroutineTypesKeepTheirParameters) {
+  donkey::DebugInfo info;
+  donkey::DebugType int_type;
+  int_type.kind = donkey::DebugTypeKind::Base;
+  int_type.name = "int";
+  int_type.byte_size = 4;
+  int_type.encoding = 5;
+  info.types[0x10] = int_type;
+  donkey::DebugType signature;
+  signature.kind = donkey::DebugTypeKind::Function;
+  signature.target = 0x10;
+  signature.members = {donkey::DebugMember{"a", 0x10, 0}, donkey::DebugMember{"b", 0x10, 0}};
+  info.types[0x20] = signature;
+  const donkey::TypeTable table = donkey::types_from_debug_info(info);
+  const donkey::TypeDefinition* function = table.find(donkey::TypeId(0x21));
+  ASSERT_NE(function, nullptr);
+  ASSERT_EQ(function->fields.size(), 2U);
+  EXPECT_EQ(function->fields[1].name, "b");
+  EXPECT_EQ(function->fields[1].type, donkey::TypeId(0x11));
+  EXPECT_TRUE(table.names_function(donkey::TypeId(0x21)));
+  EXPECT_FALSE(table.names_function(donkey::TypeId(0x11)));
+}
+
+// A complex float is two floats side by side, and an imaginary float is one. Both come through as
+// arrays of their parts, so the layout matches the compiler's and no scalar type is claimed.
+TEST(Types, ComplexAndImaginaryTypesAreArraysOfTheirParts) {
+  donkey::DebugInfo info;
+  donkey::DebugType complex;
+  complex.kind = donkey::DebugTypeKind::Base;
+  complex.name = "complex float";
+  complex.byte_size = 8;
+  complex.encoding = 3;
+  info.types[0x30] = complex;
+  donkey::DebugType imaginary;
+  imaginary.kind = donkey::DebugTypeKind::Base;
+  imaginary.name = "imaginary float";
+  imaginary.byte_size = 4;
+  imaginary.encoding = 9;
+  info.types[0x40] = imaginary;
+  const donkey::TypeTable table = donkey::types_from_debug_info(info);
+  const auto valid = table.validate();
+  ASSERT_TRUE(valid.has_value()) << valid.diagnostic().message;
+  const donkey::TypeDefinition* whole = table.find(donkey::TypeId(0x31));
+  ASSERT_NE(whole, nullptr);
+  EXPECT_EQ(whole->kind, donkey::TypeKind::Array);
+  EXPECT_EQ(whole->count, 2U);
+  auto size = table.size_of(donkey::TypeId(0x31));
+  ASSERT_TRUE(size.has_value());
+  EXPECT_EQ(size.value(), 8U);
+  auto alignment = table.alignment_of(donkey::TypeId(0x31));
+  ASSERT_TRUE(alignment.has_value());
+  EXPECT_EQ(alignment.value(), 4U);
+  auto imaginary_size = table.size_of(donkey::TypeId(0x41));
+  ASSERT_TRUE(imaginary_size.has_value());
+  EXPECT_EQ(imaginary_size.value(), 4U);
+}
