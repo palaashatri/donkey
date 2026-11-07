@@ -348,8 +348,8 @@ interpreter.
 - **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
   integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
   each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
-  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1 has not
-  been re-measured since the rule. Moves, comparisons and zeroing idioms are lifted; packed and other
+  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1: 5 of 26
+  Complete, none wrong. Moves, comparisons and zeroing idioms are lifted; packed and other
   SSE forms stay Partial. Argument and return registers follow the XMM registers that the function
   reads and writes.
 

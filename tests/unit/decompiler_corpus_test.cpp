@@ -1148,8 +1148,9 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
   // A scalar SSE result depends on the MXCSR rounding mode, which the caller may set, so the
   // functions that round are Partial (see the lifter's rounding note). Only the ones whose
   // results do not round can be Complete, and every value above is still checked against the
-  // compiled code either way.
-  EXPECT_GE(complete, 6) << complete << " of " << total << " float functions are Complete";
+  // compiled code either way. The measured counts at -O0 are 6 of 26 with GCC 13.3 and 5 of 26
+  // with Clang 18.1, so the floor is the smaller of the two.
+  EXPECT_GE(complete, 5) << complete << " of " << total << " float functions are Complete";
 #endif
 }
 #else
