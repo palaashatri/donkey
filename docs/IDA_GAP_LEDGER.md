@@ -155,7 +155,7 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form and break/continue not done; T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store exists (G05-T1, partial): types with members, enumerators and provenance, validated, schema v5. No C declaration parser, no application to code, no editing UI | P0 | IN PROGRESS (G05-T1 PARTIAL; T2-T4 TODO) |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -790,6 +790,24 @@ for Partial functions.
   - `Types.SizeAndAlignmentFollowTheAbi`
 - **Done when:** the tests pass; old projects open; the size and alignment of
   every DWARF struct in the debuggee match DWARF's `DW_AT_byte_size`.
+- **Status:** PARTIAL. Done: the type model and the store. `TypeTable` (in
+  `include/donkey/project/types.h`) holds kinds (void, integer, float, pointer, array,
+  struct, union, enum, typedef, function) with provenance; `validate` checks every
+  reference, rejects a type that contains itself by value (`type.contains_itself`), checks
+  ABI sizes, aligned member offsets and the padded struct or union size, and
+  `size_of`/`alignment_of` follow the same rules. The project stores the table in schema
+  v5 (`types`, `type_fields`, `type_enumerators`, `type_applications`), with a migration
+  from v4 and the older schemas (`replace_types`, `types`, `set_type_application`,
+  `type_applications`). `types_from_debug_info` maps the DWARF types of a debuggee; it
+  needs `DW_AT_encoding` for base types, which the reader now records. Evidence:
+  `Types.RoundTripThroughTheProject`, `Types.MigratesFromSchemaV4`,
+  `Types.RejectsCyclesWithoutPointer`, `Types.SizeAndAlignmentFollowTheAbi`, and
+  `Types.DwarfStructsMatchTheirByteSize`, which checks every struct and union of the
+  debuggee against its `DW_AT_byte_size`. Not done: step 4's automatic attachment (the
+  DWARF types are not written to the project on import; the caller passes them to
+  `replace_types`), and the `C` declaration parser (G05-T2). Bit-fields are not
+  recovered from DWARF (the reader does not record their bit offsets), and enumerator
+  values are not recorded either. Those are DWARF reader gaps, not type-store gaps.
 
 **G05-T2 C declaration parser**
 
