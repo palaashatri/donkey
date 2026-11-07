@@ -1526,6 +1526,167 @@ TEST(Types, MemberOffsetsThatWrapAreRefused) {
   EXPECT_EQ(valid.diagnostic().code, "type.member_overflow");
 }
 
+// A flexible array member is the last member of a struct and adds no size: its element sets the
+// alignment, and the struct ends where the members before it end. Anywhere else it is refused.
+TEST(Types, FlexibleArrayMembersAddNoSize) {
+  donkey::TypeTable table;
+  table.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "char", 1, true));
+  table.put(scalar(donkey::TypeId(2), donkey::TypeKind::Integer, "int", 4, true));
+  donkey::TypeDefinition open = scalar(donkey::TypeId(3), donkey::TypeKind::Array, "", 0);
+  open.target = donkey::TypeId(2);
+  open.count_known = false;
+  table.put(std::move(open));
+
+  // struct { int n; int data[]; }: 4 bytes, aligned to 4.
+  donkey::TypeTable counted = table;
+  counted.put(record(donkey::TypeId(4), donkey::TypeKind::Struct, "counted", 4,
+                     {member("n", 0, donkey::TypeId(2)), member("data", 4, donkey::TypeId(3))}));
+  EXPECT_TRUE(counted.validate().has_value());
+  EXPECT_EQ(counted.size_of(donkey::TypeId(4)).value(), 4U);
+  EXPECT_EQ(counted.alignment_of(donkey::TypeId(4)).value(), 4U);
+
+  // struct { char c; int data[]; } with the array at 2 is misaligned for its int elements.
+  donkey::TypeTable misaligned = table;
+  misaligned.put(record(donkey::TypeId(5), donkey::TypeKind::Struct, "gap", 4,
+                        {member("c", 0, donkey::TypeId(1)), member("data", 2, donkey::TypeId(3))}));
+  EXPECT_EQ(misaligned.validate().diagnostic().code, "type.misaligned_field");
+
+  // The flexible array must be the last member.
+  donkey::TypeTable middle = table;
+  middle.put(record(donkey::TypeId(6), donkey::TypeKind::Struct, "middle", 8,
+                    {member("data", 0, donkey::TypeId(3)), member("n", 4, donkey::TypeId(2))}));
+  EXPECT_EQ(middle.validate().diagnostic().code, "type.flexible_member_not_last");
+
+  // Alone, the array of unknown bound is not a type with a size; it validates, and asking for its
+  // size fails. As the element of a complete array it is refused by value.
+  EXPECT_TRUE(table.validate().has_value());
+  const auto size = table.size_of(donkey::TypeId(3));
+  ASSERT_FALSE(size.has_value());
+  EXPECT_EQ(size.diagnostic().code, "type.incomplete_array");
+  donkey::TypeTable nested = table;
+  donkey::TypeDefinition outer = scalar(donkey::TypeId(7), donkey::TypeKind::Array, "", 0);
+  outer.target = donkey::TypeId(3);
+  outer.count = 2;
+  nested.put(std::move(outer));
+  EXPECT_EQ(nested.validate().diagnostic().code, "type.incomplete_array");
+}
+
+// A scalar may be aligned to less than its size, as an eight-byte integer is in a 32-bit unit. The
+// alignment must be a power of two, and no larger than the size.
+TEST(Types, ScalarAlignmentIsAtMostItsSize) {
+  donkey::TypeTable table;
+  table.put(scalar(donkey::TypeId(1), donkey::TypeKind::Integer, "char", 1, true));
+  donkey::TypeDefinition wide =
+      scalar(donkey::TypeId(2), donkey::TypeKind::Integer, "long long", 8, true);
+  wide.alignment = 4;
+  table.put(std::move(wide));
+  // struct { char c; long long x; } with x at 4: 12 bytes, aligned to 4.
+  table.put(record(donkey::TypeId(3), donkey::TypeKind::Struct, "pair", 12,
+                   {member("c", 0, donkey::TypeId(1)), member("x", 4, donkey::TypeId(2))}));
+  EXPECT_TRUE(table.validate().has_value());
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(2)).value(), 4U);
+  EXPECT_EQ(table.size_of(donkey::TypeId(3)).value(), 12U);
+  EXPECT_EQ(table.alignment_of(donkey::TypeId(3)).value(), 4U);
+
+  donkey::TypeTable above = table;
+  donkey::TypeDefinition too_aligned =
+      scalar(donkey::TypeId(4), donkey::TypeKind::Integer, "int", 4, true);
+  too_aligned.alignment = 8;
+  above.put(std::move(too_aligned));
+  EXPECT_EQ(above.validate().diagnostic().code, "type.bad_alignment");
+
+  donkey::TypeTable odd = table;
+  donkey::TypeDefinition three =
+      scalar(donkey::TypeId(4), donkey::TypeKind::Integer, "int", 4, true);
+  three.alignment = 3;
+  odd.put(std::move(three));
+  EXPECT_EQ(odd.validate().diagnostic().code, "type.bad_alignment");
+}
+
+// DWARF gives an array with no bound the flag that makes it a flexible array member, and a zero
+// bound stays a complete array of no elements. An eight-byte base type keeps its alignment of four.
+TEST(Types, DwarfUnboundedArraysAndAlignmentsCarryThrough) {
+  donkey::DebugInfo info;
+  donkey::DebugType int_type;
+  int_type.kind = donkey::DebugTypeKind::Base;
+  int_type.name = "int";
+  int_type.byte_size = 4;
+  int_type.encoding = 5;
+  info.types[0x10] = int_type;
+  donkey::DebugType wide;
+  wide.kind = donkey::DebugTypeKind::Base;
+  wide.name = "long long";
+  wide.byte_size = 8;
+  wide.encoding = 5;
+  wide.alignment = 4;
+  info.types[0x18] = wide;
+  donkey::DebugType open;
+  open.kind = donkey::DebugTypeKind::Array;
+  open.target = 0x10;
+  open.bound_known = false;
+  info.types[0x20] = open;
+  donkey::DebugType empty;
+  empty.kind = donkey::DebugTypeKind::Array;
+  empty.target = 0x10;
+  info.types[0x28] = empty;
+
+  const donkey::TypeTable table = donkey::types_from_debug_info(info);
+  const donkey::TypeDefinition* flexible = table.find(donkey::TypeId(0x21));
+  ASSERT_NE(flexible, nullptr);
+  EXPECT_FALSE(flexible->count_known);
+  const donkey::TypeDefinition* zero_length = table.find(donkey::TypeId(0x29));
+  ASSERT_NE(zero_length, nullptr);
+  EXPECT_TRUE(zero_length->count_known);
+  EXPECT_EQ(zero_length->count, 0U);
+  ASSERT_NE(table.find(donkey::TypeId(0x19)), nullptr);
+  EXPECT_EQ(table.find(donkey::TypeId(0x19))->alignment, 4U);
+  EXPECT_TRUE(table.validate().has_value());
+}
+
+// The unknown bound and the alignment are stored, so a reopened project gives the same layout.
+TEST(Types, FlexibleArraysAndScalarAlignmentsSurviveTheProject) {
+  TempPath path("types-flexible");
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+
+  const donkey::TypeId int32(1);
+  const donkey::TypeId wide(2);
+  const donkey::TypeId flexible(3);
+  const donkey::TypeId counted(4);
+  donkey::TypeTable table;
+  table.put(scalar(int32, donkey::TypeKind::Integer, "int", 4, true));
+  donkey::TypeDefinition eight = scalar(wide, donkey::TypeKind::Integer, "long long", 8, true);
+  eight.alignment = 4;
+  table.put(std::move(eight));
+  donkey::TypeDefinition open = scalar(flexible, donkey::TypeKind::Array, "", 0);
+  open.target = int32;
+  open.count_known = false;
+  table.put(std::move(open));
+  table.put(record(counted, donkey::TypeKind::Struct, "counted", 4,
+                   {member("n", 0, int32), member("data", 4, flexible)}));
+
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value());
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto stored = reopened.value().types();
+  ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+  const donkey::TypeDefinition* read_open = stored.value().find(flexible);
+  ASSERT_NE(read_open, nullptr);
+  EXPECT_FALSE(read_open->count_known);
+  ASSERT_NE(stored.value().find(wide), nullptr);
+  EXPECT_EQ(stored.value().find(wide)->alignment, 4U);
+  EXPECT_EQ(stored.value().alignment_of(counted).value(), 4U);
+  EXPECT_TRUE(stored.value().validate().has_value());
+}
+
 // The formal parameters of a DWARF subroutine type come through as the function's fields, with
 // their types, so a prototype read from DWARF keeps its signature.
 TEST(Types, DwarfSubroutineTypesKeepTheirParameters) {
