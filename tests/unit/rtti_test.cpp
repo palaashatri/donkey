@@ -135,14 +135,16 @@ std::vector<std::byte> without_relative_pointers(const donkey::LoadedBinary& loa
     }
     return value;
   };
-  constexpr std::uint64_t kRelativeX86_64 = 8;
+  // R_X86_64_RELATIVE or R_AARCH64_RELATIVE: the relative type of the image's own architecture.
+  const std::uint64_t relative =
+      loaded.image.architecture == donkey::Architecture::AArch64 ? 1027 : 8;
   for (const auto& section : loaded.image.sections) {
     if (section.name != ".rela.dyn") {
       continue;
     }
     for (std::uint64_t entry = section.file_offset;
          entry + 24 <= section.file_offset + section.file_size; entry += 24) {
-      if ((u64_at(entry + 8) & 0xffffffffU) != kRelativeX86_64) {
+      if ((u64_at(entry + 8) & 0xffffffffU) != relative) {
         continue;
       }
       const auto place = loaded.image.va_to_file_offset(u64_at(entry));
@@ -157,15 +159,29 @@ std::vector<std::byte> without_relative_pointers(const donkey::LoadedBinary& loa
   return bytes;
 }
 
+/// The hierarchy fixtures are built by the host toolchain. Itanium RTTI is read from ELF images
+/// only, so a host that builds Mach-O or PE fixtures skips those tests instead of expecting a
+/// reading it does not give.
+bool host_fixture_is_elf(const std::string& path) {
+  auto loaded = donkey::load_binary(path);
+  return loaded.has_value() && loaded.value().image.format == donkey::BinaryFormat::Elf;
+}
+
 }  // namespace
 
 // Position-independent executables store every vtable pointer as a relocation addend; the
 // non-PIE build stores it in the file. Both must describe the same classes.
 TEST(Rtti, ReadsThePieHierarchyFromRelocations) {
+  if (!host_fixture_is_elf(DONKEY_TEST_HIERARCHY_PATH)) {
+    GTEST_SKIP() << "the host builds the hierarchy fixture as a non-ELF image";
+  }
   expect_hierarchy(read_classes(DONKEY_TEST_HIERARCHY_PATH));
 }
 
 TEST(Rtti, PiePointersComeFromTheRelocationTableNotTheFile) {
+  if (!host_fixture_is_elf(DONKEY_TEST_HIERARCHY_PATH)) {
+    GTEST_SKIP() << "the host builds the hierarchy fixture as a non-ELF image";
+  }
   auto loaded = donkey::load_binary(DONKEY_TEST_HIERARCHY_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   const std::vector<std::byte> zeroed = without_relative_pointers(loaded.value());
@@ -178,6 +194,9 @@ TEST(Rtti, PiePointersComeFromTheRelocationTableNotTheFile) {
 }
 
 TEST(Rtti, ReadsTheNonPieHierarchyFromTheFile) {
+  if (!host_fixture_is_elf(DONKEY_TEST_HIERARCHY_NOPIE_PATH)) {
+    GTEST_SKIP() << "the host builds the hierarchy fixture as a non-ELF image";
+  }
   expect_hierarchy(read_classes(DONKEY_TEST_HIERARCHY_NOPIE_PATH));
 }
 

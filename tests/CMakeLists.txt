@@ -280,8 +280,9 @@ set_tests_properties(deps.checker_rejects_ui_link PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME cli.debuginfo_json
          COMMAND donkey-cli debuginfo $<TARGET_FILE:donkey_test_module> --json)
-if(APPLE OR MSVC)
-  # No DWARF in the executable with these toolchains: the command says so.
+if(MSVC)
+  # No DWARF with the MSVC toolchain: the command says so. On macOS the DWARF is read from the
+  # dSYM bundle that dsymutil writes beside the module (see above), so the test expects it.
   set_tests_properties(cli.debuginfo_json PROPERTIES WILL_FAIL TRUE)
 else()
   set_tests_properties(cli.debuginfo_json PROPERTIES

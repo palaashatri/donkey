@@ -101,6 +101,11 @@ TEST(DebugInfo, SharedLibraryPrototype) {
 // from the CFA, which is rbp + 16 in the standard prologue: the disassembly stores `first` at
 // -0x14(%rbp), that is CFA - 36.
 TEST(DebugInfo, StackSlotsGiveCfaOffsetsOfParametersAndLocals) {
+#if !defined(__x86_64__) && !defined(_M_X64)
+  // The two -O0 layouts below are x86-64 frames. AArch64 frames put the locals elsewhere, and this
+  // test does not check them; the AArch64 frame layout has no test yet.
+  GTEST_SKIP() << "the -O0 frame layouts checked here are x86-64 frames";
+#endif
   LOAD_WITH_DWARF(info, DONKEY_TEST_LOCALS_PATH);
   const auto* sum = named(info, "donkey_locals_sum");
   ASSERT_NE(sum, nullptr);

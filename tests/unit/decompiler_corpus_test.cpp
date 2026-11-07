@@ -1226,6 +1226,10 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
 // frame adjustment moves: the debug information's CFA offsets name them (G04-T4). A function
 // whose debug information lists no slots is unchanged.
 TEST(DecompilerCorpus, FrameSlotsTakeTheNamesOfTheDebugInformation) {
+#if !defined(__x86_64__) && !defined(_M_X64)
+  // The -O0 frame of donkey_locals_sum is x86-64 here; the AArch64 frame has no test yet.
+  GTEST_SKIP() << "the -O0 frame layout checked here is an x86-64 frame";
+#endif
   auto loaded = donkey::load_binary(DONKEY_TEST_LOCALS_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
