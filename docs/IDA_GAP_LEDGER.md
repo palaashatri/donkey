@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Copy and constant propagation not done yet; register aliases are merged (G04-T1); no `for` loops | P0 | IN PROGRESS (G04-T0 and T1 DONE; T2-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -688,6 +688,20 @@ for Partial functions.
   the merge explicitly.
 - **Done when:** the note "register aliases are not canonicalised" is removed
   from both lifters, and G04-T0 passes.
+
+- **Status:** DONE. Every register operand is its family, so `eax`, `ax`, `al`,
+  `rax`, and `w8`/`x8` are one variable. A 4-byte write zero-extends (the rule the
+  interpreter already applied, so it stays a width of 4 on the family). A 1- or
+  2-byte write, and a write to `ah`, is an explicit merge with the other bytes of the
+  family, and a read of `ah` is a shift. A conditional write keeps the old value
+  when its condition fails, and a 32-bit `cmov` zero-extends either way, as the
+  hardware does. The note "register aliases are not canonicalised" is gone from both
+  lifters. Evidence: `Ir.X86NarrowWritesMergeIntoTheFamily`,
+  `Ir.X86DoubleWordWritesZeroExtend`,
+  `Ir.X86ConditionalMoveOfADoubleWordZeroExtendsEvenWhenItFails` (the last checked on
+  hardware), and the corpus outcome report is identical to the one before the change.
+  `DecompilerCorpus.EveryPassPreservesSemantics` passes. The pseudocode now shows
+  narrow reads of a family with their width, as in `(u8)rax`.
 
 **G04-T2 SSA, copy and constant propagation, dead code elimination**
 

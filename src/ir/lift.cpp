@@ -1967,6 +1967,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
     if (lifted) {
       resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
+      internal::canonicalise_registers(lifted.value(), image.architecture);
       if (options.run_passes) {
         run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
         mark_mixed_parameters(lifted.value());
@@ -2013,7 +2014,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       image.architecture == Architecture::X86
           ? "x86-32 subset; register aliases are not canonicalised, cdecl stack arguments are "
             "not recovered and locals are not recovered"
-          : "x86-64 subset; register aliases are not canonicalised and locals are not recovered");
+          : "x86-64 subset; locals are not recovered");
 
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
@@ -2354,6 +2355,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                                                ? ReturnRegisters{"x0", "v0", true}
                                                : ReturnRegisters{"rax", "xmm0", false};
   resolve_return_registers(lifter.out, return_registers);
+  internal::canonicalise_registers(lifter.out, image.architecture);
   if (options.run_passes) {
     run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
     mark_mixed_parameters(lifter.out);

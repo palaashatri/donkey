@@ -160,10 +160,27 @@ class Renderer {
     if (value.kind == IrOperandKind::Constant) {
       return hex_float_literal(value.constant, width);
     }
-    return operand(value);
+    // A register read here is a floating-point value: the integer width cast of operand()
+    // would misstate it, so the register is shown by name.
+    return operand_text(value);
   }
 
+  /// A destination: a write to a canonical register is shown by name, because its
+  /// width is the write rule (a 4-byte write zero-extends).
+  std::string destination(const IrOperand& value) const { return operand_text(value); }
+
+  /// A value read. A read narrower than the 8-byte register it names shows its width,
+  /// so that (u8)rax is not mistaken for all of rax.
   std::string operand(const IrOperand& value) const {
+    std::string text = operand_text(value);
+    if (value.kind == IrOperandKind::Register && value.width != 0 && value.width < 8 &&
+        value.reg.rfind("var_", 0) != 0 && internal::register_family(value.reg) == value.reg) {
+      return std::string("(") + width_type(value.width) + ")" + text;
+    }
+    return text;
+  }
+
+  std::string operand_text(const IrOperand& value) const {
     switch (value.kind) {
       case IrOperandKind::None:
         return "?";
@@ -262,7 +279,7 @@ class Renderer {
       case IrOp::Nop:
         return "";
       case IrOp::Assign:
-        return operand(statement.dest) + " = " + operand(statement.a) + ";";
+        return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Add:
       case IrOp::Sub:
       case IrOp::Mul:
@@ -304,20 +321,20 @@ class Renderer {
           default:
             break;
         }
-        return operand(statement.dest) + " = " + operand(statement.a) + " " + symbol + " " +
+        return destination(statement.dest) + " = " + operand(statement.a) + " " + symbol + " " +
                operand(statement.b) + ";";
       }
       case IrOp::ZeroExtend:
-        return operand(statement.dest) + " = (" + width_type(statement.dest.width) + ")" +
+        return destination(statement.dest) + " = (" + width_type(statement.dest.width) + ")" +
                operand(statement.a) + ";";
       case IrOp::SignExtend:
-        return operand(statement.dest) + " = (s" +
+        return destination(statement.dest) + " = (s" +
                std::to_string(static_cast<unsigned>(statement.dest.width) * 8) + ")" +
                operand(statement.a) + ";";
       case IrOp::Lea:
-        return operand(statement.dest) + " = (u64)(" + address_expression(statement.a) + ");";
+        return destination(statement.dest) + " = (u64)(" + address_expression(statement.a) + ");";
       case IrOp::Load:
-        return operand(statement.dest) + " = " + operand(statement.a) + ";";
+        return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Store:
         return operand(statement.a) + " = " + operand(statement.b) + ";";
       case IrOp::Call:
@@ -376,8 +393,8 @@ class Renderer {
       case IrOp::Unsupported:
         return "/* unsupported: " + statement.text + " */";
       case IrOp::CondAssign:
-        return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
-               operand(statement.a) + ";";
+        return "if (" + condition(statement, previous) + ") " + destination(statement.dest) +
+               " = " + operand(statement.a) + ";";
       case IrOp::FAdd:
       case IrOp::FSub:
       case IrOp::FMul:
@@ -386,58 +403,62 @@ class Renderer {
                              : statement.op == IrOp::FSub ? " - "
                              : statement.op == IrOp::FMul ? " * "
                                                           : " / ";
-        return operand(statement.dest) + " = " + float_operand(statement.a, statement.width) +
+        return destination(statement.dest) + " = " + float_operand(statement.a, statement.width) +
                symbol + float_operand(statement.b, statement.width) + "; /* " +
                (statement.width == 4 ? "float" : "double") + " */";
       }
       case IrOp::FSqrt:
-        return operand(statement.dest) + " = sqrt(" + float_operand(statement.a, statement.width) +
-               "); /* " + (statement.width == 4 ? "float" : "double") + " */";
+        return destination(statement.dest) + " = sqrt(" +
+               float_operand(statement.a, statement.width) + "); /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
       case IrOp::FNeg:
-        return operand(statement.dest) + " = -" + float_operand(statement.a, statement.width) +
+        return destination(statement.dest) + " = -" + float_operand(statement.a, statement.width) +
                "; /* " + (statement.width == 4 ? "float" : "double") + " */";
       case IrOp::FAbs:
-        return operand(statement.dest) + " = fabs(" + float_operand(statement.a, statement.width) +
-               "); /* " + (statement.width == 4 ? "float" : "double") + " */";
+        return destination(statement.dest) + " = fabs(" +
+               float_operand(statement.a, statement.width) + "); /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
       case IrOp::FCompare:
         return "flags = fcompare(" + float_operand(statement.a, statement.width) + ", " +
                float_operand(statement.b, statement.width) + ");";
       case IrOp::IntToFloat:
       case IrOp::UIntToFloat:
         // An unsigned source keeps all of its bytes: the cast names the source's width.
-        return operand(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
+        return destination(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
                ")" +
                (statement.op == IrOp::UIntToFloat
                     ? (statement.a.width == 8 ? "(unsigned long long)" : "(unsigned)")
                     : "") +
                operand(statement.a) + ";";
       case IrOp::FloatToInt:
-        return operand(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
+        return destination(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
                float_operand(statement.a, statement.a.width) + ";";
       case IrOp::FloatExtend:
-        return operand(statement.dest) + " = (double)" + float_operand(statement.a, 4) + ";";
+        return destination(statement.dest) + " = (double)" + float_operand(statement.a, 4) + ";";
       case IrOp::FloatTruncate:
-        return operand(statement.dest) + " = (float)" + float_operand(statement.a, 8) + ";";
+        return destination(statement.dest) + " = (float)" + float_operand(statement.a, 8) + ";";
       case IrOp::FMulAdd:
-        return operand(statement.dest) + " = fma(" + float_operand(statement.a, statement.width) +
-               ", " + float_operand(statement.b, statement.width) + ", " +
+        return destination(statement.dest) + " = fma(" +
+               float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ", " +
                float_operand(statement.c, statement.width) + ");";
       case IrOp::FMulSub:
         // c - a * b with one rounding: fma(-a, b, c) is the same operation, fused.
-        return operand(statement.dest) + " = fma(-" + float_operand(statement.a, statement.width) +
-               ", " + float_operand(statement.b, statement.width) + ", " +
+        return destination(statement.dest) + " = fma(-" +
+               float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ", " +
                float_operand(statement.c, statement.width) + ");";
       case IrOp::AddCarry:
       case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
         const bool add = statement.op != IrOp::SubBorrow;
-        return operand(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
+        return destination(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
                operand(statement.b) + (add ? " + CF;" : " - CF;") +
                (statement.op == IrOp::AddCarryFlags ? " /* sets NZCV */" : "");
       }
       case IrOp::MulHighUnsigned:
       case IrOp::MulHighSigned:
-        return operand(statement.dest) + " = mulh" +
+        return destination(statement.dest) + " = mulh" +
                (statement.op == IrOp::MulHighSigned ? "s(" : "u(") + operand(statement.a) + ", " +
                operand(statement.b) + ");";
       case IrOp::DivUnsigned:
@@ -446,18 +467,18 @@ class Renderer {
       case IrOp::RemSigned: {
         const bool quotient = statement.op == IrOp::DivUnsigned || statement.op == IrOp::DivSigned;
         const bool is_signed = statement.op == IrOp::DivSigned || statement.op == IrOp::RemSigned;
-        return operand(statement.dest) + " = (" + operand(statement.a) + ":" +
+        return destination(statement.dest) + " = (" + operand(statement.a) + ":" +
                operand(statement.b) + (is_signed ? " signed) " : " unsigned) ") +
                (quotient ? "/ " : "% ") + operand(statement.c) + ";";
       }
       case IrOp::CountTrailingZeros:
-        return operand(statement.dest) + " = ctz(" + operand(statement.a) + ");";
+        return destination(statement.dest) + " = ctz(" + operand(statement.a) + ");";
       case IrOp::CountLeadingZeros:
-        return operand(statement.dest) + " = clz(" + operand(statement.a) + ");";
+        return destination(statement.dest) + " = clz(" + operand(statement.a) + ");";
       case IrOp::PopCount:
-        return operand(statement.dest) + " = popcount(" + operand(statement.a) + ");";
+        return destination(statement.dest) + " = popcount(" + operand(statement.a) + ");";
       case IrOp::ByteSwap:
-        return operand(statement.dest) + " = bswap(" + operand(statement.a) + ");";
+        return destination(statement.dest) + " = bswap(" + operand(statement.a) + ");";
     }
     return "";
   }
