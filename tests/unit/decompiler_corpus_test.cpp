@@ -607,19 +607,31 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
 }
 
 // A17: the dense switch compiled without optimisation dispatches through a
-// jump table. The analysis recovers all eight targets from the bounds check
-// and the table bytes, and the decompiler shows a switch, not a tail call.
+// jump table on x86-64. The analysis recovers all eight targets from the
+// bounds check and the table bytes, and the decompiler shows a switch, not a
+// tail call.
+//
+// AArch64 (G03-T3): neither GCC nor Clang gives c_switch_dense a code jump
+// table there (-O0 is a compare chain, -O2 a lookup of constants), so the
+// recogniser is measured on the jump-table fixture instead: a 16-case switch
+// whose cases depend on the second argument, built at -O2.
 TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
-  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
-  ASSERT_TRUE(loaded.has_value());
-  if (loaded.value().image.architecture != donkey::Architecture::X86_64) {
-    GTEST_SKIP() << "jump-table recovery is implemented for x86 only";
+  auto corpus = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(corpus.has_value());
+  const donkey::Architecture architecture = corpus.value().image.architecture;
+  if (architecture != donkey::Architecture::X86_64 &&
+      architecture != donkey::Architecture::AArch64) {
+    GTEST_SKIP() << "jump-table recovery is implemented for x86-64 and AArch64 only";
   }
+  const bool aarch64 = architecture == donkey::Architecture::AArch64;
+  const char* name = aarch64 ? "jt_dispatch16" : "c_switch_dense";
+  auto loaded = donkey::load_binary(aarch64 ? DONKEY_JUMP_TABLE_O2_PATH : DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(loaded.has_value());
   auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& f : analysis.value().functions) {
-    if (f.name == "c_switch_dense" || f.name == "_c_switch_dense") {
+    if (f.name == name || f.name == std::string("_") + name) {
       function = &f;
     }
   }
@@ -631,8 +643,26 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
       table = &candidate;
     }
   }
-  ASSERT_NE(table, nullptr) << "no jump table recovered in c_switch_dense";
-  EXPECT_EQ(table->targets.size(), 8U);
+  if (table == nullptr) {
+    // Diagnostic for the failure: the function's bytes, so a run on another toolchain shows
+    // the table lowering that was not recognised.
+    std::string dump;
+    const auto start = loaded.value().image.va_to_file_offset(function->address);
+    if (start.has_value()) {
+      for (std::uint64_t at = start.value();
+           at < start.value() + (function->end_address - function->address) &&
+           at < loaded.value().data.size();
+           ++at) {
+        char byte[4];
+        std::snprintf(
+            byte, sizeof(byte), "%02x",
+            static_cast<unsigned>(std::to_integer<std::uint8_t>(loaded.value().data[at])));
+        dump += byte;
+      }
+    }
+    FAIL() << "no jump table recovered in " << name << "; function bytes " << dump;
+  }
+  EXPECT_EQ(table->targets.size(), aarch64 ? 16U : 8U);
   for (const std::uint64_t target : table->targets) {
     EXPECT_GE(target, function->address);
     EXPECT_LT(target, function->end_address);
@@ -644,6 +674,65 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
   auto text = donkey::format_pseudocode(lifted.value());
   ASSERT_TRUE(text.has_value());
   EXPECT_NE(text.value().find("switch ("), std::string::npos) << text.value();
+}
+
+// The jump-table fixture (G03-T3) is measured on its own, so that the corpus
+// counts above stay as they are. It must lift Complete on every host with a
+// code jump table, and the IR must agree with the compiled code on every
+// input vector.
+constexpr CorpusFunction kJumpTableFixture[] = {
+    {"jt_dispatch16", 'i', "ii"},
+};
+
+TEST(DecompilerCorpus, JumpTableFixtureAgreesWithTheCompiledCode) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_JUMP_TABLE_O2_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  void* handle = open_library(DONKEY_JUMP_TABLE_O2_PATH);
+  ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_JUMP_TABLE_O2_PATH;
+
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  for (const CorpusFunction& entry : kJumpTableFixture) {
+    const donkey::Function* function = nullptr;
+    for (const auto& f : analysis.value().functions) {
+      if (f.name == entry.name || f.name == std::string("_") + entry.name) {
+        function = &f;
+      }
+    }
+    void* symbol = find_symbol(handle, entry.name);
+    ASSERT_NE(function, nullptr) << entry.name << " not found by analysis";
+    ASSERT_NE(symbol, nullptr) << entry.name << " not exported";
+    auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+    ASSERT_TRUE(lifted.has_value()) << entry.name << ": " << lifted.diagnostic().code;
+    auto verified = donkey::verify_ir(lifted.value());
+    ASSERT_TRUE(verified.has_value()) << entry.name << ": " << verified.diagnostic().code << ": "
+                                      << verified.diagnostic().message;
+    EXPECT_FALSE(lifted.value().partial) << entry.name << " should lift Complete";
+
+    const auto native = reinterpret_cast<Native>(symbol);
+    Rng rng(0x5EEDULL ^ std::hash<std::string>{}(entry.name));
+    for (int vector = 0; vector < kVectorCount; ++vector) {
+      VectorInputs in;
+      fill_vector_inputs(in, entry, rng, vector);
+      donkey::IrEvalMemory memory = vector_memory(loaded.value().image, loaded.value().data, in);
+      auto ir = donkey::evaluate_ir(lifted.value(), std::span(in.ir_args, in.count), memory,
+                                    eval_options);
+      ASSERT_TRUE(ir.has_value()) << entry.name << ": " << ir.diagnostic().code;
+      const std::uint64_t got_native =
+          native(in.native_args[0], in.native_args[1], in.native_args[2], in.native_args[3],
+                 in.native_args[4], in.native_args[5], in.native_args[6], in.native_args[7],
+                 in.native_args[8]);
+      const std::uint64_t m = width_mask(entry.returns);
+      EXPECT_EQ(ir.value().return_value & m, got_native & m) << entry.name << " vector " << vector;
+    }
+  }
 }
 
 // M8 struct recovery: at -O2 c_point_sum reads every field of
