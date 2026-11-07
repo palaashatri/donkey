@@ -1024,7 +1024,7 @@ TEST(Ir, SignatureInferenceDistinguishesSystemVAndWindowsX64) {
 
 TEST(Ir, VerifierRejectsBadSignatureWidth) {
   IrFunction function = single_block_function();
-  function.parameters.push_back(IrParameter{"a0", 3, "rdi"});
+  function.parameters.push_back(IrParameter{"a0", 3, "rdi", false, std::string()});
   auto verified = donkey::verify_ir(function);
   ASSERT_FALSE(verified.has_value());
   EXPECT_EQ(verified.diagnostic().code, "ir.bad_parameter");
