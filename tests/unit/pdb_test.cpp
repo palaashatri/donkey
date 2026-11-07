@@ -272,3 +272,62 @@ TEST(PdbTypes, AnIncompleteClassIsReportedAndNotMapped) {
   ASSERT_EQ(unmapped.size(), 2U);
   EXPECT_EQ(unmapped[0].code, "pdb.type_unmapped");
 }
+
+// The enum of tests/fixtures/pdb/enum (G06): its enumerators are read with their values in
+// field-list order (red 0, green 5, blue 6), and its underlying type is int.
+TEST(PdbReader, ReadsEnumeratorsWithTheirValues) {
+  const auto file = read_file(fixture("enum/enum.pdb"));
+  auto result = donkey::read_pdb(file);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().code;
+  const donkey::PdbType* color = nullptr;
+  for (const donkey::PdbType& type : result.value().types) {
+    if (!type.forward && type.name == "color") {
+      color = &type;
+    }
+  }
+  ASSERT_NE(color, nullptr);
+  EXPECT_EQ(color->kind, "enum");
+  EXPECT_EQ(color->index, 0x1005U);
+  EXPECT_EQ(color->field_list, 0x1004U);
+  EXPECT_EQ(color->underlying, 0x0074U);  // int
+  ASSERT_TRUE(color->enumerators_complete);
+  ASSERT_EQ(color->enumerators.size(), 3U);
+  EXPECT_EQ(color->enumerators[0].name, "red");
+  EXPECT_EQ(color->enumerators[0].value, 0);
+  EXPECT_EQ(color->enumerators[1].name, "green");
+  EXPECT_EQ(color->enumerators[1].value, 5);
+  EXPECT_EQ(color->enumerators[2].name, "blue");
+  EXPECT_EQ(color->enumerators[2].value, 6);
+}
+
+// The enum maps to an Enum type with its three enumerators, and the struct field of enum type
+// refers to it. The struct is 8 bytes: the enum at 0 and the int at 4.
+TEST(PdbTypes, MapsAnEnumWithItsEnumerators) {
+  const auto file = read_file(fixture("enum/enum.pdb"));
+  auto result = donkey::read_pdb(file);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().code;
+  std::vector<donkey::Diagnostic> unmapped;
+  const donkey::TypeTable table = donkey::types_from_pdb(result.value(), &unmapped);
+  for (const donkey::Diagnostic& diagnostic : unmapped) {
+    ADD_FAILURE() << diagnostic.code << ": " << diagnostic.message;
+  }
+  auto valid = table.validate();
+  EXPECT_TRUE(valid.has_value()) << valid.diagnostic().code << ": " << valid.diagnostic().message;
+
+  const donkey::TypeDefinition* color = table.find(donkey::TypeId(0x1005));
+  ASSERT_NE(color, nullptr);
+  EXPECT_EQ(color->kind, donkey::TypeKind::Enum);
+  EXPECT_EQ(color->size, 4U);
+  ASSERT_EQ(color->enumerators.size(), 3U);
+  EXPECT_EQ(color->enumerators[1].name, "green");
+  EXPECT_EQ(color->enumerators[1].value, 5);
+  EXPECT_EQ(color->enumerators[2].value, 6);
+
+  const donkey::TypeDefinition* paint = table.find(donkey::TypeId(0x1007));
+  ASSERT_NE(paint, nullptr);
+  EXPECT_EQ(paint->kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(paint->size, 8U);
+  ASSERT_EQ(paint->fields.size(), 2U);
+  EXPECT_EQ(paint->fields[0].type, donkey::TypeId(0x1005));
+  EXPECT_EQ(paint->fields[1].offset, 4U);
+}

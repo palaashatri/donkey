@@ -66,6 +66,13 @@ struct PdbMember {
   std::uint64_t offset = 0;  ///< byte offset from the start of the aggregate
 };
 
+/// One enumerator of an enum: an LF_ENUMERATE of its field list, with its value (sign-extended
+/// where the numeric leaf is signed).
+struct PdbEnumerator {
+  std::string name;
+  std::int64_t value = 0;
+};
+
 /// A struct, class, union or enum from the type stream. A forward reference has no size and
 /// names the complete type; the complete one is the entry with `forward == false`.
 struct PdbType {
@@ -76,6 +83,9 @@ struct PdbType {
   bool forward = false;
   std::uint32_t field_list = 0;  ///< the LF_FIELDLIST index, 0 when there is none
   std::uint32_t underlying = 0;  ///< an enum's underlying integer type index, 0 for the others
+  /// An enum's enumerators, in field-list order. Only meaningful when `enumerators_complete`.
+  std::vector<PdbEnumerator> enumerators;
+  bool enumerators_complete = false;
   /// The instance fields, in field-list order. Only meaningful when `members_complete`: a base
   /// class, a virtual table or any other entry that changes the layout makes the list incomplete,
   /// and the fields read before it are then not the whole layout.

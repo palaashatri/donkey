@@ -156,7 +156,7 @@ P0 is the most important, P3 the least.
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial: the for form is not in the corpus); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: for form not in the corpus) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
-| G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Not read: enumerators; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs and the fixture; enumerators and C++ class layouts TODO) |
+| G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | IN PROGRESS (T1 DONE; T2 DONE on Linux with LLVM-made Mach-O fixtures; the check against Apple's dsymutil on a macOS host is open) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
@@ -189,7 +189,7 @@ Still open, in ledger order:
 - G04-T3: the for form in the corpus, and the verification of break and continue in the corpus.
   The O0 and O2 loops are not printed as `for` yet; see the status above.
 - G05-T3 step 3 and G05-T4: the type editing UI and undo.
-- G06: enumerators, and C++ class layouts (base classes, virtual tables, methods).
+- G06: C++ class layouts (base classes, virtual tables, methods). Enumerators are done.
 - G10-T1 to T4: MSVC RTTI and call-site resolution, and the GUI
   demangled-name and class-hierarchy panel.
 - G07: the .dSYM check against Apple's `dsymutil` on a macOS host (the Linux tests use LLVM's output).

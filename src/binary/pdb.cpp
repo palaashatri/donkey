@@ -260,14 +260,49 @@ constexpr std::uint16_t kLfFieldList = 0x1203;
 constexpr std::uint16_t kLfIndex = 0x1404;
 constexpr std::uint16_t kLfArray = 0x1503;
 constexpr std::uint16_t kLfMember = 0x150d;
+constexpr std::uint16_t kLfEnumerate = 0x1502;
 
 /// An LF_FIELDLIST record: its instance fields, an LF_INDEX continuation to another list, and
 /// whether a subrecord this reader does not decode ended it early (then it is incomplete).
 struct FieldList {
   std::vector<PdbMember> members;
+  std::vector<PdbEnumerator> enumerators;
   std::uint32_t continuation = 0;
   bool complete = true;
 };
+
+/// A numeric leaf as a signed value: the signed kinds (LF_CHAR, LF_SHORT, LF_LONG, LF_QUADWORD)
+/// are sign-extended, and the others are read as they are. Returns the value and its length.
+std::optional<std::pair<std::int64_t, std::uint64_t>> signed_numeric(const ByteReader& reader,
+                                                                     std::uint64_t at) {
+  const auto leaf = reader.u16(at, Endian::Little);
+  if (!leaf) {
+    return std::nullopt;
+  }
+  if (leaf.value() < 0x8000) {
+    return std::make_pair(static_cast<std::int64_t>(leaf.value()), std::uint64_t{2});
+  }
+  const auto value = numeric(reader, at);
+  if (!value) {
+    return std::nullopt;
+  }
+  const std::uint64_t raw = value->first;
+  switch (leaf.value()) {
+    case 0x8000:  // LF_CHAR
+      return std::make_pair(static_cast<std::int64_t>(static_cast<std::int8_t>(raw)),
+                            value->second);
+    case 0x8001:  // LF_SHORT
+      return std::make_pair(static_cast<std::int64_t>(static_cast<std::int16_t>(raw)),
+                            value->second);
+    case 0x8003:  // LF_LONG
+      return std::make_pair(static_cast<std::int64_t>(static_cast<std::int32_t>(raw)),
+                            value->second);
+    case 0x8009:  // LF_QUADWORD
+      return std::make_pair(static_cast<std::int64_t>(raw), value->second);
+    default:  // LF_USHORT, LF_ULONG and LF_UQUADWORD are unsigned
+      return std::make_pair(static_cast<std::int64_t>(raw), value->second);
+  }
+}
 
 /// Reads the subrecords of an LF_FIELDLIST body in [begin, end). Subrecords are padded to 4
 /// bytes with bytes of 0xF0 and up. A subrecord kind this reader does not decode (a base class,
@@ -309,6 +344,24 @@ FieldList read_field_list(const ByteReader& reader, std::uint64_t begin, std::ui
       member.offset = offset->first;
       list.members.push_back(std::move(member));
       at = name_at + name.value().size() + 1;
+    } else if (leaf.value() == kLfEnumerate) {
+      // attributes (access, ignored here), then the value as a numeric leaf, then the name.
+      const auto value = signed_numeric(reader, at + 4);
+      if (!value) {
+        list.complete = false;
+        break;
+      }
+      const std::uint64_t name_at = at + 4 + value->second;
+      const auto name = reader.c_string(name_at, 4096);
+      if (!name) {
+        list.complete = false;
+        break;
+      }
+      PdbEnumerator enumerator;
+      enumerator.name = text_of(name.value());
+      enumerator.value = value->first;
+      list.enumerators.push_back(std::move(enumerator));
+      at = name_at + name.value().size() + 1;
     } else if (leaf.value() == kLfIndex) {
       const auto continuation = reader.u32(at + 4, Endian::Little);
       if (!continuation) {
@@ -340,6 +393,24 @@ void collect_members(const std::map<std::uint32_t, FieldList>& lists, std::uint3
   }
   if (found->second.continuation != 0) {
     collect_members(lists, found->second.continuation, out, complete, depth + 1);
+  }
+}
+
+/// Appends the enumerators of field list `index` and of its continuations, as collect_members does
+/// for the fields.
+void collect_enumerators(const std::map<std::uint32_t, FieldList>& lists, std::uint32_t index,
+                         std::vector<PdbEnumerator>& out, bool& complete, int depth) {
+  const auto found = lists.find(index);
+  if (depth > 16 || found == lists.end()) {
+    complete = false;
+    return;
+  }
+  out.insert(out.end(), found->second.enumerators.begin(), found->second.enumerators.end());
+  if (!found->second.complete) {
+    complete = false;
+  }
+  if (found->second.continuation != 0) {
+    collect_enumerators(lists, found->second.continuation, out, complete, depth + 1);
   }
 }
 
@@ -509,12 +580,19 @@ void read_types(const Msf& msf, PdbInfo& info, const PdbLimits& limits) {
     if (type.forward) {
       continue;
     }
-    if (type.field_list == 0) {
-      type.members_complete = type.kind != "enum";  // no fields: complete, unless an enum
+    if (type.kind == "enum") {
+      // An enum's field list holds its enumerators, not members.
+      type.enumerators_complete = true;
+      if (type.field_list != 0) {
+        bool complete = true;
+        collect_enumerators(field_lists, type.field_list, type.enumerators, complete, 0);
+        type.enumerators_complete = complete;
+      }
       continue;
     }
-    if (type.kind == "enum") {
-      continue;  // enumerators are not read, so the enum keeps no members
+    if (type.field_list == 0) {
+      type.members_complete = true;  // no fields: complete
+      continue;
     }
     bool complete = true;
     collect_members(field_lists, type.field_list, type.members, complete, 0);

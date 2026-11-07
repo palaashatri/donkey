@@ -823,12 +823,19 @@ class PdbMapper {
         unmapped(index, "its underlying type is not mapped");
         return std::nullopt;
       }
+      if (!type.enumerators_complete) {
+        unmapped(index, "its enumerators are not all read");
+        return std::nullopt;
+      }
       TypeDefinition definition;
       definition.id = TypeId(index);
       definition.kind = TypeKind::Enum;
       definition.provenance = TypeProvenance::Pdb;
       definition.name = type.name;
       definition.size = size.value();
+      for (const PdbEnumerator& enumerator : type.enumerators) {
+        definition.enumerators.push_back(TypeEnumerator{enumerator.name, enumerator.value});
+      }
       table_.put(std::move(definition));
       return TypeId(index);
     }
