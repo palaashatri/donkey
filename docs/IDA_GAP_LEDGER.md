@@ -169,7 +169,7 @@ P0 is the most important, P3 the least.
 | G16 | Scale on real large binaries | Decades of tuning | Generated programs up to 80,000 functions are measured (G16-T1 first step: `tools/bench/scale_benchmark.py`, `docs/BENCHMARKS.md`, one machine); no real-world benchmark yet. The default analysis is capped at 1,000,000 instructions, and a 200,000-block bound now reports `analysis.block_limit`. A manual CI workflow `benchmark.yml` exists but has not been run | P2 | IN PROGRESS (G16-T1 PARTIAL; T2 TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views; text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed `.app`, unsigned `.exe` | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate |
-| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED (research needed; see G19) |
+| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform; `docs/ACCESSIBILITY.md`, design written, nothing implemented) |
 
 ---
 
