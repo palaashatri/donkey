@@ -23,9 +23,12 @@ std::string dsym_fixture(const std::string& name) {
   return std::string(DONKEY_FIXTURE_DIR) + "/dsym/" + name;
 }
 
+// Windows reports paths with '\' separators; the suffixes used here are written with '/'.
 bool ends_with(const std::string& text, const std::string& suffix) {
-  return text.size() >= suffix.size() &&
-         text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+  std::string normalized = text;
+  std::replace(normalized.begin(), normalized.end(), '\\', '/');
+  return normalized.size() >= suffix.size() &&
+         normalized.compare(normalized.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
 std::vector<std::byte> read_all(const std::filesystem::path& path) {

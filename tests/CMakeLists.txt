@@ -296,7 +296,7 @@ set_tests_properties(cli.debuginfo_reports_absence PROPERTIES WILL_FAIL TRUE)
 add_test(NAME cli.debuginfo_dsym
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg)
 set_tests_properties(cli.debuginfo_dsym PROPERTIES
-  PASS_REGULAR_EXPRESSION "separate debug file: .*dbg.dSYM/Contents/Resources/DWARF/dbg")
+  PASS_REGULAR_EXPRESSION "separate debug file: .*dbg\\.dSYM[/\\\\]Contents[/\\\\]Resources[/\\\\]DWARF[/\\\\]dbg")
 add_test(NAME cli.debuginfo_debug_file
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
                  --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg.dSYM/Contents/Resources/DWARF/dbg)
@@ -496,7 +496,12 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   endfunction()
   donkey_ui_script(keyboard_ime)
   donkey_ui_script(edits)
-  donkey_ui_script(data)
+  # The data script expects the x86-64 Linux debuggee's interpreter path at a fixed offset (0x318),
+  # so it runs only where that debuggee is built. Other hosts build a different interpreter path or
+  # no .interp at all.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(data)
+  endif()
   donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)

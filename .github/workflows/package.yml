@@ -71,7 +71,7 @@ jobs:
       - name: Test (including UI smoke tests on Xvfb)
         run: |
           mkdir -p -m 700 "$XDG_RUNTIME_DIR"
-          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4 --output-on-failure
       - name: Package
         working-directory: build/package-linux
         run: |
@@ -173,7 +173,7 @@ jobs:
       - name: Build
         run: cmake --build --preset package-macos --parallel
       - name: Test
-        run: ctest --preset package-macos --parallel 4
+        run: ctest --preset package-macos --parallel 4 --output-on-failure
       - name: Package
         working-directory: build/package-macos
         env:
