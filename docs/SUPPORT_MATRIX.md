@@ -105,6 +105,8 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 - Calls' effects on registers and memory: functions that call are
   rendered, but the oracle does not evaluate them.
 - Double-width `mul`/`imul`/`div`.
+- Carry out of `adc`/`sbb` (`adc; adc` chains are Partial); AArch64 `adc`/`sbc`/`cmn`. An
+  `adc`/`sbb` after an instruction that emitted Unsupported is not lifted with the earlier carry.
 - Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.
