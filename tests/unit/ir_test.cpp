@@ -926,6 +926,139 @@ TEST(Ir, UnsupportedVectorStatementDoesNotMakeAVectorRegisterAnArgument) {
   EXPECT_TRUE(function.parameters.empty());
 }
 
+namespace {
+
+IrStatement compare_statement(const char* reg, std::uint64_t value, IrCondition condition) {
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref(reg, 8);
+  compare.b = IrOperand::constant_value(value, 8);
+  compare.condition = condition;
+  compare.width = 8;
+  return compare;
+}
+
+IrStatement cond_branch_statement(IrCondition condition, std::uint32_t target) {
+  IrStatement branch;
+  branch.op = IrOp::CondBranch;
+  branch.condition = condition;
+  branch.a = IrOperand::register_ref("rax", 8);
+  branch.b = IrOperand::block_ref(target);
+  branch.width = 8;
+  return branch;
+}
+
+}  // namespace
+
+TEST(Ir, BranchToTheLoopExitInsideTheBodyIsBreak) {
+  // while (rax != 0) { if (rdi != 7) { rax = rax - 1; } else { break; } } return rax;
+  // Block 2 leaves the loop through an unconditional branch to the exit (block 4).
+  IrFunction function;
+  function.address = 0x2000;
+  function.name = "until_seven";
+  function.blocks.push_back(make_block(0x2000));  // 0: while (rax != 0)
+  function.blocks.push_back(make_block(0x2008));  // 1: if (rdi != 7)
+  function.blocks.push_back(make_block(0x2010));  // 2: break
+  function.blocks.push_back(make_block(0x2018));  // 3: rax = rax - 1
+  function.blocks.push_back(make_block(0x2028));  // 4: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rax", 0, IrCondition::Equal));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::Equal, 4));
+
+  function.blocks[1].statements.push_back(compare_statement("rdi", 7, IrCondition::Equal));
+  function.blocks[1].statements.push_back(cond_branch_statement(IrCondition::NotEqual, 3));
+
+  function.blocks[2].statements.push_back(branch_statement(4));
+
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rax", 8);
+  decrement.a = IrOperand::register_ref("rax", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[3].statements.push_back(decrement);
+  function.blocks[3].statements.push_back(branch_statement(0));
+
+  function.blocks[4].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("while (rax != 0x0) {"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
+  // if (rdi < 7) { skip } else { rax = 1; } return rax;  The branch skips the
+  // assignment, so the printed guard is the complement of the comparison.
+  IrFunction function;
+  function.address = 0x3000;
+  function.name = "clamp";
+  function.blocks.push_back(make_block(0x3000));  // 0: compare and branch past block 1
+  function.blocks.push_back(make_block(0x3008));  // 1: rax = 1
+  function.blocks.push_back(make_block(0x3010));  // 2: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rdi", 7, IrCondition::SignedLess));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::SignedLess, 2));
+
+  IrStatement assign;
+  assign.op = IrOp::Assign;
+  assign.dest = IrOperand::register_ref("rax", 8);
+  assign.a = IrOperand::constant_value(1, 8);
+  assign.width = 8;
+  function.blocks[1].statements.push_back(assign);
+  function.blocks[1].statements.push_back(branch_statement(2));
+
+  function.blocks[2].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("if (rdi >= 0x7) {"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
+}
+
+TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
+  // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
+  // return rax. A `break` inside the switch would leave the switch, not the loop, so
+  // the body is refused and the function is shown with labels.
+  IrFunction function;
+  function.address = 0x4000;
+  function.name = "switch_exit";
+  function.blocks.push_back(make_block(0x4000));  // 0: while (rax != 0)
+  function.blocks.push_back(make_block(0x4008));  // 1: switch (eax)
+  function.blocks.push_back(make_block(0x4010));  // 2: case 1: leave
+  function.blocks.push_back(make_block(0x4018));  // 3: default: rax -= 1
+  function.blocks.push_back(make_block(0x4028));  // 4: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rax", 0, IrCondition::Equal));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::Equal, 4));
+
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.dest = IrOperand::register_ref("eax", 4);
+  sw.a = IrOperand::block_ref(3);  // default
+  sw.width = 4;
+  sw.switch_cases.push_back(IrSwitchCase{0x1, 2});
+  function.blocks[1].statements.push_back(sw);
+
+  function.blocks[2].statements.push_back(branch_statement(4));
+
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rax", 8);
+  decrement.a = IrOperand::register_ref("rax", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[3].statements.push_back(decrement);
+  function.blocks[3].statements.push_back(branch_statement(0));
+
+  function.blocks[4].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
 TEST(Ir, SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto) {
   // if (rdi == 0) return 0; do { rax += rdi; rdi -= 1; } while (rdi != 0); return rax;
   // The loop is one block that repeats itself, and it is laid out before the return of rax.
