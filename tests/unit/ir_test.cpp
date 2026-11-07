@@ -926,6 +926,71 @@ TEST(Ir, UnsupportedVectorStatementDoesNotMakeAVectorRegisterAnArgument) {
   EXPECT_TRUE(function.parameters.empty());
 }
 
+TEST(Ir, SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto) {
+  // if (rdi == 0) return 0; do { rax += rdi; rdi -= 1; } while (rdi != 0); return rax;
+  // The loop is one block that repeats itself, and it is laid out before the return of rax.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "countdown";
+  function.blocks.push_back(make_block(0x1000));  // 0: the test
+  function.blocks.push_back(make_block(0x1008));  // 1: the loop
+  function.blocks.push_back(make_block(0x1020));  // 2: return rax
+  function.blocks.push_back(make_block(0x1028));  // 3: return 0
+
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("rdi", 8);
+  compare.b = IrOperand::constant_value(0, 8);
+  compare.condition = IrCondition::Equal;
+  compare.width = 8;
+  function.blocks[0].statements.push_back(compare);
+  function.blocks[0].statements.push_back(conditional_branch_statement(3));
+
+  IrStatement add;
+  add.op = IrOp::Add;
+  add.dest = IrOperand::register_ref("rax", 8);
+  add.a = IrOperand::register_ref("rax", 8);
+  add.b = IrOperand::register_ref("rdi", 8);
+  add.width = 8;
+  function.blocks[1].statements.push_back(add);
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rdi", 8);
+  decrement.a = IrOperand::register_ref("rdi", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[1].statements.push_back(decrement);
+  IrStatement again;
+  again.op = IrOp::Compare;
+  again.a = IrOperand::register_ref("rdi", 8);
+  again.b = IrOperand::constant_value(0, 8);
+  again.condition = IrCondition::NotEqual;
+  again.width = 8;
+  function.blocks[1].statements.push_back(again);
+  IrStatement repeat;
+  repeat.op = IrOp::CondBranch;
+  repeat.condition = IrCondition::NotEqual;
+  repeat.a = IrOperand::register_ref("rdi", 8);
+  repeat.b = IrOperand::block_ref(1);
+  repeat.width = 8;
+  function.blocks[1].statements.push_back(repeat);
+
+  function.blocks[2].statements.push_back(return_statement());
+  IrStatement zero;
+  zero.op = IrOp::Return;
+  zero.a = IrOperand::constant_value(0, 8);
+  zero.width = 8;
+  function.blocks[3].statements.push_back(zero);
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("do {"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("} while ("), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("return 0x0;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
 TEST(Ir, SignatureInferenceDistinguishesSystemVAndWindowsX64) {
   // Read rcx and rdi before write
   IrFunction func_sysv = single_block_function();

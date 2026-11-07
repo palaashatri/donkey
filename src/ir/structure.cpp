@@ -313,8 +313,9 @@ struct Structurer {
       }
     }
 
+    // A loop of one block is its own latch: the block ends in the test that repeats it.
     const BlockId latch = exit - 1;
-    if (latch <= loop.header) {
+    if (latch < loop.header) {
       return false;
     }
     const IrBlock& latch_block = function_.blocks[latch];
@@ -488,7 +489,8 @@ struct Structurer {
             if (index + 1 != last) {
               line("continue;");
             }
-          } else if (terminator.a.block != last && terminator.a.block != join_exit) {
+          } else if (terminator.a.block != last && terminator.a.block != join_exit &&
+                     terminator.a.block != index + 1) {
             ok_ = false;  // branch to a block outside this region: bail out
             return;
           }

@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3-T4 TODO) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form and break/continue not done; T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -740,6 +740,17 @@ for Partial functions.
   3. Simplify `!(a < b)` → `a >= b`, integer-only. Floating-point negation is
      not an inverse because of NaN; never do it for floats.
 - **Done when:** G04-T0 passes and the corpus loop functions print a `for`.
+- **Status:** PARTIAL. Done: a loop whose body is a single block that repeats
+  itself (the header ends in the test that repeats it) is recognised, and a branch to
+  the next block is a fall-through, so a function with an early return now prints
+  `if (...) { return ...; } else { ... do { ... } while (...); ... }` instead of labelled
+  blocks. The `c_sum_array` corpus function (x86-64 O2) is the example. Not done: the
+  `for` form. A bottom-tested loop is printed as `do { } while`, which is exact. Turning
+  it into `for (init; cond; step)` would move the step in front of the test, and that is
+  only equal when the loop is entered with the test true, which needs a proof from the
+  entry guard. Not done either: `break`/`continue` (step 2), and the `!(a < b)` to `a >= b`
+  simplification (step 3) for integers. Evidence: `Ir.SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto`
+  and the full native suite.
 
 **G04-T4 Names and locals from DWARF**
 
