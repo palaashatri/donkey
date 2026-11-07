@@ -43,9 +43,77 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
       return "bookmark";
     case AnnotationKind::FunctionStart:
       return "function";
+    case AnnotationKind::CodeStart:
+      return "code";
+    case AnnotationKind::DataRange:
+      return "data";
   }
   return "unknown";
 }
+
+bool parse_data_range_text(const std::string& text, std::uint64_t& element_size,
+                           std::uint64_t& count) noexcept {
+  const std::size_t colon = text.find(':');
+  if (colon == std::string::npos) {
+    return false;
+  }
+  // Plain decimal digits only, with no sign, space or leading zero, so each range has exactly
+  // one text. Nineteen digits cannot overflow 64 bits.
+  const auto parse_decimal = [](const std::string& digits, std::uint64_t& out) noexcept {
+    if (digits.empty() || digits.size() > 19 || (digits.size() > 1 && digits[0] == '0')) {
+      return false;
+    }
+    std::uint64_t value = 0;
+    for (const char c : digits) {
+      if (c < '0' || c > '9') {
+        return false;
+      }
+      value = value * 10U + static_cast<std::uint64_t>(c - '0');
+    }
+    out = value;
+    return true;
+  };
+  std::uint64_t size = 0;
+  std::uint64_t number = 0;
+  if (!parse_decimal(text.substr(0, colon), size) ||
+      !parse_decimal(text.substr(colon + 1), number)) {
+    return false;
+  }
+  if (size != 0 && size != 1 && size != 2 && size != 4 && size != 8) {
+    return false;
+  }
+  if (number == 0 || number > kMaxDataRangeBytes) {
+    return false;
+  }
+  if (size != 0 && number > kMaxDataRangeBytes / size) {
+    return false;
+  }
+  element_size = size;
+  count = number;
+  return true;
+}
+
+std::string format_data_range_text(std::uint64_t element_size, std::uint64_t count) {
+  return std::to_string(element_size) + ":" + std::to_string(count);
+}
+
+namespace {
+
+/// Whether `text` is an acceptable value for `kind`. A CodeStart must say "code" and a
+/// DataRange must parse; the other kinds take any text, as before.
+bool annotation_text_valid(AnnotationKind kind, const std::string& text) {
+  if (kind == AnnotationKind::CodeStart) {
+    return text == "code";
+  }
+  if (kind == AnnotationKind::DataRange) {
+    std::uint64_t element_size = 0;
+    std::uint64_t count = 0;
+    return parse_data_range_text(text, element_size, count);
+  }
+  return true;
+}
+
+}  // namespace
 
 namespace {
 
@@ -174,6 +242,24 @@ CREATE TABLE type_applications (
   PRIMARY KEY (image_id, address, kind)
 );
 PRAGMA user_version=5;
+)sql";
+
+/// v6 adds the code and data annotations (G12-T1). SQLite cannot change a CHECK constraint in
+/// place, so the annotations table is rebuilt and its rows copied, as in v3 to v4.
+constexpr const char* kMigrateV5ToV6 = R"sql(
+ALTER TABLE annotations RENAME TO annotations_v5_old;
+CREATE TABLE annotations (
+  image_id   INTEGER NOT NULL REFERENCES images(id) ON DELETE CASCADE,
+  kind       TEXT    NOT NULL CHECK (kind IN ('rename', 'comment', 'bookmark', 'function', 'code', 'data')),
+  address    INTEGER NOT NULL,
+  text       TEXT    NOT NULL,
+  updated_at TEXT    NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (image_id, kind, address)
+);
+INSERT INTO annotations (image_id, kind, address, text, updated_at)
+  SELECT image_id, kind, address, text, updated_at FROM annotations_v5_old;
+DROP TABLE annotations_v5_old;
+PRAGMA user_version=6;
 )sql";
 
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
@@ -444,6 +530,20 @@ Result<Project> Project::open(const std::string& path) {
       }
       schema = 5;
     }
+    if (schema == 5) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV5ToV6, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v5->v6: " + message);
+      }
+      schema = 6;
+    }
     project.impl_->schema_version = schema;
     return project;
   }
@@ -713,6 +813,10 @@ Result<void> Project::set_annotation(std::int64_t image_id, AnnotationKind kind,
     return make_void_error(Status::InvalidInput, "project.annotation_too_long",
                            "annotation text exceeds 4096 bytes");
   }
+  if (!text.empty() && !annotation_text_valid(kind, text)) {
+    return make_void_error(Status::InvalidInput, "project.annotation_text_invalid",
+                           "annotation text is not valid for this annotation kind");
+  }
   if (text.empty()) {
     return clear_annotation(image_id, kind, address);
   }
@@ -796,6 +900,10 @@ Result<std::vector<Annotation>> Project::annotations(std::int64_t image_id) cons
       annotation.kind = AnnotationKind::FunctionStart;
     } else if (kind == "bookmark") {
       annotation.kind = AnnotationKind::Bookmark;
+    } else if (kind == "code") {
+      annotation.kind = AnnotationKind::CodeStart;
+    } else if (kind == "data") {
+      annotation.kind = AnnotationKind::DataRange;
     } else {
       return make_error<std::vector<Annotation>>(
           Status::CorruptProject, "project.annotation_kind_invalid",
@@ -1116,6 +1224,10 @@ Result<void> Project::replace_annotations(std::int64_t image_id,
     if (annotation.text.size() > kMaxAnnotationLength) {
       return make_void_error(Status::InvalidInput, "project.annotation_too_long",
                              "annotation text exceeds 4096 bytes");
+    }
+    if (!annotation_text_valid(annotation.kind, annotation.text)) {
+      return make_void_error(Status::InvalidInput, "project.annotation_text_invalid",
+                             "annotation text is not valid for this annotation kind");
     }
   }
   {

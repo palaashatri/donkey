@@ -1030,7 +1030,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 5);
+    EXPECT_EQ(project.value().schema_version(), 6);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1157,7 +1157,7 @@ TEST(Types, MigratesFromSchemaV4) {
   {
     auto project = Project::create(path.str());
     ASSERT_TRUE(project.has_value());
-    EXPECT_EQ(project.value().schema_version(), 5);
+    EXPECT_EQ(project.value().schema_version(), 6);
   }
   // A v4 project has no type tables; drop them and set the version back to 4.
   {
@@ -1172,7 +1172,7 @@ TEST(Types, MigratesFromSchemaV4) {
   }
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 5);
+  EXPECT_EQ(reopened.value().schema_version(), 6);
   auto empty = reopened.value().types();
   ASSERT_TRUE(empty.has_value());
   EXPECT_EQ(empty.value().size(), 0U);
@@ -1492,3 +1492,124 @@ TEST(Types, DwarfStructsMatchTheirByteSize) {
 }
 
 }  // namespace
+
+// The DataRange text is "<element size>:<count>", canonical and bounded: no signs, no leading
+// zeros, sizes 0, 1, 2, 4 or 8, and at most 16 MiB covered.
+TEST(Project, DataRangeTextIsCanonicalAndBounded) {
+  std::uint64_t element_size = 0;
+  std::uint64_t count = 0;
+  EXPECT_TRUE(donkey::parse_data_range_text("0:1", element_size, count));
+  EXPECT_EQ(element_size, 0U);
+  EXPECT_EQ(count, 1U);
+  EXPECT_TRUE(donkey::parse_data_range_text("8:2097152", element_size, count));
+  EXPECT_EQ(element_size, 8U);
+  EXPECT_EQ(count, 2097152U);
+  EXPECT_EQ(donkey::format_data_range_text(8, 2097152), "8:2097152");
+  EXPECT_EQ(donkey::format_data_range_text(0, 5), "0:5");
+  for (const char* bad : {"", "3:2", "1:0", "1:", ":4", "01:4", "+1:4", "1:-4", "1 :4", "1:4:5",
+                          "8:2097153", "0:16777217", "16:1", "1:99999999999999999999"}) {
+    EXPECT_FALSE(donkey::parse_data_range_text(bad, element_size, count)) << bad;
+  }
+}
+
+// G12-T1: a code start and data ranges are stored, come back in order after a reopen, and text
+// that does not fit the kind is refused with a code, never stored.
+TEST(Project, StoresCodeStartsAndDataRangesAndRefusesOtherText) {
+  TempPath path("code-data-kinds");
+  const std::int64_t image_id = make_project(path.str(), "kept");
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::CodeStart, 0x400109, "code")
+                  .has_value());
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x40010c, "1:4")
+                  .has_value());
+  EXPECT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x400200, "0:8")
+                  .has_value());
+
+  const std::pair<donkey::AnnotationKind, const char*> refused[] = {
+      {donkey::AnnotationKind::CodeStart, "yes"},
+      {donkey::AnnotationKind::DataRange, "3:2"},
+      {donkey::AnnotationKind::DataRange, "8:2097153"},
+  };
+  for (const auto& [kind, text] : refused) {
+    auto result = project.value().set_annotation(image_id, kind, 0x400300, text);
+    ASSERT_FALSE(result.has_value()) << text;
+    EXPECT_EQ(result.diagnostic().code, "project.annotation_text_invalid") << text;
+  }
+
+  // A batch with one bad row is refused as a whole, so the good row is not written either.
+  const std::vector<donkey::Annotation> batch{
+      {donkey::AnnotationKind::CodeStart, 0x400500, "code"},
+      {donkey::AnnotationKind::DataRange, 0x400504, "4:0"},
+  };
+  auto replaced = project.value().replace_annotations(image_id, batch);
+  ASSERT_FALSE(replaced.has_value());
+  EXPECT_EQ(replaced.diagnostic().code, "project.annotation_text_invalid");
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto rows = reopened.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value()) << rows.diagnostic().message;
+  std::vector<std::string> seen;
+  for (const donkey::Annotation& row : rows.value()) {
+    seen.push_back(std::string(donkey::annotation_kind_name(row.kind)) + "@" +
+                   std::to_string(row.address) + "=" + row.text);
+  }
+  // The helper stores its own comment at 0x10; the three below are the ones this test added.
+  EXPECT_EQ(seen.size(), 4U);
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "comment@16=kept"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "code@4194569=code"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "data@4194572=1:4"), seen.end());
+  EXPECT_NE(std::find(seen.begin(), seen.end(), "data@4194816=0:8"), seen.end());
+}
+
+// The v5 fixture was saved by the v5 build (tests/fixtures/projects/PROVENANCE.md): one image with
+// a rename, a comment and a bookmark at 0x400109. Opening it must migrate to v6, keep all three,
+// and accept the new kinds.
+TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
+  TempPath path("migrate-v5");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  EXPECT_EQ(project.value().schema_version(), 6);
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  const std::int64_t image_id = images.value()[0].id;
+
+  auto kept = project.value().annotations(image_id);
+  ASSERT_TRUE(kept.has_value()) << kept.diagnostic().message;
+  ASSERT_EQ(kept.value().size(), 3U);
+  bool rename = false;
+  bool comment = false;
+  bool bookmark = false;
+  for (const donkey::Annotation& row : kept.value()) {
+    rename = rename || (row.kind == donkey::AnnotationKind::Rename && row.text == "entry_main");
+    comment =
+        comment || (row.kind == donkey::AnnotationKind::Comment && row.text == "reviewed in v5");
+    bookmark = bookmark || (row.kind == donkey::AnnotationKind::Bookmark && row.text == "keep");
+  }
+  EXPECT_TRUE(rename && comment && bookmark);
+
+  // The rebuilt table accepts the new kinds, and they survive a reopen.
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::CodeStart, 0x400109, "code")
+                  .has_value());
+  ASSERT_TRUE(project.value()
+                  .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x40010c, "1:4")
+                  .has_value());
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), 6);
+  auto rows = reopened.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value());
+  EXPECT_EQ(rows.value().size(), 5U);
+}
