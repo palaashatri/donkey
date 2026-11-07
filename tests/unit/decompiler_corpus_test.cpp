@@ -1049,8 +1049,11 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
   }
   std::printf("float corpus: %d of %d Complete\n", complete, total);
   EXPECT_GE(total, 20);
-  // The scalar SSE forms are lifted Complete for at least 18 of the functions.
-  EXPECT_GE(complete, 18) << complete << " of " << total << " float functions are Complete";
+  // A scalar SSE result depends on the MXCSR rounding mode, which the caller may set, so the
+  // functions that round are Partial (see the lifter's rounding note). Only the ones whose
+  // results do not round can be Complete, and every value above is still checked against the
+  // compiled code either way.
+  EXPECT_GE(complete, 6) << complete << " of " << total << " float functions are Complete";
 #endif
 }
 #else
