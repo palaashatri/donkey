@@ -9,10 +9,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -911,5 +913,171 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
       std::string::npos)
       << "the checker accepted a pass that cleared the Partial flag";
 }
+
+#if defined(__x86_64__) || defined(_M_X64)
+// G01-T2: scalar floating-point functions from corpus_fp.c. They all have the
+// prototype double f(double, double, double, double), so the arguments arrive in
+// xmm0 to xmm3 and the result is in xmm0. The IR receives each argument in the XMM
+// register its parameter names; the native call uses the double prototype.
+constexpr const char* kFloatFunctions[] = {
+    "fp_add",
+    "fp_sub",
+    "fp_mul",
+    "fp_div",
+    "fp_poly",
+    "fp_hypot_sqrt",
+    "fp_lt",
+    "fp_eq_select",
+    "fp_ne_select",
+    "fp_max",
+    "fp_min",
+    "fp_truncate_int",
+    "fp_scale_by_int",
+    "fp_through_single",
+    "fp_single_add",
+    "fp_sum_array",
+    "fp_dot3",
+    "fp_branchy",
+    "fp_loop_reduce",
+    "fp_mean4",
+    "fp_lerp",
+    "fp_clamp01",
+    "fp_capped_root",
+    "fp_int_quotient",
+    "fp_compare_chain",
+    "fp_single_mix",
+};
+
+using NativeDouble = double (*)(double, double, double, double);
+
+std::uint64_t double_bits_of(double value) {
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof bits);
+  return bits;
+}
+
+double double_of_bits(std::uint64_t bits) {
+  double value = 0.0;
+  std::memcpy(&value, &bits, sizeof value);
+  return value;
+}
+
+// Both NaN is equal whatever the payload; otherwise the bits must match, so the sign of
+// a zero or the exact value of a rounded result is checked.
+bool same_double_result(std::uint64_t ir_bits, std::uint64_t native_bits) {
+  const double ir = double_of_bits(ir_bits);
+  const double native = double_of_bits(native_bits);
+  if (std::isnan(ir) || std::isnan(native)) {
+    return std::isnan(ir) && std::isnan(native);
+  }
+  return ir_bits == native_bits;
+}
+
+double next_double_input(Rng& rng) {
+  static const double kSpecial[] = {0.0,
+                                    -0.0,
+                                    1.0,
+                                    2.5,
+                                    0.5,
+                                    3.0,
+                                    1e300,
+                                    -1e-300,
+                                    4.9e-324,
+                                    std::numeric_limits<double>::infinity(),
+                                    -std::numeric_limits<double>::infinity(),
+                                    std::numeric_limits<double>::quiet_NaN()};
+  const std::uint64_t draw = rng.next();
+  if (draw % 3 == 0) {
+    return kSpecial[(draw >> 8U) % (sizeof kSpecial / sizeof kSpecial[0])];
+  }
+  // A value in [-64, 64) with a fraction, so comparisons and small integers both occur.
+  const double unit = static_cast<double>(rng.next() >> 11U) / 9007199254740992.0;
+  return unit * 128.0 - 64.0;
+}
+
+TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
+#if !defined(DONKEY_CORPUS_FP_O0_PATH)
+  GTEST_SKIP() << "the floating-point corpus was not built";
+#else
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_FP_O0_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  void* handle = open_library(DONKEY_CORPUS_FP_O0_PATH);
+  ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_CORPUS_FP_O0_PATH;
+
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  int complete = 0;
+  int total = 0;
+  std::uint64_t seed = 0x5EEDF10ULL;
+  for (const char* name : kFloatFunctions) {
+    ++total;
+    ++seed;
+    const donkey::Function* function = nullptr;
+    for (const auto& f : analysis.value().functions) {
+      if (f.name == name || f.name == std::string("_") + name) {
+        function = &f;
+      }
+    }
+    void* symbol = find_symbol(handle, name);
+    ASSERT_NE(function, nullptr) << name << " not found by analysis";
+    ASSERT_NE(symbol, nullptr) << name << " not exported";
+    auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+    ASSERT_TRUE(lifted.has_value()) << name << ": " << lifted.diagnostic().code;
+    auto verified = donkey::verify_ir(lifted.value());
+    ASSERT_TRUE(verified.has_value()) << name << ": " << verified.diagnostic().message;
+    if (lifted.value().partial) {
+      std::printf("float corpus: %s is Partial\n", name);
+      for (const std::string& note : lifted.value().notes) {
+        std::printf("  note: %s\n", note.c_str());
+      }
+      continue;  // Partial is reported, not compared: only Complete results are claims.
+    }
+    ++complete;
+
+    const auto native = reinterpret_cast<NativeDouble>(symbol);
+    Rng rng(seed);
+    for (int vector = 0; vector < kVectorCount; ++vector) {
+      double args[4] = {};
+      for (double& arg : args) {
+        arg = next_double_input(rng);
+      }
+      // Each IR parameter reads one XMM register, so it takes that argument.
+      std::vector<std::uint64_t> ir_args;
+      for (const donkey::IrParameter& parameter : lifted.value().parameters) {
+        ASSERT_EQ(parameter.abi_register.rfind("xmm", 0), 0U)
+            << name << " reads " << parameter.abi_register;
+        const auto index = static_cast<std::size_t>(parameter.abi_register[3] - '0');
+        ASSERT_LT(index, 4U);
+        ir_args.push_back(double_bits_of(args[index]));
+      }
+      // The image is mapped so that constants in .rodata (loaded with rip-relative
+      // moves) read as they do in the process.
+      donkey::IrEvalMemory memory(loaded.value().image, loaded.value().data);
+      auto ir = donkey::evaluate_ir(lifted.value(), ir_args, memory, eval_options);
+      ASSERT_TRUE(ir.has_value()) << name << ": " << ir.diagnostic().code;
+      const double got_native = native(args[0], args[1], args[2], args[3]);
+      EXPECT_TRUE(same_double_result(ir.value().return_value, double_bits_of(got_native)))
+          << name << " vector " << vector << ": IR " << double_of_bits(ir.value().return_value)
+          << ", native " << got_native;
+    }
+  }
+  std::printf("float corpus: %d of %d Complete\n", complete, total);
+  EXPECT_GE(total, 20);
+  // A scalar SSE result depends on the MXCSR rounding mode, which the caller may set, so the
+  // functions that round are Partial (see the lifter's rounding note). Only the ones whose
+  // results do not round can be Complete, and every value above is still checked against the
+  // compiled code either way.
+  EXPECT_GE(complete, 6) << complete << " of " << total << " float functions are Complete";
+#endif
+}
+#else
+TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
+  GTEST_SKIP() << "the floating-point corpus is x86-64 only";
+}
+#endif
 
 }  // namespace

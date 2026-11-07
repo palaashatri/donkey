@@ -89,6 +89,16 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
 endif()
 list(APPEND DONKEY_CORPUS_LIBRARIES donkey_jump_table_O2)
 
+# Scalar floating-point code (G01-T2), x86-64 only: the lifter models SSE, and an
+# AArch64 build of the same source would be a different corpus. Math errno is off so
+# that sqrt is one instruction and no libm call remains.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_library(donkey_corpus_fp_O0 SHARED corpus/corpus_fp.c)
+  target_compile_options(donkey_corpus_fp_O0 PRIVATE -O0 -fno-stack-protector -fno-math-errno
+                         -ffp-contract=off)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_fp_O0)
+endif()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
   unit/decompiler_corpus_test.cpp
@@ -125,6 +135,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
   $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
   DONKEY_JUMP_TABLE_O2_PATH="$<TARGET_FILE:donkey_jump_table_O2>"
+  $<$<TARGET_EXISTS:donkey_corpus_fp_O0>:DONKEY_CORPUS_FP_O0_PATH="$<TARGET_FILE:donkey_corpus_fp_O0>">
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )

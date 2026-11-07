@@ -31,17 +31,21 @@ AbiModel model_for(Architecture architecture, BinaryFormat format) {
       if (format == BinaryFormat::Pe) {
         // Microsoft x64 calling convention: integer arguments in rcx, rdx, r8, r9
         // and the result in rax.
+        // Each position is either an integer register or the XMM register of the same
+        // position: a floating-point argument in position 1 arrives in xmm1.
         model.arguments = {
-            {{{"rcx", 8}, {"ecx", 4}, {"cx", 2}, {"cl", 1}}},
-            {{{"rdx", 8}, {"edx", 4}, {"dx", 2}, {"dl", 1}}},
-            {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}}},
-            {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}}},
+            {{{"rcx", 8}, {"ecx", 4}, {"cx", 2}, {"cl", 1}, {"xmm0", 8}}},
+            {{{"rdx", 8}, {"edx", 4}, {"dx", 2}, {"dl", 1}, {"xmm1", 8}}},
+            {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}, {"xmm2", 8}}},
+            {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}, {"xmm3", 8}}},
         };
-        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}};
+        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}, {"xmm0", 8}};
         model.convention_name = "Microsoft x64 calling convention";
       } else {
         // System V AMD64: integer arguments in rdi, rsi, rdx, rcx, r8, r9 and the
         // result in rax. Only aliases the x86-64 lifter can emit are listed.
+        // Floating-point arguments use xmm0 to xmm7 in order, independently of the
+        // integer registers.
         model.arguments = {
             {{{"rdi", 8}, {"edi", 4}, {"di", 2}, {"dil", 1}}},
             {{{"rsi", 8}, {"esi", 4}, {"si", 2}, {"sil", 1}}},
@@ -50,7 +54,10 @@ AbiModel model_for(Architecture architecture, BinaryFormat format) {
             {{{"r8", 8}, {"r8d", 4}, {"r8w", 2}, {"r8b", 1}}},
             {{{"r9", 8}, {"r9d", 4}, {"r9w", 2}, {"r9b", 1}}},
         };
-        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}};
+        for (int index = 0; index < 8; ++index) {
+          model.arguments.push_back({{{"xmm" + std::to_string(index), 8}}});
+        }
+        model.return_aliases = {{"rax", 8}, {"eax", 4}, {"ax", 2}, {"al", 1}, {"xmm0", 8}};
         model.convention_name = "System V AMD64 ABI";
       }
       break;
@@ -101,6 +108,16 @@ std::optional<std::uint8_t> width_of(const std::vector<Alias>& aliases, const st
   return std::nullopt;
 }
 
+/// The width at which `statement` reads register `name`, or 8 when it does not say.
+std::uint8_t read_width(const IrStatement& statement, const std::string& name) {
+  for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+    if (operand->kind == IrOperandKind::Register && operand->reg == name && operand->width != 0) {
+      return operand->width;
+    }
+  }
+  return 8;
+}
+
 /// Registers an operand reads. Block operands read nothing.
 void collect_reads(const IrOperand& operand, std::vector<std::string>& out) {
   switch (operand.kind) {
@@ -126,6 +143,9 @@ struct Scan {
   std::vector<bool> argument_read;  // read before any write of the family
   std::vector<bool> argument_written;
   std::vector<std::uint8_t> argument_width;
+  // The register each argument was first read from. A family can name several
+  // (Microsoft x64 position 1 is rdx or xmm1), so the parameter keeps this one.
+  std::vector<std::string> argument_register;
   bool has_value_return = false;
   bool has_bare_return = false;
   // Default to the width of the ABI's own return register (rax/x0: 8, eax: 4)
@@ -143,6 +163,7 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
   result.argument_read.assign(argument_count, false);
   result.argument_written.assign(argument_count, false);
   result.argument_width.assign(argument_count, 0);
+  result.argument_register.assign(argument_count, std::string());
 
   std::vector<std::string> reads;
   for (const IrBlock& block : function.blocks) {
@@ -187,8 +208,14 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
         }
         const std::size_t index = family.value();
         if (!result.argument_written[index]) {
+          if (!result.argument_read[index]) {
+            result.argument_register[index] = name;
+          }
           result.argument_read[index] = true;
-          const auto width = width_of(model.arguments[index].aliases, name);
+          // An XMM argument is as wide as the read that uses it: 4 for a single.
+          const auto width = name.rfind("xmm", 0) == 0
+                                 ? std::optional<std::uint8_t>(read_width(statement, name))
+                                 : width_of(model.arguments[index].aliases, name);
           if (width.has_value() && width.value() > result.argument_width[index]) {
             result.argument_width[index] = width.value();
           }
@@ -201,8 +228,12 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
           result.argument_written[family.value()] = true;
         }
         if (width_of(model.return_aliases, statement.dest.reg).has_value()) {
+          // A merge leaves the family at full width, but the value it carries is narrower:
+          // the return is as wide as that value (al, ax, or a single-precision xmm0).
           const std::uint8_t width =
-              statement.dest.width != 0 ? statement.dest.width : statement.width;
+              statement.merged_width != 0
+                  ? statement.merged_width
+                  : (statement.dest.width != 0 ? statement.dest.width : statement.width);
           if (width != 0) {
             result.current_return_width = width;
           }
@@ -236,7 +267,11 @@ void infer_signature(IrFunction& function, Architecture architecture, BinaryForm
     IrParameter parameter;
     parameter.name = "a" + std::to_string(function.parameters.size());
     parameter.width = result.argument_width[index] == 0 ? 8 : result.argument_width[index];
-    parameter.abi_register = model.arguments[index].aliases.front().name;
+    // Integer arguments name their family's 64-bit register; an XMM argument names the
+    // XMM register it was read from.
+    const std::string& read_as = result.argument_register[index];
+    parameter.abi_register =
+        read_as.rfind("xmm", 0) == 0 ? read_as : model.arguments[index].aliases.front().name;
     function.parameters.push_back(std::move(parameter));
   }
 

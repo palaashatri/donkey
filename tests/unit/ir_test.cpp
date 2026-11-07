@@ -3,9 +3,11 @@
 #include <cfenv>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -2607,6 +2609,48 @@ bool aarch64_lifts_partial(const std::vector<std::byte>& data) {
   return lifted.has_value() && lifted.value().partial;
 }
 
+/// The lifted x86-64 function for the code (the first function found).
+donkey::IrFunction lift_x86_64_code(const std::vector<std::byte>& data) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  donkey::IrFunction none;
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return none;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  return lifted.has_value() ? lifted.value() : none;
+}
+
+TEST(Ir, SingleFloatReturnIsFourBytesWide) {
+  // addss xmm0, xmm1; ret: the value returned is a single-precision float.
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf3}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
+  EXPECT_EQ(function.return_width, 4U);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, DoubleReturnWithNoIntegerWriteKeepsItsReturnChannel) {
+  // addsd xmm0, xmm1; ret
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf2}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
+  EXPECT_EQ(function.return_width, 8U);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, IntegerWriteAfterAFloatResultIsAmbiguous) {
+  // addsd xmm0, xmm1; mov eax, 1; ret: rax and xmm0 are both written on the way to the
+  // return, so the return channel cannot be told apart and the function is Partial.
+  const auto function = lift_x86_64_code(
+      {std::byte{0xf2}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xb8},
+       std::byte{0x01}, std::byte{0x00}, std::byte{0x00}, std::byte{0x00}, std::byte{0xc3}});
+  EXPECT_TRUE(function.partial);
+}
+
 TEST(Ir, AArch64CarryChainAddsThenAdcUsesTheSumsCarry) {
   // adds x0, x0, x1; adc x0, x2, x3; ret. The carry is the one out of the sum.
   const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0xd65f03c0});
@@ -3068,6 +3112,92 @@ TEST(Ir, AArch64AddsThenAdcsUsesTheSumsCarry) {
   EXPECT_FALSE(aarch64_lifts_partial(code));
   EXPECT_EQ(run_aarch64_args(code, {~0ULL, 1, 5, 7}), 13U);  // carry 1: 5 + 7 + 1
   EXPECT_EQ(run_aarch64_args(code, {1, 2, 5, 7}), 12U);      // carry 0
+}
+
+// Scalar SSE: only the low lane is modelled. The bit patterns below are the
+// operands the interpreter receives, so a double is passed as its 64-bit image.
+std::uint64_t double_bits(double value) {
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof bits);
+  return bits;
+}
+
+double bits_as_double(std::uint64_t bits) {
+  double value = 0;
+  std::memcpy(&value, &bits, sizeof value);
+  return value;
+}
+
+TEST(Ir, X86ScalarDoubleArithmeticLiftsExactly) {
+  donkey::IrFunction add;  // addsd xmm0, xmm1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x58, 0xc1, 0xc3}, add));
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(add.partial);
+  EXPECT_EQ(bits_as_double(run_x86_64(add, {double_bits(1.5), double_bits(2.25)})), 3.75);
+
+  donkey::IrFunction divide;  // divsd xmm0, xmm1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x5e, 0xc1, 0xc3}, divide));
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(divide.partial);
+  EXPECT_EQ(bits_as_double(run_x86_64(divide, {double_bits(1.0), double_bits(4.0)})), 0.25);
+  // Division by zero gives infinity under IEEE, and no fault.
+  EXPECT_EQ(bits_as_double(run_x86_64(divide, {double_bits(1.0), double_bits(0.0)})),
+            std::numeric_limits<double>::infinity());
+
+  donkey::IrFunction root;  // sqrtsd xmm0, xmm1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x51, 0xc1, 0xc3}, root));
+  EXPECT_EQ(bits_as_double(run_x86_64(root, {double_bits(2.25)})), 1.5);  // only xmm1 is read
+}
+
+TEST(Ir, X86ScalarSingleMergesIntoTheLowLane) {
+  // addss xmm0, xmm1; ret: the sum is a single, and xmm0 bits 32 to 63 are kept.
+  donkey::IrFunction add;
+  ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x0f, 0x58, 0xc1, 0xc3}, add));
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(add.partial);
+  const std::uint64_t kept = 0x1234567800000000ULL;
+  const std::uint64_t one_and_a_half = 0x3fc00000ULL;     // 1.5f
+  const std::uint64_t two_and_a_quarter = 0x40100000ULL;  // 2.25f
+  EXPECT_EQ(run_x86_64(add, {kept | one_and_a_half, two_and_a_quarter}),
+            kept | 0x40700000ULL);  // 3.75f
+}
+
+TEST(Ir, X86ScalarCompareWithAJumpOnAboveHandlesUnordered) {
+  donkey::IrFunction f;  // ucomisd xmm0, xmm1; ja L; mov eax, 0; ret; L: mov eax, 1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x66, 0x0f, 0x2e, 0xc1, 0x77, 0x06, 0xb8, 0x00, 0x00, 0x00, 0x00,
+                               0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3},
+                              f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {double_bits(2.0), double_bits(1.0)}), 1U);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(2.0)}), 0U);
+  EXPECT_EQ(run_x86_64(f, {double_bits(2.0), double_bits(2.0)}), 0U);
+  // Unordered sets ZF, PF and CF, so "above" is false.
+  EXPECT_EQ(
+      run_x86_64(f, {double_bits(std::numeric_limits<double>::quiet_NaN()), double_bits(1.0)}), 0U);
+}
+
+TEST(Ir, X86IntegerToDoubleSignExtendsAndBackTruncates) {
+  donkey::IrFunction to_double;  // cvtsi2sd xmm0, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x2a, 0xc7, 0xc3}, to_double));
+  EXPECT_EQ(bits_as_double(run_x86_64(to_double, {0xfffffffdULL})), -3.0);
+
+  donkey::IrFunction to_int;  // cvttsd2si eax, xmm0; ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x2c, 0xc0, 0xc3}, to_int));
+  EXPECT_EQ(run_x86_64(to_int, {double_bits(-3.9)}), 0xfffffffdULL);
+  EXPECT_EQ(run_x86_64(to_int, {double_bits(3.9)}), 3U);
+}
+
+TEST(Ir, X86ZeroingIdiomClearsTheLowLane) {
+  donkey::IrFunction f;  // xorps xmm0, xmm0; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x57, 0xc0, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {double_bits(7.0)}), 0U);
+}
+
+TEST(Ir, X86MovapsIsPartialBecauseItCopiesTheUpperLanes) {
+  donkey::IrFunction f;  // movaps xmm0, xmm1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x28, 0xc1, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
 }
 
 }  // namespace

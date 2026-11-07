@@ -151,7 +151,7 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1); no instruction lifts to them yet, so any FP instruction still makes the function Partial | P0 | IN PROGRESS (G01-T1 DONE; T2, T3 TODO) |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1), and x86-64 scalar SSE lifts to them (G01-T2). AArch64 FP does not lift yet (G01-T3), so FP functions there stay Partial | P0 | IN PROGRESS (G01-T1 and T2 DONE; T3 TODO) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
@@ -311,6 +311,13 @@ interpreter.
   - `cvtsi2sd` with a 32-bit source sign-extends.
   - Flags after `ucomisd`: ZF=PF=CF=1 when unordered, which is why compilers
     emit `jp` checks. Map `jp`/`jnp`.
+- **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
+  integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
+  each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
+  Complete, none wrong (the figures and the rule are in `docs/SUPPORT_MATRIX.md`). Clang 18.1 has not
+  been re-measured since the rule. Moves, comparisons and zeroing idioms are lifted; packed and other
+  SSE forms stay Partial. Argument and return registers follow the XMM registers that the function
+  reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 
