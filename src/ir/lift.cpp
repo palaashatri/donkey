@@ -317,6 +317,20 @@ struct Lifter {
 
   void note(std::string text) { out.notes.push_back(std::move(text)); }
 
+  /// A result that depends on the MXCSR rounding mode. The caller may set a mode other than round
+  /// to nearest, and this lifter does not model MXCSR, so the function is reported Partial with
+  /// the assumption written down, once.
+  void mark_rounding_dependent() {
+    static const std::string kNote =
+        "floating-point results assume the MXCSR rounding mode is round to nearest; a caller "
+        "may set another mode, which is not modelled";
+    if (std::find(out.notes.begin(), out.notes.end(), kNote) == out.notes.end()) {
+      mark_partial(kNote);
+    } else {
+      out.partial = true;
+    }
+  }
+
   void mark_partial(std::string text) {
     out.notes.push_back(std::move(text));
     out.partial = true;
@@ -1192,15 +1206,7 @@ struct Lifter {
         statement.a = *source;
       }
       statement.float_model = IrFloatModel::X86;
-      // The operations round in the MXCSR mode the caller left. The ABI sets round to
-      // nearest on entry, which is what the IR models; ldmxcsr is not modelled, so a
-      // function that changes the mode is Partial through its Unsupported statement.
-      static const std::string kMxcsrNote =
-          "scalar floating-point operations assume the ABI's default MXCSR (round to nearest, "
-          "no exceptions unmasked) on entry";
-      if (std::find(out.notes.begin(), out.notes.end(), kMxcsrNote) == out.notes.end()) {
-        note(kMxcsrNote);
-      }
+      mark_rounding_dependent();
       write_xmm_scalar(block, instruction, std::move(statement), width, ops[0].reg);
       return true;
     }
@@ -1250,6 +1256,7 @@ struct Lifter {
 
     // Conversions between integers and floats.
     if (m == "cvtsi2ss" || m == "cvtsi2sd") {
+      mark_rounding_dependent();
       if (!is_xmm(ops[0])) {
         return false;
       }
