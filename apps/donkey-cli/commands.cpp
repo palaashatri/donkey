@@ -19,6 +19,7 @@
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
@@ -1155,10 +1156,26 @@ int command_debuginfo(const std::vector<std::string_view>& arguments) {
     return kExitFailure;
   }
   auto result = read_debug_info(loaded.image, loaded.data);
+  // A stripped binary keeps its debug information in a separate file, found by its build-id or
+  // its debuglink (G07). That file is read in place of the binary's own sections.
+  std::optional<LoadedBinary> separate;
+  std::string separate_path;
+  if (!result && result.diagnostic().code == "dwarf.not_present") {
+    if (auto found = find_separate_debug_file(loaded.image, loaded.data, path)) {
+      if (auto opened = donkey::load_binary(found.value())) {
+        separate_path = found.value();
+        separate = std::move(opened.value());
+        result = read_debug_info(separate->image, separate->data);
+      }
+    }
+  }
   if (!result) {
     return fail(result.diagnostic());
   }
   const DebugInfo& info = result.value();
+  if (!separate_path.empty() && !json) {
+    std::printf("separate debug file: %s\n", separate_path.c_str());
+  }
   if (!json) {
     std::printf("DWARF %u-%u, %zu compile units, %zu functions, %zu variables, %zu types%s\n",
                 static_cast<unsigned>(info.min_version), static_cast<unsigned>(info.max_version),

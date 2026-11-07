@@ -26,7 +26,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 | Format | Read | Symbols | DWARF |
 |---|---|---|---|
-| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; compressed sections and split DWARF reported Unsupported |
+| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; zlib-compressed sections read (`inflate`, checked against zlib); zstd-compressed and split DWARF reported Unsupported; separate debug files found by build-id or debuglink |
 | PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB is not read. |
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
 | ELF relocatable (`ET_REL`, `.o`) | laid out and linked as one image: x86-64 and AArch64 common relocations, GOT forms, COMMON symbols, x86-64 local-exec and initial-exec TLS; other TLS models reported, not applied | — | — |

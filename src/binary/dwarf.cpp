@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -14,7 +15,9 @@
 #include <tuple>
 #include <unordered_map>
 
+#include "donkey/binary/byte_reader.h"
 #include "donkey/binary/debug_info.h"
+#include "donkey/binary/inflate.h"
 
 namespace donkey {
 namespace {
@@ -1456,6 +1459,10 @@ const DebugFunction* DebugInfo::function_at(std::uint64_t address) const {
 
 Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std::byte> data,
                                   const DebugInfoOptions& options) {
+  // Decompressed sections are kept here. A deque never moves its elements, so the spans
+  // handed out for earlier sections stay valid.
+  std::deque<std::vector<std::byte>> decompressed;
+  std::optional<Diagnostic> decompression_error;
   auto bytes_of = [&](const Section* section) -> std::optional<Bytes> {
     if (section == nullptr) {
       return Bytes{};
@@ -1464,8 +1471,49 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
         section->file_size > data.size() - section->file_offset) {
       return std::nullopt;
     }
-    return data.subspan(static_cast<std::size_t>(section->file_offset),
-                        static_cast<std::size_t>(section->file_size));
+    const Bytes raw = data.subspan(static_cast<std::size_t>(section->file_offset),
+                                   static_cast<std::size_t>(section->file_size));
+    if (!section->compressed) {
+      return raw;
+    }
+    // SHF_COMPRESSED: an Elf64_Chdr (type, size, alignment) then a zlib stream. Only zlib
+    // (ELFCOMPRESS_ZLIB = 1) is read; the declared size must match the stream's output.
+    const std::size_t header = image.is_64_bit() ? 24U : 12U;
+    if (raw.size() < header) {
+      decompression_error =
+          Diagnostic::make(Status::InvalidInput, "dwarf.compressed_header",
+                           "a compressed section has no compression header", section->file_offset);
+      return std::nullopt;
+    }
+    const ByteReader chdr(raw.first(header));
+    const auto type = chdr.u32(0, image.endian);
+    std::uint64_t size = 0;
+    if (image.is_64_bit()) {
+      if (auto declared = chdr.u64(8, image.endian)) {
+        size = declared.value();
+      }
+    } else if (auto declared = chdr.u32(4, image.endian)) {
+      size = declared.value();
+    }
+    if (!type || type.value() != 1) {
+      decompression_error =
+          Diagnostic::make(Status::Unsupported, "dwarf.compression_type",
+                           "only zlib-compressed debug sections are read", section->file_offset);
+      return std::nullopt;
+    }
+    auto inflated = inflate_zlib(raw.subspan(header));
+    if (!inflated) {
+      decompression_error = inflated.diagnostic();
+      return std::nullopt;
+    }
+    if (inflated.value().size() != size) {
+      decompression_error =
+          Diagnostic::make(Status::InvalidInput, "dwarf.compressed_size",
+                           "a compressed section is not its declared size", section->file_offset);
+      return std::nullopt;
+    }
+    decompressed.push_back(std::move(inflated.value()));
+    return std::span<const std::byte>(decompressed.back());
   };
   const Section* info = find_section(image, ".debug_info", "__debug_info");
   if (info == nullptr) {
@@ -1481,19 +1529,15 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
       find_section(image, ".debug_addr", "__debug_addr"),
       find_section(image, ".debug_line", "__debug_line"),
   };
-  for (const Section* section : named) {
-    if (section != nullptr && section->compressed) {
-      return make_error<DebugInfo>(Status::Unsupported, "dwarf.compressed",
-                                   "compressed debug sections (SHF_COMPRESSED) are not supported "
-                                   "yet; decompress with objcopy --decompress-debug-sections");
-    }
-  }
   Sections sections;
   sections.big_endian = image.endian == Endian::Big;
   Bytes* targets[] = {&sections.info,        &sections.abbrev, &sections.str, &sections.line_str,
                       &sections.str_offsets, &sections.addr,   &sections.line};
   for (std::size_t i = 0; i < std::size(named); ++i) {
     auto bytes = bytes_of(named[i]);
+    if (!bytes.has_value() && decompression_error) {
+      return Result<DebugInfo>(*decompression_error);
+    }
     if (!bytes.has_value()) {
       return make_error<DebugInfo>(Status::InvalidInput, "dwarf.section_out_of_bounds",
                                    "a debug section lies outside the file");
