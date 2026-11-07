@@ -388,7 +388,9 @@ bool is_plain_register(const Operand& operand) {
 /// table's bounds check and its `br`, for one selector value. Only what GCC
 /// and Clang emit for table dispatch is understood: `mov`, `adr`, `adrp`, `add`
 /// with an immediate or an extended and shifted register, and loads from a
-/// register offset. Anything else stops the evaluation.
+/// register offset. `nop` is understood too: a linker that relaxes the
+/// `adrp`/`add` pair that forms a table address (LLD does) writes a `nop` for
+/// the `adrp` and an `adr` for the `add`. Anything else stops the evaluation.
 class Aarch64TableSlice {
  public:
   Aarch64TableSlice(const BinaryImage& image, std::span<const std::byte> file, unsigned selector,
@@ -400,6 +402,9 @@ class Aarch64TableSlice {
   bool step(const Instruction& instruction) {
     const std::string& m = instruction.mnemonic;
     const auto& ops = instruction.structured_operands;
+    if (m == "nop" && ops.empty()) {
+      return true;  // changes no register
+    }
     if (m == "mov" && ops.size() == 2 && is_plain_register(ops[0]) &&
         (is_plain_register(ops[1]) ||
          (ops[1].kind == OperandKind::Immediate && ops[1].shift == ShiftKind::None))) {
