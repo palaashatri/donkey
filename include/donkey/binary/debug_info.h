@@ -64,6 +64,17 @@ struct DebugParameter {
   std::uint64_t type = 0;
 };
 
+/// A parameter or local of a function that lives in its frame. `cfa_offset` is the offset
+/// from the canonical frame address (the stack pointer before the call pushed the return
+/// address, plus 8). A standard x86-64 frame pointer prologue sets rbp to CFA - 16.
+struct DebugStackSlot {
+  std::string name;
+  std::uint64_t type = 0;
+  std::int64_t cfa_offset = 0;
+  bool is_parameter = false;
+  std::uint32_t line = 0;
+};
+
 struct DebugFunction {
   std::uint64_t address = 0;
   std::uint64_t size = 0;  ///< 0 when only the start is known
@@ -71,6 +82,9 @@ struct DebugFunction {
   std::string linkage_name;
   std::uint64_t return_type = 0;  ///< 0 = void or unknown
   std::vector<DebugParameter> parameters;
+  /// Parameters and locals kept in the frame, when the frame base is the CFA. Only direct
+  /// children of the subprogram are listed; nested lexical blocks are not read yet.
+  std::vector<DebugStackSlot> stack_slots;
   bool variadic = false;
   bool external = false;
   std::string file;

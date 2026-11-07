@@ -96,6 +96,38 @@ TEST(DebugInfo, SharedLibraryPrototype) {
   EXPECT_EQ(info.prototype(*answer), "int donkey_module_answer(int value)");
 }
 
+#if defined(DONKEY_TEST_LOCALS_PATH)
+// At -O0 with frame pointers, parameters and locals are DW_OP_fbreg slots. Their offsets are
+// from the CFA, which is rbp + 16 in the standard prologue: the disassembly stores `first` at
+// -0x14(%rbp), that is CFA - 36.
+TEST(DebugInfo, StackSlotsGiveCfaOffsetsOfParametersAndLocals) {
+  LOAD_WITH_DWARF(info, DONKEY_TEST_LOCALS_PATH);
+  const auto* sum = named(info, "donkey_locals_sum");
+  ASSERT_NE(sum, nullptr);
+  ASSERT_EQ(sum->stack_slots.size(), 4U);
+  const auto slot = [&](const std::string& name) {
+    return std::find_if(sum->stack_slots.begin(), sum->stack_slots.end(),
+                        [&](const auto& s) { return s.name == name; });
+  };
+  const auto first = slot("first");
+  const auto second = slot("second");
+  const auto total = slot("total");
+  const auto scaled = slot("scaled");
+  ASSERT_NE(first, sum->stack_slots.end());
+  ASSERT_NE(second, sum->stack_slots.end());
+  ASSERT_NE(total, sum->stack_slots.end());
+  ASSERT_NE(scaled, sum->stack_slots.end());
+  EXPECT_EQ(first->cfa_offset, -36);
+  EXPECT_EQ(second->cfa_offset, -40);
+  EXPECT_EQ(total->cfa_offset, -24);
+  EXPECT_EQ(scaled->cfa_offset, -20);
+  EXPECT_TRUE(first->is_parameter);
+  EXPECT_TRUE(second->is_parameter);
+  EXPECT_FALSE(total->is_parameter);
+  EXPECT_FALSE(scaled->is_parameter);
+}
+#endif
+
 TEST(DebugInfo, ImagesWithoutDebugInformationSaySo) {
   auto loaded = donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/binaries/tiny-elf-x86_64");
   ASSERT_TRUE(loaded.has_value());

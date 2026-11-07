@@ -40,6 +40,11 @@ if(NOT MSVC)
 endif()
 # The dynamic-module fixture `debuggee load` opens at run time.
 add_library(donkey_test_module SHARED fixtures/debuggee/module.c)
+if(NOT MSVC)
+  # Stack parameters and locals for the frame-slot debug names (G04-T4). The attributes are GCC/Clang.
+  add_library(donkey_test_locals SHARED fixtures/debuggee/locals.c)
+  target_compile_options(donkey_test_locals PRIVATE -O0 -g -fno-omit-frame-pointer -fcf-protection=none)
+endif()
 if(MSVC)
   target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
   target_compile_options(donkey_test_module PRIVATE /Od /Oy-)
@@ -129,6 +134,7 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_LOCALS_PATH="$<TARGET_FILE:donkey_test_locals>">
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_RANGES_FIXTURE_PATH="$<TARGET_FILE:donkey_ranges_fixture>">
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
@@ -141,6 +147,9 @@ target_compile_definitions(donkey_unit_tests PRIVATE
 )
 if(NOT MSVC)
   add_dependencies(donkey_unit_tests donkey_ranges_fixture)
+endif()
+if(NOT MSVC)
+  add_dependencies(donkey_unit_tests donkey_test_locals)
 endif()
 add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
