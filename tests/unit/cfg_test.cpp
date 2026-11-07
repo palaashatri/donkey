@@ -198,6 +198,184 @@ TEST(Cfg, TruncatedInputsNeverHangOrCrash) {
   }
 }
 
+/// An AArch64 image for jump-table tests: `.text` at 0x1000 holds `words`, and
+/// a read-only `.rodata` at 0x2000 holds `table` at 0x2010, which is the
+/// address the code's `adrp` and `add` reach.
+struct AArch64DispatchImage {
+  BinaryImage image;
+  std::vector<std::byte> data;
+};
+
+/// `table` is the table's bytes in memory order, so the caller chooses the entry
+/// size and byte order; `endian` orders the instruction words.
+AArch64DispatchImage aarch64_dispatch_image(const std::vector<std::uint32_t>& words,
+                                            const std::vector<std::uint8_t>& table,
+                                            donkey::Endian endian = donkey::Endian::Little) {
+  AArch64DispatchImage out;
+  out.data.assign(0x100, std::byte{0});
+  std::size_t at = 0;
+  for (const std::uint32_t word : words) {
+    for (std::size_t i = 0; i < 4; ++i) {
+      const std::size_t significance = endian == donkey::Endian::Big ? 3 - i : i;
+      out.data[at++] = static_cast<std::byte>((word >> (8U * significance)) & 0xffU);
+    }
+  }
+  at = 0x90;
+  for (const std::uint8_t byte : table) {
+    out.data[at++] = static_cast<std::byte>(byte);
+  }
+  BinaryImage& image = out.image;
+  image.path = "<synthetic>";
+  image.architecture = Architecture::AArch64;
+  image.endian = endian;
+  image.format = donkey::BinaryFormat::Raw;
+  image.bits = 64;
+  image.file_size = out.data.size();
+  image.entry_point = 0x1000;
+  Section text;
+  text.id = donkey::SectionId{1};
+  text.name = ".text";
+  text.type = "synthetic";
+  text.file_offset = 0;
+  text.file_size = 0x80;
+  text.address = 0x1000;
+  text.virtual_size = 0x80;
+  text.readable = true;
+  text.executable = true;
+  text.has_file_data = true;
+  image.sections.push_back(text);
+  Section rodata = text;
+  rodata.id = donkey::SectionId{2};
+  rodata.name = ".rodata";
+  rodata.file_offset = 0x80;
+  rodata.address = 0x2000;
+  rodata.executable = false;
+  image.sections.push_back(rodata);
+  donkey::Segment code_segment;
+  code_segment.index = 0;
+  code_segment.name = ".text";
+  code_segment.file_offset = 0;
+  code_segment.file_size = 0x80;
+  code_segment.virtual_address = 0x1000;
+  code_segment.virtual_size = 0x80;
+  code_segment.readable = true;
+  code_segment.executable = true;
+  image.segments.push_back(code_segment);
+  donkey::Segment data_segment = code_segment;
+  data_segment.index = 1;
+  data_segment.name = ".rodata";
+  data_segment.file_offset = 0x80;
+  data_segment.virtual_address = 0x2000;
+  data_segment.executable = false;
+  image.segments.push_back(data_segment);
+  return out;
+}
+
+/// What GCC emits at -O2 for a dense 4-case switch on AArch64, placed at
+/// 0x1000 (assembled with llvm-mc). The bounds check is `b.ls`, whose taken
+/// edge enters the table block; `bounds_branch` can replace it.
+std::vector<std::uint32_t> gcc_dispatch(std::uint32_t bounds_branch = 0x54000069U) {
+  return {0x71000c1fU, bounds_branch, 0x12800000U, 0xd65f03c0U, 0xb0000002U, 0x91004042U,
+          0x38604842U, 0x10000060U,   0x8b228802U, 0xd61f0040U, 0x11000420U, 0xd65f03c0U,
+          0x11000820U, 0xd65f03c0U,   0x11000c20U, 0xd65f03c0U, 0x11001020U, 0xd65f03c0U};
+}
+
+/// What Clang emits at -O2 for the same switch: the bounds check is `b.hi`
+/// whose fall-through enters the table block.
+std::vector<std::uint32_t> clang_dispatch() {
+  return {0x71000c1fU, 0x54000208U, 0x2a0003e8U, 0xb0000009U, 0x91004129U, 0x1000008aU, 0x3868692bU,
+          0x8b0b094aU, 0xd61f0140U, 0x11000420U, 0xd65f03c0U, 0x11000820U, 0xd65f03c0U, 0x11000c20U,
+          0xd65f03c0U, 0x11001020U, 0xd65f03c0U, 0x12800000U, 0xd65f03c0U};
+}
+
+TEST(Cfg, AArch64GccShapedJumpTableIsRecovered) {
+  const auto dispatch = aarch64_dispatch_image(gcc_dispatch(), {0x00, 0x02, 0x04, 0x06});
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& cfg = result.value().cfg;
+  ASSERT_EQ(cfg.jump_tables.size(), 1U);
+  const auto& table = cfg.jump_tables.front();
+  EXPECT_EQ(table.jump_address, 0x1024U);
+  EXPECT_EQ(table.check_address, 0x1000U);
+  EXPECT_EQ(table.default_target, 0x1008U);
+  EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1028U, 0x1030U, 0x1038U, 0x1040U}));
+  for (const std::uint64_t target : table.targets) {
+    const CfgEdge* edge = edge_between(cfg, 0x1024, target);
+    ASSERT_NE(edge, nullptr) << "no jump-table edge to " << target;
+    EXPECT_EQ(edge->kind, CfgEdgeKind::JumpTable);
+  }
+}
+
+/// gcc_dispatch() with 16-bit entries: `ldrh w2, [x2, w0, uxtw #1]` and
+/// `add x2, x0, w2, sxth #2` replace the byte load and the sxtb add.
+std::vector<std::uint32_t> gcc_halfword_dispatch() {
+  std::vector<std::uint32_t> words = gcc_dispatch();
+  words[6] = 0x78605842U;
+  words[8] = 0x8b22a802U;
+  return words;
+}
+
+/// The four targets of gcc_dispatch(), from a table at 0x2010 read with the
+/// image's byte order.
+void expect_four_target_table(const AArch64DispatchImage& dispatch) {
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& cfg = result.value().cfg;
+  ASSERT_EQ(cfg.jump_tables.size(), 1U);
+  const auto& table = cfg.jump_tables.front();
+  EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1028U, 0x1030U, 0x1038U, 0x1040U}));
+  for (const std::uint64_t target : table.targets) {
+    const CfgEdge* edge = edge_between(cfg, 0x1024, target);
+    ASSERT_NE(edge, nullptr) << "no jump-table edge to " << target;
+    EXPECT_EQ(edge->kind, CfgEdgeKind::JumpTable);
+  }
+}
+
+TEST(Cfg, AArch64HalfwordTableIsRecoveredInLittleEndian) {
+  expect_four_target_table(aarch64_dispatch_image(
+      gcc_halfword_dispatch(), {0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x06, 0x00}));
+}
+
+TEST(Cfg, AArch64HalfwordTableIsRecoveredInBigEndian) {
+  // Big-endian image: the instruction words and the 16-bit entries are both
+  // big-endian. Reading the entries little-endian would give 0x0200 for the second
+  // entry, which is not an instruction start, so no table would be recovered.
+  expect_four_target_table(aarch64_dispatch_image(gcc_halfword_dispatch(),
+                                                  {0x00, 0x00, 0x00, 0x02, 0x00, 0x04, 0x00, 0x06},
+                                                  donkey::Endian::Big));
+}
+
+TEST(Cfg, AArch64ClangShapedJumpTableIsRecovered) {
+  const auto dispatch = aarch64_dispatch_image(clang_dispatch(), {0x00, 0x02, 0x04, 0x06});
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& cfg = result.value().cfg;
+  ASSERT_EQ(cfg.jump_tables.size(), 1U);
+  const auto& table = cfg.jump_tables.front();
+  EXPECT_EQ(table.jump_address, 0x1020U);
+  EXPECT_EQ(table.check_address, 0x1000U);
+  EXPECT_EQ(table.default_target, 0x1044U);
+  EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1024U, 0x102cU, 0x1034U, 0x103cU}));
+}
+
+// `b.hi` takes its branch when the selector is out of range, so a table behind
+// its taken edge is on the wrong side and must not be recovered.
+TEST(Cfg, AArch64TableOnTheOutOfRangeSideIsNotRecovered) {
+  const auto dispatch = aarch64_dispatch_image(gcc_dispatch(0x54000068U), {0x00, 0x02, 0x04, 0x06});
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.jump_tables.empty());
+}
+
+// An entry that lands outside the code is not an instruction start, so the
+// whole table is unproven and no table is recovered.
+TEST(Cfg, AArch64TableEntryOutsideTheCodeIsNotRecovered) {
+  const auto dispatch = aarch64_dispatch_image(gcc_dispatch(), {0x00, 0x02, 0x04, 0x40});
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.jump_tables.empty());
+}
+
 TEST(Cfg, RespectsInstructionLimit) {
   const auto data = branchy_function();
   const auto image = synthetic_image(data.size());

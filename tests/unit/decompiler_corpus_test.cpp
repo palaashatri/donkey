@@ -9,10 +9,12 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -21,6 +23,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
@@ -607,19 +610,31 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
 }
 
 // A17: the dense switch compiled without optimisation dispatches through a
-// jump table. The analysis recovers all eight targets from the bounds check
-// and the table bytes, and the decompiler shows a switch, not a tail call.
+// jump table on x86-64. The analysis recovers all eight targets from the
+// bounds check and the table bytes, and the decompiler shows a switch, not a
+// tail call.
+//
+// AArch64 (G03-T3): neither GCC nor Clang gives c_switch_dense a code jump
+// table there (-O0 is a compare chain, -O2 a lookup of constants), so the
+// recogniser is measured on the jump-table fixture instead: a 16-case switch
+// whose cases depend on the second argument, built at -O2.
 TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
-  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
-  ASSERT_TRUE(loaded.has_value());
-  if (loaded.value().image.architecture != donkey::Architecture::X86_64) {
-    GTEST_SKIP() << "jump-table recovery is implemented for x86 only";
+  auto corpus = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(corpus.has_value());
+  const donkey::Architecture architecture = corpus.value().image.architecture;
+  if (architecture != donkey::Architecture::X86_64 &&
+      architecture != donkey::Architecture::AArch64) {
+    GTEST_SKIP() << "jump-table recovery is implemented for x86-64 and AArch64 only";
   }
+  const bool aarch64 = architecture == donkey::Architecture::AArch64;
+  const char* name = aarch64 ? "jt_dispatch16" : "c_switch_dense";
+  auto loaded = donkey::load_binary(aarch64 ? DONKEY_JUMP_TABLE_O2_PATH : DONKEY_CORPUS_O0_PATH);
+  ASSERT_TRUE(loaded.has_value());
   auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& f : analysis.value().functions) {
-    if (f.name == "c_switch_dense" || f.name == "_c_switch_dense") {
+    if (f.name == name || f.name == std::string("_") + name) {
       function = &f;
     }
   }
@@ -631,8 +646,8 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
       table = &candidate;
     }
   }
-  ASSERT_NE(table, nullptr) << "no jump table recovered in c_switch_dense";
-  EXPECT_EQ(table->targets.size(), 8U);
+  ASSERT_NE(table, nullptr) << "no jump table recovered in " << name;
+  EXPECT_EQ(table->targets.size(), aarch64 ? 16U : 8U);
   for (const std::uint64_t target : table->targets) {
     EXPECT_GE(target, function->address);
     EXPECT_LT(target, function->end_address);
@@ -644,6 +659,65 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
   auto text = donkey::format_pseudocode(lifted.value());
   ASSERT_TRUE(text.has_value());
   EXPECT_NE(text.value().find("switch ("), std::string::npos) << text.value();
+}
+
+// The jump-table fixture (G03-T3) is measured on its own, so that the corpus
+// counts above stay as they are. It must lift Complete on every host with a
+// code jump table, and the IR must agree with the compiled code on every
+// input vector.
+constexpr CorpusFunction kJumpTableFixture[] = {
+    {"jt_dispatch16", 'i', "ii"},
+};
+
+TEST(DecompilerCorpus, JumpTableFixtureAgreesWithTheCompiledCode) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_JUMP_TABLE_O2_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  void* handle = open_library(DONKEY_JUMP_TABLE_O2_PATH);
+  ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_JUMP_TABLE_O2_PATH;
+
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  for (const CorpusFunction& entry : kJumpTableFixture) {
+    const donkey::Function* function = nullptr;
+    for (const auto& f : analysis.value().functions) {
+      if (f.name == entry.name || f.name == std::string("_") + entry.name) {
+        function = &f;
+      }
+    }
+    void* symbol = find_symbol(handle, entry.name);
+    ASSERT_NE(function, nullptr) << entry.name << " not found by analysis";
+    ASSERT_NE(symbol, nullptr) << entry.name << " not exported";
+    auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+    ASSERT_TRUE(lifted.has_value()) << entry.name << ": " << lifted.diagnostic().code;
+    auto verified = donkey::verify_ir(lifted.value());
+    ASSERT_TRUE(verified.has_value()) << entry.name << ": " << verified.diagnostic().code << ": "
+                                      << verified.diagnostic().message;
+    EXPECT_FALSE(lifted.value().partial) << entry.name << " should lift Complete";
+
+    const auto native = reinterpret_cast<Native>(symbol);
+    Rng rng(0x5EEDULL ^ std::hash<std::string>{}(entry.name));
+    for (int vector = 0; vector < kVectorCount; ++vector) {
+      VectorInputs in;
+      fill_vector_inputs(in, entry, rng, vector);
+      donkey::IrEvalMemory memory = vector_memory(loaded.value().image, loaded.value().data, in);
+      auto ir = donkey::evaluate_ir(lifted.value(), std::span(in.ir_args, in.count), memory,
+                                    eval_options);
+      ASSERT_TRUE(ir.has_value()) << entry.name << ": " << ir.diagnostic().code;
+      const std::uint64_t got_native =
+          native(in.native_args[0], in.native_args[1], in.native_args[2], in.native_args[3],
+                 in.native_args[4], in.native_args[5], in.native_args[6], in.native_args[7],
+                 in.native_args[8]);
+      const std::uint64_t m = width_mask(entry.returns);
+      EXPECT_EQ(ir.value().return_value & m, got_native & m) << entry.name << " vector " << vector;
+    }
+  }
 }
 
 // M8 struct recovery: at -O2 c_point_sum reads every field of
@@ -682,6 +756,93 @@ TEST(DecompilerCorpus, StructLayoutRecoveredBehindAPointerArgument) {
 // on all corpus vectors and must give the same observation as the lifter's
 // output, Partial functions included. The test also checks that the hook saw
 // each pass, and that the pipeline matches what lift_function produces.
+// G04-T2 measurement: the total number of pseudocode statement lines across the corpus,
+// before and after the statement passes (the state after recover_pointer_structs is "before").
+// The statement passes must make it smaller at every level.
+TEST(DecompilerCorpus, StatementPassesShortenThePseudocode) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+
+    std::vector<std::size_t> before_lines;
+    std::vector<std::size_t> after_lines;
+    for (const CorpusFunction& entry : kCorpus) {
+      const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
+      ASSERT_NE(function, nullptr) << entry.name;
+      donkey::LiftOptions raw_options;
+      raw_options.run_passes = false;
+      auto raw =
+          donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+      ASSERT_TRUE(raw.has_value()) << entry.name;
+
+      donkey::PassOptions pass_options;
+      pass_options.architecture = loaded.value().image.architecture;
+      pass_options.format = loaded.value().image.format;
+      donkey::IrFunction before;
+      pass_options.after_pass = [&before](std::string_view pass, const donkey::IrFunction& after) {
+        if (pass == "recover_pointer_structs") {
+          before = after;
+        }
+      };
+      donkey::IrFunction piped = raw.value();
+      donkey::run_ir_passes(piped, pass_options);
+
+      // Statement lines: the lines of the body that hold a C statement. Headers, notes,
+      // labels and braces are not counted, so the measure does not depend on them.
+      const auto count_lines = [](const donkey::IrFunction& f) -> std::size_t {
+        auto text = donkey::format_pseudocode(f);
+        if (!text.has_value()) {
+          return 0;
+        }
+        std::size_t count = 0;
+        std::size_t start = 0;
+        const std::string& body = text.value();
+        while (start < body.size()) {
+          std::size_t end = body.find('\n', start);
+          if (end == std::string::npos) {
+            end = body.size();
+          }
+          const std::string_view line(body.data() + start, end - start);
+          const std::size_t first = line.find_first_not_of(' ');
+          if (first != std::string_view::npos && line.substr(first, 2) != "//" &&
+              line.find(';') != std::string_view::npos) {
+            ++count;
+          }
+          start = end + 1;
+        }
+        return count;
+      };
+      const std::size_t lines_before = count_lines(before);
+      const std::size_t lines_after = count_lines(piped);
+      if (lines_before == 0 || lines_after == 0) {
+        continue;  // the function does not render; the other tests report it
+      }
+      before_lines.push_back(lines_before);
+      after_lines.push_back(lines_after);
+    }
+    ASSERT_FALSE(before_lines.empty()) << library.level;
+    // The assertion is on the total over the corpus. A median over 59 functions moves only
+    // when half of them change, so it hid a drop of 54 lines at AArch64 O0.
+    std::size_t total_before = 0;
+    std::size_t total_after = 0;
+    for (const std::size_t lines : before_lines) {
+      total_before += lines;
+    }
+    for (const std::size_t lines : after_lines) {
+      total_after += lines;
+    }
+    std::printf(
+        "pseudocode statement lines, total over %zu functions at %s: before %zu, after %zu\n",
+        before_lines.size(), library.level, total_before, total_after);
+    EXPECT_LT(total_after, total_before) << library.level;
+  }
+}
+
 TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
 #if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
   GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
@@ -724,8 +885,10 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       for (const PassSnapshot& version : versions) {
         passes.push_back(version.pass);
       }
-      EXPECT_EQ(passes,
-                (std::vector<std::string>{"lift", "infer_signature", "recover_pointer_structs"}))
+      EXPECT_EQ(passes, (std::vector<std::string>{
+                            "lift", "infer_signature", "recover_pointer_structs",
+                            "propagate_copies", "remove_dead_temporaries",
+                            "remove_dead_register_writes", "remove_dead_temporaries"}))
           << library.level << " " << entry.name << ": the hook must see every pass, in order";
 
       auto production = donkey::lift_function(loaded.value().image, analysis.value(), *function);
@@ -821,6 +984,224 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
           .find("reported Partial"),
       std::string::npos)
       << "the checker accepted a pass that cleared the Partial flag";
+}
+
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
+// G01-T2: scalar floating-point functions from corpus_fp.c. They all have the
+// prototype double f(double, double, double, double), so the arguments arrive in
+// xmm0 to xmm3 and the result is in xmm0. The IR receives each argument in the XMM
+// register its parameter names; the native call uses the double prototype.
+constexpr const char* kFloatFunctions[] = {
+    "fp_add",
+    "fp_sub",
+    "fp_mul",
+    "fp_div",
+    "fp_poly",
+    "fp_hypot_sqrt",
+    "fp_lt",
+    "fp_eq_select",
+    "fp_ne_select",
+    "fp_max",
+    "fp_min",
+    "fp_truncate_int",
+    "fp_scale_by_int",
+    "fp_through_single",
+    "fp_single_add",
+    "fp_sum_array",
+    "fp_dot3",
+    "fp_branchy",
+    "fp_loop_reduce",
+    "fp_mean4",
+    "fp_lerp",
+    "fp_clamp01",
+    "fp_capped_root",
+    "fp_int_quotient",
+    "fp_compare_chain",
+    "fp_single_mix",
+};
+
+using NativeDouble = double (*)(double, double, double, double);
+
+std::uint64_t double_bits_of(double value) {
+  std::uint64_t bits = 0;
+  std::memcpy(&bits, &value, sizeof bits);
+  return bits;
+}
+
+double double_of_bits(std::uint64_t bits) {
+  double value = 0.0;
+  std::memcpy(&value, &bits, sizeof value);
+  return value;
+}
+
+// Both NaN is equal whatever the payload; otherwise the bits must match, so the sign of
+// a zero or the exact value of a rounded result is checked.
+bool same_double_result(std::uint64_t ir_bits, std::uint64_t native_bits) {
+  const double ir = double_of_bits(ir_bits);
+  const double native = double_of_bits(native_bits);
+  if (std::isnan(ir) || std::isnan(native)) {
+    return std::isnan(ir) && std::isnan(native);
+  }
+  return ir_bits == native_bits;
+}
+
+double next_double_input(Rng& rng) {
+  static const double kSpecial[] = {0.0,
+                                    -0.0,
+                                    1.0,
+                                    2.5,
+                                    0.5,
+                                    3.0,
+                                    1e300,
+                                    -1e-300,
+                                    4.9e-324,
+                                    std::numeric_limits<double>::infinity(),
+                                    -std::numeric_limits<double>::infinity(),
+                                    std::numeric_limits<double>::quiet_NaN()};
+  const std::uint64_t draw = rng.next();
+  if (draw % 3 == 0) {
+    return kSpecial[(draw >> 8U) % (sizeof kSpecial / sizeof kSpecial[0])];
+  }
+  // A value in [-64, 64) with a fraction, so comparisons and small integers both occur.
+  const double unit = static_cast<double>(rng.next() >> 11U) / 9007199254740992.0;
+  return unit * 128.0 - 64.0;
+}
+
+TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
+#if !defined(DONKEY_CORPUS_FP_O0_PATH)
+  GTEST_SKIP() << "the floating-point corpus was not built";
+#else
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_FP_O0_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  void* handle = open_library(DONKEY_CORPUS_FP_O0_PATH);
+  ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_CORPUS_FP_O0_PATH;
+
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+
+  int complete = 0;
+  int total = 0;
+  std::uint64_t seed = 0x5EEDF10ULL;
+  for (const char* name : kFloatFunctions) {
+    ++total;
+    ++seed;
+    const donkey::Function* function = nullptr;
+    for (const auto& f : analysis.value().functions) {
+      if (f.name == name || f.name == std::string("_") + name) {
+        function = &f;
+      }
+    }
+    void* symbol = find_symbol(handle, name);
+    ASSERT_NE(function, nullptr) << name << " not found by analysis";
+    ASSERT_NE(symbol, nullptr) << name << " not exported";
+    auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+    ASSERT_TRUE(lifted.has_value()) << name << ": " << lifted.diagnostic().code;
+    auto verified = donkey::verify_ir(lifted.value());
+    ASSERT_TRUE(verified.has_value()) << name << ": " << verified.diagnostic().message;
+    if (lifted.value().partial) {
+      std::printf("float corpus: %s is Partial\n", name);
+      for (const std::string& note : lifted.value().notes) {
+        std::printf("  note: %s\n", note.c_str());
+      }
+      continue;  // Partial is reported, not compared: only Complete results are claims.
+    }
+    ++complete;
+
+    const auto native = reinterpret_cast<NativeDouble>(symbol);
+    Rng rng(seed);
+    for (int vector = 0; vector < kVectorCount; ++vector) {
+      double args[4] = {};
+      for (double& arg : args) {
+        arg = next_double_input(rng);
+      }
+      // Each IR parameter reads one floating-point register (xmm0 to xmm3 on x86-64, or
+      // v0 to v3 on AArch64, named as d, s or v), so it takes that argument.
+      std::vector<std::uint64_t> ir_args;
+      for (const donkey::IrParameter& parameter : lifted.value().parameters) {
+        const std::string& reg = parameter.abi_register;
+        const bool xmm = reg.rfind("xmm", 0) == 0;
+        const bool scalar = reg.size() == 2 && (reg[0] == 'd' || reg[0] == 's' || reg[0] == 'v');
+        ASSERT_TRUE(xmm || scalar) << name << " reads " << reg;
+        const auto index = static_cast<std::size_t>(xmm ? reg[3] - '0' : reg[1] - '0');
+        ASSERT_LT(index, 4U);
+        ir_args.push_back(double_bits_of(args[index]));
+      }
+      // The image is mapped so that constants in .rodata (loaded with rip-relative
+      // moves) read as they do in the process.
+      donkey::IrEvalMemory memory(loaded.value().image, loaded.value().data);
+      auto ir = donkey::evaluate_ir(lifted.value(), ir_args, memory, eval_options);
+      ASSERT_TRUE(ir.has_value()) << name << ": " << ir.diagnostic().code;
+      const double got_native = native(args[0], args[1], args[2], args[3]);
+      EXPECT_TRUE(same_double_result(ir.value().return_value, double_bits_of(got_native)))
+          << name << " vector " << vector << ": IR " << double_of_bits(ir.value().return_value)
+          << ", native " << got_native;
+    }
+  }
+  std::printf("float corpus: %d of %d Complete\n", complete, total);
+  EXPECT_GE(total, 20);
+  // The scalar SSE forms are lifted Complete for at least 18 of the functions.
+  EXPECT_GE(complete, 18) << complete << " of " << total << " float functions are Complete";
+#endif
+}
+#else
+TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
+  GTEST_SKIP() << "the floating-point corpus runs on x86-64 and AArch64 hosts";
+}
+#endif
+
+// G04-T4: the parameters of a function in a -g binary take their names from the debug
+// information. The module fixture's donkey_module_answer(int value) is built at -O0 -g.
+TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_TEST_MODULE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& candidate : analysis.value().functions) {
+    if (candidate.name == "donkey_module_answer") {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  const donkey::DebugFunction* debug = info.value().function_at(function->address);
+  ASSERT_NE(debug, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+
+  donkey::IrFunction named = lifted.value();
+  auto before = donkey::format_pseudocode(named);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_NE(before.value().find("(u32 a0)"), std::string::npos) << before.value();
+
+  auto applied = donkey::apply_debug_parameter_names(named, *debug, info.value());
+  ASSERT_TRUE(applied.has_value())
+      << applied.diagnostic().code << ": " << applied.diagnostic().message;
+  auto text = donkey::format_pseudocode(named);
+  ASSERT_TRUE(text.has_value());
+  // The width spelling (u32) is the decompiler's; the name is the debug information's.
+  EXPECT_NE(text.value().find("donkey_module_answer(u32 value)"), std::string::npos)
+      << text.value();
+  EXPECT_EQ(text.value().find("a0"), std::string::npos) << text.value();
+
+  // A debug function that does not match the code (one parameter too many) is refused,
+  // and the function keeps its inferred names.
+  donkey::DebugFunction extra = *debug;
+  extra.parameters.push_back(donkey::DebugParameter{"extra", debug->parameters.front().type});
+  donkey::IrFunction unchanged = lifted.value();
+  auto refused = donkey::apply_debug_parameter_names(unchanged, extra, info.value());
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "ir.debug_names_arity");
+  auto kept = donkey::format_pseudocode(unchanged);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(kept.value(), before.value());
 }
 
 }  // namespace

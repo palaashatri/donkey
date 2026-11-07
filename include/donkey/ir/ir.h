@@ -52,6 +52,38 @@ enum class IrOp : std::uint8_t {
   CountLeadingZeros,   ///< dest = leading zero bits of a; a == 0 gives the operand width in bits
   PopCount,            ///< dest = number of set bits in a
   ByteSwap,            ///< dest = a with its bytes in reverse order (bswap)
+  // Conditional compare (AArch64 ccmp and ccmn). It sets the flags, which the
+  // interpreter then holds as an explicit NZCV value: if `condition` holds over
+  // the current flags, NZCV is the flags of a - b (CondCompare) or of a + b
+  // (CondCompareAdd); otherwise NZCV is the constant c, 0 to 15, in bits N Z C V.
+  // IrCondition::None means unconditionally: AArch64 cmn and adds.
+  CondCompare,     ///< flags = condition ? flags(a - b) : c
+  CondCompareAdd,  ///< flags = condition ? flags(a + b) : c
+  // Add with carry that sets the flags (AArch64 adcs, and sbcs with the lifter's
+  // NOT of b): dest = a + b + C, and NZCV is the flags of that addition, with C
+  // the carry out and V the signed overflow. The carry in is read from the flags
+  // before, as AddCarry reads it.
+  AddCarryFlags,
+  // Floating point. A float is 4 bytes (IEEE single) and a double 8 bytes. The
+  // width of the statement is the width of the floating-point values it reads or
+  // produces. The operands hold the bits of those values.
+  FAdd,           ///< dest = a + b
+  FSub,           ///< dest = a - b
+  FMul,           ///< dest = a * b
+  FDiv,           ///< dest = a / b
+  FSqrt,          ///< dest = sqrt(a)
+  FNeg,           ///< dest = -a: flips the sign bit, NaN included
+  FAbs,           ///< dest = |a|: clears the sign bit, NaN included
+  FCompare,       ///< flags = compare(a, b), set as ucomis* (x86) or fcmp (AArch64) set them
+  IntToFloat,     ///< dest (float) = a (signed integer of a's width), rounded to nearest
+  UIntToFloat,    ///< dest (float) = a (unsigned integer of a's width), rounded to nearest
+  FloatToInt,     ///< dest (integer) = a (float of a's width) truncated toward zero
+  FloatExtend,    ///< dest (double) = a (float), exact
+  FloatTruncate,  ///< dest (float) = a (double), rounded to nearest
+  // Fused multiply-add with one rounding (AArch64 fmadd and fmsub). FMulAdd is
+  // dest = a * b + c; FMulSub is dest = c - a * b. Both follow the AArch64 rules.
+  FMulAdd,
+  FMulSub,
 };
 
 const char* ir_op_name(IrOp op) noexcept;
@@ -76,6 +108,10 @@ enum class IrCondition : std::uint8_t {
   NoOverflow,
   Carry,
   NoCarry,
+  // x86 PF after ucomis*: set when the comparison was unordered. AArch64 has no
+  // parity flag, so these are never asked of AArch64 flags.
+  Parity,
+  NoParity,
 };
 
 const char* ir_condition_name(IrCondition condition) noexcept;
@@ -127,6 +163,11 @@ struct IrSwitchCase {
   std::uint32_t target_block = 0;
 };
 
+/// The architecture whose floating-point rules an operation follows where they
+/// differ: the NaN an invalid operation produces, the integer a conversion gives
+/// for a NaN or an out-of-range value, and the flags a comparison sets.
+enum class IrFloatModel : std::uint8_t { X86, AArch64 };
+
 struct IrStatement {
   IrOp op = IrOp::Nop;
   IrOperand dest;
@@ -135,7 +176,13 @@ struct IrStatement {
   /// Third operand: the divisor of the Div and Rem operations.
   IrOperand c;
   IrCondition condition = IrCondition::None;
+  /// Only for the floating-point operations.
+  IrFloatModel float_model = IrFloatModel::X86;
   std::uint8_t width = 0;
+  /// Only for the final OR of a merge into a register family: the width, in bytes, of
+  /// the value merged in (a sub-word write, or a single-precision result). Zero otherwise.
+  /// Return inference reads the width of the value a register holds from this field.
+  std::uint8_t merged_width = 0;
   /// Address of the machine instruction this statement came from (0 for
   /// synthesized statements).
   std::uint64_t source_address = 0;
@@ -158,6 +205,9 @@ struct IrParameter {
   std::uint8_t width = 8;
   /// ABI register the value arrives in (`rdi`, `x0`, …).
   std::string abi_register;
+  /// The value is floating-point (an XMM, s, d or v register): it is rendered as float or
+  /// double, not as an integer of the same width.
+  bool floating_point = false;
 };
 
 struct IrLocalVariable {
@@ -196,6 +246,8 @@ struct IrFunction {
   std::vector<IrParameter> parameters;
   /// Width of the returned value in bytes; 0 means no value is returned.
   std::uint8_t return_width = 0;
+  /// The returned value is floating-point (it is in xmm0, or in v0, d0 or s0).
+  bool return_floating_point = false;
   bool signature_inferred = false;
   /// Stack local variables and arguments recovered from stack frames.
   std::vector<IrLocalVariable> local_variables;
@@ -224,10 +276,12 @@ struct PassOptions {
 };
 
 /// Run the passes that follow lifting, in the fixed order lift_function uses:
-/// signature inference, then pointer-structure recovery. They annotate the
-/// function (parameters, return width, pointer_structs) and must not change
-/// what its statements compute. The decompiler corpus interprets the IR before
-/// and after every pass to check this (DecompilerCorpus.EveryPassPreservesSemantics).
+/// signature inference, then pointer-structure recovery, then copy propagation,
+/// dead temporary removal and removal of overwritten writes. The first two annotate
+/// the function (parameters, return width, pointer_structs); the statement passes
+/// make it smaller. None of them may change what the function computes. The decompiler corpus
+/// interprets the IR before and after every pass to check this
+/// (DecompilerCorpus.EveryPassPreservesSemantics).
 void run_ir_passes(IrFunction& function, const PassOptions& options);
 
 /// Check structural invariants: operand widths, block indices, def-use order

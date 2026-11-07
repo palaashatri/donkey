@@ -45,6 +45,7 @@ constexpr std::uint16_t kTagRvalueReferenceType = 0x42;
 
 constexpr std::uint16_t kAtLocation = 0x02;
 constexpr std::uint16_t kAtName = 0x03;
+constexpr std::uint16_t kAtFrameBase = 0x40;
 constexpr std::uint16_t kAtByteSize = 0x0b;
 constexpr std::uint16_t kAtStmtList = 0x10;
 constexpr std::uint16_t kAtLowPc = 0x11;
@@ -567,6 +568,19 @@ class Reader {
            form == kFormUdata || form == kFormSdata || form == kFormImplicitConst;
   }
 
+  /// DW_OP_fbreg with its signed offset, the whole location expression.
+  std::optional<std::int64_t> fbreg_offset(const Value& v) const {
+    if (v.block.empty()) {
+      return std::nullopt;
+    }
+    Cursor c(v.block, s_.big_endian);
+    if (c.u8() != 0x91) {  // DW_OP_fbreg
+      return std::nullopt;
+    }
+    const std::int64_t offset = c.sleb();
+    return c.ok() && c.at_end() ? std::optional<std::int64_t>(offset) : std::nullopt;
+  }
+
   /// DW_OP_addr / DW_OP_addrx at the start of a location expression.
   std::optional<std::uint64_t> static_location(const Value& v, const Unit& unit) const {
     if (v.block.empty()) {
@@ -708,6 +722,12 @@ class Reader {
     std::optional<std::int64_t> upper_bound;
     std::uint64_t member_offset = 0;
     std::optional<std::uint64_t> location;
+    /// DW_OP_fbreg: the offset from the frame base, for a variable kept in the frame.
+    std::optional<std::int64_t> frame_offset;
+    /// DW_AT_frame_base is DW_OP_call_frame_cfa (the subprogram's frame offsets are from the CFA).
+    bool frame_base_cfa = false;
+    /// DW_AT_frame_base is DW_OP_reg6 (rbp, as Clang emits at -O0): the offsets are from rbp.
+    bool frame_base_rbp = false;
     std::uint64_t specification = 0;
     std::uint64_t abstract_origin = 0;
     std::uint64_t decl_file = 0;
@@ -717,6 +737,28 @@ class Reader {
     bool declaration = false;
     bool has_ranges = false;  // DW_AT_ranges: code in range lists, not low_pc/high_pc
   };
+
+  /// Records a parameter or local of the subprogram at `parent` that the frame holds at a
+  /// DW_OP_fbreg offset, when that subprogram's frame base is the CFA.
+  void add_stack_slot(std::uint64_t parent, const Entry& e, bool is_parameter) {
+    if (!e.frame_offset.has_value() || cfa_subprograms_.count(parent) == 0) {
+      return;
+    }
+    const auto it = function_index_.find(parent);
+    if (it == function_index_.end()) {
+      return;
+    }
+    DebugStackSlot slot;
+    slot.name = e.name;
+    slot.type = e.type;
+    // rbp is the CFA minus 16 after the standard `push rbp; mov rbp, rsp` prologue, so an
+    // offset from rbp is 16 less than the same offset from the CFA. Only functions whose frame
+    // base is rbp are adjusted; a frame base of rbp is a claim about the prologue, not checked.
+    slot.cfa_offset = *e.frame_offset - (rbp_subprograms_.count(parent) != 0 ? 16 : 0);
+    slot.is_parameter = is_parameter;
+    slot.line = e.decl_line;
+    out_.functions[it->second].stack_slots.push_back(std::move(slot));
+  }
 
   bool read_unit(Cursor& info) {
     Unit unit;
@@ -932,6 +974,15 @@ class Reader {
         break;
       case kAtLocation:
         e.location = static_location(v, unit);
+        e.frame_offset = fbreg_offset(v);
+        break;
+      case kAtFrameBase:
+        if (v.block.size() == 1 &&
+            static_cast<std::uint8_t>(v.block[0]) == 0x9c) {  // DW_OP_call_frame_cfa
+          e.frame_base_cfa = true;
+        } else if (v.block.size() == 1 && static_cast<std::uint8_t>(v.block[0]) == 0x56) {
+          e.frame_base_rbp = true;  // DW_OP_reg6
+        }
         break;
       case kAtSpecification:
         if (v.is_ref) {
@@ -1029,6 +1080,12 @@ class Reader {
         f.line = e.decl_line;
         f.provenance = provenance(e, unit);
         function_index_[e.offset] = out_.functions.size();
+        if (e.frame_base_rbp) {
+          rbp_subprograms_.insert(e.offset);
+        }
+        if (e.frame_base_cfa || e.frame_base_rbp) {
+          cfa_subprograms_.insert(e.offset);
+        }
         out_.functions.push_back(std::move(f));
         return;
       }
@@ -1038,6 +1095,7 @@ class Reader {
             out_.functions[it->second].parameters.push_back(DebugParameter{e.name, e.type});
             pending_parameters_.emplace_back(
                 it->second, out_.functions[it->second].parameters.size() - 1, e.offset);
+            add_stack_slot(parent, e, /*is_parameter=*/true);
           }
         } else if (parent_tag == kTagSubroutineType) {
           if (auto it = out_.types.find(parent); it != out_.types.end()) {
@@ -1063,6 +1121,8 @@ class Reader {
           var.provenance = provenance(e, unit);
           variable_links_.emplace_back(out_.variables.size(), e.specification);
           out_.variables.push_back(std::move(var));
+        } else if (!e.declaration && parent_tag == kTagSubprogram) {
+          add_stack_slot(parent, e, /*is_parameter=*/false);
         }
         return;
       case kTagMember:
@@ -1251,6 +1311,9 @@ class Reader {
   std::map<std::uint64_t, std::uint64_t> die_types_;
   std::map<std::uint64_t, std::pair<std::string, std::uint32_t>> sources_;
   std::unordered_map<std::uint64_t, std::size_t> function_index_;
+  /// Subprograms whose frame base is DW_OP_call_frame_cfa, by DIE offset.
+  std::set<std::uint64_t> cfa_subprograms_;
+  std::set<std::uint64_t> rbp_subprograms_;  // the subset whose frame base is rbp
   std::vector<std::tuple<std::size_t, std::size_t, std::uint64_t>> pending_parameters_;
   std::vector<std::pair<std::size_t, std::uint64_t>> variable_links_;
 };

@@ -50,6 +50,11 @@ if(NOT MSVC)
   target_compile_options(donkey_test_hierarchy_nopie PRIVATE -O0 -g0 -fno-pie)
   target_link_options(donkey_test_hierarchy_nopie PRIVATE -no-pie)
 endif()
+if(NOT MSVC)
+  # Stack parameters and locals for the frame-slot debug names (G04-T4). The attributes are GCC/Clang.
+  add_library(donkey_test_locals SHARED fixtures/debuggee/locals.c)
+  target_compile_options(donkey_test_locals PRIVATE -O0 -g -fno-omit-frame-pointer -fcf-protection=none)
+endif()
 if(MSVC)
   target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
   target_compile_options(donkey_test_module PRIVATE /Od /Oy-)
@@ -81,6 +86,32 @@ if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
   add_library(donkey_corpus_O3_v2 SHARED corpus/corpus.c)
   target_compile_options(donkey_corpus_O3_v2 PRIVATE -O3 -march=x86-64-v2 -fno-stack-protector)
   list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_O3_v2)
+endif()
+
+# A dense switch that compilers lower to a code jump table (G03-T3). Kept out
+# of corpus.c so that the corpus function counts do not change.
+add_library(donkey_jump_table_O2 SHARED corpus/jump_table.c)
+if(NOT MSVC)
+  target_compile_options(donkey_jump_table_O2 PRIVATE -O2 -fno-stack-protector)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  # GCC can move the default path into a .cold part that is laid out below the
+  # entry. The lifter keeps blocks in address order (a conditional branch falls
+  # through to the next block), so such a function is rejected by the verifier.
+  # That limitation is recorded in the support matrix; this fixture keeps the
+  # switch in one part so that it measures the jump table.
+  target_compile_options(donkey_jump_table_O2 PRIVATE -fno-reorder-blocks-and-partition)
+endif()
+list(APPEND DONKEY_CORPUS_LIBRARIES donkey_jump_table_O2)
+
+# Scalar floating-point code (G01-T2 and G01-T3) on x86-64 and AArch64: each host
+# builds its own machine code from the same source. Math errno is off so that sqrt
+# is one instruction and no libm call remains.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+  add_library(donkey_corpus_fp_O0 SHARED corpus/corpus_fp.c)
+  target_compile_options(donkey_corpus_fp_O0 PRIVATE -O0 -fno-stack-protector -fno-math-errno
+                         -ffp-contract=off)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_fp_O0)
 endif()
 
 add_executable(donkey_unit_tests
@@ -118,11 +149,14 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_PATH="$<TARGET_FILE:donkey_test_hierarchy>">
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_NOPIE_PATH="$<TARGET_FILE:donkey_test_hierarchy_nopie>">
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_LOCALS_PATH="$<TARGET_FILE:donkey_test_locals>">
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_RANGES_FIXTURE_PATH="$<TARGET_FILE:donkey_ranges_fixture>">
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
   $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
+  DONKEY_JUMP_TABLE_O2_PATH="$<TARGET_FILE:donkey_jump_table_O2>"
+  $<$<TARGET_EXISTS:donkey_corpus_fp_O0>:DONKEY_CORPUS_FP_O0_PATH="$<TARGET_FILE:donkey_corpus_fp_O0>">
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
@@ -131,6 +165,7 @@ if(NOT MSVC)
 endif()
 if(NOT MSVC)
   add_dependencies(donkey_unit_tests donkey_test_hierarchy donkey_test_hierarchy_nopie)
+  add_dependencies(donkey_unit_tests donkey_test_locals)
 endif()
 add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)

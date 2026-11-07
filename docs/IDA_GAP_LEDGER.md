@@ -151,10 +151,10 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap`, `movbe` (register forms) and `bsf`/`bsr` (Partial for a zero source) in G02-T3, and flags into a single-predecessor fall-through block in G02-T4. Still Partial or Unsupported by design: `bsf`/`bsr` with a zero source, memory forms of `bt` family, flags into a block with several predecessors | P0 | IN PROGRESS (G02-T1, T2, T3, T4 DONE; the rest is by design, see the row text) |
-| G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
+| G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form not done; break, continue and integer negation done; T4 PARTIAL, register parameters named, DWARF stack slots read with CFA offsets, decompiler does not name them yet) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -237,6 +237,36 @@ interpreter.
   - Never use `float` arithmetic on the host for double operations.
   - Never compare NaN with `==`.
   - Do not enable `-ffast-math` anywhere.
+- **Status:** DONE for the IR (G01-T1), on x86-64 natively and AArch64 under
+  qemu-aarch64. No lifter emits these operations yet, so FP functions stay
+  Partial until G01-T2 and G01-T3. Added: `FAdd`, `FSub`, `FMul`, `FDiv`,
+  `FSqrt`, `FNeg`, `FAbs`, `FCompare`, `IntToFloat`, `UIntToFloat`,
+  `FloatToInt` (truncates), `FloatExtend` and `FloatTruncate`, with the width
+  of the statement as the float width (4 or 8). `IrFloatModel` on the statement
+  picks the architecture's rules: the default NaN of an invalid operation
+  (x86 negative `0xfff8…`, AArch64 positive `0x7ff8…`), the integer a
+  conversion gives for a NaN or an out-of-range value (x86 the minimum, AArch64
+  0 and saturation), and the flags a comparison sets (x86 ZF/PF/CF with
+  unordered setting all three; AArch64 NZCV with unordered 0011). NaN operands
+  are returned quieted, the first one when both are NaN. The expected bits come
+  from running the same operations natively (x86-64 SSE) and under qemu-aarch64,
+  not from host arithmetic on the test side; the two models differ exactly where
+  the two hosts do.
+  Deviations from the plan, all deliberate: (1) the IR stays untyped. A
+  float statement carries its width and the model, and the verifier checks
+  widths, so an integer operand of another width is rejected, but an 8-byte
+  integer fed to a double operation is not detected. Typed operands are a later
+  change if the decompiler needs them. (2) The x86 `jp`/`jnp` conditions were
+  added as `Parity`/`NoParity`, and the integer compare reports PF from the
+  low byte of its result, as x86 does; AArch64 never asks for parity. (3) Only
+  double-precision compares were checked against native execution; the single
+  compare uses the same code but is not measured. (4) `fuzz_ir` was not built
+  or run here.
+  Evidence: `Ir.FloatArithmeticMatchesIeee` (26 double and single cases, both
+  models), `Ir.FloatToIntIndefiniteOnX86AndSaturatesOnAArch64`,
+  `Ir.FCompareUnorderedSetsFlags`, `Ir.VerifierRejectsMixedIntFloatOperands`,
+  `Ir.FloatConstantsPrintAsExactHexadecimalFloats`. Flipping the default-NaN
+  model fails `Ir.FloatArithmeticMatchesIeee`, so it is checked.
 
 **G01-T2 x86 SSE scalar lifting** [oracle] (depends: G01-T1)
 
@@ -281,6 +311,13 @@ interpreter.
   - `cvtsi2sd` with a 32-bit source sign-extends.
   - Flags after `ucomisd`: ZF=PF=CF=1 when unordered, which is why compilers
     emit `jp` checks. Map `jp`/`jnp`.
+- **Status:** DONE for x86-64 scalar SSE. GCC 13.3 at -O0: 23 of 26 Complete,
+  none wrong; Clang 18.1 at -O0: 23 of 26 Complete, none wrong. The Partial
+  functions are a `movapd` register copy (GCC) and a packed compare plus a
+  memory-operand compare whose `jp` is in the next block (Clang). The counts
+  are in `docs/SUPPORT_MATRIX.md`. Moves, arithmetic, conversions, comparisons and
+  zeroing idioms are lifted; packed and other SSE forms stay Partial. Argument and
+  return registers now follow the XMM registers that the function reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 
@@ -312,6 +349,14 @@ interpreter.
   - `fmadd` rounds once; `a*b+c` in two IR ops rounds twice and is WRONG.
   - Apple's ABI passes variadic FP arguments differently. The corpus has no
     variadic functions; keep it that way.
+- **Status:** IN PROGRESS. The scalar forms are lifted and checked under qemu-aarch64
+  with GCC 13.3 at -O0: 26 of 26 Complete, none wrong, on 48 vectors each. The IR op
+  is `FMulAdd`, with `FMulSub` for `fmsub`; the NaN and invalid-product rules were
+  checked against qemu. Not lifted: `fcvtzu` (no unsigned float-to-integer IR op),
+  `fnmadd` and `fnmsub`, and vector forms. Not done, and required by "done when": the
+  Apple Clang measurement, and the corpus on the `ubuntu-24.04-arm` and `macos-15`
+  runners. Until those exist this stays IN PROGRESS. The counts are in
+  `docs/SUPPORT_MATRIX.md`.
 
 ### G02 x86 integer gaps [oracle]
 
@@ -481,6 +526,19 @@ interpreter.
      `lift_conditional_select` code first.
 - **Done when:** `c_both` and `c_collatz_steps` are Complete and verified at
   -O2 on GCC aarch64 and Apple Clang. Locally, use qemu (section 7).
+- **Status:** DONE on GCC 13.3 under qemu-aarch64. Added the IR ops
+  `CondCompare` (ccmp) and `CondCompareAdd` (ccmn). The interpreter holds an
+  explicit NZCV value after them, and conditions read that value with AArch64
+  meanings. A compare or test clears it. `ccmp`/`ccmn` are lifted only when the
+  flags before are exact. Otherwise they are Unsupported, so the function is
+  Partial. Evidence: `Ir.AArch64ConditionalCompareUsesTheCompareOnlyWhenItsConditionHolds`,
+  `Ir.AArch64ConditionalCompareSetsTheImmediateNzcvWhenItsConditionFails`,
+  `Ir.AArch64ConditionalCompareNegatedSetsTheFlagsOfTheSum`,
+  `Ir.AArch64ConditionalCompareWithoutExactFlagsIsPartial`,
+  `Ir.VerifierRejectsAConditionalCompareWithAnOutOfRangeNzcv`. Corpus under
+  qemu-aarch64, 59 functions: `c_both` and `c_collatz_steps` are Complete and
+  verified at O0, O2 and O3, and no result is WRONG. Not done: Apple Clang was
+  not run locally (CI's macOS corpus job covers it).
 
 **G03-T2 Division, high multiply, bit manipulation**
 
@@ -498,6 +556,23 @@ interpreter.
   overflow, so AArch64 `udiv`/`sdiv` must guard the zero case in the IR (a
   compare and a conditional select to zero) to match AArch64's result. Do not
   lower them to the faulting op unguarded.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Done: `udiv` and `sdiv` with the AArch64 results for
+  zero divisors and `INT_MIN / -1`, `umulh` and `smulh`, `clz`, `cls`, `rbit`,
+  `rev`, `rev16`, `rev32`, `extr`, `bfi` and `bfxil`. The guard is arithmetic,
+  not a compare: a compare would write the NZCV state that later instructions in
+  the block read. Evidence: `Ir.AArch64DivisionMatchesTheArchitectureAtTheEdges`,
+  `Ir.AArch64HighMultiplyIsTheUpperHalf`,
+  `Ir.AArch64CountAndReverseInstructionsMatchTheArchitecture`,
+  `Ir.AArch64ExtractAndBitfieldInsertMatchTheArchitecture`. The corpus under
+  qemu-aarch64 (GCC 13.3): `c_udiv32`, `c_urem32`, `c_udiv64`, `c_urem64`,
+  `c_div10`, `c_mulhi_u64` and `c_mulhi_s64` are Complete and verified at O0,
+  O2 and O3. Since G03-T4 added `cmn`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and
+  `c_srem64` are Complete and verified too, on both compilers. The widening
+  multiplies are done as well: `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`,
+  `smsubl`, `umnegl` and `smnegl`, each 32-bit source extended to 64 bits before
+  the multiply. Evidence: `Ir.AArch64WideningMultiplyUsesTheLow32BitsOfEachSource`.
+  On Clang 18.1, `c_sum_to` (which uses `umull`) is Complete at O2 and O3 now.
+  The corpus has no WRONG result on any tree.
 
 **G03-T3 AArch64 jump tables**
 
@@ -518,6 +593,27 @@ interpreter.
   AArch64 instead of skipping.
 - **Done when:** that test passes on `ubuntu-24.04-arm` and `macos-15`, and
   `c_switch_dense` is Complete and verified.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Not yet run
+  on `ubuntu-24.04-arm` or `macos-15` (CI is the check for those two). GCC and
+  Clang do not give `c_switch_dense` a code jump table on AArch64 (at -O0 it is
+  a compare chain, at -O2 a lookup of constants), so the recovery test uses the
+  fixture `tests/corpus/jump_table.c` (`jt_dispatch16`). `c_switch_dense` is
+  Complete and verified at O0, O2 and O3. Recognised: GCC's form (`b.ls` into
+  the table, byte offsets with `add ... sxtb #2`) and Clang's form (`b.hi`
+  falling into the table, `uxtb ... lsl #2`); any other shape stays unresolved.
+  The switch reads a copy of the compared register taken after the compare,
+  since GCC's table code overwrites `x0`. The CFG keeps the last two path
+  entries for a block entered through a conditional's taken edge, so the
+  compare is in view. In the x86 slice, an unrelated computation with an
+  unknown input now leaves its destination unknown instead of failing; only a
+  jump that needs that value fails. Evidence: `Cfg.AArch64GccShapedJumpTableIsRecovered`,
+  `Cfg.AArch64ClangShapedJumpTableIsRecovered`,
+  `Cfg.AArch64TableOnTheOutOfRangeSideIsNotRecovered`,
+  `Cfg.AArch64TableEntryOutsideTheCodeIsNotRecovered`,
+  `DecompilerCorpus.JumpTableIsRecoveredWithEvidence`,
+  `DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode`. The corpus
+  counts did not change on any tree. Not done: a function whose cold block lies
+  below its entry is rejected by the verifier (see `docs/SUPPORT_MATRIX.md`).
 
 **G03-T4 AArch64 carry chain** (depends: G02-T1; added when G02-T1 landed)
 
@@ -529,6 +625,43 @@ interpreter.
 - **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
   and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
   counts in `docs/SUPPORT_MATRIX.md`.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64 (see the
+  follow-up below for `adcs`/`sbcs`). Lifted: `adds` (flags of
+  a + b, with an unconditional `CondCompareAdd`), `cmn` (the same, into the zero
+  register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
+  the flags before). The unconditional form is `IrCondition::None` in
+  `CondCompare`/`CondCompareAdd`. Lifting `adc`/`sbc` needs exact flags, and a
+  second carry reader in a block is Partial, since the carry out is not modelled.
+  Also fixed in this task: an unsupported
+  statement now clears the exact-flags state, so a later `adc` cannot read a
+  carry through it. Evidence: `Ir.AArch64CarryChainAddsThenAdcUsesTheSumsCarry`,
+  `Ir.AArch64SubtractWithBorrowUsesTheCompareBorrow`,
+  `Ir.AArch64CmnAgainstMinusOneSetsTheZeroFlag`,
+  `Ir.AArch64AddsSetsTheZeroFlagOfTheSum`,
+  `Ir.AArch64CarryWithoutAFlagWriterIsPartial`,
+  `Ir.AArch64SecondCarryReaderIsPartial`, `Ir.AArch64AddsWithCarryIsPartial`.
+  Corpus under qemu-aarch64, 59 functions: `c_add128_hi`, `c_sub128_hi`,
+  `c_add_wraps`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and `c_srem64` are Complete
+  and verified at O0, O2 and O3, and no result is WRONG. Not done: SIMD
+  (`movi`, `dup`, `fmov`, `ldr d`) and `c_switch_sparse` remain Partial.
+- **Follow-up (adcs, sbcs, cross-block flags):** `adcs` and `sbcs` are lifted
+  with the IR op `AddCarryFlags`: dest = a + b + C, and NZCV is the flags of the
+  addition (C the carry out, V the signed overflow). `sbcs` is the same op on
+  NOT(b), as the architecture defines it. The flags after them are exact, so a
+  second carry reader can follow. The expected values in
+  `Ir.AArch64AdcsAndSbcsSetNzcvLikeTheAddition` are ground truth from running
+  the instructions under qemu-aarch64; the earlier test that asserted adcs is
+  Unsupported was replaced, because the limitation it recorded is what this
+  removes. Also: a `cmp` or `tst` whose flags are still current at the end of a
+  block that falls through into a block with one predecessor is repeated at the
+  start of that block (`Ir.AArch64FlagsFromSinglePredecessorAreExact`; the
+  negative cases are `Ir.AArch64FlagsRewrittenAfterTheCompareStayPartial` and
+  `Ir.AArch64FlagsFromAddsDoNotCarryAcrossBlocks`). This is what makes
+  `c_switch_sparse` Complete and verified on GCC at O0, O2 and O3. Corpus under
+  qemu-aarch64, 59 functions: GCC O0 58/59, O2 58/59 (was 57), O3 52/59 (was
+  51); Clang O0 56/59, O2 53/59, O3 53/59 (unchanged). No result is WRONG on any
+  tree. All 30 `Ir.AArch64*` tests pass natively, and the AArch64 corpus, IR
+  and CFG tests (125) pass under qemu on both cross trees.
 
 ### G04 Decompiler readability
 
@@ -571,6 +704,20 @@ for Partial functions.
 - **Done when:** the note "register aliases are not canonicalised" is removed
   from both lifters, and G04-T0 passes.
 
+- **Status:** DONE. Every register operand is its family, so `eax`, `ax`, `al`,
+  `rax`, and `w8`/`x8` are one variable. A 4-byte write zero-extends (the rule the
+  interpreter already applied, so it stays a width of 4 on the family). A 1- or
+  2-byte write, and a write to `ah`, is an explicit merge with the other bytes of the
+  family, and a read of `ah` is a shift. A conditional write keeps the old value
+  when its condition fails, and a 32-bit `cmov` zero-extends either way, as the
+  hardware does. The note "register aliases are not canonicalised" is gone from both
+  lifters. Evidence: `Ir.X86NarrowWritesMergeIntoTheFamily`,
+  `Ir.X86DoubleWordWritesZeroExtend`,
+  `Ir.X86ConditionalMoveOfADoubleWordZeroExtendsEvenWhenItFails` (the last checked on
+  hardware), and the corpus outcome report is identical to the one before the change.
+  `DecompilerCorpus.EveryPassPreservesSemantics` passes. The pseudocode now shows
+  narrow reads of a family with their width, as in `(u8)rax`.
+
 **G04-T2 SSA, copy and constant propagation, dead code elimination**
 
 - **Steps:**
@@ -582,6 +729,22 @@ for Partial functions.
   4. Leave SSA by merging non-interfering variables.
 - **Done when:** G04-T0 passes, and the median pseudocode line count across
   the corpus drops. Record before/after in the PR.
+- **Status:** DONE with deviations. Implemented: copy propagation of register
+  copies and constants within a block (`propagate_copies`), removal of temporaries
+  nothing reads (`remove_dead_temporaries`), and removal of pure register writes whose
+  value no later statement reads, with liveness over the blocks
+  (`remove_dead_register_writes`). Calls, loads, stores, unsupported statements, and the
+  registers that a return or the caller relies on (stack, frame, callee-saved, and
+  return registers) are never removed. Not done, from the steps above: SSA (steps 1
+  and 4) and memory forwarding across stores (step 2). The "done when" measure is the
+  total of the pseudocode statement lines over the corpus, not the median: the median
+  over 59 functions did not move at every level (AArch64 O2 and O3 stayed at 6), so the
+  test asserts on the total. Totals, before to after: x86-64 O0
+  1111 to 1026, O2 517 to 474, O3 707 to 664, O3-x86-64-v2 702 to 658; AArch64 (GCC)
+  O0 1112 to 1058, O2 520 to 516, O3 737 to 733. Evidence:
+  `DecompilerCorpus.EveryPassPreservesSemantics` (every pass checked on the corpus
+  vectors), `DecompilerCorpus.StatementPassesShortenThePseudocode`, native ctest, and
+  the AArch64 corpus under qemu-aarch64.
 
 **G04-T3 Loop and condition recovery**
 
@@ -592,6 +755,27 @@ for Partial functions.
   3. Simplify `!(a < b)` → `a >= b`, integer-only. Floating-point negation is
      not an inverse because of NaN; never do it for floats.
 - **Done when:** G04-T0 passes and the corpus loop functions print a `for`.
+- **Status:** PARTIAL. Done: a loop whose body is a single block that repeats
+  itself (the header ends in the test that repeats it) is recognised, and a branch to
+  the next block is a fall-through, so a function with an early return now prints
+  `if (...) { return ...; } else { ... do { ... } while (...); ... }` instead of labelled
+  blocks. The `c_sum_array` corpus function (x86-64 O2) is the example. Not done: the
+  `for` form. A bottom-tested loop is printed as `do { } while`, which is exact. Turning
+  it into `for (init; cond; step)` would move the step in front of the test, and that is
+  only equal when the loop is entered with the test true, which needs a proof from the
+  entry guard.
+  Step 2 is done for `break`. A branch from a loop body to the loop's exit prints
+  `break;`, and the body's exit is the one the loop's own test leaves to, with the blocks
+  the header dominates below it included (so a `break` block that no path back to the
+  header passes through still belongs to the loop). Before this, such a branch printed
+  nothing and the loop repeated, which is wrong. A `break` inside a switch is not printed:
+  the function falls back to labels. `continue` was already emitted for branches to the
+  header. Evidence: `Ir.BranchToTheLoopExitInsideTheBodyIsBreak` (fails without the change),
+  `Ir.LeavingTheLoopFromInsideASwitchIsNotStructured` (the switch guard; disabling it makes
+  the test fail), and the full native suite (409 of 409).
+  Step 3 for integers was already done: the complement table prints `!(a < b)` as
+  `a >= b`, and floating-point compares do not take that path. Evidence:
+  `Ir.NegatedIntegerComparisonIsWrittenAsItsComplement`.
 
 **G04-T4 Names and locals from DWARF**
 
@@ -600,6 +784,25 @@ for Partial functions.
   `src/binary/dwarf.cpp` and `include/donkey/binary/debug_info.h`. Names are
   display-only; user renames (G12) always win.
 - **Done when:** a test on the `-g` debuggee shows the real parameter names.
+- **Status:** PARTIAL. Done: a function's parameters that arrive in registers take the
+  names of the debug information's parameters, in order. `apply_debug_parameter_names`
+  (`include/donkey/ir/debug_names.h`, `src/ir/debug_names.cpp`) applies them only when the
+  counts match, every debug parameter is a scalar of the size and class of the register the
+  function reads, and the names are distinct C identifiers; a structure or array passed by
+  value is refused, because it cannot be matched by position. It renames the parameters and
+  the pointer structures that refer to them, and it changes no type or statement. Evidence:
+  `DecompilerCorpus.ParameterNamesComeFromTheDebugInformation`, which shows `u32 value` for
+  `donkey_module_answer` in the `-g -O0` module fixture, and a refusal case. Not done: naming
+  the frame slots. At `-O0` the argument is stored to a frame slot (`*(u32 *)(rsp - 0x4) = rdi`), and
+  the slot keeps its address form. The reader records `DW_OP_fbreg` locations of the direct
+  children of a subprogram whose frame base is `DW_OP_call_frame_cfa`, as
+  `DebugFunction::stack_slots` (`DebugStackSlot`: name, type, CFA offset, parameter flag,
+  line). Evidence: `DebugInfo.StackSlotsGiveCfaOffsetsOfParametersAndLocals` on
+  `tests/fixtures/debuggee/locals.c` (`donkey_locals_sum`: -36, -40, -24, -20). Not done:
+  the decompiler does not yet map a CFA offset to the `rbp - n` address the frame uses, so
+  the frame-local names are not shown, and nested lexical blocks are not read. The
+  decompiler also spells integer types by width (`u32`), not by their C names; the name is
+  the debug information's and the type spelling is the decompiler's.
 
 ### G05 Type system and user types
 
