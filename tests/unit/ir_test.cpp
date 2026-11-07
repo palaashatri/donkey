@@ -2919,15 +2919,17 @@ TEST(Ir, SingleFloatReturnIsFourBytesWide) {
   const auto function = lift_x86_64_code(
       {std::byte{0xf3}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
   EXPECT_EQ(function.return_width, 4U);
-  EXPECT_FALSE(function.partial);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(function.partial);
 }
 
-TEST(Ir, DoubleReturnWithNoIntegerWriteIsComplete) {
+TEST(Ir, DoubleReturnWithNoIntegerWriteKeepsItsReturnChannel) {
   // addsd xmm0, xmm1; ret
   const auto function = lift_x86_64_code(
       {std::byte{0xf2}, std::byte{0x0f}, std::byte{0x58}, std::byte{0xc1}, std::byte{0xc3}});
   EXPECT_EQ(function.return_width, 8U);
-  EXPECT_FALSE(function.partial);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(function.partial);
 }
 
 TEST(Ir, IntegerWriteAfterAFloatResultIsAmbiguous) {
@@ -3462,12 +3464,14 @@ double bits_as_double(std::uint64_t bits) {
 TEST(Ir, X86ScalarDoubleArithmeticLiftsExactly) {
   donkey::IrFunction add;  // addsd xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x58, 0xc1, 0xc3}, add));
-  EXPECT_FALSE(add.partial);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(add.partial);
   EXPECT_EQ(bits_as_double(run_x86_64(add, {double_bits(1.5), double_bits(2.25)})), 3.75);
 
   donkey::IrFunction divide;  // divsd xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0x5e, 0xc1, 0xc3}, divide));
-  EXPECT_FALSE(divide.partial);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(divide.partial);
   EXPECT_EQ(bits_as_double(run_x86_64(divide, {double_bits(1.0), double_bits(4.0)})), 0.25);
   // Division by zero gives infinity under IEEE, and no fault.
   EXPECT_EQ(bits_as_double(run_x86_64(divide, {double_bits(1.0), double_bits(0.0)})),
@@ -3482,7 +3486,8 @@ TEST(Ir, X86ScalarSingleMergesIntoTheLowLane) {
   // addss xmm0, xmm1; ret: the sum is a single, and xmm0 bits 32 to 63 are kept.
   donkey::IrFunction add;
   ASSERT_TRUE(lift_raw_x86_64({0xf3, 0x0f, 0x58, 0xc1, 0xc3}, add));
-  EXPECT_FALSE(add.partial);
+  // Rounding-dependent results are Partial: the MXCSR mode is not modelled.
+  EXPECT_TRUE(add.partial);
   const std::uint64_t kept = 0x1234567800000000ULL;
   const std::uint64_t one_and_a_half = 0x3fc00000ULL;     // 1.5f
   const std::uint64_t two_and_a_quarter = 0x40100000ULL;  // 2.25f
@@ -3672,6 +3677,16 @@ TEST(Ir, DeadRegisterWriteIsRemoved) {
   // The return reads rsi directly, so the copy into rax is gone too.
   EXPECT_NE(text.value().find("return rsi;"), std::string::npos) << text.value();
   EXPECT_EQ(run_x86_64(f, {5, 7}), 7U);
+}
+
+// Windows x64 and x86-32 keep rsi and rdi across calls, so the epilogue's restore of rsi is not
+// a dead write even though nothing in the function reads it afterwards.
+TEST(Ir, CalleeSavedRsiWriteIsKeptAtReturn) {
+  donkey::IrFunction f;  // mov rsi, rdx; mov eax, 1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xd6, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rsi"), std::string::npos) << text.value();
 }
 
 }  // namespace
