@@ -1006,6 +1006,28 @@ void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const s
   after_annotation_change(kind);
 }
 
+void Session::undefine(std::uint64_t address) {
+  const auto current = annotations();
+  if (current != nullptr && current->data_range_at(address) != nullptr) {
+    set_annotation(AnnotationKind::DataRange, address, "");
+    return;
+  }
+  if (current != nullptr && current->code_start_at(address) != nullptr) {
+    set_annotation(AnnotationKind::CodeStart, address, "");
+    return;
+  }
+  std::uint64_t length = 1;
+  if (const auto analyzed = document()) {
+    for (const Instruction& instruction : analyzed->analysis.instructions) {
+      if (instruction.address == address) {
+        length = std::max<std::uint64_t>(1, instruction.length);
+        break;
+      }
+    }
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_data_range_text(0, length));
+}
+
 void Session::set_function_edit(std::uint64_t address, const std::string& action) {
   set_annotation(AnnotationKind::FunctionStart, address, action);
 }

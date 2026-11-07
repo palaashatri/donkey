@@ -959,3 +959,29 @@ TEST(Session, CodeStartSeedsAFunctionAndInvalidTextIsIgnored) {
   ASSERT_TRUE(wait_idle(session));
   EXPECT_FALSE(has_function(session, 0x40010c));
 }
+
+// G12-T1 (U): undefining an instruction declares its bytes undefined, so analysis drops it, and
+// a second undefine clears the declaration. The range covers the whole instruction.
+TEST(Session, UndefineDeclaresInstructionBytesUndefinedAndClearsThem) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_TRUE(session_has_instruction(session, 0x40010b));  // ret, one byte
+  ASSERT_TRUE(session_has_instruction(session, 0x400104));  // call, five bytes
+
+  session.undefine(0x40010b);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x40010b)), "0:1");
+  EXPECT_FALSE(session_has_instruction(session, 0x40010b));
+
+  session.undefine(0x400104);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x400104)), "0:5");
+  EXPECT_FALSE(session_has_instruction(session, 0x400104));
+  EXPECT_TRUE(session_has_instruction(session, 0x400109)) << "the range ends where the call does";
+
+  session.undefine(0x40010b);  // clears the one-byte range
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x40010b), nullptr);
+  EXPECT_TRUE(session_has_instruction(session, 0x40010b));
+}

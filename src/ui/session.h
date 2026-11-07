@@ -156,6 +156,10 @@ class Session {
   /// Define a function starting at `address`, remove the discovered one, or
   /// (with an empty action) drop the edit. Re-runs analysis on the worker.
   void set_function_edit(std::uint64_t address, const std::string& action);
+  /// The `U` key (G12-T1): clears a user data range or code start at `address` if there is one;
+  /// otherwise declares the bytes of the instruction there undefined, so analysis will not decode
+  /// them. One call is one undo step.
+  void undefine(std::uint64_t address);
 
   /// True when a function-boundary edit is waiting for the worker to be free.
   [[nodiscard]] bool reanalysis_pending() const;

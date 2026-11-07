@@ -512,7 +512,7 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     return true;
   }
   if (c.name == "assert_annotation") {
-    // assert_annotation rename|comment <address-or-name> <text...>|-
+    // assert_annotation rename|comment|code|data <address-or-name> <text...>|-  ("-" means absent)
     const std::string kind = arg(0);
     const std::uint64_t address = workspace.resolve_location(arg(1));
     const std::size_t text_at = c.rest.find(arg(1)) + arg(1).size() + 1;
@@ -523,6 +523,10 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
       got = annotations->rename_at(address);
     } else if (annotations && kind == "comment") {
       got = annotations->comment_at(address);
+    } else if (annotations && kind == "code") {
+      got = annotations->code_start_at(address);
+    } else if (annotations && kind == "data") {
+      got = annotations->data_range_at(address);
     }
     if (want == "-" ? got != nullptr : (got == nullptr || *got != want)) {
       fail(c, "annotation is '" + (got != nullptr ? *got : std::string("<none>")) + "', wanted '" +
