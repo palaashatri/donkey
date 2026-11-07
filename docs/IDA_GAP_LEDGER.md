@@ -153,7 +153,7 @@ P0 is the most important, P3 the least.
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
-| G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, and jump tables (GCC and Clang forms) in G03-T3. Still open in G03-T2: `umull`/`smull`/`umaddl` | P0 | IN PROGRESS (G03-T1, T3, T4 DONE; T2 open for `umull`/`smull`/`umaddl`) |
+| G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. Still open in G03-T4: `adcs`/`sbcs` | P0 | IN PROGRESS (G03-T1, T2, T3 DONE; T4 PARTIAL, `adcs`/`sbcs` open) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
@@ -490,7 +490,7 @@ interpreter.
   overflow, so AArch64 `udiv`/`sdiv` must guard the zero case in the IR (a
   compare and a conditional select to zero) to match AArch64's result. Do not
   lower them to the faulting op unguarded.
-- **Status:** IN PROGRESS. Done: `udiv` and `sdiv` with the AArch64 results for
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Done: `udiv` and `sdiv` with the AArch64 results for
   zero divisors and `INT_MIN / -1`, `umulh` and `smulh`, `clz`, `cls`, `rbit`,
   `rev`, `rev16`, `rev32`, `extr`, `bfi` and `bfxil`. The guard is arithmetic,
   not a compare: a compare would write the NZCV state that later instructions in
@@ -500,9 +500,13 @@ interpreter.
   `Ir.AArch64ExtractAndBitfieldInsertMatchTheArchitecture`. The corpus under
   qemu-aarch64 (GCC 13.3): `c_udiv32`, `c_urem32`, `c_udiv64`, `c_urem64`,
   `c_div10`, `c_mulhi_u64` and `c_mulhi_s64` are Complete and verified at O0,
-  O2 and O3. Not done: `c_sdiv32`, `c_srem32`, `c_sdiv64` and `c_srem64` stay
-  Partial because the compiler emits `cmn`, which is G03-T4. `umull`/`smull`
-  (32-bit widening multiply) are not lifted yet, and `umaddl` is not either.
+  O2 and O3. Since G03-T4 added `cmn`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and
+  `c_srem64` are Complete and verified too, on both compilers. The widening
+  multiplies are done as well: `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`,
+  `smsubl`, `umnegl` and `smnegl`, each 32-bit source extended to 64 bits before
+  the multiply. Evidence: `Ir.AArch64WideningMultiplyUsesTheLow32BitsOfEachSource`.
+  On Clang 18.1, `c_sum_to` (which uses `umull`) is Complete at O2 and O3 now.
+  The corpus has no WRONG result on any tree.
 
 **G03-T3 AArch64 jump tables**
 
@@ -555,7 +559,9 @@ interpreter.
 - **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
   and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
   counts in `docs/SUPPORT_MATRIX.md`.
-- **Status:** DONE on GCC 13.3 under qemu-aarch64. Lifted: `adds` (flags of
+- **Status:** PARTIAL on GCC 13.3 under qemu-aarch64: the lifts below are
+  done, but `adcs` and `sbcs` are named in this goal and stay Unsupported, so
+  the task is not complete until they are lifted. Lifted: `adds` (flags of
   a + b, with an unconditional `CondCompareAdd`), `cmn` (the same, into the zero
   register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
   the flags before). The unconditional form is `IrCondition::None` in

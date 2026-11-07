@@ -2393,6 +2393,46 @@ TEST(Ir, AArch64HighMultiplyIsTheUpperHalf) {
   EXPECT_EQ(run_aarch64_args(smulh, {static_cast<std::uint64_t>(-2), 3}), minus_one);  // -6
 }
 
+// Only the low 32 bits of each W source take part; the high halves below are
+// noise that a wrong lowering would multiply in.
+TEST(Ir, AArch64WideningMultiplyUsesTheLow32BitsOfEachSource) {
+  const auto umull = aarch64_bytes({0x9ba17c00, 0xd65f03c0});   // umull x0, w0, w1; ret
+  const auto smull = aarch64_bytes({0x9b217c00, 0xd65f03c0});   // smull x0, w0, w1; ret
+  const auto umaddl = aarch64_bytes({0x9ba10800, 0xd65f03c0});  // umaddl x0, w0, w1, x2; ret
+  const auto smaddl = aarch64_bytes({0x9b210800, 0xd65f03c0});  // smaddl x0, w0, w1, x2; ret
+  const auto umsubl = aarch64_bytes({0x9ba18800, 0xd65f03c0});  // umsubl x0, w0, w1, x2; ret
+  const auto smsubl = aarch64_bytes({0x9b218800, 0xd65f03c0});  // smsubl x0, w0, w1, x2; ret
+  const auto umnegl = aarch64_bytes({0x9ba1fc00, 0xd65f03c0});  // umnegl x0, w0, w1; ret
+  const auto smnegl = aarch64_bytes({0x9b21fc00, 0xd65f03c0});  // smnegl x0, w0, w1; ret
+  const std::uint64_t source_a = 0xdeadbeefffffffffULL;         // low word 0xffffffff
+  const std::uint64_t source_b = 0x1234567800000002ULL;         // low word 2
+  EXPECT_EQ(run_aarch64_args(umull, {source_a, source_b}), 0x1fffffffeULL);  // 4294967295 * 2
+  EXPECT_EQ(run_aarch64_args(smull, {source_a, source_b}),
+            static_cast<std::uint64_t>(-2));  // (-1) * 2
+  EXPECT_EQ(run_aarch64_args(umaddl, {source_a, source_b, 100}), 0x1fffffffeULL + 100);
+  EXPECT_EQ(run_aarch64_args(smaddl, {source_a, source_b, 100}), 98U);  // 100 + (-2)
+  EXPECT_EQ(run_aarch64_args(umsubl, {source_a, source_b, 0x1000000000ULL}),
+            0x1000000000ULL - 0x1fffffffeULL);
+  EXPECT_EQ(run_aarch64_args(smsubl, {source_a, source_b, 100}), 102U);  // 100 - (-2)
+  EXPECT_EQ(run_aarch64_args(umnegl, {source_a, source_b}),
+            static_cast<std::uint64_t>(-0x1fffffffeLL));
+  EXPECT_EQ(run_aarch64_args(smnegl, {source_a, source_b}), 2U);  // -(-2)
+  // The two 32-bit sources of 0xffffffff: the unsigned product is 2^64 - 2^33 + 1,
+  // the signed product is (-1) * (-1).
+  const std::uint64_t all_ones = 0xffffffffULL;
+  EXPECT_EQ(run_aarch64_args(umull, {all_ones, all_ones}), 0xfffffffe00000001ULL);
+  EXPECT_EQ(run_aarch64_args(smull, {all_ones, all_ones}), 1U);
+}
+
+// A widening multiply into xzr discards its product, so nothing is lifted for it.
+// The function still lifts exactly and returns its first argument.
+TEST(Ir, AArch64WideningMultiplyIntoXzrIsDiscarded) {
+  const auto umull = aarch64_bytes({0x9ba17c1f, 0xd65f03c0});   // umull xzr, w0, w1; ret
+  const auto umaddl = aarch64_bytes({0x9ba1081f, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; ret
+  EXPECT_EQ(run_aarch64_args(umull, {7, 9}), 7U);
+  EXPECT_EQ(run_aarch64_args(umaddl, {7, 9, 11}), 7U);
+}
+
 TEST(Ir, AArch64CountAndReverseInstructionsMatchTheArchitecture) {
   const auto clz = aarch64_bytes({0xdac01000, 0xd65f03c0});     // clz x0, x0
   const auto cls = aarch64_bytes({0xdac01400, 0xd65f03c0});     // cls x0, x0
