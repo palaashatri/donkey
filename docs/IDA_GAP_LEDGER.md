@@ -179,12 +179,17 @@ Completed and merged or on the integration branch (see the table for each gap's 
   decoding.
 - G01-T3 with the AArch64 rounding rule, G01-T2 with the x86 rule, the G04-T3 loop structuring
   docs, and the G05-T1 review fixes.
+- Since then, on the designated branch: G07-T2 (a `.dSYM` found by LC_UUID and `debuginfo
+  --debug-file`, checked on Linux with LLVM's output), G06-T3 (PDB struct fields, pointers,
+  arrays and procedures, mapped into the type store), G15-T3 (Windows minidumps), and G13 MIPS
+  delay slots in the CFG for ordinary branches, calls and returns.
 
 Still open, in ledger order:
 
 - G04-T3: the for form in the corpus, and the verification of break and continue in the corpus.
+  The O0 and O2 loops are not printed as `for` yet; see the status above.
 - G05-T3 step 3 and G05-T4: the type editing UI and undo.
-- G06: enumerators and C++ class layouts (base classes, virtual tables, methods).
+- G06: enumerators, and C++ class layouts (base classes, virtual tables, methods).
 - G10-T1 to T4: MSVC RTTI and call-site resolution, and the GUI
   demangled-name and class-hierarchy panel.
 - G07: the .dSYM check against Apple's `dsymutil` on a macOS host (the Linux tests use LLVM's output).
@@ -194,8 +199,13 @@ Still open, in ledger order:
   forms, microMIPS, MIPS16 and VLE detection, and 64-bit MIPS and PowerPC. Not done.
 - G14-T1 to T4: remote debugging, FreeBSD, macOS, Windows on Arm, GUI watchpoints and AArch64
   DBGWVR. The lldb-server oracle is available for T1.
-- G15-T1 remaining TLS forms (`-mtls-dialect=trad`), G15-T2 multi-image projects. G15-T3 is done
+- G15-T1 remaining TLS forms (`-mtls-dialect=trad`: the AArch64 GD and LD sequences, whose
+  relaxation does not fit the original instructions), G15-T2 multi-image projects. G15-T3 is done
   for the formats it names; a minidump written by Windows has not been checked.
+- G16-T2 incremental re-analysis and a real-world corpus.
+- G17 UI breadth: not started.
+- G19 accessibility: blocked on owner decisions (see its section).
+- G18: excluded (signing certificates).
 - G16-T2: incremental re-analysis and a real-world corpus.
 - G17: UI breadth (more views, search kinds, command palette).
 - G01: verification with Apple Clang and on CI runners.
