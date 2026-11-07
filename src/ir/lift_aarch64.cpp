@@ -1,9 +1,13 @@
 #include "lift_internal.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
+#include <initializer_list>
+#include <iterator>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
@@ -22,6 +26,9 @@ bool all_digits(const std::string& text) {
 }
 
 std::uint8_t register_width(const std::string& name) {
+  if (internal::scalar_fp_width(name) != 0) {
+    return internal::scalar_fp_width(name);
+  }
   if (name == "sp" || name == "fp" || name == "lr" || name == "pc" || name == "xzr") {
     return kPointerWidth;
   }
@@ -110,6 +117,15 @@ IrCondition trailing_condition(const std::string& operands) {
   return branch_condition("b." + code);
 }
 
+/// The scalar floating-point mnemonics lift_scalar_fp models. fcsel is in the select
+/// lowering. fcvtzu and the negated fused forms are not modelled.
+bool is_scalar_fp_mnemonic(const std::string& mnemonic) {
+  static const char* const kNames[] = {"fmov",  "fadd",  "fsub",   "fmul",  "fdiv", "fsqrt",
+                                       "fneg",  "fabs",  "fmadd",  "fmsub", "fcmp", "fcmpe",
+                                       "scvtf", "ucvtf", "fcvtzs", "fcvt",  "movi"};
+  return std::find(std::begin(kNames), std::end(kNames), mnemonic) != std::end(kNames);
+}
+
 /// Instructions that write NZCV. The lifter models the flags of cmp, tst,
 /// subs and ands exactly; any other writer leaves them unknown.
 bool sets_flags(const std::string& mnemonic) {
@@ -160,6 +176,19 @@ struct Lifter {
   void mark_partial(std::string text) {
     out.notes.push_back(std::move(text));
     out.partial = true;
+  }
+
+  /// A rounded result depends on FPCR's rounding mode, which the caller may set, and this lifter
+  /// does not model FPCR. The function is Partial, with the assumption written in its notes once.
+  void mark_rounding_dependent() {
+    static const std::string kNote =
+        "floating-point results assume the FPCR rounding mode is round to nearest; a caller may "
+        "set another mode, which is not modelled";
+    if (std::find(out.notes.begin(), out.notes.end(), kNote) == out.notes.end()) {
+      mark_partial(kNote);
+    } else {
+      out.partial = true;
+    }
   }
 
   void push(IrBlock& block, IrStatement statement) {
@@ -674,6 +703,171 @@ struct Lifter {
 
   /// csel/csinc/csinv/csneg and their aliases cset, csetm, cinc, cinv, cneg:
   /// dest = condition ? a : f(b). Exact only when the block's flags are.
+  /// Scalar floating-point instructions on the s and d registers. A float is its bits
+  /// in the IR, so moves and selects do not depend on the type. Returns false when the
+  /// form is not modelled; the caller then marks the instruction Unsupported.
+  bool lift_scalar_fp(IrBlock& block, const Instruction& instruction) {
+    const std::string& m = instruction.mnemonic;
+    const std::vector<Operand>& ops = instruction.structured_operands;
+    const auto is_fp = [](const Operand& o) {
+      return o.kind == OperandKind::Register && internal::scalar_fp_width(o.reg) != 0;
+    };
+    const auto is_gp = [](const Operand& o) {
+      return o.kind == OperandKind::Register && internal::scalar_fp_width(o.reg) == 0 &&
+             (register_width(o.reg) == 4 || register_width(o.reg) == 8);
+    };
+    const auto width_of_fp = [](const Operand& o) { return internal::scalar_fp_width(o.reg); };
+    const auto reg = [](const Operand& o, std::uint8_t width) {
+      return IrOperand::register_ref(o.reg, width);
+    };
+    const auto emit = [&](IrOp op, IrOperand dest, IrOperand a, IrOperand b, IrOperand c,
+                          std::uint8_t width) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = std::move(dest);
+      statement.a = std::move(a);
+      statement.b = std::move(b);
+      statement.c = std::move(c);
+      statement.width = width;
+      statement.float_model = IrFloatModel::AArch64;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    const auto all_fp = [&](std::initializer_list<std::size_t> indices, std::uint8_t width) {
+      for (const std::size_t index : indices) {
+        if (index >= ops.size() || !is_fp(ops[index]) || width_of_fp(ops[index]) != width) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    if (m == "movi" && ops.size() == 2 && is_fp(ops[0]) && ops[1].kind == OperandKind::Immediate &&
+        ops[1].immediate == 0) {
+      // movi d0, #0 clears the scalar register, as a zeroing idiom does.
+      const std::uint8_t width = width_of_fp(ops[0]);
+      emit(IrOp::Assign, reg(ops[0], width), IrOperand::constant_value(0, width), IrOperand::none(),
+           IrOperand::none(), width);
+      return true;
+    }
+    if (m == "fmov" && ops.size() == 2) {
+      if (is_fp(ops[0])) {
+        const std::uint8_t width = width_of_fp(ops[0]);
+        if (ops[1].kind == OperandKind::Immediate) {
+          // The immediate is the bits of the double it encodes. A single is that
+          // value rounded, which is exact for every value fmov can encode.
+          const double value = std::bit_cast<double>(static_cast<std::uint64_t>(ops[1].immediate));
+          const std::uint64_t bits = width == 8
+                                         ? std::bit_cast<std::uint64_t>(value)
+                                         : std::bit_cast<std::uint32_t>(static_cast<float>(value));
+          emit(IrOp::Assign, reg(ops[0], width), IrOperand::constant_value(bits, width),
+               IrOperand::none(), IrOperand::none(), width);
+          return true;
+        }
+        const bool same_fp = is_fp(ops[1]) && width_of_fp(ops[1]) == width;
+        const bool from_gp = is_gp(ops[1]) && register_width(ops[1].reg) == width;
+        if (!same_fp && !from_gp) {
+          return false;
+        }
+        emit(IrOp::Assign, reg(ops[0], width), reg(ops[1], width), IrOperand::none(),
+             IrOperand::none(), width);
+        return true;
+      }
+      if (is_gp(ops[0]) && is_fp(ops[1]) && register_width(ops[0].reg) == width_of_fp(ops[1])) {
+        const std::uint8_t width = register_width(ops[0].reg);
+        emit(IrOp::Assign, reg(ops[0], width), reg(ops[1], width), IrOperand::none(),
+             IrOperand::none(), width);
+        return true;
+      }
+      return false;
+    }
+
+    static const char* const kBinary[] = {"fadd", "fsub", "fmul", "fdiv"};
+    if (std::find(std::begin(kBinary), std::end(kBinary), m) != std::end(kBinary) &&
+        ops.size() == 3 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1, 2}, width)) {
+        return false;
+      }
+      const IrOp op = m == "fadd"   ? IrOp::FAdd
+                      : m == "fsub" ? IrOp::FSub
+                      : m == "fmul" ? IrOp::FMul
+                                    : IrOp::FDiv;
+      mark_rounding_dependent();
+      emit(op, reg(ops[0], width), reg(ops[1], width), reg(ops[2], width), IrOperand::none(),
+           width);
+      return true;
+    }
+    if ((m == "fsqrt" || m == "fneg" || m == "fabs") && ops.size() == 2 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1}, width)) {
+        return false;
+      }
+      const IrOp op = m == "fsqrt" ? IrOp::FSqrt : m == "fneg" ? IrOp::FNeg : IrOp::FAbs;
+      if (m == "fsqrt") {
+        mark_rounding_dependent();
+      }
+      emit(op, reg(ops[0], width), reg(ops[1], width), IrOperand::none(), IrOperand::none(), width);
+      return true;
+    }
+    if ((m == "fmadd" || m == "fmsub") && ops.size() == 4 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1, 2, 3}, width)) {
+        return false;
+      }
+      // Dd = Da + Dn * Dm (fmadd) or Da - Dn * Dm (fmsub), rounded once.
+      mark_rounding_dependent();
+      emit(m == "fmadd" ? IrOp::FMulAdd : IrOp::FMulSub, reg(ops[0], width), reg(ops[1], width),
+           reg(ops[2], width), reg(ops[3], width), width);
+      return true;
+    }
+    if ((m == "fcmp" || m == "fcmpe") && ops.size() == 2 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      IrOperand other;
+      if (is_fp(ops[1]) && width_of_fp(ops[1]) == width) {
+        other = reg(ops[1], width);
+      } else if (ops[1].kind == OperandKind::Immediate && ops[1].immediate == 0) {
+        other = IrOperand::constant_value(0, width);  // fcmp with #0.0
+      } else {
+        return false;
+      }
+      emit(IrOp::FCompare, IrOperand::none(), reg(ops[0], width), other, IrOperand::none(), width);
+      modelled_flags = true;  // NZCV as fcmp sets them
+      return true;
+    }
+    if ((m == "scvtf" || m == "ucvtf") && ops.size() == 2 && is_fp(ops[0]) && is_gp(ops[1])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      const std::uint8_t integer = register_width(ops[1].reg);
+      mark_rounding_dependent();
+      emit(m == "scvtf" ? IrOp::IntToFloat : IrOp::UIntToFloat, reg(ops[0], width),
+           reg(ops[1], integer), IrOperand::none(), IrOperand::none(), width);
+      return true;
+    }
+    if (m == "fcvtzs" && ops.size() == 2 && is_gp(ops[0]) && is_fp(ops[1])) {
+      const std::uint8_t integer = register_width(ops[0].reg);
+      const std::uint8_t width = width_of_fp(ops[1]);
+      emit(IrOp::FloatToInt, reg(ops[0], integer), reg(ops[1], width), IrOperand::none(),
+           IrOperand::none(), integer);
+      return true;
+    }
+    if (m == "fcvt" && ops.size() == 2 && is_fp(ops[0]) && is_fp(ops[1])) {
+      const std::uint8_t to = width_of_fp(ops[0]);
+      const std::uint8_t from = width_of_fp(ops[1]);
+      if (to == 8 && from == 4) {
+        emit(IrOp::FloatExtend, reg(ops[0], 8), reg(ops[1], 4), IrOperand::none(),
+             IrOperand::none(), 8);
+        return true;
+      }
+      if (to == 4 && from == 8) {
+        mark_rounding_dependent();  // narrowing rounds; widening is exact
+        emit(IrOp::FloatTruncate, reg(ops[0], 4), reg(ops[1], 8), IrOperand::none(),
+             IrOperand::none(), 4);
+        return true;
+      }
+    }
+    return false;
+  }
+
   void lift_conditional_select(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const std::string& mnemonic = instruction.mnemonic;
@@ -702,17 +896,18 @@ struct Lifter {
     IrOperand base;
     IrOp transform = IrOp::Assign;
     bool invert_input = false;  // cinc/cinv/cneg: transform applies to the taken value
-    if (mnemonic == "csel" || mnemonic == "csinc" || mnemonic == "csinv" || mnemonic == "csneg") {
+    if (mnemonic == "csel" || mnemonic == "fcsel" || mnemonic == "csinc" || mnemonic == "csinv" ||
+        mnemonic == "csneg") {
       if (operands.size() < 3) {
         unsupported(block, instruction);
         return;
       }
       taken = operand_at(1);
       base = operand_at(2);
-      transform = mnemonic == "csel"    ? IrOp::Assign
-                  : mnemonic == "csinc" ? IrOp::Add
-                  : mnemonic == "csinv" ? IrOp::Xor
-                                        : IrOp::Sub;
+      transform = mnemonic == "csel" || mnemonic == "fcsel" ? IrOp::Assign
+                  : mnemonic == "csinc"                     ? IrOp::Add
+                  : mnemonic == "csinv"                     ? IrOp::Xor
+                                                            : IrOp::Sub;
     } else if (mnemonic == "cset" || mnemonic == "csetm") {
       taken = IrOperand::constant_value(mnemonic == "cset" ? 1 : width_mask(width), width);
       base = IrOperand::constant_value(0, width);
@@ -2033,9 +2228,10 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       } else if (mnemonic == "ror" || mnemonic == "ubfiz" || mnemonic == "sbfiz" ||
                  mnemonic == "ubfx" || mnemonic == "sbfx") {
         lifter.lift_bitfield(out_block, instruction);
-      } else if (mnemonic == "csel" || mnemonic == "csinc" || mnemonic == "csinv" ||
-                 mnemonic == "csneg" || mnemonic == "cset" || mnemonic == "csetm" ||
-                 mnemonic == "cinc" || mnemonic == "cinv" || mnemonic == "cneg") {
+      } else if (mnemonic == "csel" || mnemonic == "fcsel" || mnemonic == "csinc" ||
+                 mnemonic == "csinv" || mnemonic == "csneg" || mnemonic == "cset" ||
+                 mnemonic == "csetm" || mnemonic == "cinc" || mnemonic == "cinv" ||
+                 mnemonic == "cneg") {
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
@@ -2068,6 +2264,10 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_load_store(out_block, instruction);
       } else if (mnemonic == "nop" || mnemonic == "bti" || mnemonic == "hint") {
         // No semantic effect in the IR.
+      } else if (is_scalar_fp_mnemonic(mnemonic)) {
+        if (!lifter.lift_scalar_fp(out_block, instruction)) {
+          lifter.unsupported(out_block, instruction);
+        }
       } else {
         lifter.unsupported(out_block, instruction);
       }

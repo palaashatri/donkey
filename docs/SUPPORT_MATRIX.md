@@ -37,7 +37,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 |---|---|---|---|---|---|
 | x86-64 | yes | yes | integer subset and scalar SSE (`ss`/`sd`): see the corpora below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
-| AArch64 | yes | yes, with ADRP folding | integer subset: see the corpus below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
+| AArch64 | yes | yes, with ADRP folding | integer subset and scalar floating point (`s` and `d` registers): see the corpora below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
 | 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
 
 ## Decompiler corpus
@@ -66,7 +66,7 @@ becomes a lookup, not a jump). `DecompilerCorpus.JumpTableFixtureAgreesWithTheCo
 requires it to lift Complete and agree with the compiled code on all 48 vectors.
 On GCC it is built without hot/cold partitioning, see the known limitations.
 
-`tests/corpus/corpus_fp.c` is a third library, on x86-64 hosts only: 26 scalar
+`tests/corpus/corpus_fp.c` is a third library, on x86-64 and AArch64 hosts: 26 scalar
 floating-point functions, each `double f(double, double, double, double)`, built
 at -O0 with `-fno-math-errno -ffp-contract=off` so that `sqrt` is one instruction.
 Its arguments arrive in xmm0 to xmm3, which the IR reads as parameters. It covers
@@ -75,7 +75,15 @@ conversions, single-precision arithmetic, loops over a local array, and branches
 `DecompilerCorpus.FloatResultsAgreeWithTheCompiledCode` compares every Complete
 result with the compiled code on 48 vectors. NaN equals NaN; otherwise the bits
 must match, so the sign of a zero is checked. Partial functions are not compared.
-Results at -O0 on x86-64, GCC 13.3: 6 of 26 Complete, none wrong. The other 20 are Partial. Every scalar SSE arithmetic operation and every integer-to-float conversion depends on the MXCSR rounding mode. The caller may set a mode other than round to nearest, and this lifter does not model MXCSR, so each function that rounds is Partial with that assumption written in its notes (review of #39). Before this rule the count was 18 of 26: three functions copied a register with `movapd`, whose upper lanes are not modelled, and five wrote both `rax` and `xmm0` on a path to the return, which the return rule now keeps Partial. Every Partial function is still compared with the compiled code on all 48 vectors. Clang 18.1 has not been re-measured since the rounding rule; its count before the rule was 23 of 26 Complete, none wrong.
+Results at -O0 on x86-64, GCC 13.3: 6 of 26 Complete, none wrong. The other 20 are Partial. Every scalar SSE arithmetic operation and every integer-to-float conversion depends on the MXCSR rounding mode. The caller may set a mode other than round to nearest, and this lifter does not model MXCSR, so each function that rounds is Partial with that assumption written in its notes (review of #39). Before this rule the count was 18 of 26: three functions copied a register with `movapd`, and five wrote both `rax` and `xmm0` on a path to the return, which the return rule now keeps Partial. Every Partial function is still compared with the compiled code on all 48 vectors.
+Clang 18.1 at -O0 (the FreeBSD job builds the corpus with clang): 6 of 26 Complete, none wrong, checked by the same test on the clang-built corpus. The count reaches 6 because the lifter models both 64-bit lanes of an XMM register (`xmm0` and `xmm0_hi`) for `movaps`/`movapd`, the packed logical operations (`andps`/`andpd`/`andnps`/`andnpd`/`orps`/`orpd`/`xorps`/`xorpd`/`pxor`), the zeroing idioms and the memory loads; it lowers `cmpltsd` as a masked select with the flags it does not keep; and it carries `ucomisd`/`comisd` with a memory operand across a block boundary when nothing after the compare touches memory.
+
+On AArch64, GCC 13.3 at -O0 gives 20 of 26 Complete, none wrong, run under
+qemu-aarch64 against the native AArch64 code (48 vectors each). The six Partial functions
+(`fp_truncate_int`, `fp_scale_by_int`, `fp_sum_array`, `fp_dot3`, `fp_loop_reduce`,
+`fp_int_quotient`) write both `x0` and `v0` on a path to the return, the same ambiguity
+rule as on x86-64. Before that rule the count was 26 of 26. CI runs the same test on
+`ubuntu-24.04-arm` and `macos-15`; Apple Clang is not yet measured.
 
 Each cell counts functions reported **Complete** whose IR, run in the
 interpreter, agreed with the compiled code on all 48 vectors. CI prints the
@@ -109,6 +117,8 @@ listed where the per-function report was read.
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
+
+Floating-point results that round (AArch64 `fadd`, `fsub`, `fmul`, `fdiv`, `fsqrt`, `fmadd`, `fmsub`, `scvtf`, `ucvtf` and narrowing `fcvt`) depend on the FPCR rounding mode, which the caller may set. Those functions are Partial, with the assumption written in their notes. A row above is current only if it was measured after that rule. The rows with a CI or local measurement before the rule are kept as measured; CI re-measures on every run, and the local rows are not re-measured here.
 
 On every row, no Complete result disagrees with the compiled code.
 
@@ -157,11 +167,16 @@ compare, because GCC's table code overwrites `x0`.
 
 ### Known unsupported classes
 
-- Floating point and SIMD: x86-64 scalar `ss`/`sd` arithmetic, moves, conversions
-  and comparisons are lifted (G01-T2). Anything else in SSE is Partial: packed
-  and vector forms, `movaps`/`movapd` (their upper lanes are not modelled), x87,
-  and FP on AArch64 until G01-T3. Only the low lane of an XMM register is modelled.
-  The IR's IEEE operations are tested against native execution (G01-T1).
+- Floating point and SIMD: scalar `ss`/`sd` arithmetic, moves, conversions and
+  comparisons are lifted on x86-64 (G01-T2) and the scalar `s`/`d` forms on AArch64
+  (G01-T3), including the fused `fmadd`/`fmsub`. Anything else is Partial: packed
+  and vector forms, `movaps`/`movapd` and the packed logical operations (both lanes are modelled), other packed forms, x87,
+  `fcvtzu` (the IR has no unsigned float-to-integer conversion), and the negated
+  fused forms `fnmadd`/`fnmsub`. An XMM register is modelled as two 64-bit lanes (`xmm0` and
+  `xmm0_hi`): scalar instructions write the low lane, and `movaps`/`movapd`, the packed logical
+  operations, the zeroing idioms and the memory loads write both lanes. The scalar view of a
+  SIMD&FP register is modelled on AArch64. The IR's IEEE operations are tested against
+  native execution (G01-T1).
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
 - `bsf`/`bsr`: the result is undefined for a zero source, so they are

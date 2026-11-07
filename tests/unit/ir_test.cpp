@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cfenv>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -849,6 +851,79 @@ TEST(Ir, SignatureInferenceIsSilentForUnmodelledArchitectures) {
   EXPECT_FALSE(function.signature_inferred);
   EXPECT_TRUE(function.parameters.empty());
   EXPECT_EQ(function.return_width, 0);
+}
+
+TEST(Ir, ArgumentReadsFollowThePathsNotTheBlockOrder) {
+  // Block 1 writes x0 and sits before block 2 in the layout, but block 0 reaches block 2
+  // without passing block 1. The x0 that block 2 reads is still the incoming argument.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "path_sensitive";
+  function.blocks.push_back(make_block(0x1000));
+  function.blocks.push_back(make_block(0x1008));
+  function.blocks.push_back(make_block(0x100c));
+
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("x1", 8);
+  compare.b = IrOperand::constant_value(0, 8);
+  compare.condition = IrCondition::Equal;
+  compare.width = 8;
+  function.blocks[0].statements.push_back(compare);
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("x0", 0));
+  function.blocks[1].statements.push_back(branch_statement(2));
+
+  IrStatement use;
+  use.op = IrOp::Assign;
+  use.dest = IrOperand::register_ref("x3", 8);
+  use.a = IrOperand::register_ref("x0", 8);
+  use.width = 8;
+  function.blocks[2].statements.push_back(use);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("x3", 8);
+  ret.width = 8;
+  function.blocks[2].statements.push_back(ret);
+
+  donkey::infer_signature(function, Architecture::AArch64);
+  bool has_x0 = false;
+  for (const IrParameter& parameter : function.parameters) {
+    has_x0 = has_x0 || parameter.abi_register == "x0";
+  }
+  EXPECT_TRUE(has_x0) << "x0 is read on a path that does not write it";
+}
+
+TEST(Ir, UnsupportedVectorStatementDoesNotMakeAVectorRegisterAnArgument) {
+  // The vector move is not modelled, so its effect on v0 is unknown. The v0 read after it
+  // must not be taken for an incoming floating-point argument: that would move the integer
+  // arguments to the wrong registers when the function runs.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "vector_temporary";
+  function.blocks.push_back(make_block(0x1000));
+  IrStatement unsupported;
+  unsupported.op = IrOp::Unsupported;
+  unsupported.text = "movi v0.2d, #0000000000000000";
+  function.blocks[0].statements.push_back(unsupported);
+
+  IrStatement use;
+  use.op = IrOp::Assign;
+  use.dest = IrOperand::register_ref("x8", 8);
+  use.a = IrOperand::register_ref("v0", 4);
+  use.width = 8;
+  function.blocks[0].statements.push_back(use);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("x8", 8);
+  ret.width = 8;
+  function.blocks[0].statements.push_back(ret);
+
+  donkey::infer_signature(function, Architecture::AArch64);
+  for (const IrParameter& parameter : function.parameters) {
+    EXPECT_NE(parameter.abi_register.rfind("v", 0), 0U) << parameter.abi_register;
+  }
+  EXPECT_TRUE(function.parameters.empty());
 }
 
 TEST(Ir, SignatureInferenceDistinguishesSystemVAndWindowsX64) {
@@ -2076,6 +2151,65 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
 
 // ---- G02-T3: population count, bit scans, byte swap, bit test ----
 
+// The flags of a compare carry into a fall-through block that has no other
+// predecessor, so `setg` after `cmp`/`je` is exact there and the function is
+// Complete. The compare is repeated at the start of that block.
+TEST(Ir, FlagsFromSinglePredecessorAreExact) {
+  donkey::IrFunction
+      carried;  // cmp rdi, rsi; je L; setg al; movzx eax, al; ret; L: mov eax, 42; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x39, 0xf7, 0x74, 0x07, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0,
+                               0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                              carried));
+  EXPECT_FALSE(carried.partial);
+  EXPECT_EQ(run_x86_64(carried, {5, 3}), 1U);
+  EXPECT_EQ(run_x86_64(carried, {3, 5}), 0U);
+  EXPECT_EQ(run_x86_64(carried, {~0ULL, 0}), 0U);  // -1 > 0 is false, signed
+  EXPECT_EQ(run_x86_64(carried, {3, 3}), 42U);     // equal: the je branch
+
+  // The same shape, but rdi is rewritten between the compare and the branch: the
+  // operands the repeated compare would read are not the ones that set the flags.
+  donkey::IrFunction rewritten;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x39, 0xf7, 0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, 0x74, 0x07, 0x0f,
+                       0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                      rewritten));
+  EXPECT_TRUE(rewritten.partial);
+}
+
+// `sp` is the 16-bit name of the stack pointer. After `mov ax, sp; cmp sp, ax`,
+// the push changes the value the compare read, so its flags cannot be carried
+// into the fall-through block.
+TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
+  donkey::IrFunction function;  // mov ax, sp; cmp sp, ax; push rdi; jne L; setne al; L: ret
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x89, 0xe0, 0x66, 0x39, 0xc4, 0x57, 0x75, 0x03, 0x0f, 0x95, 0xc0, 0xc3}, function));
+  EXPECT_TRUE(function.partial);
+}
+
+// bsf and bsr for a nonzero source are the lowest and highest set bit. The
+// result is Partial, because the destination is undefined for a zero source.
+TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
+  donkey::IrFunction forward;  // bsf rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbc, 0xc7, 0xc3}, forward));
+  EXPECT_TRUE(forward.partial);
+  EXPECT_EQ(run_x86_64(forward, {0x18}), 3U);
+  EXPECT_EQ(run_x86_64(forward, {1ULL << 40}), 40U);
+
+  donkey::IrFunction reverse;  // bsr rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbd, 0xc7, 0xc3}, reverse));
+  EXPECT_TRUE(reverse.partial);
+  EXPECT_EQ(run_x86_64(reverse, {0x18}), 4U);
+  EXPECT_EQ(run_x86_64(reverse, {1ULL << 40}), 40U);
+
+  donkey::IrFunction forward32;  // bsf eax, edi; ret: only the low 32 bits are read
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbc, 0xc7, 0xc3}, forward32));
+  EXPECT_EQ(run_x86_64(forward32, {0x100000008ULL}), 3U);
+
+  donkey::IrFunction reverse32;  // bsr eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbd, 0xc7, 0xc3}, reverse32));
+  EXPECT_EQ(run_x86_64(reverse32, {0xffffffffULL}), 31U);
+}
+
 TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
   // popcnt rax, rdi; ret
   donkey::IrFunction popcount;
@@ -2354,7 +2488,15 @@ std::uint64_t run_aarch64_args(const std::vector<std::byte>& data,
   if (!lifted.has_value()) {
     return 0;
   }
-  EXPECT_FALSE(lifted.value().partial);
+  // A rounded result is Partial, because FPCR is not modelled (see the lifter's note). Any other
+  // reason for Partial still fails here, and the value is checked either way.
+  if (lifted.value().partial) {
+    const bool fpcr_only = std::any_of(
+        lifted.value().notes.begin(), lifted.value().notes.end(), [](const std::string& note) {
+          return note.find("FPCR rounding mode") != std::string::npos;
+        });
+    EXPECT_TRUE(fpcr_only) << "partial for a reason other than the FPCR rounding mode";
+  }
   donkey::IrEvalMemory memory;
   donkey::IrEvalOptions options;
   options.architecture = Architecture::AArch64;
@@ -2428,10 +2570,13 @@ TEST(Ir, AArch64WideningMultiplyUsesTheLow32BitsOfEachSource) {
 }
 
 // A widening multiply into xzr discards its product, so nothing is lifted for it.
-// The function still lifts exactly and returns its first argument.
+// The function still lifts exactly and returns x0. `mov x0, x0` defines the return
+// register: a return of an unwritten x0 could also be a floating-point argument.
 TEST(Ir, AArch64WideningMultiplyIntoXzrIsDiscarded) {
-  const auto umull = aarch64_bytes({0x9ba17c1f, 0xd65f03c0});   // umull xzr, w0, w1; ret
-  const auto umaddl = aarch64_bytes({0x9ba1081f, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; ret
+  const auto umull =
+      aarch64_bytes({0x9ba17c1f, 0xaa0003e0, 0xd65f03c0});  // umull xzr, w0, w1; mov x0, x0; ret
+  const auto umaddl = aarch64_bytes(
+      {0x9ba1081f, 0xaa0003e0, 0xd65f03c0});  // umaddl xzr, w0, w1, x2; mov x0, x0; ret
   EXPECT_EQ(run_aarch64_args(umull, {7, 9}), 7U);
   EXPECT_EQ(run_aarch64_args(umaddl, {7, 9, 11}), 7U);
 }
@@ -2537,7 +2682,7 @@ TEST(Ir, VerifierRejectsAConditionalCompareWithAnOutOfRangeNzcv) {
 
 TEST(Ir, AArch64DiscardedResultToTheZeroRegisterLiftsToNothing) {
   // udiv xzr, x0, x1; ret: the quotient is discarded, so x0 is unchanged.
-  const auto data = aarch64_bytes({0x9ac1081f, 0xd65f03c0});
+  const auto data = aarch64_bytes({0x9ac1081f, 0xaa0003e0, 0xd65f03c0});  // ...; mov x0, x0; ret
   EXPECT_EQ(run_aarch64_args(data, {42, 3}), 42U);
 }
 
@@ -3094,6 +3239,52 @@ TEST(Ir, FloatingPointEvaluationRoundsToNearestWhateverTheCallerSet) {
   EXPECT_EQ(result, 0x3ff0000000000000ULL);
 }
 
+/// The lifted AArch64 function for the code (the first function found).
+donkey::IrFunction lift_aarch64_code(const std::vector<std::byte>& data) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  donkey::IrFunction none;
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return none;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  return lifted.has_value() ? lifted.value() : none;
+}
+
+TEST(Ir, AArch64FloatingPointParametersAndReturnAreRenderedAsDouble) {
+  // fadd d0, d0, d1; ret: two double arguments and a double result.
+  const auto function = lift_aarch64_code(aarch64_bytes({0x1e612800U, 0xd65f03c0U}));
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("double a0, double a1"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("double sub"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("u64 a0"), std::string::npos) << text.value();
+}
+
+TEST(Ir, AArch64FusedMultiplySubtractIsRenderedAsAFusedCall) {
+  // fmsub d0, d1, d2, d3: d0 = d3 - d1 * d2, rounded once.
+  const auto function = lift_aarch64_code(aarch64_bytes({0x1f428c20U, 0xd65f03c0U}));
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("fma(-"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("/* fused */"), std::string::npos) << text.value();
+}
+
+TEST(Ir, AArch64IntegerAndFloatingPointParametersTogetherArePartial) {
+  // add x0, x0, x1; fadd d0, d0, d1; ret: the order of the four arguments is not
+  // recoverable from their registers, so the signature is Partial.
+  EXPECT_TRUE(lift_aarch64_code(aarch64_bytes({0x8b010000U, 0x1e612800U, 0xd65f03c0U})).partial);
+}
+
+TEST(Ir, AArch64IntegerReturnAfterAFloatingPointResultIsAmbiguous) {
+  // fadd d0, d0, d1; movz x0, #1; ret: x0 and d0 are both written on the way to the
+  // return, so the return channel is not determined.
+  EXPECT_TRUE(lift_aarch64_code(aarch64_bytes({0x1e612800U, 0xd2800020U, 0xd65f03c0U})).partial);
+}
+
 TEST(Ir, AArch64AdcsWithoutAnExactCarryIsPartial) {
   // adcs with no flag writer before it: its carry in is unknown.
   EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xba010000U, 0xd65f03c0U})));
@@ -3194,10 +3385,119 @@ TEST(Ir, X86ZeroingIdiomClearsTheLowLane) {
   EXPECT_EQ(run_x86_64(f, {double_bits(7.0)}), 0U);
 }
 
-TEST(Ir, X86MovapsIsPartialBecauseItCopiesTheUpperLanes) {
+// movaps copies both 64-bit lanes, which the IR keeps as two registers. xmm1 is the only register
+// the function reads, so it is the argument, and the return value is the low lane of xmm0.
+TEST(Ir, X86MovapsCopiesBothLanesWithoutMakingTheFunctionPartial) {
   donkey::IrFunction f;  // movaps xmm0, xmm1; ret
   ASSERT_TRUE(lift_raw_x86_64({0x0f, 0x28, 0xc1, 0xc3}, f));
-  EXPECT_TRUE(f.partial);
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(bits_as_double(run_x86_64(f, {double_bits(7.5)})), 7.5);
+}
+
+// cmpltsd xmm0, xmm1 sets the low lane to all ones when xmm0 < xmm1 and to zero otherwise. An
+// unordered comparison is false, so a NaN operand gives zero.
+TEST(Ir, X86CmpltsdIsAnOrderedMask) {
+  donkey::IrFunction f;  // cmpltsd xmm0, xmm1, 1 (less than); ret
+  ASSERT_TRUE(lift_raw_x86_64({0xf2, 0x0f, 0xc2, 0xc1, 0x01, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+  const std::uint64_t all_ones = ~0ULL;
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(2.0)}), all_ones);
+  EXPECT_EQ(run_x86_64(f, {double_bits(2.0), double_bits(1.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(1.0)}), 0ULL);
+  const double nan = std::numeric_limits<double>::quiet_NaN();
+  EXPECT_EQ(run_x86_64(f, {double_bits(nan), double_bits(2.0)}), 0ULL);
+  EXPECT_EQ(run_x86_64(f, {double_bits(1.0), double_bits(nan)}), 0ULL);
+}
+
+// AArch64 scalar floating point. The encodings are the assembler's (llvm-mc); the
+// fused and NaN rules were checked against qemu-aarch64 by running the same
+// instructions natively.
+TEST(Ir, AArch64ScalarDoubleArithmeticLiftsExactly) {
+  const auto fadd = aarch64_bytes({0x1e612800, 0xd65f03c0});  // fadd d0, d0, d1; ret
+  const auto fsub = aarch64_bytes({0x1e613800, 0xd65f03c0});  // fsub d0, d0, d1; ret
+  const auto fmul = aarch64_bytes({0x1e610800, 0xd65f03c0});  // fmul d0, d0, d1; ret
+  const auto fdiv = aarch64_bytes({0x1e611800, 0xd65f03c0});  // fdiv d0, d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fadd, {double_bits(1.5), double_bits(2.25)})), 3.75);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fsub, {double_bits(1.5), double_bits(2.25)})), -0.75);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fmul, {double_bits(1.5), double_bits(2.25)})), 3.375);
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fdiv, {double_bits(1.0), double_bits(4.0)})), 0.25);
+  const auto fsqrt = aarch64_bytes({0x1e61c020, 0xd65f03c0});  // fsqrt d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fsqrt, {double_bits(2.25)})), 1.5);
+  const auto fneg = aarch64_bytes({0x1e614020, 0xd65f03c0});  // fneg d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fneg, {double_bits(2.5)})), -2.5);
+  const auto fabs = aarch64_bytes({0x1e60c020, 0xd65f03c0});  // fabs d0, d1; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fabs, {double_bits(-2.5)})), 2.5);
+}
+
+TEST(Ir, AArch64SingleRegisterWritesZeroTheRestOfTheVector) {
+  // fadd s0, s0, s1; ret: a single result, with the upper half of d0 cleared.
+  const auto fadd = aarch64_bytes({0x1e212800, 0xd65f03c0});
+  const std::uint64_t one_and_a_half = 0x3fc00000ULL;
+  const std::uint64_t two_and_a_quarter = 0x40100000ULL;
+  const std::uint64_t dirty_upper = 0xabcdef0100000000ULL;  // ignored: only s0 is read
+  EXPECT_EQ(run_aarch64_args(fadd, {one_and_a_half | dirty_upper, two_and_a_quarter}),
+            0x40700000ULL);  // 3.75f, and bits 32 to 63 are zero
+}
+
+TEST(Ir, AArch64FusedMultiplyAddRoundsOnce) {
+  // fmadd d0, d1, d2, d3: d0 = d3 + d1 * d2. (1 + 2^-52)^2 - (1 + 2^-51) is 2^-104
+  // with one rounding, and 0 when the product is rounded before the add.
+  const auto fmadd = aarch64_bytes({0x1f420c20, 0xd65f03c0});
+  const double n = 1.0 + std::ldexp(1.0, -52);
+  const double addend = -(1.0 + std::ldexp(1.0, -51));
+  EXPECT_EQ(run_aarch64_args(fmadd, {double_bits(n), double_bits(n), double_bits(addend)}),
+            double_bits(std::ldexp(1.0, -104)));
+  // fmsub d0, d1, d2, d3: d0 = d3 - d1 * d2.
+  const auto fmsub = aarch64_bytes({0x1f428c20, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(fmsub, {double_bits(n), double_bits(n), double_bits(-addend)}),
+            double_bits(-std::ldexp(1.0, -104)));
+}
+
+TEST(Ir, AArch64FusedMultiplyAddFollowsTheHardwareNaNRules) {
+  const auto fmadd = aarch64_bytes({0x1f420c20, 0xd65f03c0});
+  const auto fmsub = aarch64_bytes({0x1f428c20, 0xd65f03c0});
+  const std::uint64_t nan1 = 0x7ff8000000000001ULL;
+  const std::uint64_t nan3 = 0x7ff8000000000003ULL;
+  const std::uint64_t one = double_bits(1.0);
+  const std::uint64_t zero = 0;
+  const std::uint64_t inf = 0x7ff0000000000000ULL;
+  // A NaN addend wins over a NaN product operand.
+  EXPECT_EQ(run_aarch64_args(fmadd, {nan1, one, nan3}), nan3);
+  // The NaN taken from the product of fmsub has its sign flipped.
+  EXPECT_EQ(run_aarch64_args(fmsub, {nan1, one, one}), 0xfff8000000000001ULL);
+  // inf * 0 is invalid whatever the addend is: the default NaN.
+  EXPECT_EQ(run_aarch64_args(fmadd, {inf, zero, nan3}), 0x7ff8000000000000ULL);
+}
+
+TEST(Ir, AArch64FloatCompareSelectsWithItsNZCV) {
+  const auto fcsel =
+      aarch64_bytes({0x1e612000, 0x1e62cc20, 0xd65f03c0});  // fcmp d0, d1; fcsel d0, d1, d2, gt
+  // d0 > d1 selects d1; otherwise d2. NaN is unordered, so it is not greater.
+  EXPECT_EQ(bits_as_double(
+                run_aarch64_args(fcsel, {double_bits(2.0), double_bits(1.0), double_bits(5.0)})),
+            1.0);
+  EXPECT_EQ(bits_as_double(
+                run_aarch64_args(fcsel, {double_bits(1.0), double_bits(2.0), double_bits(5.0)})),
+            5.0);
+  EXPECT_EQ(
+      bits_as_double(run_aarch64_args(fcsel, {double_bits(std::numeric_limits<double>::quiet_NaN()),
+                                              double_bits(1.0), double_bits(5.0)})),
+      5.0);
+}
+
+TEST(Ir, AArch64IntegerToDoubleAndBack) {
+  const auto scvtf = aarch64_bytes({0x9e620000, 0xd65f03c0});  // scvtf d0, x0; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(scvtf, {static_cast<std::uint64_t>(-3)})), -3.0);
+  const auto fcvtzs = aarch64_bytes({0x9e780000, 0xd65f03c0});  // fcvtzs x0, d0; ret
+  EXPECT_EQ(run_aarch64_args(fcvtzs, {double_bits(-3.9)}), static_cast<std::uint64_t>(-3));
+  EXPECT_EQ(run_aarch64_args(fcvtzs, {double_bits(3.9)}), 3U);
+}
+
+TEST(Ir, AArch64FloatConversionsAndImmediateMoves) {
+  const auto fcvt = aarch64_bytes({0x1e22c000, 0xd65f03c0});  // fcvt d0, s0; ret
+  EXPECT_EQ(bits_as_double(run_aarch64_args(fcvt, {0x3fc00000ULL})), 1.5);
+  const auto movi = aarch64_bytes({0x1e6e1000, 0xd65f03c0});  // fmov d0, #1.0; ret
+  EXPECT_EQ(run_aarch64_args(movi, {}), double_bits(1.0));
 }
 
 }  // namespace

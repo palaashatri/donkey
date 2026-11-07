@@ -80,6 +80,10 @@ enum class IrOp : std::uint8_t {
   FloatToInt,     ///< dest (integer) = a (float of a's width) truncated toward zero
   FloatExtend,    ///< dest (double) = a (float), exact
   FloatTruncate,  ///< dest (float) = a (double), rounded to nearest
+  // Fused multiply-add with one rounding (AArch64 fmadd and fmsub). FMulAdd is
+  // dest = a * b + c; FMulSub is dest = c - a * b. Both follow the AArch64 rules.
+  FMulAdd,
+  FMulSub,
 };
 
 const char* ir_op_name(IrOp op) noexcept;
@@ -205,6 +209,9 @@ struct IrParameter {
   std::uint8_t width = 8;
   /// ABI register the value arrives in (`rdi`, `x0`, …).
   std::string abi_register;
+  /// The value is floating-point (an XMM, s, d or v register): it is rendered as float or
+  /// double, not as an integer of the same width.
+  bool floating_point = false;
 };
 
 struct IrLocalVariable {
@@ -243,6 +250,8 @@ struct IrFunction {
   std::vector<IrParameter> parameters;
   /// Width of the returned value in bytes; 0 means no value is returned.
   std::uint8_t return_width = 0;
+  /// The returned value is floating-point (it is in xmm0, or in v0, d0 or s0).
+  bool return_floating_point = false;
   bool signature_inferred = false;
   /// Stack local variables and arguments recovered from stack frames.
   std::vector<IrLocalVariable> local_variables;
