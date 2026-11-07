@@ -29,6 +29,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; compressed sections and split DWARF reported Unsupported |
 | PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB is not read. |
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
+| ELF core (`ET_CORE`) | threads with x86-64 registers, process name, file mappings (`donkey-cli core`); memory is the PT_LOAD segments | — | — |
 | Raw | with explicit `--arch --base --entry` | — | — |
 
 ## C++ symbol names

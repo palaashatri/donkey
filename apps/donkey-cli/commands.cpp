@@ -15,6 +15,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/archive.h"
+#include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
@@ -782,6 +783,7 @@ void print_usage(std::FILE* out) {
                " [--max-strings N]\n"
                "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
                "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
+               "  donkey-cli core <file> [--json]\n"
                "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
                "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
                "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
@@ -1043,6 +1045,77 @@ int command_callgraph(const std::vector<std::string_view>& arguments) {
     return usage_error("callgraph needs a file path");
   }
   return command_analysis(request, "callgraph");
+}
+
+int command_core(const std::vector<std::string_view>& arguments) {
+  std::string path;
+  bool json = false;
+  LoadOptions load_options;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
+    if (argument == "--json") {
+      json = true;
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for core");
+    } else if (path.empty()) {
+      path = std::string(argument);
+    } else {
+      return usage_error("core accepts exactly one file");
+    }
+  }
+  if (path.empty()) {
+    return usage_error("core needs a file path");
+  }
+  LoadedBinary loaded;
+  if (!load(path, loaded, load_options)) {
+    return kExitFailure;
+  }
+  auto result = read_elf_core(loaded.image, loaded.data);
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const CoreInfo& info = result.value();
+  if (json) {
+    std::string out = "{\n  \"process\": " + quote(info.process_name) + ",\n";
+    out += "  \"partial\": " + std::string(info.partial ? "true" : "false") + ",\n";
+    out += "  \"threads\": [";
+    for (std::size_t i = 0; i < info.threads.size(); ++i) {
+      const CoreThread& thread = info.threads[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"pid\": " + std::to_string(thread.pid) +
+             ", \"signal\": " + std::to_string(thread.signal) +
+             ", \"pc\": " + quote(hex(thread.pc)) + ", \"sp\": " + quote(hex(thread.sp)) + "}";
+    }
+    out += "\n  ],\n  \"mappings\": [";
+    for (std::size_t i = 0; i < info.mappings.size(); ++i) {
+      const CoreMapping& mapping = info.mappings[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"start\": " + quote(hex(mapping.start)) +
+             ", \"end\": " + quote(hex(mapping.end)) +
+             ", \"file_offset\": " + quote(hex(mapping.file_offset)) +
+             ", \"path\": " + quote(mapping.path) + "}";
+    }
+    out += "\n  ]\n}\n";
+    std::fputs(out.c_str(), stdout);
+    return kExitOk;
+  }
+  std::printf("core of %s: %zu thread%s, %zu mapping%s%s\n", info.process_name.c_str(),
+              info.threads.size(), info.threads.size() == 1 ? "" : "s", info.mappings.size(),
+              info.mappings.size() == 1 ? "" : "s", info.partial ? " (partial)" : "");
+  for (const CoreThread& thread : info.threads) {
+    std::printf("thread %u  signal %d  pc %s  sp %s\n", static_cast<unsigned>(thread.pid),
+                static_cast<int>(thread.signal), hex(thread.pc).c_str(), hex(thread.sp).c_str());
+  }
+  for (const CoreMapping& mapping : info.mappings) {
+    std::printf("%s-%s  offset %s  %s\n", hex(mapping.start).c_str(), hex(mapping.end).c_str(),
+                hex(mapping.file_offset).c_str(), mapping.path.c_str());
+  }
+  return kExitOk;
 }
 
 int command_debuginfo(const std::vector<std::string_view>& arguments) {

@@ -119,6 +119,7 @@ add_executable(donkey_unit_tests
   unit/demangle_test.cpp
   unit/demangle_msvc_test.cpp
   unit/rtti_test.cpp
+  unit/core_test.cpp
   unit/archive_test.cpp
   unit/relocate_test.cpp
   unit/relocate_aarch64_test.cpp
@@ -261,6 +262,13 @@ add_test(NAME cli.info_demangles_itanium_exports_json
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/cpp-exports-x86_64.so --json)
 set_tests_properties(cli.info_demangles_itanium_exports_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"_ZN6shapes4areaERKNS_3BoxEi\", \"demangled\": \"shapes::area\\(shapes::Box const&, int\\)\"")
+
+# The core command lists the thread and the mappings of an ELF core (G15-T3), with the values
+# gdb reads from the same core.
+add_test(NAME cli.core_lists_the_thread
+         COMMAND donkey-cli core ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/core/sleeper.core)
+set_tests_properties(cli.core_lists_the_thread PROPERTIES
+  PASS_REGULAR_EXPRESSION "core of sleeper: 1 thread, 5 mappings\nthread 8251  signal 0  pc 0x4112f4")
 
 if(NOT WIN32)
   add_test(NAME cli.info_isolated_json
