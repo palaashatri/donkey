@@ -181,6 +181,17 @@ TEST(Rtti, ReadsTheNonPieHierarchyFromTheFile) {
   expect_hierarchy(read_classes(DONKEY_TEST_HIERARCHY_NOPIE_PATH));
 }
 
+// AArch64 builds of the same source (tests/fixtures/rtti/PROVENANCE.md). Their PLT entries load
+// the GOT slot with ADRP and LDR, so the pure-virtual slot is named through its JUMP_SLOT, and
+// the graph is complete (not partial).
+TEST(Rtti, ReadsTheAArch64NonPieHierarchyWithItsPltNames) {
+  expect_hierarchy(read_classes(std::string(DONKEY_FIXTURE_DIR) + "/rtti/hierarchy-aarch64-nopie"));
+}
+
+TEST(Rtti, ReadsTheAArch64PieHierarchyFromRelocations) {
+  expect_hierarchy(read_classes(std::string(DONKEY_FIXTURE_DIR) + "/rtti/hierarchy-aarch64-pie"));
+}
+
 TEST(Rtti, AnImageWithoutItaniumTypeinfoHasNoClasses) {
   const auto info = read_classes(std::string(DONKEY_FIXTURE_DIR) + "/binaries/tiny-elf-x86_64");
   EXPECT_TRUE(info.classes.empty());

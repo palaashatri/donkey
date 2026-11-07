@@ -45,7 +45,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 | Itanium RTTI and vtables (ELF) | Reader | Checked against | Not covered |
 |---|---|---|---|
-| x86-64, PIE and non-PIE | `read_itanium_rtti` (G10-T3, partial) | `gdb` on the non-PIE fixture: vtable slots, typeinfo bases and offsets-to-top match; the PIE build gives the same graph | AArch64 PLT stubs are not named (the reader reports `rtti.plt_unnamed`); AArch64 is checked one-off, not in CI; MSVC RTTI (Complete Object Locators) is not read; no call-site resolution in the decompiler |
+| x86-64 and AArch64, PIE and non-PIE | `read_itanium_rtti` (G10-T3, partial) | `gdb` on the x86-64 non-PIE fixture: vtable slots, typeinfo bases and offsets-to-top match; the PIE build gives the same graph. AArch64 builds of the same source (`aarch64-linux-gnu-g++`, PIE and non-PIE) give the same graph and name the pure-virtual slot through its PLT stub | Only the 16-byte PLT entry form is decoded for AArch64 (a BTI-prefixed entry stays unnamed and reports `rtti.plt_unnamed`); AArch64 is not run in CI; MSVC RTTI (Complete Object Locators) is not read; no call-site resolution in the decompiler |
 
 ## Instruction sets
 

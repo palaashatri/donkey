@@ -21,3 +21,11 @@ Compiler differences: Clang 18 (the `clang-headless` build) fills the two destru
 the abstract `Shape` with `Shape::~Shape()`, where GCC leaves them null. The test accepts either
 for those two slots; the rest of the hierarchy is identical, and the whole suite passes with
 both compilers.
+
+`hierarchy-aarch64-nopie` and `hierarchy-aarch64-pie` are the AArch64 builds of the same source:
+`aarch64-linux-gnu-g++` (GCC 13.3.0) with `-O0 -g0 -fno-stack-protector`, `-fno-pie -no-pie` and
+`-fPIE -pie` respectively. They keep their symbols. The graph and slot names are the same
+expectations as the x86-64 builds; the pure-virtual slot is named `__cxa_pure_virtual` through
+the PLT stub `adrp x16; ldr x17, [x16, #0x30]; add x16, x16, #0x30; br x17`, whose JUMP_SLOT
+relocation `aarch64-linux-gnu-readelf -r` shows.
+
