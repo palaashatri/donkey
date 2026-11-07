@@ -12,9 +12,13 @@
 #include <cstdio>
 #include <span>
 
+#include <utility>
+#include <vector>
+
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/relocate.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
 
@@ -37,10 +41,22 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     return 0;  // Rejection is a valid, deterministic outcome.
   }
 
+  // An ELF object is laid out and relocated first; the analysis then reads the patched copy.
+  std::vector<std::byte> linked;
+  std::span<const std::byte> analysed = bytes;
+  if (donkey::is_relocatable_elf(bytes)) {
+    auto relocated = donkey::link_relocatable_object(bytes, image.value());
+    if (!relocated) {
+      return 0;
+    }
+    linked = std::move(relocated.value());
+    analysed = linked;
+  }
+
   // DWARF reader: bounded, and every type it reports must render.
   donkey::DebugInfoOptions debug_options;
   debug_options.max_entries = 200'000;
-  if (auto debug = donkey::read_debug_info(image.value(), bytes, debug_options)) {
+  if (auto debug = donkey::read_debug_info(image.value(), analysed, debug_options)) {
     for (const auto& function : debug.value().functions) {
       (void)debug.value().prototype(function);
     }
@@ -53,7 +69,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   options.max_instructions = kMaxInstructions;
   options.max_strings = 2'000;
   options.min_string_length = 4;
-  auto analysis = donkey::analyze(image.value(), bytes, options);
+  auto analysis = donkey::analyze(image.value(), analysed, options);
   if (!analysis) {
     return 0;
   }
