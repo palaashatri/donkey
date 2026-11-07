@@ -201,6 +201,9 @@ class Renderer {
         return buffer;
       }
       case IrOperandKind::Memory: {
+        if (!value.name.empty()) {
+          return value.name;
+        }
         if (value.index.empty()) {
           for (const IrPointerStruct& recovered : function_.pointer_structs) {
             if (recovered.base_register != value.reg) {

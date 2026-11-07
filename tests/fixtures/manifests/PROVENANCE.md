@@ -18,6 +18,7 @@ same hash (`Binary.PublicFixturesMatchRecordedHash`).
 |---|---|---|
 | `tiny-elf-x86_64` | ELF64 `ET_EXEC`, x86-64, one PT_LOAD, `.text`/`.rodata`, symtab with defined and undefined symbols | `cb2f08393b7c54eb793cf315f56fe51e974372d1e1c9dba2a04af2d9991bcb43` |
 | `tiny-elf-i386` | ELF32 `ET_EXEC`, i386, one PT_LOAD, `.text`/`.rodata`, Elf32 symtab with defined and undefined symbols | `12b48c5ce6669b9d2d98c438199bac760fd4d57d44c4d35f01ea04ad8c9e3659` |
+| `cpp-exports-x86_64.so` | ELF64 shared object, x86-64, built from `tests/fixtures/cpp/exports.cpp` with g++ 13.3.0 `-std=c++17 -O1 -fPIC -shared`; Itanium-mangled exports for the G10-T4 demangled-name output | `b7014fee68c0e9e62000358a526748fb12a008cb5303c1b2dba3d9243d4f3661` |
 | `tiny-pe-x86_64.exe` | PE32+, x86-64, two sections, one export, one `KERNEL32.dll` import | `486ea4e73369d4c2f0ce16a23ee8e95a0a5ce22cbff2e225a7b29c45715760e2` |
 | `tiny-pe-i386.exe` | PE32, i386, two sections, one export, one `KERNEL32.dll` import | `13a396d1daa25e23a93208ad7e978ce85fabaf32d558cc28c0c66fbeb942e0ff` |
 | `tiny-macho-arm64` | Mach-O 64 `MH_EXECUTE`, arm64, `__TEXT,__text`, `LC_MAIN`, `LC_SYMTAB` | `fc5e8b09d25a30cdd1abc9071d64abaf0429381be3989b7f642291003847490f` |

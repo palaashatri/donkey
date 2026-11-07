@@ -653,6 +653,10 @@ struct Lifter {
         source = value;
       }
     }
+    if (mnemonic == "bsf" || mnemonic == "bsr") {
+      lift_bit_scan(block, instruction, destination, source);
+      return;
+    }
     IrStatement statement;
     if (mnemonic == "popcnt") {
       statement.op = IrOp::PopCount;
@@ -667,6 +671,160 @@ struct Lifter {
     statement.a = source;
     statement.width = destination.width;
     statement.source_address = instruction.address;
+    push(block, std::move(statement));
+  }
+
+  /// The compare or test whose flags are still current at the end of `previous`,
+  /// a block that falls through into the next one. Scanning back from its end,
+  /// the first instruction that writes flags must be a two-operand cmp or test of
+  /// registers and immediates. Everything after it must keep the flags and must
+  /// not write a register the compare reads. Returns its index in
+  /// analysis.instructions.
+  std::optional<std::uint32_t> carried_flag_writer(const BasicBlock& previous) const {
+    const std::uint32_t first = previous.first_instruction;
+    const std::uint32_t end = previous.first_instruction + previous.instruction_count;
+    if (previous.instruction_count == 0 || end > analysis.instructions.size()) {
+      return std::nullopt;
+    }
+    std::optional<std::uint32_t> writer;
+    for (std::uint32_t i = end; i-- > first;) {
+      const Instruction& candidate = analysis.instructions[i];
+      if (candidate.classification == InstructionClass::ConditionalJump) {
+        continue;  // reads the flags and writes none; it can only end the block
+      }
+      if (candidate.classification != InstructionClass::Other) {
+        return std::nullopt;
+      }
+      if (!preserves_flags(candidate.mnemonic)) {
+        writer = i;
+        break;
+      }
+    }
+    if (!writer) {
+      return std::nullopt;
+    }
+    const Instruction& compare = analysis.instructions[*writer];
+    const bool fp_compare = is_sse_compare(compare.mnemonic);
+    if ((!fp_compare && compare.mnemonic != "cmp" && compare.mnemonic != "test") ||
+        compare.structured_operands.size() != 2) {
+      return std::nullopt;
+    }
+    if (fp_compare && !is_xmm(compare.structured_operands[0])) {
+      return std::nullopt;
+    }
+    std::vector<std::string> read;
+    // A memory operand of an FP compare is re-read at the start of the next block. That is
+    // exact only when nothing between the compare and the block's end can store to memory or
+    // write the address registers: the compare must be followed by the terminator alone.
+    bool memory_operand = false;
+    for (const Operand& operand : compare.structured_operands) {
+      if (operand.kind == OperandKind::Register) {
+        read.push_back(internal::register_family(operand.reg));
+      } else if (operand.kind == OperandKind::Memory && fp_compare) {
+        memory_operand = true;
+        if (!operand.memory.base.empty()) {
+          read.push_back(internal::register_family(operand.memory.base));
+        }
+        if (!operand.memory.index.empty()) {
+          read.push_back(internal::register_family(operand.memory.index));
+        }
+      } else if (operand.kind != OperandKind::Immediate) {
+        return std::nullopt;  // a memory operand could change before the next block
+      }
+    }
+    for (std::uint32_t i = *writer + 1; i < end; ++i) {
+      const Instruction& later = analysis.instructions[i];
+      if (later.classification == InstructionClass::ConditionalJump && i + 1 == end) {
+        continue;  // the block's terminator
+      }
+      if (memory_operand) {
+        return std::nullopt;
+      }
+      // cdq, cqo, cdqe, cwde, cbw and cwd write rax or rdx without an operand.
+      if (later.classification != InstructionClass::Other || !preserves_flags(later.mnemonic) ||
+          later.mnemonic == "cdq" || later.mnemonic == "cqo" || later.mnemonic == "cdqe" ||
+          later.mnemonic == "cwde" || later.mnemonic == "cbw" || later.mnemonic == "cwd") {
+        return std::nullopt;
+      }
+      const auto reads = [&read](const std::string& family) {
+        return std::find(read.begin(), read.end(), family) != read.end();
+      };
+      if ((later.mnemonic == "push" || later.mnemonic == "pop") && reads("rsp")) {
+        return std::nullopt;
+      }
+      if (!later.structured_operands.empty() &&
+          later.structured_operands[0].kind == OperandKind::Register &&
+          reads(internal::register_family(later.structured_operands[0].reg))) {
+        return std::nullopt;
+      }
+    }
+    return writer;
+  }
+
+  /// True when `block` has no predecessor but `previous`, the block just before it
+  /// in address order, and `previous` reaches it by falling through: either it does
+  /// not end in a branch, or it ends in a conditional branch whose not-taken edge
+  /// is `block`. An unresolved indirect branch in the function could reach any
+  /// block, so it rules this out. Calls and jumps from elsewhere count as
+  /// predecessors, which is conservative.
+  bool single_fallthrough_predecessor(const BasicBlock& previous, const BasicBlock& block) const {
+    if (function.estimated) {
+      return false;
+    }
+    const Instruction& last =
+        analysis.instructions[previous.first_instruction + previous.instruction_count - 1];
+    std::size_t predecessors = 0;
+    bool from_previous = false;
+    for (const CfgEdge& edge : analysis.cfg.edges) {
+      if (edge.to != block.address) {
+        continue;
+      }
+      ++predecessors;
+      if (edge.from == last.address && edge.kind == CfgEdgeKind::ConditionalFalse) {
+        from_previous = true;
+      }
+    }
+    if (last.classification == InstructionClass::Other) {
+      ++predecessors;  // a fall-through has no CFG edge
+      from_previous = true;
+    } else if (last.classification != InstructionClass::ConditionalJump) {
+      return false;
+    }
+    return from_previous && predecessors == 1;
+  }
+
+  /// bsf and bsr: the index of the lowest or highest set bit. For a nonzero source
+  /// they are tzcnt and width-1 minus lzcnt. For a zero source the architecture
+  /// leaves the destination undefined, and this lifter does not model that case,
+  /// so the function is Partial. ZF is not modelled either, so the flags are
+  /// unknown afterwards.
+  void lift_bit_scan(IrBlock& block, const Instruction& instruction, const IrOperand& destination,
+                     const IrOperand& source) {
+    mark_partial(
+        "bsf and bsr with a zero source leave the destination undefined; that case is not "
+        "modelled");
+    IrStatement statement;
+    statement.dest = destination;
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    if (instruction.mnemonic == "bsf") {
+      statement.op = IrOp::CountTrailingZeros;
+      statement.a = source;
+      push(block, std::move(statement));
+      return;
+    }
+    const IrOperand leading = temp_operand(temporary_id(), destination.width);
+    IrStatement count;
+    count.op = IrOp::CountLeadingZeros;
+    count.dest = leading;
+    count.a = source;
+    count.width = destination.width;
+    count.source_address = instruction.address;
+    push(block, std::move(count));
+    statement.op = IrOp::Sub;
+    statement.a = IrOperand::constant_value(static_cast<std::uint64_t>(destination.width) * 8U - 1U,
+                                            destination.width);
+    statement.b = leading;
     push(block, std::move(statement));
   }
 
@@ -1795,8 +1953,31 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
-    // Flags are only followed within a block.
+    // Flags carry from the previous block into this one when this block has no
+    // other predecessor: the compare that set them is repeated here, from the
+    // same operands, before anything else in the block.
+    const Lifter::FlagsState entering = lifter.flags_state;
     lifter.flags_state = Lifter::FlagsState::Unknown;
+    const std::uint32_t block_index = lifter.block_by_address.at(block->address);
+    if (block_index > 0 && entering != Lifter::FlagsState::Unknown &&
+        lifter.out.blocks.size() == block_index) {
+      const BasicBlock& previous = *lifter.blocks[block_index - 1];
+      if (previous.end_address == block->address) {
+        const auto writer = lifter.carried_flag_writer(previous);
+        if (writer && lifter.single_fallthrough_predecessor(previous, *block)) {
+          const Instruction& compare = analysis.instructions[*writer];
+          if (compare.mnemonic == "cmp") {
+            lifter.lift_compare(out_block, compare);
+            lifter.flags_state = entering;
+          } else if (compare.mnemonic == "test") {
+            lifter.lift_test(out_block, compare);
+            lifter.flags_state = entering;
+          } else if (lifter.lift_scalar_sse(out_block, compare)) {
+            lifter.flags_state = entering;  // the FP comparison sets the flags it reads
+          }
+        }
+      }
+    }
 
     // The condition the next flag reader in this block uses, if one reads the
     // flags written by instruction `i` before anything else writes them.
@@ -1992,8 +2173,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.flags_state = Lifter::FlagsState::Exact;
         keeps_flags = true;
       } else if (mnemonic == "popcnt" || mnemonic == "tzcnt" || mnemonic == "lzcnt" ||
-                 mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||
-                 mnemonic == "btr" || mnemonic == "btc") {
+                 mnemonic == "bsf" || mnemonic == "bsr" || mnemonic == "bswap" ||
+                 mnemonic == "bt" || mnemonic == "bts" || mnemonic == "btr" || mnemonic == "btc") {
         lifter.lift_bit_operation(out_block, instruction);
         // bswap leaves the flags alone; the bit tests set CF, so their state is kept.
         keeps_flags = mnemonic == "bswap" || mnemonic == "bt" || mnemonic == "bts" ||

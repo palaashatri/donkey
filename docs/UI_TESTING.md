@@ -99,7 +99,8 @@ Flow: `frames N`, `wait_idle [ms]`, `measure LABEL FRAMES`,
 `end_require`, `dump_nav`, `quit`.
 
 Assertions: `assert_selected ADDRESS|NAME`,
-`assert_annotation rename|comment ADDRESS|NAME TEXT|-`,
+`assert_annotation rename|comment|code|data ADDRESS|NAME TEXT|-` (`-` means the
+annotation is absent; `data` takes the DataRange text, `ELEMENT:COUNT`),
 `assert_focus WINDOW`, `assert_text_input 0|1`, `assert_ime_rect`,
 `assert_scale F`, `assert_window_on_display`, `assert_graphics_resets N`,
 `assert_floating WINDOW`, `assert_docked WINDOW`,

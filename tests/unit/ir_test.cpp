@@ -504,6 +504,85 @@ TEST(Ir, StructuresWhileLoop) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
+// rax = 0; while (rax < 10) { rbx += 2; rax += 1; }: the store before the header is the
+// init and the last statement of the latch is the step, so the loop prints as a for.
+TEST(Ir, StructuresCountedLoopAsFor) {
+  IrFunction function = branch_function();
+  function.blocks.resize(4);
+  function.blocks[0].statements.push_back(assign_register_statement("rax", 0));
+  function.blocks[0].statements.push_back(branch_statement(1));
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("rax", 8);
+  compare.b = IrOperand::constant_value(10, 8);
+  compare.condition = IrCondition::SignedGreaterEqual;
+  compare.width = 8;
+  function.blocks[1].statements.push_back(compare);
+  function.blocks[1].statements.push_back(conditional_branch_statement(3));
+  function.blocks[1].statements.back().condition = IrCondition::SignedGreaterEqual;
+  IrStatement body;
+  body.op = IrOp::Add;
+  body.dest = IrOperand::register_ref("rbx", 8);
+  body.a = IrOperand::register_ref("rbx", 8);
+  body.b = IrOperand::constant_value(2, 8);
+  body.width = 8;
+  IrStatement step;
+  step.op = IrOp::Add;
+  step.dest = IrOperand::register_ref("rax", 8);
+  step.a = IrOperand::register_ref("rax", 8);
+  step.b = IrOperand::constant_value(1, 8);
+  step.width = 8;
+  function.blocks[2].statements.push_back(body);
+  function.blocks[2].statements.push_back(step);
+  function.blocks[2].statements.push_back(branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("for (rax = 0x0; rax < 0xa; rax = rax + 0x1) {"), std::string::npos) << code;
+  EXPECT_NE(code.find("rbx = rbx + 0x2;"), std::string::npos) << code;
+  const std::size_t header_init = code.find("rax = 0x0;");
+  EXPECT_EQ(code.find("rax = 0x0;", header_init + 1), std::string::npos)
+      << "the init is printed once, in the header: " << code;
+  EXPECT_EQ(code.find("while ("), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+// The same loop when the preheader's last store is to another register: there is no init
+// for the header to print, so the loop keeps its while form.
+TEST(Ir, LoopWithoutAnInitStaysWhile) {
+  IrFunction function = branch_function();
+  function.blocks.resize(4);
+  function.blocks[0].statements.push_back(assign_register_statement("rdx", 0));
+  function.blocks[0].statements.push_back(branch_statement(1));
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref("rax", 8);
+  compare.b = IrOperand::constant_value(10, 8);
+  compare.condition = IrCondition::SignedGreaterEqual;
+  compare.width = 8;
+  function.blocks[1].statements.push_back(compare);
+  function.blocks[1].statements.push_back(conditional_branch_statement(3));
+  function.blocks[1].statements.back().condition = IrCondition::SignedGreaterEqual;
+  IrStatement step;
+  step.op = IrOp::Add;
+  step.dest = IrOperand::register_ref("rax", 8);
+  step.a = IrOperand::register_ref("rax", 8);
+  step.b = IrOperand::constant_value(1, 8);
+  step.width = 8;
+  function.blocks[2].statements.push_back(step);
+  function.blocks[2].statements.push_back(branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("while (rax < 0xa) {"), std::string::npos) << code;
+  EXPECT_EQ(code.find("for ("), std::string::npos) << code;
+  EXPECT_NE(code.find("rdx = 0x0;"), std::string::npos) << code;
+}
+
 TEST(Ir, StructuresDoWhileLoop) {
   IrFunction function = branch_function();
   function.blocks.resize(3);
@@ -923,6 +1002,139 @@ TEST(Ir, UnsupportedVectorStatementDoesNotMakeAVectorRegisterAnArgument) {
     EXPECT_NE(parameter.abi_register.rfind("v", 0), 0U) << parameter.abi_register;
   }
   EXPECT_TRUE(function.parameters.empty());
+}
+
+namespace {
+
+IrStatement compare_statement(const char* reg, std::uint64_t value, IrCondition condition) {
+  IrStatement compare;
+  compare.op = IrOp::Compare;
+  compare.a = IrOperand::register_ref(reg, 8);
+  compare.b = IrOperand::constant_value(value, 8);
+  compare.condition = condition;
+  compare.width = 8;
+  return compare;
+}
+
+IrStatement cond_branch_statement(IrCondition condition, std::uint32_t target) {
+  IrStatement branch;
+  branch.op = IrOp::CondBranch;
+  branch.condition = condition;
+  branch.a = IrOperand::register_ref("rax", 8);
+  branch.b = IrOperand::block_ref(target);
+  branch.width = 8;
+  return branch;
+}
+
+}  // namespace
+
+TEST(Ir, BranchToTheLoopExitInsideTheBodyIsBreak) {
+  // while (rax != 0) { if (rdi != 7) { rax = rax - 1; } else { break; } } return rax;
+  // Block 2 leaves the loop through an unconditional branch to the exit (block 4).
+  IrFunction function;
+  function.address = 0x2000;
+  function.name = "until_seven";
+  function.blocks.push_back(make_block(0x2000));  // 0: while (rax != 0)
+  function.blocks.push_back(make_block(0x2008));  // 1: if (rdi != 7)
+  function.blocks.push_back(make_block(0x2010));  // 2: break
+  function.blocks.push_back(make_block(0x2018));  // 3: rax = rax - 1
+  function.blocks.push_back(make_block(0x2028));  // 4: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rax", 0, IrCondition::Equal));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::Equal, 4));
+
+  function.blocks[1].statements.push_back(compare_statement("rdi", 7, IrCondition::Equal));
+  function.blocks[1].statements.push_back(cond_branch_statement(IrCondition::NotEqual, 3));
+
+  function.blocks[2].statements.push_back(branch_statement(4));
+
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rax", 8);
+  decrement.a = IrOperand::register_ref("rax", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[3].statements.push_back(decrement);
+  function.blocks[3].statements.push_back(branch_statement(0));
+
+  function.blocks[4].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("while (rax != 0x0) {"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
+  // if (rdi < 7) { skip } else { rax = 1; } return rax;  The branch skips the
+  // assignment, so the printed guard is the complement of the comparison.
+  IrFunction function;
+  function.address = 0x3000;
+  function.name = "clamp";
+  function.blocks.push_back(make_block(0x3000));  // 0: compare and branch past block 1
+  function.blocks.push_back(make_block(0x3008));  // 1: rax = 1
+  function.blocks.push_back(make_block(0x3010));  // 2: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rdi", 7, IrCondition::SignedLess));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::SignedLess, 2));
+
+  IrStatement assign;
+  assign.op = IrOp::Assign;
+  assign.dest = IrOperand::register_ref("rax", 8);
+  assign.a = IrOperand::constant_value(1, 8);
+  assign.width = 8;
+  function.blocks[1].statements.push_back(assign);
+  function.blocks[1].statements.push_back(branch_statement(2));
+
+  function.blocks[2].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("if (rdi >= 0x7) {"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
+}
+
+TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
+  // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
+  // return rax. A `break` inside the switch would leave the switch, not the loop, so
+  // the body is refused and the function is shown with labels.
+  IrFunction function;
+  function.address = 0x4000;
+  function.name = "switch_exit";
+  function.blocks.push_back(make_block(0x4000));  // 0: while (rax != 0)
+  function.blocks.push_back(make_block(0x4008));  // 1: switch (eax)
+  function.blocks.push_back(make_block(0x4010));  // 2: case 1: leave
+  function.blocks.push_back(make_block(0x4018));  // 3: default: rax -= 1
+  function.blocks.push_back(make_block(0x4028));  // 4: return rax
+
+  function.blocks[0].statements.push_back(compare_statement("rax", 0, IrCondition::Equal));
+  function.blocks[0].statements.push_back(cond_branch_statement(IrCondition::Equal, 4));
+
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.dest = IrOperand::register_ref("eax", 4);
+  sw.a = IrOperand::block_ref(3);  // default
+  sw.width = 4;
+  sw.switch_cases.push_back(IrSwitchCase{0x1, 2});
+  function.blocks[1].statements.push_back(sw);
+
+  function.blocks[2].statements.push_back(branch_statement(4));
+
+  IrStatement decrement;
+  decrement.op = IrOp::Sub;
+  decrement.dest = IrOperand::register_ref("rax", 8);
+  decrement.a = IrOperand::register_ref("rax", 8);
+  decrement.b = IrOperand::constant_value(1, 8);
+  decrement.width = 8;
+  function.blocks[3].statements.push_back(decrement);
+  function.blocks[3].statements.push_back(branch_statement(0));
+
+  function.blocks[4].statements.push_back(return_statement());
+
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
 
 TEST(Ir, SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto) {
@@ -2221,6 +2433,91 @@ TEST(Ir, VerifierRejectsDivideWithoutItsDivisor) {
 }
 
 // ---- G02-T3: population count, bit scans, byte swap, bit test ----
+
+// The flags of a compare carry into a fall-through block that has no other
+// predecessor, so `setg` after `cmp`/`je` is exact there and the function is
+// Complete. The compare is repeated at the start of that block.
+TEST(Ir, FlagsFromSinglePredecessorAreExact) {
+  donkey::IrFunction
+      carried;  // cmp rdi, rsi; je L; setg al; movzx eax, al; ret; L: mov eax, 42; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x39, 0xf7, 0x74, 0x07, 0x0f, 0x9f, 0xc0, 0x0f, 0xb6, 0xc0,
+                               0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                              carried));
+  EXPECT_FALSE(carried.partial);
+  EXPECT_EQ(run_x86_64(carried, {5, 3}), 1U);
+  EXPECT_EQ(run_x86_64(carried, {3, 5}), 0U);
+  EXPECT_EQ(run_x86_64(carried, {~0ULL, 0}), 0U);  // -1 > 0 is false, signed
+  EXPECT_EQ(run_x86_64(carried, {3, 3}), 42U);     // equal: the je branch
+
+  // The same shape, but rdi is rewritten between the compare and the branch: the
+  // operands the repeated compare would read are not the ones that set the flags.
+  donkey::IrFunction rewritten;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x39, 0xf7, 0x48, 0xc7, 0xc7, 0x01, 0x00, 0x00, 0x00, 0x74, 0x07, 0x0f,
+                       0x9f, 0xc0, 0x0f, 0xb6, 0xc0, 0xc3, 0xb8, 0x2a, 0x00, 0x00, 0x00, 0xc3},
+                      rewritten));
+  EXPECT_TRUE(rewritten.partial);
+}
+
+// `sp` is the 16-bit name of the stack pointer. After `mov ax, sp; cmp sp, ax`,
+// the push changes the value the compare read, so its flags cannot be carried
+// into the fall-through block.
+TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
+  donkey::IrFunction function;  // mov ax, sp; cmp sp, ax; push rdi; jne L; setne al; L: ret
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x89, 0xe0, 0x66, 0x39, 0xc4, 0x57, 0x75, 0x03, 0x0f, 0x95, 0xc0, 0xc3}, function));
+  EXPECT_TRUE(function.partial);
+}
+
+// `ucomisd xmm0, [rsp+8]` sets the flags for a jne in its block; the `jp` in the next block
+// (its only predecessor is that fall-through) reads the same flags. The compare is repeated
+// there, with its memory operand, which is exact: nothing between the compare and the block's
+// end can store to memory or write the address register. (rsp is the stack pointer, not a
+// parameter, so the only parameter is the xmm0 value.)
+TEST(Ir, X86FpCompareWithAMemoryOperandCarriesIntoASinglePredecessorBlock) {
+  donkey::IrFunction function;  // ucomisd xmm0, [rsp+8]; jne L; jp L; mov eax, 1; ret; L: ...
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x0f, 0x2e, 0x44, 0x24, 0x08, 0x75, 0x0c, 0x7a, 0x0a, 0xb8, 0x01, 0x00,
+       0x00, 0x00, 0xc3, 0x90, 0x90, 0x90, 0x90, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3},
+      function));
+  EXPECT_FALSE(function.partial);
+}
+
+// The same shape with a store to the compared memory between the compare and the jne. The
+// repeated compare would read the stored value, so the flags are not carried and the `jp`
+// stays Partial.
+TEST(Ir, X86FpCompareIsNotCarriedPastAStore) {
+  donkey::IrFunction function;  // ucomisd xmm0, [rsp+8]; mov [rsp+8], eax; jne L; jp L; ...
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x0f, 0x2e, 0x44, 0x24, 0x08, 0x89, 0x44, 0x24, 0x08, 0x75, 0x0c, 0x7a, 0x0a, 0xb8,
+       0x01, 0x00, 0x00, 0x00, 0xc3, 0x90, 0x90, 0x90, 0x90, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3},
+      function));
+  EXPECT_TRUE(function.partial);
+}
+
+// bsf and bsr for a nonzero source are the lowest and highest set bit. The
+// result is Partial, because the destination is undefined for a zero source.
+TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {
+  donkey::IrFunction forward;  // bsf rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbc, 0xc7, 0xc3}, forward));
+  EXPECT_TRUE(forward.partial);
+  EXPECT_EQ(run_x86_64(forward, {0x18}), 3U);
+  EXPECT_EQ(run_x86_64(forward, {1ULL << 40}), 40U);
+
+  donkey::IrFunction reverse;  // bsr rax, rdi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x0f, 0xbd, 0xc7, 0xc3}, reverse));
+  EXPECT_TRUE(reverse.partial);
+  EXPECT_EQ(run_x86_64(reverse, {0x18}), 4U);
+  EXPECT_EQ(run_x86_64(reverse, {1ULL << 40}), 40U);
+
+  donkey::IrFunction forward32;  // bsf eax, edi; ret: only the low 32 bits are read
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbc, 0xc7, 0xc3}, forward32));
+  EXPECT_EQ(run_x86_64(forward32, {0x100000008ULL}), 3U);
+
+  donkey::IrFunction reverse32;  // bsr eax, edi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x0f, 0xbd, 0xc7, 0xc3}, reverse32));
+  EXPECT_EQ(run_x86_64(reverse32, {0xffffffffULL}), 31U);
+}
 
 TEST(Ir, X86PopcntTzcntLzcntAndBswapMatchTheInstructions) {
   // popcnt rax, rdi; ret

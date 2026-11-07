@@ -168,8 +168,21 @@ const char* stop_reason_name(StopReason reason) noexcept {
       return "UserPause";
     case StopReason::Exited:
       return "Exited";
+    case StopReason::Watchpoint:
+      return "Watchpoint";
   }
   return "None";
+}
+
+Result<Watchpoint> DebugAdapter::set_watchpoint(std::uint64_t /*address*/, std::uint8_t /*length*/,
+                                                WatchKind /*kind*/) {
+  return make_error<Watchpoint>(Status::Unsupported, "debug.watchpoints_unsupported",
+                                "hardware watchpoints are not implemented on this host or adapter");
+}
+
+Result<bool> DebugAdapter::remove_watchpoint(std::uint64_t /*id*/) {
+  return make_error<bool>(Status::Unsupported, "debug.watchpoints_unsupported",
+                          "hardware watchpoints are not implemented on this host or adapter");
 }
 
 Result<StopInfo> DebugAdapter::wait_for_event(int timeout_ms) {

@@ -24,6 +24,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
@@ -1157,6 +1158,112 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
 }
 #endif
 
+// G04-T4: the parameters of a function in a -g binary take their names from the debug
+// information. The module fixture's donkey_module_answer(int value) is built at -O0 -g.
+TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_TEST_MODULE_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& candidate : analysis.value().functions) {
+    if (candidate.name == "donkey_module_answer") {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  const donkey::DebugFunction* debug = info.value().function_at(function->address);
+  ASSERT_NE(debug, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+
+  donkey::IrFunction named = lifted.value();
+  auto before = donkey::format_pseudocode(named);
+  ASSERT_TRUE(before.has_value());
+  EXPECT_NE(before.value().find("(u32 a0)"), std::string::npos) << before.value();
+
+  auto applied = donkey::apply_debug_parameter_names(named, *debug, info.value());
+  ASSERT_TRUE(applied.has_value())
+      << applied.diagnostic().code << ": " << applied.diagnostic().message;
+  auto text = donkey::format_pseudocode(named);
+  ASSERT_TRUE(text.has_value());
+  // The width spelling (u32) is the decompiler's; the name is the debug information's.
+  EXPECT_NE(text.value().find("donkey_module_answer(u32 value)"), std::string::npos)
+      << text.value();
+  EXPECT_EQ(text.value().find("a0"), std::string::npos) << text.value();
+
+  // A debug function that does not match the code (one parameter too many) is refused,
+  // and the function keeps its inferred names.
+  donkey::DebugFunction extra = *debug;
+  extra.parameters.push_back(donkey::DebugParameter{"extra", debug->parameters.front().type});
+  donkey::IrFunction unchanged = lifted.value();
+  auto refused = donkey::apply_debug_parameter_names(unchanged, extra, info.value());
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "ir.debug_names_arity");
+  auto kept = donkey::format_pseudocode(unchanged);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(kept.value(), before.value());
+}
+
+#if defined(DONKEY_TEST_LOCALS_PATH)
+// At -O0 the parameters and locals of donkey_locals_sum are stored at rsp offsets the
+// frame adjustment moves: the debug information's CFA offsets name them (G04-T4). A function
+// whose debug information lists no slots is unchanged.
+TEST(DecompilerCorpus, FrameSlotsTakeTheNamesOfTheDebugInformation) {
+  auto loaded = donkey::load_binary(DONKEY_TEST_LOCALS_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = nullptr;
+  for (const auto& candidate : analysis.value().functions) {
+    if (candidate.name == "donkey_locals_sum") {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  const donkey::DebugFunction* debug = info.value().function_at(function->address);
+  ASSERT_NE(debug, nullptr);
+  ASSERT_EQ(debug->stack_slots.size(), 4U);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+
+  donkey::IrFunction named = lifted.value();
+  auto before = donkey::format_pseudocode(named);
+  ASSERT_TRUE(before.has_value());
+  // GCC stores the locals at rsp - 0x8 .. 0x18; Clang at rsp - 0x4 .. 0x10. Both are frame slots.
+  EXPECT_NE(before.value().find("*(u32 *)(rsp - "), std::string::npos) << before.value();
+
+  auto applied = donkey::apply_debug_stack_names(named, *debug, info.value());
+  ASSERT_TRUE(applied.has_value()) << applied.diagnostic().code;
+  EXPECT_TRUE(applied.value());
+  auto text = donkey::format_pseudocode(named);
+  ASSERT_TRUE(text.has_value());
+  // The parameter stores and the loads and stores of the locals use the slot names.
+  EXPECT_NE(text.value().find("first = (u32)rdi;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("second = (u32)rsi;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("total = (u32)rax;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("scaled = (u32)rax;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("*(u32 *)(rsp - "), std::string::npos) << text.value();
+
+  // With no slots in the debug information nothing is named, and the text is unchanged.
+  donkey::DebugFunction bare = *debug;
+  bare.stack_slots.clear();
+  donkey::IrFunction unchanged = lifted.value();
+  auto none = donkey::apply_debug_stack_names(unchanged, bare, info.value());
+  ASSERT_TRUE(none.has_value());
+  EXPECT_FALSE(none.value());
+  auto kept = donkey::format_pseudocode(unchanged);
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(kept.value(), before.value());
+}
+#endif
 // G05-T3: a prototype applied to a recovered function names the structure and its
 // members, and types the parameter. Printing shows p->z, and the function still
 // computes the same value, because a prototype changes names and types only.

@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -164,6 +165,15 @@ struct Loop {
   bool negate_condition = false;
 };
 
+/// A while loop that prints as `for (init; test; step)`: the init is statement `init_index`
+/// of the block before the header, the step is statement `step_index` of the latch.
+struct ForPlan {
+  BlockId preheader = 0;
+  std::size_t init_index = 0;
+  BlockId latch = 0;
+  std::size_t step_index = 0;
+};
+
 struct Structurer {
   explicit Structurer(const IrFunction& function) : function_(function) {}
 
@@ -187,6 +197,7 @@ struct Structurer {
     if (!find_loops()) {
       return std::nullopt;
     }
+    plan_for_loops();
     if (!region_closed(0, count)) {
       return std::nullopt;
     }
@@ -208,18 +219,121 @@ struct Structurer {
     lines_.push_back(StructuredLine{std::move(indented), source_address});
   }
 
+  static std::uint64_t statement_key(BlockId block, std::size_t index) {
+    return (static_cast<std::uint64_t>(block) << 32U) | static_cast<std::uint64_t>(index);
+  }
+
   void emit_statements(BlockId block, bool include_terminator) {
     const IrBlock& body = function_.blocks[block];
     const std::size_t limit = include_terminator || body.statements.empty()
                                   ? body.statements.size()
                                   : body.statements.size() - 1;
     for (std::size_t index = 0; index < limit; ++index) {
+      if (in_header_.count(statement_key(block, index)) != 0) {
+        continue;  // printed in the header of the `for` loop it steps
+      }
       const IrStatement* previous = flags_producer(body, index);
       const std::string text = render_statement(function_, body.statements[index], previous);
       if (!text.empty()) {
         line(text, body.statements[index].source_address);
+        line_of_[statement_key(block, index)] = lines_.size() - 1;
       }
     }
+  }
+
+  /// Finds the while loops that can print as `for`: the header's only predecessors are the
+  /// block before it and the latch (the loop's last block, which branches back to the
+  /// header), the block before the header ends by entering the header and last assigns the
+  /// counter, and the latch's last statement before its branch steps the same counter by a
+  /// constant. Then no path skips the step and no path runs the init twice, so the step
+  /// may be printed in the header. Nothing is changed here; emit_counted_loop does that.
+  void plan_for_loops() {
+    for (const auto& [header, loop] : loops_) {
+      if (loop.is_do_while || header == 0 || loop.exit < header + 2) {
+        continue;
+      }
+      const BlockId latch = loop.exit - 1;
+      const IrBlock& preheader = function_.blocks[header - 1];
+      const IrBlock& latch_block = function_.blocks[latch];
+      const IrBlock& header_block = function_.blocks[header];
+      if (preheader.statements.size() < 2 || latch_block.statements.size() < 2 ||
+          header_block.statements.empty()) {
+        continue;
+      }
+      const auto& entries = graph_.predecessors[header];
+      if (entries.size() != 2 ||
+          std::find(entries.begin(), entries.end(), header - 1) == entries.end() ||
+          std::find(entries.begin(), entries.end(), latch) == entries.end()) {
+        continue;
+      }
+      const IrStatement& enter = preheader.statements.back();
+      const IrStatement& back = latch_block.statements.back();
+      if (enter.op != IrOp::Branch || enter.a.block != header || back.op != IrOp::Branch ||
+          back.a.block != header) {
+        continue;
+      }
+      const std::size_t init_index = preheader.statements.size() - 2;
+      const std::size_t step_index = latch_block.statements.size() - 2;
+      const IrStatement& init = preheader.statements[init_index];
+      const IrStatement& step = latch_block.statements[step_index];
+      if (init.op != IrOp::Assign || init.dest.kind != IrOperandKind::Register ||
+          (step.op != IrOp::Add && step.op != IrOp::Sub) ||
+          step.dest.kind != IrOperandKind::Register || step.dest.reg != init.dest.reg ||
+          step.a.kind != IrOperandKind::Register || step.a.reg != step.dest.reg ||
+          step.b.kind != IrOperandKind::Constant) {
+        continue;
+      }
+      // The header's test must read flags set in the header, so the step's flags do not
+      // reach it.
+      if (flags_producer(header_block, header_block.statements.size() - 1) == nullptr) {
+        continue;
+      }
+      for_plans_.emplace(header, ForPlan{header - 1, init_index, latch, step_index});
+    }
+  }
+
+  /// Prints a planned `for` loop, or returns false when the init is not the last line
+  /// emitted before the loop (so the rendering cannot move it). Nothing is changed unless
+  /// it returns true.
+  bool emit_counted_loop(const Loop& loop, const ForPlan& plan) {
+    const auto init_line = line_of_.find(statement_key(plan.preheader, plan.init_index));
+    if (init_line == line_of_.end() || init_line->second + 1 != lines_.size()) {
+      return false;
+    }
+    const IrBlock& preheader = function_.blocks[plan.preheader];
+    const IrBlock& latch_block = function_.blocks[plan.latch];
+    const IrStatement& init = preheader.statements[plan.init_index];
+    const IrStatement& step = latch_block.statements[plan.step_index];
+    std::string init_text =
+        render_statement(function_, init, flags_producer(preheader, plan.init_index));
+    std::string step_text =
+        render_statement(function_, step, flags_producer(latch_block, plan.step_index));
+    if (init_text.size() < 2 || step_text.size() < 2 || init_text.back() != ';' ||
+        step_text.back() != ';') {
+      return false;
+    }
+    init_text.pop_back();
+    step_text.pop_back();
+    const std::string condition = condition_of(loop.header, loop.negate_condition);
+
+    // The init line comes out of the body above; the header prints the init instead.
+    lines_.pop_back();
+    out_.clear();
+    for (const StructuredLine& emitted : lines_) {
+      out_ += emitted.text;
+      out_ += '\n';
+    }
+    const std::uint64_t step_key = statement_key(plan.latch, plan.step_index);
+    in_header_.insert(step_key);
+    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address);
+    ++indent_;
+    frames_.push_back(LoopFrame{loop.exit, 0});
+    emit_range(loop.header + 1, loop.exit, loop.header);
+    frames_.pop_back();
+    --indent_;
+    line("}");
+    in_header_.erase(step_key);
+    return true;
   }
 
   bool find_loops() {
@@ -256,22 +370,32 @@ struct Structurer {
     }
 
     for (auto& [header, body] : bodies) {
-      std::vector<BlockId> exits;
-      for (BlockId block = 0; block < count; ++block) {
-        if (!body.test(block)) {
-          continue;
+      const std::vector<BlockId> exits = outside_successors(body);
+      BlockId exit = kNoBlock;
+      if (exits.size() == 1) {
+        exit = exits.front();
+      } else if (exits.size() > 1) {
+        // A `break` leaves the loop from a block that no path back to the header passes
+        // through, so the natural body misses it. The loop's own test names the exit, and
+        // the blocks the header dominates below that exit belong to the body.
+        exit = test_exit(header, body, exits);
+        if (exit == kNoBlock) {
+          return false;
         }
-        for (const BlockId successor : graph_.successors[block]) {
-          if (!body.test(successor) &&
-              std::find(exits.begin(), exits.end(), successor) == exits.end()) {
-            exits.push_back(successor);
+        for (BlockId block = header + 1; block < exit; ++block) {
+          if (!body.test(block) && dominators_[block].test(header)) {
+            body.set(block);
           }
         }
-      }
-      if (exits.size() != 1 || exits.front() <= header) {
+        if (outside_successors(body) != std::vector<BlockId>{exit}) {
+          return false;
+        }
+      } else {
         return false;
       }
-      const BlockId exit = exits.front();
+      if (exit <= header) {
+        return false;
+      }
       if (body.count() != exit - header) {
         return false;  // non-contiguous loop body: labels/goto are more honest
       }
@@ -290,6 +414,55 @@ struct Structurer {
       loops_.emplace(header, loop);
     }
     return true;
+  }
+
+  /// The blocks outside `body` that a block inside it branches to, in block order.
+  [[nodiscard]] std::vector<BlockId> outside_successors(const BitSet& body) const {
+    std::vector<BlockId> exits;
+    for (BlockId block = 0; block < graph_.successors.size(); ++block) {
+      if (!body.test(block)) {
+        continue;
+      }
+      for (const BlockId successor : graph_.successors[block]) {
+        if (!body.test(successor) &&
+            std::find(exits.begin(), exits.end(), successor) == exits.end()) {
+          exits.push_back(successor);
+        }
+      }
+    }
+    return exits;
+  }
+
+  /// The exit that a loop's own test leaves to, when it is one of `exits`. The tests
+  /// are the header's conditional branch and the one that ends the body's last block.
+  /// kNoBlock unless exactly one of them names an exit.
+  [[nodiscard]] BlockId test_exit(BlockId header, const BitSet& body,
+                                  const std::vector<BlockId>& exits) const {
+    std::vector<BlockId> candidates;
+    const auto consider = [&](BlockId block) {
+      const IrBlock& candidate = function_.blocks[block];
+      if (candidate.statements.empty() || candidate.statements.back().op != IrOp::CondBranch) {
+        return;
+      }
+      const IrStatement& test = candidate.statements.back();
+      for (const BlockId target :
+           {static_cast<BlockId>(test.b.block), static_cast<BlockId>(block + 1)}) {
+        const bool is_exit = std::find(exits.begin(), exits.end(), target) != exits.end();
+        if (is_exit &&
+            std::find(candidates.begin(), candidates.end(), target) == candidates.end()) {
+          candidates.push_back(target);
+        }
+      }
+    };
+    consider(header);
+    BlockId latch = header;
+    for (BlockId block = header; block < graph_.successors.size(); ++block) {
+      if (body.test(block)) {
+        latch = block;
+      }
+    }
+    consider(latch);
+    return candidates.size() == 1 ? candidates.front() : kNoBlock;
   }
 
   bool describe_loop(Loop& loop, const BitSet& body, BlockId exit) {
@@ -434,6 +607,9 @@ struct Structurer {
           }
         }
         emit_statements(index, false);
+        if (!frames_.empty()) {
+          ++frames_.back().switch_depth;
+        }
         line("switch (" + render_operand(function_, terminator.dest) + ") {");
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
@@ -475,6 +651,9 @@ struct Structurer {
         }
         --indent_;
         line("}");
+        if (!frames_.empty()) {
+          --frames_.back().switch_depth;
+        }
         if (join != kNoBlock && join <= last) {
           index = join;
         } else {
@@ -485,6 +664,17 @@ struct Structurer {
       if (terminator.op != IrOp::CondBranch) {
         if (terminator.op == IrOp::Branch) {
           emit_statements(index, false);
+          if (!frames_.empty() && terminator.a.block == frames_.back().exit) {
+            // Leaving the innermost loop from its body. Inside a switch, `break` would
+            // leave the switch instead, so that case is left to labels.
+            if (frames_.back().switch_depth > 0) {
+              ok_ = false;
+              return;
+            }
+            line("break;");
+            ++index;
+            continue;
+          }
           if (terminator.a.block == loop_header) {
             if (index + 1 != last) {
               line("continue;");
@@ -605,9 +795,15 @@ struct Structurer {
           header.statements.front().op != IrOp::Test) {
         return false;
       }
+      if (const auto plan = for_plans_.find(loop.header);
+          plan != for_plans_.end() && emit_counted_loop(loop, plan->second)) {
+        return true;
+      }
       line("while (" + condition_of(loop.header, loop.negate_condition) + ") {");
       ++indent_;
+      frames_.push_back(LoopFrame{loop.exit, 0});
       emit_range(first_body, loop.exit, loop.header);
+      frames_.pop_back();
       --indent_;
       line("}");
       return true;
@@ -627,6 +823,7 @@ struct Structurer {
     }
     line("do {");
     ++indent_;
+    frames_.push_back(LoopFrame{loop.exit, 0});
     if (latch == loop.header) {
       emit_statements(loop.header, false);
     } else {
@@ -634,6 +831,7 @@ struct Structurer {
       emit_range(loop.header + 1, latch, loop.header);
       emit_statements(latch, false);
     }
+    frames_.pop_back();
     --indent_;
     line("} while (" + condition_of(latch, loop.negate_condition) + ");");
     return true;
@@ -644,8 +842,22 @@ struct Structurer {
   std::vector<BitSet> dominators_;
   std::vector<BlockId> immediate_post_dominator_;
   std::unordered_map<BlockId, Loop> loops_;
+  /// A while loop's `for` form, keyed by its header (see plan_for_loops).
+  std::unordered_map<BlockId, ForPlan> for_plans_;
+  /// Statements printed in a `for` header rather than in the body (statement_key).
+  std::unordered_set<std::uint64_t> in_header_;
+  /// The index in lines_ of the line each statement was printed on (statement_key).
+  std::unordered_map<std::uint64_t, std::size_t> line_of_;
   std::string out_;
   std::vector<StructuredLine> lines_;
+  /// The loops being emitted, innermost last. A branch from a loop body to its exit is a
+  /// `break`; `switch_depth` counts the switches the body is inside, where `break` means
+  /// something else.
+  struct LoopFrame {
+    BlockId exit = 0;
+    int switch_depth = 0;
+  };
+  std::vector<LoopFrame> frames_;
   int indent_ = 1;
   bool ok_ = true;
 };

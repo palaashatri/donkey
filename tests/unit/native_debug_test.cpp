@@ -581,6 +581,109 @@ TEST(NativeDebug, RefusedAttachExplainsItselfAndNothingElseBreaks) {
   EXPECT_FALSE(debuggee_image().image.symbols.empty());
 }
 
+#if defined(__linux__) && defined(__x86_64__)
+// Hardware watchpoints (G14-T5). The debug registers trap after each write to the counter; the
+// stop names the watchpoint, and once it is removed the program runs to its own exit.
+TEST(NativeDebug, HardwareWatchpointStopsAfterEachWriteToACounter) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  ASSERT_TRUE(adapter->capabilities().can_hardware_watchpoints);
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t counter =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  const std::uint64_t step = translator.static_to_runtime(static_symbol("donkey_debuggee_step"));
+  const std::int32_t increment = read_int(*adapter, step);
+
+  auto watch = adapter->set_watchpoint(counter, 4, donkey::debug::WatchKind::Write);
+  ASSERT_TRUE(watch.has_value()) << watch.diagnostic().code << ": " << watch.diagnostic().message;
+  EXPECT_EQ(watch.value().address, counter);
+  EXPECT_EQ(watch.value().length, 4U);
+
+  for (int hit = 1; hit <= 3; ++hit) {
+    ASSERT_TRUE(adapter->resume().has_value());
+    auto event = adapter->wait_for_event(10000);
+    ASSERT_TRUE(event.has_value());
+    ASSERT_EQ(event.value().reason, StopReason::Watchpoint) << event.value().description;
+    EXPECT_NE(event.value().description.find("watchpoint " + std::to_string(watch.value().id)),
+              std::string::npos)
+        << event.value().description;
+    // The trap follows the store, so the counter already holds this tick's value.
+    EXPECT_EQ(read_int(*adapter, counter), hit * increment);
+  }
+
+  ASSERT_TRUE(adapter->remove_watchpoint(watch.value().id).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited) << exited.value().description;
+  EXPECT_EQ(exited.value().exit_code, 42);  // three ticks of one: the counter is 3
+}
+
+// A request that cannot be honoured is refused with its reason before any debug register is
+// written, and only four watches fit.
+TEST(NativeDebug, HardwareWatchpointRequestsAreCheckedBeforeAnySlotIsUsed) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const std::uint64_t counter =
+      adapter->address_translator().static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  using donkey::debug::WatchKind;
+
+  auto misaligned = adapter->set_watchpoint(counter + 1, 4, WatchKind::Write);
+  ASSERT_FALSE(misaligned.has_value());
+  EXPECT_EQ(misaligned.diagnostic().code, "debug.watch_alignment");
+  auto odd_length = adapter->set_watchpoint(counter, 3, WatchKind::Write);
+  ASSERT_FALSE(odd_length.has_value());
+  EXPECT_EQ(odd_length.diagnostic().code, "debug.watch_length");
+  auto unknown_kind = adapter->set_watchpoint(counter, 4, static_cast<WatchKind>(7));
+  ASSERT_FALSE(unknown_kind.has_value());
+  EXPECT_EQ(unknown_kind.diagnostic().code, "debug.watch_kind");
+  auto missing = adapter->remove_watchpoint(999);
+  ASSERT_FALSE(missing.has_value());
+  EXPECT_EQ(missing.diagnostic().code, "debug.no_watchpoint");
+
+  std::vector<std::uint64_t> ids;
+  for (std::uint64_t byte = 0; byte < 4; ++byte) {
+    auto slot = adapter->set_watchpoint(counter + byte, 1, WatchKind::ReadWrite);
+    ASSERT_TRUE(slot.has_value()) << slot.diagnostic().code << ": " << slot.diagnostic().message;
+    ids.push_back(slot.value().id);
+  }
+  auto fifth = adapter->set_watchpoint(counter + 4, 1, WatchKind::Write);
+  ASSERT_FALSE(fifth.has_value());
+  EXPECT_EQ(fifth.diagnostic().status, donkey::Status::ResourceLimit);
+  EXPECT_EQ(fifth.diagnostic().code, "debug.watch_slots");
+  for (const std::uint64_t id : ids) {
+    EXPECT_TRUE(adapter->remove_watchpoint(id).has_value());
+  }
+  ASSERT_TRUE(adapter->terminate().has_value());
+}
+
+// A running target has no debug registers to program: the request waits for a stop, and the
+// refusal says so.
+TEST(NativeDebug, HardwareWatchpointsCannotChangeWhileTheTargetRuns) {
+  REQUIRE_NATIVE();
+  auto adapter = native_adapter();
+  LaunchConfig config;
+  config.binary_path = kDebuggee;
+  config.arguments = {"spin"};
+  config.stop_at_entry = false;
+  ASSERT_TRUE(adapter->launch(config).has_value());
+  auto refused = adapter->set_watchpoint(0x1000, 4, donkey::debug::WatchKind::Write);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "debug.not_stopped");
+  ASSERT_TRUE(adapter->terminate().has_value());
+}
+#else
+// Hosts without hardware watchpoints say so and refuse, rather than set one that never traps.
+TEST(NativeDebug, HardwareWatchpointsAreUnsupportedWhereTheHostHasNone) {
+  auto adapter = native_adapter();
+  EXPECT_FALSE(adapter->capabilities().can_hardware_watchpoints);
+  auto watch = adapter->set_watchpoint(0x1000, 4, donkey::debug::WatchKind::Write);
+  ASSERT_FALSE(watch.has_value());
+  EXPECT_EQ(watch.diagnostic().status, donkey::Status::Unsupported);
+  EXPECT_EQ(watch.diagnostic().code, "debug.watchpoints_unsupported");
+}
+#endif
+
 TEST(NativeDebug, UnsupportedHostsReportNothingAndFabricateNothing) {
   if (native_supported()) {
     GTEST_SKIP() << "this host has a native debugger";

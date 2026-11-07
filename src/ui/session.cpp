@@ -36,15 +36,62 @@ std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& row
       case AnnotationKind::FunctionStart:
         annotations->functions[annotation.address] = annotation.text;
         break;
+      case AnnotationKind::CodeStart:
+        annotations->code_starts[annotation.address] = annotation.text;
+        break;
+      case AnnotationKind::DataRange:
+        annotations->data_ranges[annotation.address] = annotation.text;
+        break;
     }
   }
   return annotations;
 }
 
+/// The map that holds annotations of `kind`.
+std::unordered_map<std::uint64_t, std::string>& annotation_map(Annotations& annotations,
+                                                               AnnotationKind kind) {
+  switch (kind) {
+    case AnnotationKind::Rename:
+      return annotations.renames;
+    case AnnotationKind::Comment:
+      return annotations.comments;
+    case AnnotationKind::Bookmark:
+      return annotations.bookmarks;
+    case AnnotationKind::FunctionStart:
+      return annotations.functions;
+    case AnnotationKind::CodeStart:
+      return annotations.code_starts;
+    case AnnotationKind::DataRange:
+      return annotations.data_ranges;
+  }
+  return annotations.renames;
+}
+
+/// Whether `text` is acceptable for `kind`: a code start must say "code", and a data range
+/// must parse. An invalid edit is ignored, as the project would refuse to store it.
+bool text_valid_for(AnnotationKind kind, const std::string& text) {
+  if (kind == AnnotationKind::CodeStart) {
+    return text == "code";
+  }
+  if (kind == AnnotationKind::DataRange) {
+    std::uint64_t element_size = 0;
+    std::uint64_t count = 0;
+    return parse_data_range_text(text, element_size, count);
+  }
+  return true;
+}
+
 std::vector<Annotation> rows_from(const Annotations& annotations) {
   std::vector<Annotation> rows;
   rows.reserve(annotations.renames.size() + annotations.comments.size() +
-               annotations.bookmarks.size() + annotations.functions.size());
+               annotations.bookmarks.size() + annotations.functions.size() +
+               annotations.code_starts.size() + annotations.data_ranges.size());
+  for (const auto& [address, text] : annotations.code_starts) {
+    rows.push_back(Annotation{AnnotationKind::CodeStart, address, text});
+  }
+  for (const auto& [address, text] : annotations.data_ranges) {
+    rows.push_back(Annotation{AnnotationKind::DataRange, address, text});
+  }
   for (const auto& [address, text] : annotations.renames) {
     rows.push_back(Annotation{AnnotationKind::Rename, address, text});
   }
@@ -63,6 +110,18 @@ std::vector<Annotation> rows_from(const Annotations& annotations) {
 /// Analysis options with the user's function-boundary edits applied.
 AnalysisOptions analysis_options_for(const Annotations& annotations) {
   AnalysisOptions options = analysis_options();
+  for (const auto& [address, text] : annotations.code_starts) {
+    if (text == "code") {
+      options.user_code_starts.push_back(address);
+    }
+  }
+  for (const auto& [address, text] : annotations.data_ranges) {
+    std::uint64_t element_size = 0;
+    std::uint64_t count = 0;
+    if (parse_data_range_text(text, element_size, count)) {
+      options.user_data_ranges.push_back(UserDataRange{address, element_size, count});
+    }
+  }
   for (const auto& [address, action] : annotations.functions) {
     if (action == "define") {
       options.user_function_starts.push_back(address);
@@ -906,8 +965,19 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
     if (const auto* s = annotations_->function_edit_at(address)) {
       old_text = *s;
     }
+  } else if (kind == AnnotationKind::CodeStart) {
+    if (const auto* s = annotations_->code_start_at(address)) {
+      old_text = *s;
+    }
+  } else if (kind == AnnotationKind::DataRange) {
+    if (const auto* s = annotations_->data_range_at(address)) {
+      old_text = *s;
+    }
   }
 
+  if (!text.empty() && !text_valid_for(kind, text)) {
+    return;
+  }
   if (old_text == text) {
     return;
   }
@@ -918,10 +988,7 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
   }
 
   auto next = std::make_shared<Annotations>(*annotations_);
-  auto& target = kind == AnnotationKind::Rename     ? next->renames
-                 : kind == AnnotationKind::Comment  ? next->comments
-                 : kind == AnnotationKind::Bookmark ? next->bookmarks
-                                                    : next->functions;
+  auto& target = annotation_map(*next, kind);
   if (text.empty()) {
     target.erase(address);
   } else {
@@ -939,14 +1006,37 @@ void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const s
   after_annotation_change(kind);
 }
 
+void Session::undefine(std::uint64_t address) {
+  const auto current = annotations();
+  if (current != nullptr && current->data_range_at(address) != nullptr) {
+    set_annotation(AnnotationKind::DataRange, address, "");
+    return;
+  }
+  if (current != nullptr && current->code_start_at(address) != nullptr) {
+    set_annotation(AnnotationKind::CodeStart, address, "");
+    return;
+  }
+  std::uint64_t length = 1;
+  if (const auto analyzed = document()) {
+    for (const Instruction& instruction : analyzed->analysis.instructions) {
+      if (instruction.address == address) {
+        length = std::max<std::uint64_t>(1, instruction.length);
+        break;
+      }
+    }
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_data_range_text(0, length));
+}
+
 void Session::set_function_edit(std::uint64_t address, const std::string& action) {
   set_annotation(AnnotationKind::FunctionStart, address, action);
 }
 
 void Session::after_annotation_change(AnnotationKind kind) {
-  // Function boundaries change the analysis; every other annotation is
-  // display-only.
-  if (kind == AnnotationKind::FunctionStart) {
+  // Function boundaries, code starts and data ranges change the analysis; every
+  // other annotation is display-only.
+  if (kind == AnnotationKind::FunctionStart || kind == AnnotationKind::CodeStart ||
+      kind == AnnotationKind::DataRange) {
     reanalyze();
   }
 }

@@ -46,6 +46,7 @@ include(DonkeyStorageDependencies)
 
 add_library(donkey_foundation STATIC
   src/foundation/diagnostics.cpp
+  src/foundation/json.cpp
   src/foundation/scheduler.cpp
   src/foundation/thread_priority.cpp
   src/foundation/sha256.cpp
@@ -74,6 +75,14 @@ add_library(donkey_binary STATIC
   src/binary/isolation.cpp
   src/binary/macho.cpp
   src/binary/pe.cpp
+  src/binary/demangle.cpp
+  src/binary/demangle_msvc.cpp
+  src/binary/rtti.cpp
+  src/binary/core.cpp
+  src/binary/inflate.cpp
+  src/binary/zstd.cpp
+  src/binary/separate_debug.cpp
+  src/binary/pdb.cpp
   src/binary/records.cpp
   src/binary/relocate.cpp
 )
@@ -119,6 +128,7 @@ add_library(donkey_ir STATIC
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp
   src/ir/canonical.cpp
+  src/ir/debug_names.cpp
   src/ir/optimize.cpp
   src/ir/prototype.cpp
   src/ir/structure.cpp
@@ -274,6 +284,41 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_ir PRIVATE ${DONKEY_FUZZ_SANITIZE})
 
+  add_executable(fuzz_rtti fuzz/fuzz_rtti.cpp)
+  target_link_libraries(fuzz_rtti PRIVATE donkey::binary)
+  target_compile_features(fuzz_rtti PRIVATE cxx_std_20)
+  target_compile_options(fuzz_rtti PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_rtti PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_inflate fuzz/fuzz_inflate.cpp)
+  target_link_libraries(fuzz_inflate PRIVATE donkey::binary)
+  target_compile_features(fuzz_inflate PRIVATE cxx_std_20)
+  target_compile_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_inflate PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_json fuzz/fuzz_json.cpp)
+  target_link_libraries(fuzz_json PRIVATE donkey::foundation)
+  target_compile_features(fuzz_json PRIVATE cxx_std_20)
+  target_compile_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_zstd fuzz/fuzz_zstd.cpp)
+  target_link_libraries(fuzz_zstd PRIVATE donkey::binary)
+  target_compile_features(fuzz_zstd PRIVATE cxx_std_20)
+  target_compile_options(fuzz_zstd PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_zstd PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_pdb fuzz/fuzz_pdb.cpp)
+  target_link_libraries(fuzz_pdb PRIVATE donkey::binary)
+  target_compile_features(fuzz_pdb PRIVATE cxx_std_20)
+  target_compile_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_core fuzz/fuzz_core.cpp)
+  target_link_libraries(fuzz_core PRIVATE donkey::binary)
+  target_compile_features(fuzz_core PRIVATE cxx_std_20)
+  target_compile_options(fuzz_core PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_core PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_demangle fuzz/fuzz_demangle.cpp)
+  target_link_libraries(fuzz_demangle PRIVATE donkey::binary)
+  target_compile_features(fuzz_demangle PRIVATE cxx_std_20)
+  target_compile_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_demangle PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_records fuzz/fuzz_records.cpp)
   target_link_libraries(fuzz_records PRIVATE donkey::binary)
   target_compile_features(fuzz_records PRIVATE cxx_std_20)

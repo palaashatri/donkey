@@ -54,6 +54,21 @@ struct CallGraph {
   [[nodiscard]] std::vector<CallGraphEdge> callees_of(std::uint64_t function) const;
 };
 
+/// Bytes the user declared to be data (G12-T1): `count` elements of `element_size` bytes at
+/// `address`, or `count` undefined bytes when `element_size` is 0. The sweep never decodes
+/// them, and no function starts inside them. A range that would run past the top of the
+/// address space is ignored.
+struct UserDataRange {
+  std::uint64_t address = 0;
+  std::uint64_t element_size = 0;
+  std::uint64_t count = 0;
+
+  /// Byte length of the range: count, or element size times count.
+  [[nodiscard]] std::uint64_t byte_length() const noexcept {
+    return element_size == 0 ? count : element_size * count;
+  }
+};
+
 struct AnalysisOptions {
   std::size_t max_instructions = 1'000'000;
   std::size_t max_strings = 100'000;
@@ -70,6 +85,11 @@ struct AnalysisOptions {
   /// and discovered starts the user removed. Both come from the project.
   std::vector<std::uint64_t> user_function_starts;
   std::vector<std::uint64_t> removed_function_starts;
+  /// Code starts the user declared (G12-T1). Each is seeded like a function start when it
+  /// lies in an executable section and outside every user data range.
+  std::vector<std::uint64_t> user_code_starts;
+  /// Byte ranges the user declared to be data (G12-T1). See UserDataRange.
+  std::vector<UserDataRange> user_data_ranges;
 };
 
 struct AnalysisResult {

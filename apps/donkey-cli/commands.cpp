@@ -15,13 +15,17 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/archive.h"
+#include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
+#include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/lift.h"
 #include "donkey/patch/patch.h"
 #include "donkey/plugin/plugin.h"
@@ -202,6 +206,20 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
   return false;
 }
 
+/// The demangling of `name` (Itanium `_Z` or MSVC `?`), or an empty string when `name` is not a
+/// mangled name or the demangler does not read it. The raw name is always printed too.
+std::string demangled_name(const std::string& name) {
+  if (is_msvc_name(name)) {
+    const auto demangled = demangle_msvc(name);
+    return demangled.has_value() ? demangled.value() : std::string();
+  }
+  if (!is_itanium_name(name)) {
+    return {};
+  }
+  const auto demangled = demangle_itanium(name);
+  return demangled.has_value() ? demangled.value() : std::string();
+}
+
 void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
   std::printf("File:      %s\n", image.path.c_str());
   std::printf("Size:      %" PRIu64 " bytes\n", image.file_size);
@@ -260,6 +278,9 @@ void print_human_info(const BinaryImage& image, std::size_t max_symbols) {
                 hex(symbol.address).c_str());
     if (!symbol.module.empty()) {
       std::printf(" (%s)", symbol.module.c_str());
+    }
+    if (const std::string demangled = demangled_name(symbol.name); !demangled.empty()) {
+      std::printf("  [%s]", demangled.c_str());
     }
     std::printf("\n");
   }
@@ -350,7 +371,9 @@ std::string json_info(const BinaryImage& image, std::size_t max_symbols) {
     }
     out += written == 0 ? "\n" : ",\n";
     out += "    {\"kind\": " + quote(symbol.imported ? "import" : "export") +
-           ", \"name\": " + quote(symbol.name) + ", \"module\": " + quote(symbol.module) +
+           ", \"name\": " + quote(symbol.name) +
+           ", \"demangled\": " + quote(demangled_name(symbol.name)) +
+           ", \"module\": " + quote(symbol.module) +
            ", \"address\": " + quote(hex(symbol.address)) +
            ", \"size\": " + std::to_string(symbol.size) +
            ", \"binding\": " + quote(symbol_binding_name(symbol.binding)) + "}";
@@ -748,45 +771,50 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
 }  // namespace
 
 void print_usage(std::FILE* out) {
-  std::fprintf(out,
-               "donkey-cli %s - headless binary analysis\n"
-               "\n"
-               "Usage:\n"
-               "  donkey-cli --version\n"
-               "  donkey-cli --help\n"
-               "  donkey-cli info <binary> [--json] [--max-symbols N]\n"
-               "  donkey-cli disasm <binary> [--json] [--address A] [--count N]"
-               " [--section NAME]\n"
-               "  donkey-cli strings <binary> [--json] [--min-length N]"
-               " [--max-strings N]\n"
-               "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
-               "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
-               "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
-               "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
-               "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
-               "  donkey-cli xrefs <binary> [--json] [--address A]\n"
-               "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
-               "  donkey-cli project save <database> <binary> [--json]\n"
-               "  donkey-cli project info <database> [--json]\n"
-               "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
-               "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
-               "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
-               "  donkey-cli project annotations <database> <image-id> [--json]\n"
-               "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
-               "  donkey-cli project restore <database> <backup> [--json]\n"
-               "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--run]"
-               " [--mock] [--json]\n"
-               "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
-               "<hex>] --output <out> [--force] [--json]\n"
-               "  donkey-cli plugin info <plugin-lib> [--json]\n"
-               "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
-               "<mask|name>] [--json]\n"
-               "\n"
-               "Every command except `debug launch` only reads files and never executes them.\n"
-               "`debug launch` runs the program under the native debugger (it stops at the\n"
-               "entry point; --run continues through breakpoints and terminates the target\n"
-               "when done).\n",
-               std::string(version()).c_str());
+  std::fprintf(
+      out,
+      "donkey-cli %s - headless binary analysis\n"
+      "\n"
+      "Usage:\n"
+      "  donkey-cli --version\n"
+      "  donkey-cli --help\n"
+      "  donkey-cli info <binary> [--json] [--max-symbols N]\n"
+      "  donkey-cli disasm <binary> [--json] [--address A] [--count N]"
+      " [--section NAME]\n"
+      "  donkey-cli strings <binary> [--json] [--min-length N]"
+      " [--max-strings N]\n"
+      "  donkey-cli functions <binary> [--json] [--max-instructions N] [--function A]...\n"
+      "  donkey-cli callgraph <binary> [--json] [--max-instructions N] [--function A]...\n"
+      "  donkey-cli core <file> [--json]\n"
+      "  donkey-cli debuginfo <binary> [--json] [--max-items N]\n"
+      "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
+      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N]\n"
+      "  donkey-cli xrefs <binary> [--json] [--address A]\n"
+      "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
+      "  donkey-cli project save <database> <binary> [--json]\n"
+      "  donkey-cli project info <database> [--json]\n"
+      "  donkey-cli project rename <database> <image-id> <address> <text>|--clear\n"
+      "  donkey-cli project comment <database> <image-id> <address> <text>|--clear\n"
+      "  donkey-cli project bookmark <database> <image-id> <address> [<text>]|--clear\n"
+      "  donkey-cli project annotations <database> <image-id> [--json]\n"
+      "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
+      "  donkey-cli project restore <database> <backup> [--json]\n"
+      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
+      "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
+      " [--mock] [--json]\n"
+      "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
+      "<hex>] --output <out> [--force] [--json]\n"
+      "  donkey-cli plugin info <plugin-lib> [--json]\n"
+      "  donkey-cli plugin run <plugin-lib> [--input <json>] [--isolate] [--caps "
+      "<mask|name>] [--json]\n"
+      "  donkey-cli serve                 JSON-RPC 2.0 on stdin/stdout (see docs/RPC.md)\n"
+      "  donkey-cli batch <script.json>   run a JSON array of RPC requests, print the responses\n"
+      "\n"
+      "Every command except `debug launch` only reads files and never executes them.\n"
+      "`debug launch` runs the program under the native debugger (it stops at the\n"
+      "entry point; --run continues through breakpoints and terminates the target\n"
+      "when done).\n",
+      std::string(version()).c_str());
 }
 
 int command_info(const std::vector<std::string_view>& arguments) {
@@ -1024,6 +1052,77 @@ int command_callgraph(const std::vector<std::string_view>& arguments) {
   return command_analysis(request, "callgraph");
 }
 
+int command_core(const std::vector<std::string_view>& arguments) {
+  std::string path;
+  bool json = false;
+  LoadOptions load_options;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    const char* flag_error = nullptr;
+    if (argument == "--json") {
+      json = true;
+    } else if (try_parse_load_flag(arguments, i, load_options, flag_error)) {
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for core");
+    } else if (path.empty()) {
+      path = std::string(argument);
+    } else {
+      return usage_error("core accepts exactly one file");
+    }
+  }
+  if (path.empty()) {
+    return usage_error("core needs a file path");
+  }
+  LoadedBinary loaded;
+  if (!load(path, loaded, load_options)) {
+    return kExitFailure;
+  }
+  auto result = read_elf_core(loaded.image, loaded.data);
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const CoreInfo& info = result.value();
+  if (json) {
+    std::string out = "{\n  \"process\": " + quote(info.process_name) + ",\n";
+    out += "  \"partial\": " + std::string(info.partial ? "true" : "false") + ",\n";
+    out += "  \"threads\": [";
+    for (std::size_t i = 0; i < info.threads.size(); ++i) {
+      const CoreThread& thread = info.threads[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"pid\": " + std::to_string(thread.pid) +
+             ", \"signal\": " + std::to_string(thread.signal) +
+             ", \"pc\": " + quote(hex(thread.pc)) + ", \"sp\": " + quote(hex(thread.sp)) + "}";
+    }
+    out += "\n  ],\n  \"mappings\": [";
+    for (std::size_t i = 0; i < info.mappings.size(); ++i) {
+      const CoreMapping& mapping = info.mappings[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"start\": " + quote(hex(mapping.start)) +
+             ", \"end\": " + quote(hex(mapping.end)) +
+             ", \"file_offset\": " + quote(hex(mapping.file_offset)) +
+             ", \"path\": " + quote(mapping.path) + "}";
+    }
+    out += "\n  ]\n}\n";
+    std::fputs(out.c_str(), stdout);
+    return kExitOk;
+  }
+  std::printf("core of %s: %zu thread%s, %zu mapping%s%s\n", info.process_name.c_str(),
+              info.threads.size(), info.threads.size() == 1 ? "" : "s", info.mappings.size(),
+              info.mappings.size() == 1 ? "" : "s", info.partial ? " (partial)" : "");
+  for (const CoreThread& thread : info.threads) {
+    std::printf("thread %u  signal %d  pc %s  sp %s\n", static_cast<unsigned>(thread.pid),
+                static_cast<int>(thread.signal), hex(thread.pc).c_str(), hex(thread.sp).c_str());
+  }
+  for (const CoreMapping& mapping : info.mappings) {
+    std::printf("%s-%s  offset %s  %s\n", hex(mapping.start).c_str(), hex(mapping.end).c_str(),
+                hex(mapping.file_offset).c_str(), mapping.path.c_str());
+  }
+  return kExitOk;
+}
+
 int command_debuginfo(const std::vector<std::string_view>& arguments) {
   std::string path;
   bool json = false;
@@ -1061,10 +1160,26 @@ int command_debuginfo(const std::vector<std::string_view>& arguments) {
     return kExitFailure;
   }
   auto result = read_debug_info(loaded.image, loaded.data);
+  // A stripped binary keeps its debug information in a separate file, found by its build-id or
+  // its debuglink (G07). That file is read in place of the binary's own sections.
+  std::optional<LoadedBinary> separate;
+  std::string separate_path;
+  if (!result && result.diagnostic().code == "dwarf.not_present") {
+    if (auto found = find_separate_debug_file(loaded.image, loaded.data, path)) {
+      if (auto opened = donkey::load_binary(found.value())) {
+        separate_path = found.value();
+        separate = std::move(opened.value());
+        result = read_debug_info(separate->image, separate->data);
+      }
+    }
+  }
   if (!result) {
     return fail(result.diagnostic());
   }
   const DebugInfo& info = result.value();
+  if (!separate_path.empty() && !json) {
+    std::printf("separate debug file: %s\n", separate_path.c_str());
+  }
   if (!json) {
     std::printf("DWARF %u-%u, %zu compile units, %zu functions, %zu variables, %zu types%s\n",
                 static_cast<unsigned>(info.min_version), static_cast<unsigned>(info.max_version),
@@ -1469,6 +1584,22 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     }
   }
 
+  // The DWARF of the binary, when it has any, names the parameters and the frame slots of
+  // each function (G04-T4). Naming is display-only and changes no statement.
+  std::optional<DebugInfo> debug;
+  if (auto read = read_debug_info(loaded.image, loaded.data); read.has_value()) {
+    debug = std::move(read.value());
+  }
+  auto lift_named = [&](const Function& function) {
+    auto lifted = lift_function(loaded.image, analysis.value(), function);
+    if (lifted && debug) {
+      if (const DebugFunction* named = debug->function_at(function.address)) {
+        (void)apply_debug_parameter_names(lifted.value(), *named, *debug);
+        (void)apply_debug_stack_names(lifted.value(), *named, *debug);
+      }
+    }
+    return lifted;
+  };
   if (request.json) {
     std::string out;
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
@@ -1480,7 +1611,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       if (written >= request.max_items) {
         break;
       }
-      auto lifted = lift_function(loaded.image, analysis.value(), *function);
+      auto lifted = lift_named(*function);
       out += written == 0 ? "\n" : ",\n";
       if (!lifted) {
         out += "    {\"address\": " + quote(hex(function->address)) +
@@ -1528,7 +1659,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       std::printf("\n");
     }
     first = false;
-    auto lifted = lift_function(loaded.image, analysis.value(), *function);
+    auto lifted = lift_named(*function);
     if (!lifted) {
       std::printf("// %s: unsupported (%s)\n", display_name(function->name).c_str(),
                   lifted.diagnostic().code.c_str());
@@ -2210,6 +2341,7 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::string binary_path;
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
+  std::vector<std::string> watch_specs;
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -2219,12 +2351,18 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       mock = true;
     } else if (arg == "--run") {
       run = true;
-    } else if (arg == "--arg" || arg == "--break") {
+    } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
-        return usage_error(arg == "--arg" ? "--arg needs a value" : "--break needs a value");
+        return usage_error(arg == "--arg"     ? "--arg needs a value"
+                           : arg == "--watch" ? "--watch needs a value"
+                                              : "--break needs a value");
       }
-      (arg == "--arg" ? args : break_specs).emplace_back(val);
+      if (arg == "--watch") {
+        watch_specs.emplace_back(val);
+      } else {
+        (arg == "--arg" ? args : break_specs).emplace_back(val);
+      }
     } else if (!arg.empty() && arg.front() == '-') {
       return usage_error("unknown option for debug launch");
     } else if (binary_path.empty()) {
@@ -2296,6 +2434,46 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     if (!bp) {
       (void)adapter->terminate();
       return fail(bp.diagnostic());
+    }
+  }
+  // A watch is TARGET[:LENGTH][:rw]: the target's address, its size in bytes (default 4), and the
+  // access (default write; rw traps on reads and writes too). The debug registers take it only
+  // while the target is stopped, which it is here.
+  for (const std::string& spec : watch_specs) {
+    const auto first = spec.find(':');
+    const std::string target = spec.substr(0, first);
+    std::uint64_t length = 4;
+    auto kind = debug::WatchKind::Write;
+    if (first != std::string::npos) {
+      const std::string rest = spec.substr(first + 1);
+      const auto second = rest.find(':');
+      std::uint64_t parsed = 0;
+      if (!parse_u64(rest.substr(0, second), parsed) ||
+          (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+        (void)adapter->terminate();
+        return usage_error("--watch length must be 1, 2, 4 or 8 bytes");
+      }
+      length = parsed;
+      if (second != std::string::npos) {
+        if (rest.substr(second + 1) != "rw") {
+          (void)adapter->terminate();
+          return usage_error("--watch access must be rw (the default is write)");
+        }
+        kind = debug::WatchKind::ReadWrite;
+      }
+    }
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, target, address)) {
+      (void)adapter->terminate();
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_watch",
+                             "no symbol or address '" + target + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto watch = adapter->set_watchpoint(translator.static_to_runtime(address),
+                                         static_cast<std::uint8_t>(length), kind);
+    if (!watch) {
+      (void)adapter->terminate();
+      return fail(watch.diagnostic());
     }
   }
 

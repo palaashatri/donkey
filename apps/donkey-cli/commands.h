@@ -13,6 +13,7 @@ int command_disasm(const std::vector<std::string_view>& arguments);
 int command_strings(const std::vector<std::string_view>& arguments);
 int command_functions(const std::vector<std::string_view>& arguments);
 int command_callgraph(const std::vector<std::string_view>& arguments);
+int command_core(const std::vector<std::string_view>& arguments);
 int command_debuginfo(const std::vector<std::string_view>& arguments);
 int command_cfg(const std::vector<std::string_view>& arguments);
 int command_decompile(const std::vector<std::string_view>& arguments);
@@ -23,5 +24,7 @@ int command_archive(const std::vector<std::string_view>& arguments);
 int command_debug(const std::vector<std::string_view>& arguments);
 int command_patch(const std::vector<std::string_view>& arguments);
 int command_plugin(const std::vector<std::string_view>& arguments);
+int command_serve(const std::vector<std::string_view>& arguments);
+int command_batch(const std::vector<std::string_view>& arguments);
 
 }  // namespace donkey::cli

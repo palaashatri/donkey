@@ -26,10 +26,26 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 | Format | Read | Symbols | DWARF |
 |---|---|---|---|
-| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; compressed sections and split DWARF reported Unsupported |
-| PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB is not read. |
+| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; zlib- and zstd-compressed sections read (`inflate` and `zstd_decompress`, checked against zlib and the zstd library); split DWARF reported Unsupported; separate debug files found by build-id or debuglink |
+| PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB files are read separately (PDB row). |
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
+| ELF relocatable (`ET_REL`, `.o`) | laid out and linked as one image: x86-64 and AArch64 common relocations, GOT forms, COMMON symbols, x86-64 local-exec, initial-exec, global-dynamic and local-dynamic TLS, and AArch64 local-exec, initial-exec and TLSDESC (the dynamic sequences are relaxed to the static offsets as `ld` relaxes them, when the variable is defined in the object); AArch64 `-mtls-dialect=trad` DTPREL forms and the TP-relative load/store forms are reported, not applied | — | — |
+| PDB 7.00 (`pdb.h`) | procedures and code sizes, global data, struct/class/union/enum names and sizes, sections, modules, PDB GUID and age; not line information or the full type graph | — | — |
+| ELF core (`ET_CORE`) | threads with x86-64 registers, process name, file mappings (`donkey-cli core`); memory is the PT_LOAD segments | — | — |
 | Raw | with explicit `--arch --base --entry` | — | — |
+
+## C++ symbol names
+
+| Scheme | Demangler | Checked against | Not covered (reported Unsupported, never guessed) |
+|---|---|---|---|
+| Itanium (`_Z`) | `demangle_itanium` (G10-T1, partial) | 502 of 512 `c++filt` corpus names match; 10 are Unsupported | expression template arguments, generic lambdas |
+| MSVC (`?`, x64 `__cdecl`) | `demangle_msvc` (G10-T2, partial) | 87 of 95 `llvm-undname` corpus names match exactly; 8 are Unsupported | templates, arrays, string literals, vftables, dynamic initialisers, function and member pointers, 32-bit forms and other calling conventions |
+
+`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4).
+
+| Itanium RTTI and vtables (ELF) | Reader | Checked against | Not covered |
+|---|---|---|---|
+| x86-64 and AArch64, PIE and non-PIE | `read_itanium_rtti` (G10-T3, partial) | `gdb` on the x86-64 non-PIE fixture: vtable slots, typeinfo bases and offsets-to-top match; the PIE build gives the same graph. AArch64 builds of the same source (`aarch64-linux-gnu-g++`, PIE and non-PIE) give the same graph and name the pure-virtual slot through its PLT stub | Only the 16-byte PLT entry form is decoded for AArch64 (a BTI-prefixed entry stays unnamed and reports `rtti.plt_unnamed`); AArch64 is not run in CI; MSVC RTTI (Complete Object Locators) is not read; no call-site resolution in the decompiler |
 
 ## Instruction sets
 
@@ -38,7 +54,8 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | x86-64 | yes | yes | integer subset and scalar SSE (`ss`/`sd`): see the corpora below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
 | AArch64 | yes | yes, with ADRP folding | integer subset and scalar floating point (`s` and `d` registers): see the corpora below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
-| 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
+| 32-bit ARM (A32 only) | yes, little-endian; matches llvm-objdump on the test image (55 instructions). Thumb is not decoded or detected, so Thumb code is read as A32 and gives wrong results | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
+| RISC-V 64 (RV64GC) | yes, little-endian; matches llvm-objdump on the test image (56 instructions, compressed included) | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
 
 ## Decompiler corpus
 
@@ -104,6 +121,8 @@ listed where the per-function report was read.
 | GCC 13.3, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 52/53 | 46/53 | SIMD vectorisation |
 | GCC 13.3, x86-64 Linux | locally, after G02-T3 (59 functions) | 57/59 | 56/59 | 50/59 | SIMD vectorisation, calls to `__popcountdi2` (no `-mpopcnt`), `bsr` |
 | GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T3 (59 functions) | not built | not built | 51/59 | SIMD vectorisation, `bsr`; `c_switch_sparse` Partial (cause not itemised); `c_popcount` Complete |
+| GCC 13.3, x86-64 Linux | locally, after G02-T4 (59 functions) | 57/59 | 57/59 | 51/59 | the causes above, not re-itemised; one more function is Complete at O2 and O3 (cross-block flags) |
+| GCC 13.3, x86-64 Linux, `-march=x86-64-v2` | locally, after G02-T4 (59 functions) | not built | not built | 52/59 | the causes above, not re-itemised; one more function is Complete (cross-block flags) |
 | Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
 | Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | Clang 18.1, x86-64 Linux | locally, after G02-T2 (53 functions) | 53/53 | 48/53 | 48/53 | SIMD vectorisation |
@@ -184,8 +203,10 @@ compare, because GCC's table code overwrites `x0`.
   native execution (G01-T1).
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
-- `bsf`/`bsr`: the result is undefined for a zero source, so they are
-  Unsupported until a zero-flag state exists.
+- `bsf`/`bsr` with a zero source: the destination is undefined there, and ZF is
+  not modelled. They are lifted, and a function that uses them is Partial with a
+  note. A guarded use such as `c_clz64_guarded` stays Partial until flags cross
+  blocks (G02-T4).
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
 - Flags read across basic blocks, except into a fall-through block with one
@@ -199,6 +220,23 @@ compare, because GCC's table code overwrites `x0`.
   order and the verifier starts from the first one, so the IR is rejected
   (`ir.unreachable_block`) and the function is never shown as Complete.
 - Varargs and struct passing by value.
+
+## Debugger
+
+| Capability | Linux x86-64 | Linux AArch64 | Windows x64 | Other |
+|---|---|---|---|---|
+| Software breakpoints, stepping, memory and registers | yes (ptrace) | yes (ptrace) | yes (Win32 debug API) | Unsupported |
+| Hardware watchpoints (`set_watchpoint`, library API) | yes: up to four write or read-or-write watches of 1, 2, 4 or 8 bytes (DR0-DR3, DR7), set while stopped | not implemented (DBGWVR) | not implemented | Unsupported |
+| Hardware watchpoints in the CLI (`donkey-cli debug launch --watch`) | yes (`cli.debug_native_watch_json`) | not implemented | not implemented | Unsupported |
+| Hardware watchpoints in the GUI | not yet | not yet | not yet | not yet |
+
+## Automation
+
+| Surface | Status | Notes |
+|---|---|---|
+| `donkey-cli serve` (JSON-RPC 2.0, `donkey.rpc.v1`, stdin and stdout) | Partial | Read methods `hello`, `open`, `info`, `functions`, `strings`, `xrefs`, `disasm`, `callgraph` are tested (`cli.serve_session`). `decompile` and `annotations.list` are not implemented; write methods are refused (`rpc.write_disabled`). See `docs/RPC.md` |
+| `donkey-cli batch <script.json>` | Implemented | Runs a JSON array of the same requests in one session (`cli.batch_script`) |
+| Python client (`bindings/python`, optional) | Partial | Typed wrappers for the implemented methods, tested against the built tool (`python.rpc_client`) |
 
 ## UI
 

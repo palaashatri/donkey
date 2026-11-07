@@ -18,16 +18,21 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstddef>
+#include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -182,6 +187,114 @@ struct LocalDebugAdapter::Impl {
   bool stepping = false;
   std::uint64_t page_size = static_cast<std::uint64_t>(::sysconf(_SC_PAGESIZE));
 
+  // Hardware watchpoints (x86-64). DR0-DR3 hold four addresses, and DR7 enables each slot and
+  // sets its size and access type. Slot i is watches[i]. A traced thread has its own debug
+  // registers, and a new thread starts without them, so each thread is armed whenever it stops
+  // and whenever the set of watches changes.
+  static constexpr std::size_t kWatchSlots = 4;
+  std::vector<Watchpoint> watches;
+  std::uint64_t next_watch_id = 1;
+
+#if defined(__x86_64__)
+  static std::uintptr_t debugreg_offset(int index) {
+    return offsetof(struct user, u_debugreg) +
+           sizeof(unsigned long) * static_cast<std::size_t>(index);
+  }
+
+  static bool poke_debugreg(pid_t thread, int index, unsigned long value) {
+    return ::ptrace(PTRACE_POKEUSER, thread, reinterpret_cast<void*>(debugreg_offset(index)),
+                    reinterpret_cast<void*>(value)) == 0;
+  }
+
+  static bool peek_debugreg(pid_t thread, int index, unsigned long& value) {
+    errno = 0;
+    const long word =
+        ::ptrace(PTRACE_PEEKUSER, thread, reinterpret_cast<void*>(debugreg_offset(index)), nullptr);
+    if (word == -1 && errno != 0) {
+      return false;
+    }
+    value = static_cast<unsigned long>(word);
+    return true;
+  }
+
+  /// Programs DR0-DR3 and DR7 of one stopped thread from `watches`, and clears DR6.
+  bool arm_thread(pid_t thread) const {
+    unsigned long dr7 = 0;
+    for (std::size_t slot = 0; slot < watches.size() && slot < kWatchSlots; ++slot) {
+      const Watchpoint& watch = watches[slot];
+      const int index = static_cast<int>(slot);
+      if (!poke_debugreg(thread, index, static_cast<unsigned long>(watch.address))) {
+        return false;
+      }
+      // DR7: the local enable L<n> is bit 2n; the access R/W<n> is bits 16+4n (01 for writes,
+      // 11 for reads or writes); the size LEN<n> is bits 18+4n (00, 01, 11 and 10 for 1, 2, 4
+      // and 8 bytes).
+      const unsigned long access = watch.kind == WatchKind::Write ? 0x1UL : 0x3UL;
+      unsigned long size = 0x3UL;
+      if (watch.length == 1) {
+        size = 0x0UL;
+      } else if (watch.length == 2) {
+        size = 0x1UL;
+      } else if (watch.length == 8) {
+        size = 0x2UL;
+      }
+      dr7 |= (1UL << (2 * index)) | (access << (16 + 4 * index)) | (size << (18 + 4 * index));
+    }
+    return poke_debugreg(thread, 7, dr7) && poke_debugreg(thread, 6, 0);
+  }
+
+  /// The watch whose DR6 bit is set, if the thread stopped on one. Clears DR6 after reading it.
+  std::optional<StopInfo> watch_stop(pid_t thread, std::uint64_t pc) {
+    if (watches.empty()) {
+      return std::nullopt;
+    }
+    unsigned long status = 0;
+    if (!peek_debugreg(thread, 6, status) || (status & 0xfUL) == 0) {
+      return std::nullopt;
+    }
+    poke_debugreg(thread, 6, 0);
+    for (std::size_t slot = 0; slot < watches.size() && slot < kWatchSlots; ++slot) {
+      if ((status & (1UL << slot)) == 0) {
+        continue;
+      }
+      Watchpoint& watch = watches[slot];
+      ++watch.hit_count;
+      char address_text[32];
+      std::snprintf(address_text, sizeof(address_text), "0x%llx",
+                    static_cast<unsigned long long>(watch.address));
+      std::string description =
+          "watchpoint " + std::to_string(watch.id) +
+          " hit: " + (watch.kind == WatchKind::Write ? "write" : "read or write") + " of " +
+          std::to_string(watch.length) + " bytes at " + address_text;
+      return StopInfo{StopReason::Watchpoint, static_cast<std::uint64_t>(thread), pc,
+                      std::move(description), 0};
+    }
+    return std::nullopt;
+  }
+#else
+  bool arm_thread(pid_t) const { return true; }
+  std::optional<StopInfo> watch_stop(pid_t, std::uint64_t) { return std::nullopt; }
+#endif
+
+  /// Arms every stopped thread. Called only while the target is stopped.
+  bool arm_all() const {
+    bool ok = true;
+    for (pid_t thread : tids) {
+      if (stopped.count(thread) != 0) {
+        ok = arm_thread(thread) && ok;
+      }
+    }
+    return ok;
+  }
+
+  /// A thread that reports a stop gets the current watches, so one that was created while the
+  /// target ran is covered from its first instruction.
+  void arm_stopped_thread(pid_t thread) const {
+    if (!watches.empty()) {
+      arm_thread(thread);
+    }
+  }
+
   ~Impl() { teardown(); }
 
   // ---- low level ---------------------------------------------------------
@@ -270,6 +383,7 @@ struct LocalDebugAdapter::Impl {
       note_clone(thread);
     } else if (sig == SIGSTOP && sigstop_expected.count(thread) != 0) {
       sigstop_expected.erase(thread);
+      arm_stopped_thread(thread);
     } else if (sig == SIGTRAP) {
       rewind_trap(thread);
     } else {
@@ -504,6 +618,7 @@ struct LocalDebugAdapter::Impl {
   }
 
   void teardown() {
+    watches.clear();
     if (pid <= 0) {
       return;
     }
@@ -628,6 +743,7 @@ struct LocalDebugAdapter::Impl {
     }
     if (sig == SIGSTOP && sigstop_expected.count(thread) != 0) {
       sigstop_expected.erase(thread);
+      arm_stopped_thread(thread);
       if (state == SessionState::Running && !stepping) {
         resume_thread(thread);
       }
@@ -686,6 +802,11 @@ struct LocalDebugAdapter::Impl {
     std::uint64_t at = have_regs ? reg_pc(regs) : 0;
 
     if (sig == SIGTRAP) {
+      if (std::optional<StopInfo> watch = watch_stop(static_cast<pid_t>(tid), at)) {
+        drop_internal_breakpoints();
+        stop = *watch;
+        return;
+      }
       // A software breakpoint traps after the int3 on x86 and at the BRK on
       // AArch64.
       const std::uint64_t trap_address = kTrap.size() == 1 ? at - 1 : at;
@@ -981,6 +1102,9 @@ DebugCapabilities LocalDebugAdapter::capabilities() const noexcept {
   caps.can_write_memory = true;
   caps.can_software_breakpoints = true;
   caps.can_hardware_breakpoints = false;
+#if defined(__x86_64__)
+  caps.can_hardware_watchpoints = true;
+#endif
   return caps;
 }
 
@@ -1546,6 +1670,68 @@ Result<StopInfo> LocalDebugAdapter::poll_events() {
   }
   return d.stop;
 }
+
+#if defined(__x86_64__)
+Result<Watchpoint> LocalDebugAdapter::set_watchpoint(std::uint64_t address, std::uint8_t length,
+                                                     WatchKind kind) {
+  Impl& d = *impl_;
+  if (d.pid <= 0 || d.state != SessionState::Stopped) {
+    return make_error<Watchpoint>(
+        Status::InvalidInput, "debug.not_stopped",
+        "a hardware watchpoint can be set only while the target is stopped");
+  }
+  if (kind != WatchKind::Write && kind != WatchKind::ReadWrite) {
+    return make_error<Watchpoint>(Status::InvalidInput, "debug.watch_kind",
+                                  "unknown watchpoint kind");
+  }
+  if (length != 1 && length != 2 && length != 4 && length != 8) {
+    return make_error<Watchpoint>(Status::InvalidInput, "debug.watch_length",
+                                  "a watchpoint covers 1, 2, 4 or 8 bytes");
+  }
+  if (address % length != 0) {
+    return make_error<Watchpoint>(Status::InvalidInput, "debug.watch_alignment",
+                                  "a watchpoint address must be a multiple of its length");
+  }
+  if (d.watches.size() >= Impl::kWatchSlots) {
+    return make_error<Watchpoint>(Status::ResourceLimit, "debug.watch_slots",
+                                  "all four hardware watchpoints are in use");
+  }
+  Watchpoint watch;
+  watch.id = d.next_watch_id++;
+  watch.address = address;
+  watch.length = length;
+  watch.kind = kind;
+  d.watches.push_back(watch);
+  if (!d.arm_all()) {
+    d.watches.pop_back();
+    d.arm_all();
+    return make_error<Watchpoint>(Status::InvalidInput, "debug.watch_failed",
+                                  "the kernel refused the debug registers for that address");
+  }
+  return watch;
+}
+
+Result<bool> LocalDebugAdapter::remove_watchpoint(std::uint64_t id) {
+  Impl& d = *impl_;
+  const auto found = std::find_if(d.watches.begin(), d.watches.end(),
+                                  [id](const Watchpoint& watch) { return watch.id == id; });
+  if (found == d.watches.end()) {
+    return make_error<bool>(Status::InvalidInput, "debug.no_watchpoint",
+                            "no hardware watchpoint has that id");
+  }
+  if (d.state != SessionState::Stopped) {
+    return make_error<bool>(
+        Status::InvalidInput, "debug.not_stopped",
+        "a hardware watchpoint can be removed only while the target is stopped");
+  }
+  d.watches.erase(found);
+  if (!d.arm_all()) {
+    return make_error<bool>(Status::InvalidInput, "debug.watch_failed",
+                            "the kernel refused the debug registers");
+  }
+  return true;
+}
+#endif
 
 Result<StopInfo> LocalDebugAdapter::wait_for_event(int timeout_ms) {
   Impl& d = *impl_;
