@@ -11,6 +11,7 @@
 
 #include "donkey/analysis/cfg.h"
 #include "lift_internal.h"
+#include "registers.h"
 
 namespace donkey {
 namespace {
@@ -160,12 +161,28 @@ bool preserves_flags(const std::string& mnemonic) {
          is_setcc(mnemonic);
 }
 
+/// xchg of two registers: a swap that leaves the flags alone. The memory forms
+/// need a load and a store, so they are not register exchanges.
+bool is_register_exchange(const Instruction& instruction) {
+  const std::vector<Operand>& operands = instruction.structured_operands;
+  return instruction.mnemonic == "xchg" && operands.size() == 2 &&
+         operands[0].kind == OperandKind::Register && operands[1].kind == OperandKind::Register;
+}
+
 /// Conditions that read only ZF and SF, which every flag-setting arithmetic
 /// instruction derives from its result alone.
 bool zero_sign_condition(IrCondition condition) {
   return condition == IrCondition::Zero || condition == IrCondition::NonZero ||
          condition == IrCondition::Equal || condition == IrCondition::NotEqual ||
          condition == IrCondition::Negative || condition == IrCondition::Positive;
+}
+
+/// Conditions that read only CF (jb, jae, setb, cmovae, ...), and adc/sbb. A
+/// Compare's unsigned conditions are exactly the carry: `a <u b` is CF after
+/// `cmp a, b`, and the lifter writes jb / setb as UnsignedLess.
+bool carry_condition(IrCondition condition) {
+  return condition == IrCondition::Carry || condition == IrCondition::NoCarry ||
+         condition == IrCondition::UnsignedLess || condition == IrCondition::UnsignedGreaterEqual;
 }
 
 bool is_bitwise_or_arithmetic(const std::string& mnemonic) {
@@ -360,9 +377,26 @@ struct Lifter {
     push(block, std::move(statement));
   }
 
-  /// What the IR knows about the flags a later jcc / cmovcc / setcc reads.
-  enum class FlagsState { Unknown, Exact, ZeroSign };
+  /// What the IR knows about the flags a later jcc / cmovcc / setcc / adc reads.
+  /// Exact: every flag. ZeroSign: ZF and SF only. CarryOnly: CF only (the last
+  /// Compare holds the operands that give CF exactly, but not ZF or SF).
+  enum class FlagsState { Unknown, Exact, ZeroSign, CarryOnly };
   FlagsState flags_state = FlagsState::Unknown;
+
+  /// True when the modelled flags give `condition` exactly.
+  bool flags_readable(IrCondition condition) const {
+    switch (flags_state) {
+      case FlagsState::Unknown:
+        return false;
+      case FlagsState::Exact:
+        return true;
+      case FlagsState::ZeroSign:
+        return zero_sign_condition(condition);
+      case FlagsState::CarryOnly:
+        return carry_condition(condition);
+    }
+    return false;
+  }
 
   IrStatement flags_test_of(const IrOperand& value, std::uint64_t address) const {
     IrStatement test;
@@ -428,16 +462,40 @@ struct Lifter {
 
     if (destination.kind == IrOperandKind::Register) {
       std::optional<IrOperand> saved;
-      if (consumer && subtract && !zero_sign_condition(*consumer)) {
-        // Keep the minuend: the condition compares it with the subtrahend.
-        saved = temp_operand(temporary_id(), destination.width);
+      // The flags are derived from the operands the operation read. An operand
+      // that is also the destination is overwritten by the operation, so it is
+      // copied first: `sub x, x` and `add x, x` need the original value.
+      const bool carry_add = mnemonic == "add" && consumer && carry_condition(*consumer);
+      const bool needs_operands =
+          consumer && flags_defined && (subtract ? !zero_sign_condition(*consumer) : carry_add);
+      auto copy_before = [&](const IrOperand& value) {
+        const IrOperand copy_of = temp_operand(temporary_id(), value.width);
         IrStatement copy;
         copy.op = IrOp::Assign;
-        copy.dest = *saved;
-        copy.a = destination;
-        copy.width = destination.width;
+        copy.dest = copy_of;
+        copy.a = value;
+        copy.width = value.width;
         copy.source_address = instruction.address;
         push(block, std::move(copy));
+        return copy_of;
+      };
+      if (needs_operands && subtract) {
+        // Keep the minuend: the condition compares it with the subtrahend.
+        saved = copy_before(destination);
+      }
+      // The Compare reads the source again after the destination is written. A
+      // source that the destination is part of (a register, or a memory address
+      // formed from it, as in `add rax, [rax]`) must be copied before the write.
+      std::optional<IrOperand> saved_source;
+      const std::string destination_family = internal::register_family(destination.reg);
+      const bool source_uses_destination =
+          source.kind == IrOperandKind::Register
+              ? internal::register_family(source.reg) == destination_family
+              : source.kind == IrOperandKind::Memory &&
+                    (internal::register_family(source.reg) == destination_family ||
+                     internal::register_family(source.index) == destination_family);
+      if (needs_operands && source_uses_destination) {
+        saved_source = copy_before(source);
       }
       IrStatement statement;
       statement.op = op;
@@ -447,21 +505,28 @@ struct Lifter {
       statement.width = destination.width;
       statement.source_address = instruction.address;
       push(block, std::move(statement));
-      if (consumer && flags_defined) {
+      if (needs_operands) {
+        const IrOperand compared = saved_source ? *saved_source : source;
+        IrStatement compare;
+        compare.op = IrOp::Compare;
+        compare.b = compared;
+        compare.width = destination.width;
+        compare.source_address = instruction.address;
         if (saved) {
-          IrStatement compare;
-          compare.op = IrOp::Compare;
           compare.a = *saved;
-          compare.b = source;
           compare.condition = IrCondition::Equal;
-          compare.width = saved->width;
-          compare.source_address = instruction.address;
           push(block, std::move(compare));
           flags_state = FlagsState::Exact;
         } else {
-          push(block, flags_test_of(destination, instruction.address));
-          flags_state = logic ? FlagsState::Exact : FlagsState::ZeroSign;
+          // add: the carry out is set exactly when the sum is below the addend.
+          compare.a = destination;
+          compare.condition = IrCondition::UnsignedLess;
+          push(block, std::move(compare));
+          flags_state = FlagsState::CarryOnly;
         }
+      } else if (consumer && flags_defined) {
+        push(block, flags_test_of(destination, instruction.address));
+        flags_state = logic ? FlagsState::Exact : FlagsState::ZeroSign;
       }
       return;
     }
@@ -501,6 +566,82 @@ struct Lifter {
       return;
     }
     unsupported(block, instruction);
+  }
+
+  /// xchg reg, reg: a swap through a temporary. An exchange leaves the flags alone.
+  /// Returns false when the exchange is Unsupported, which invalidates the flags.
+  bool lift_exchange(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    if (!is_register_exchange(instruction)) {
+      unsupported(block, instruction);  // with memory it needs a load and a store
+      return false;
+    }
+    const IrOperand first = to_ir_operand(operands[0], instruction, pointer_width);
+    const IrOperand second = to_ir_operand(operands[1], instruction, pointer_width);
+    if (first.width != second.width) {
+      unsupported(block, instruction);
+      return false;
+    }
+    const IrOperand saved = temp_operand(temporary_id(), first.width);
+    const auto assign = [&](const IrOperand& dest, const IrOperand& source) {
+      IrStatement statement;
+      statement.op = IrOp::Assign;
+      statement.dest = dest;
+      statement.a = source;
+      statement.width = dest.width;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    assign(saved, first);
+    assign(first, second);
+    assign(second, saved);
+    return true;
+  }
+
+  /// adc / sbb with a register destination: dest = dest +/- source +/- CF. The
+  /// carry is read through the flag model, so it must be exact there: the last
+  /// flag writer must have set CF (a compare, a test, or an add whose consumer
+  /// reads CF). Otherwise the instruction is Unsupported, which makes the
+  /// function Partial.
+  void lift_add_with_carry(IrBlock& block, const Instruction& instruction,
+                           std::optional<IrCondition> consumer) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const bool subtract = instruction.mnemonic == "sbb";
+    if (operands.size() != 2 || operands[0].kind != OperandKind::Register ||
+        (operands[1].kind != OperandKind::Register && operands[1].kind != OperandKind::Immediate &&
+         operands[1].kind != OperandKind::Memory) ||
+        !flags_readable(IrCondition::Carry)) {
+      flags_state = FlagsState::Unknown;
+      unsupported(block, instruction);
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
+    IrStatement statement;
+    statement.op = subtract ? IrOp::SubBorrow : IrOp::AddCarry;
+    statement.dest = destination;
+    statement.a = destination;
+    if (operands[1].kind == OperandKind::Memory) {
+      // The memory operand is loaded first. A load leaves the flags alone.
+      const IrOperand value = temp_operand(temporary_id(), destination.width);
+      IrStatement load;
+      load.op = IrOp::Load;
+      load.dest = value;
+      load.a = memory_operand(operands[1], instruction);
+      load.width = destination.width;
+      load.source_address = instruction.address;
+      push(block, std::move(load));
+      statement.b = value;
+    } else {
+      statement.b = to_ir_operand(operands[1], instruction, pointer_width);
+    }
+    statement.width = destination.width;
+    statement.source_address = instruction.address;
+    push(block, std::move(statement));
+    flags_state = FlagsState::Unknown;  // the carry out is not modelled
+    if (consumer) {
+      push(block, flags_test_of(destination, instruction.address));
+      flags_state = FlagsState::ZeroSign;
+    }
   }
 
   /// neg / not.
@@ -620,8 +761,7 @@ struct Lifter {
   void lift_conditional(IrBlock& block, const Instruction& instruction, bool set) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const IrCondition condition = suffix_condition(instruction.mnemonic, set ? 3U : 4U);
-    if (flags_state == FlagsState::Unknown ||
-        (flags_state == FlagsState::ZeroSign && !zero_sign_condition(condition))) {
+    if (!flags_readable(condition)) {
       mark_partial("'" + instruction.mnemonic + "' reads flags this lifter does not model");
     }
     if ((set && operands.size() != 1) || (!set && operands.size() != 2) ||
@@ -876,6 +1016,12 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           break;
         }
         const Instruction& next = analysis.instructions[at];
+        if (next.mnemonic == "adc" || next.mnemonic == "sbb") {
+          return IrCondition::Carry;  // reads CF only
+        }
+        if (is_register_exchange(next)) {
+          continue;  // swaps two registers; the flags pass through
+        }
         if (next.classification == InstructionClass::ConditionalJump) {
           return branch_condition(next.mnemonic);
         }
@@ -909,9 +1055,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         statement.width = lifter.pointer_width;
         statement.condition = condition;
         statement.a = IrOperand::register_ref("flags", lifter.pointer_width);
-        if (lifter.flags_state == Lifter::FlagsState::Unknown ||
-            (lifter.flags_state == Lifter::FlagsState::ZeroSign &&
-             !zero_sign_condition(condition))) {
+        if (!lifter.flags_readable(condition)) {
           lifter.mark_partial("conditional branch depends on flags this lifter does not model");
         }
         if (condition == IrCondition::None) {
@@ -1033,6 +1177,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       }
 
       const auto flags_before = lifter.flags_state;
+      const std::size_t statements_before = out_block.statements.size();
       bool keeps_flags = preserves_flags(mnemonic);
       if (mnemonic == "mov" || mnemonic == "movabs") {
         lifter.lift_mov(out_block, instruction);
@@ -1051,6 +1196,13 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       } else if (is_bitwise_or_arithmetic(mnemonic) || mnemonic == "inc" || mnemonic == "dec") {
         lifter.lift_arithmetic(out_block, instruction, next_consumer(i));
         keeps_flags = true;  // lift_arithmetic set the state
+      } else if (mnemonic == "xchg") {
+        // A register exchange does not write the flags; an unsupported one may
+        // have, so the flag state is dropped.
+        keeps_flags = lifter.lift_exchange(out_block, instruction);
+      } else if (mnemonic == "adc" || mnemonic == "sbb") {
+        lifter.lift_add_with_carry(out_block, instruction, next_consumer(i));
+        keeps_flags = true;  // lift_add_with_carry set the state
       } else if (mnemonic == "neg" || mnemonic == "not") {
         lifter.lift_unary(out_block, instruction, next_consumer(i));
         keeps_flags = true;  // lift_unary set the state
@@ -1078,7 +1230,14 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.unsupported(out_block, instruction);
         keeps_flags = false;
       }
-      if (!keeps_flags) {
+      // An instruction that emitted Unsupported may have written the flags, whatever its mnemonic
+      // says, so their state is unknown after it. A later carry is then not read across it.
+      bool emitted_unsupported = false;
+      for (std::size_t s = statements_before; s < out_block.statements.size(); ++s) {
+        emitted_unsupported =
+            emitted_unsupported || out_block.statements[s].op == IrOp::Unsupported;
+      }
+      if (!keeps_flags || emitted_unsupported) {
         lifter.flags_state = Lifter::FlagsState::Unknown;
       } else if (preserves_flags(mnemonic)) {
         lifter.flags_state = flags_before;

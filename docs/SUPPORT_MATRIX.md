@@ -42,9 +42,10 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 ## Decompiler corpus
 
-`tests/corpus/corpus.c` has 39 integer functions: arithmetic, branches,
-loops, arrays, structs, dense and sparse switches, stack arguments and
-narrow types. The test suite builds it at -O0, -O2 and -O3 with the host's C
+`tests/corpus/corpus.c` has 42 integer functions: arithmetic, branches,
+loops, arrays, structs, dense and sparse switches, stack arguments, narrow
+types, and carry-propagating 128-bit arithmetic (`adc`, `sbb`). The test
+suite builds it at -O0, -O2 and -O3 with the host's C
 compiler. `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` lifts
 every function from the built library and runs the IR in an interpreter on
 48 input vectors. It calls the compiled function itself with the same inputs
@@ -62,10 +63,13 @@ listed where the per-function report was read.
 
 | Compiler, target | Where measured | -O0 | -O2 | -O3 | Partial causes |
 |---|---|---|---|---|---|
-| GCC 13.3, x86-64 Linux | CI ubuntu-24.04 | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
-| Clang 18.1, x86-64 Linux | locally | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
+| GCC 13.3, x86-64 Linux | CI ubuntu-24.04 (before G02-T1, 39 functions) | 39/39 | 38/39 | 32/39 | SIMD vectorisation |
+| GCC 13.3, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 41/42 | 35/42 | SIMD vectorisation |
+| Clang 18.1, x86-64 Linux | locally (before G02-T1, 39 functions) | 39/39 | 33/39 | 33/39 | SIMD, `adc` |
+| Clang 18.1, x86-64 Linux | locally, after G02-T1 (42 functions) | 42/42 | 37/42 | 37/42 | SIMD vectorisation |
 | MinGW-w64 GCC 14.2, x64 Windows | CI windows-2022 | 39/39 | 36/39 | 30/39 | not itemised |
 | GCC 13.3, AArch64 Linux | CI ubuntu-24.04-arm | 39/39 | 36/39 | 30/39 | SIMD, `ccmp` |
+| GCC 13.3, AArch64 Linux | locally, after G02-T1 (42 functions), under qemu-aarch64 | 40/42 | 36/42 | 30/42 | SIMD, `ccmp`, `adc`/`sbc`/`cmn` (not lifted yet) |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -100,7 +104,9 @@ family, register-offset addressing, `ldpsw`, `ror`, `ubfiz`/`sbfiz`/
 - Floating point and SIMD: vectorised loops are Partial.
 - Calls' effects on registers and memory: functions that call are
   rendered, but the oracle does not evaluate them.
-- `adc`/`sbb`, double-width `mul`/`imul`/`div`.
+- Double-width `mul`/`imul`/`div`.
+- Carry out of `adc`/`sbb` (`adc; adc` chains are Partial); AArch64 `adc`/`sbc`/`cmn`. An
+  `adc`/`sbb` after an instruction that emitted Unsupported is not lifted with the earlier carry.
 - Flags read across basic blocks; AArch64 `ccmp`/`ccmn`.
 - AArch64 jump tables; 32-bit ARM.
 - Varargs and struct passing by value.

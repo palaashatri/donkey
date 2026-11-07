@@ -422,6 +422,24 @@ class Machine {
               ok = v.has_value() && assign(s.dest, w, *v);
             }
             break;
+          case IrOp::AddCarry:
+          case IrOp::SubBorrow: {
+            // The carry (x86 CF, AArch64 C) and the borrow of a subtraction are
+            // read through the same flag model that CondAssign uses. On AArch64
+            // the subtraction borrow is the inverse of C.
+            const bool add = s.op == IrOp::AddCarry;
+            const bool in = add || !aarch64_ ? condition_holds(IrCondition::Carry)
+                                             : condition_holds(IrCondition::NoCarry);
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value();
+            if (ok) {
+              const std::uint64_t carry = in ? 1 : 0;
+              const std::uint64_t result = add ? *x + *y + carry : *x - *y - carry;
+              ok = assign(s.dest, w, result & mask(w));
+            }
+            break;
+          }
         }
         if (!ok) {
           return std::nullopt;

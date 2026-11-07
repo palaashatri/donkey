@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `adc`/`sbb`, double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks | P0 | TODO |
+| G02 | x86 integer gaps | Full integer semantics | No double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1) | P0 | IN PROGRESS (G02-T1 DONE; T2-T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -335,6 +335,35 @@ interpreter.
   from the Intel SDM definitions.
 - **Done when:** the `adc` Partial on Clang -O2 (`docs/SUPPORT_MATRIX.md`)
   becomes Complete and verified.
+- **Status:** DONE. Evidence: `Ir.X86AddWithCarryMatchesHardwareFlags`,
+  `Ir.X86SubWithBorrowMatchesHardwareFlags`,
+  `Ir.X86AddOfARegisterToItselfCarriesFromTheOriginalValue`,
+  `Ir.X86SubOfARegisterFromItselfKeepsTheOriginalForSignedBranches`,
+  `Ir.X86AddFollowedByACarryBranchIsExact`, `Ir.AddCarryMatchesHardwareFlags`,
+  `Ir.SubBorrowMatchesHardwareFlags`,
+  `Ir.VerifierRejectsCarryWithoutAFlagWriterInItsBlock`, and the corpus
+  functions `c_add128_hi`, `c_sub128_hi`, `c_add_wraps` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`. On Clang 18.1
+  x86-64 those three are Complete and verified at O0, O2 and O3, so the
+  `adc` Partial on Clang -O2 is gone. Also fixed in this task: `sub x, x`
+  followed by a signed branch compared against the overwritten register; an
+  `add`/`sub` whose memory source is addressed by its own destination
+  (`add rdi, [rdi]; setb`), which now copies the source before the write
+  (`Ir.X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue`);
+  a register `xchg` between a flag writer and its consumer, which now passes the
+  flags through (`Ir.X86CarryReachesAnAdcAcrossARegisterExchange`); an
+  unsupported memory `xchg`, which now drops the flag state
+  (`Ir.X86CarryIsNotReadAcrossAnUnsupportedExchange`); and the verifier
+  rejects a second carry op that would read a carry out the IR does not
+  represent (`Ir.VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled`),
+  a block operand (`Ir.VerifierRejectsACarryWithABlockOperand`), and a
+  constant wider than the destination (`Ir.VerifierRejectsACarryConstantWiderThanItsDestination`).
+- **Deviations from the steps above:** the carry is read from the flag state
+  of the last `Compare`/`Test` in the block, as `CondAssign` already does,
+  rather than from a separate operand. The carry out of `adc`/`sbb` is not
+  modelled, so `adc; adc` chains are Partial. `xchg reg, reg` and a memory
+  source for `adc`/`sbb` are lifted. AArch64 `adc`/`sbc`/`cmn` are not lifted;
+  that is G03-T4.
 
 **G02-T2 Double-width multiply and divide** (depends: none)
 
@@ -427,6 +456,17 @@ interpreter.
   AArch64 instead of skipping.
 - **Done when:** that test passes on `ubuntu-24.04-arm` and `macos-15`, and
   `c_switch_dense` is Complete and verified.
+
+**G03-T4 AArch64 carry chain** (depends: G02-T1; added when G02-T1 landed)
+
+- **Goal:** lift AArch64 `adc`, `adcs`, `sbc`, `sbcs`, `adds`, `subs`, `cmn`
+  and `cmp` (`cmn` is `adds` into the zero register), with C and V from the
+  existing NZCV model. The IR already has `AddCarry` and `SubBorrow`
+  (G02-T1), and `condition_holds(Carry)` already gives AArch64 C.
+- **Files:** `src/ir/lift_aarch64.cpp`, the corpus is unchanged.
+- **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
+  and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
+  counts in `docs/SUPPORT_MATRIX.md`.
 
 ### G04 Decompiler readability
 

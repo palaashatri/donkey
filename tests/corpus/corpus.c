@@ -257,3 +257,20 @@ CORPUS long long c_many_args(long long a, long long b, long long c, long long d,
 CORPUS int c_narrow_args(signed char a, short b, unsigned char c, unsigned short d) {
   return a * 1000 + b + c + d;
 }
+
+/* ---- carry and borrow: 128-bit arithmetic from 64-bit halves (adc, sbb) ---- */
+CORPUS unsigned long long c_add128_hi(unsigned long long alo, unsigned long long ahi,
+                                      unsigned long long blo, unsigned long long bhi) {
+  unsigned __int128 a = ((unsigned __int128)ahi << 64) | alo;
+  unsigned __int128 b = ((unsigned __int128)bhi << 64) | blo;
+  return (unsigned long long)((a + b) >> 64);
+}
+CORPUS unsigned long long c_sub128_hi(unsigned long long alo, unsigned long long ahi,
+                                      unsigned long long blo, unsigned long long bhi) {
+  unsigned __int128 a = ((unsigned __int128)ahi << 64) | alo;
+  unsigned __int128 b = ((unsigned __int128)bhi << 64) | blo;
+  return (unsigned long long)((a - b) >> 64);
+}
+CORPUS int c_add_wraps(unsigned long long x, unsigned long long y) {
+  return x + y < x;
+}
