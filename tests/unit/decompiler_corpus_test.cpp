@@ -1167,7 +1167,16 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
 #endif
   auto loaded = donkey::load_binary(DONKEY_TEST_MODULE_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
-  auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
+  // The module's debug information. On macOS it is in the .dSYM bundle that the build makes with
+  // dsymutil; the image itself has no .debug_info section.
+  std::string debug_path = DONKEY_TEST_MODULE_PATH;
+#if defined(__APPLE__)
+  const std::string module_name = debug_path.substr(debug_path.find_last_of('/') + 1);
+  debug_path += ".dSYM/Contents/Resources/DWARF/" + module_name;
+#endif
+  auto debug_file = donkey::load_binary(debug_path);
+  ASSERT_TRUE(debug_file.has_value()) << debug_file.diagnostic().message;
+  auto info = donkey::read_debug_info(debug_file.value().image, debug_file.value().data);
   ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
   auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
   ASSERT_TRUE(analysis.has_value());
