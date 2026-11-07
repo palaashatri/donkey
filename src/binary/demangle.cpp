@@ -104,8 +104,13 @@ class Printer {
         }
         return text + ">";
       }
-      case Node::Kind::Special:
-        return node->text + type(node->children[0], "");
+      case Node::Kind::Special: {
+        // A thunk's operand is a named encoding (`non-virtual thunk to Foo::bar()`), so it
+        // prints as a function with its name, not as a bare function type.
+        const Node* operand = node->children[0];
+        return node->text +
+               (operand->kind == Node::Kind::Function ? function_text(operand) : type(operand, ""));
+      }
       case Node::Kind::Function:
         return function_text(node);
       case Node::Kind::Pack: {

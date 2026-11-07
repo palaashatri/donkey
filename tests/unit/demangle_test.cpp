@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <fstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "donkey/binary/demangle.h"
@@ -90,4 +91,20 @@ TEST(Demangle, TruncatedAndUnsupportedNamesAreErrors) {
 
   const auto unsupported = donkey::demangle_itanium("_ZTZ3foo");
   ASSERT_FALSE(unsupported.has_value());
+}
+
+// Thunks name the function they adjust (G10-T3 found them in vtables). The expected text is
+// c++filt's output for each name.
+TEST(Demangle, ThunksNameTheirTarget) {
+  const std::pair<const char*, const char*> cases[] = {
+      {"_ZThn16_NK6Tagged4nameEv", "non-virtual thunk to Tagged::name() const"},
+      {"_ZThn16_N3Foo3barEi", "non-virtual thunk to Foo::bar(int)"},
+      {"_ZTv0_n24_NK6Tagged4nameEv", "virtual thunk to Tagged::name() const"},
+      {"_ZTh0_N3Foo3barEv", "non-virtual thunk to Foo::bar()"},
+  };
+  for (const auto& [mangled, expected] : cases) {
+    const auto result = donkey::demangle_itanium(mangled);
+    ASSERT_TRUE(result.has_value()) << mangled;
+    EXPECT_EQ(result.value(), expected) << mangled;
+  }
 }
