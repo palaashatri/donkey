@@ -3,18 +3,34 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
-#include <stdexcept>
 
-std::string make_string(const char* s) { return std::string(s); }
-std::vector<int> make_vector(int n) { return std::vector<int>(n, 1); }
-std::map<std::string, int> make_map() { return {{"a", 1}}; }
-std::unique_ptr<int> make_unique(int v) { return std::make_unique<int>(v); }
-std::shared_ptr<double> make_shared(double v) { return std::make_shared<double>(v); }
-std::function<int(int)> make_function(int k) { return [k](int x) { return x + k; }; }
-std::vector<std::string> strings(const std::vector<std::string>& in) { return in; }
-void throws(int v) { if (v < 0) throw std::runtime_error("negative"); }
+std::string make_string(const char* s) {
+  return std::string(s);
+}
+std::vector<int> make_vector(int n) {
+  return std::vector<int>(n, 1);
+}
+std::map<std::string, int> make_map() {
+  return {{"a", 1}};
+}
+std::unique_ptr<int> make_unique(int v) {
+  return std::make_unique<int>(v);
+}
+std::shared_ptr<double> make_shared(double v) {
+  return std::make_shared<double>(v);
+}
+std::function<int(int)> make_function(int k) {
+  return [k](int x) { return x + k; };
+}
+std::vector<std::string> strings(const std::vector<std::string>& in) {
+  return in;
+}
+void throws(int v) {
+  if (v < 0) throw std::runtime_error("negative");
+}
 int lambdas(int x) {
   auto f = [x](int y) { return x + y; };
   auto g = [&](auto z) { return z + x; };
@@ -45,6 +61,11 @@ double total(const std::vector<std::unique_ptr<Shape>>& shapes) {
   return sum;
 }
 namespace {
-struct Local { int v; };
+struct Local {
+  int v;
+};
 }  // namespace
-int local_struct_user() { Local l{4}; return l.v; }
+int local_struct_user() {
+  Local l{4};
+  return l.v;
+}

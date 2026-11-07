@@ -1,5 +1,6 @@
 // Mangling fixture (G10-T1): class and function templates instantiated with many types.
-template <typename T> struct Box {
+template <typename T>
+struct Box {
   T value;
   Box() : value() {}
   explicit Box(T v) : value(v) {}
@@ -7,15 +8,34 @@ template <typename T> struct Box {
   void set(T v) { value = v; }
   Box<T>* self() { return this; }
 };
-template <typename T, int N> struct Array {
+template <typename T, int N>
+struct Array {
   T data[N];
   T at(int i) const { return data[i]; }
 };
-template <typename T> T identity(T v) { return v; }
-template <typename T, typename U> T convert(U u) { return static_cast<T>(u); }
-template <typename... Ts> int count(Ts... args) { return sizeof...(Ts); }
-template <typename T> void consume(const T& t) { (void)t; }
-template <class T> struct Holder { template <typename U> static U pick(U u) { return u; } };
+template <typename T>
+T identity(T v) {
+  return v;
+}
+template <typename T, typename U>
+T convert(U u) {
+  return static_cast<T>(u);
+}
+template <typename... Ts>
+int count(Ts... args) {
+  return sizeof...(Ts);
+}
+template <typename T>
+void consume(const T& t) {
+  (void)t;
+}
+template <class T>
+struct Holder {
+  template <typename U>
+  static U pick(U u) {
+    return u;
+  }
+};
 
 Box<int> b_int(3);
 Box<char> b_char('c');
