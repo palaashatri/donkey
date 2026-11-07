@@ -152,7 +152,7 @@ P0 is the most important, P3 the least.
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1) | P0 | IN PROGRESS (G02-T1 DONE; T2-T4 TODO) |
+| G02 | x86 integer gaps | Full integer semantics | No `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks (`adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2) | P0 | IN PROGRESS (G02-T1, T2 DONE; T3-T4 TODO) |
 | G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
@@ -380,6 +380,21 @@ interpreter.
      division by a constant (compilers emit multiply-high).
 - **Done when:** the new functions are Complete and verified on GCC and Clang
   at O0/O2/O3.
+- **Status:** DONE (stacked on G02-T1; see the PR for its base). Evidence:
+  `Ir.X86MulAndImulReturnTheHighHalfOfTheProduct`,
+  `Ir.X86DivAndIdivReturnTheQuotientAndTheRemainder`,
+  `Ir.X86DivideFaultsWhereTheHardwareDivideErrors`,
+  `Ir.X86ThirtyTwoBitDivideUsesEdxAndEax`,
+  `Ir.VerifierRejectsDivideWithoutItsDivisor`, and the corpus functions
+  `c_mulhi_u64`, `c_mulhi_s64`, `c_udiv32`, `c_urem32`, `c_sdiv32`,
+  `c_srem32`, `c_udiv64`, `c_urem64`, `c_sdiv64`, `c_srem64`, `c_div10` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
+- **Deviations from the steps above:** division needs three operands, so
+  `IrStatement` gained a third operand `c` (the divisor). The dividend is the
+  pair `a` (high) and `b` (low). The 8- and 16-bit forms are Unsupported. The
+  flags after `mul`/`div` are not modelled. The signed corpus functions guard
+  `INT_MIN / -1` and division by zero, because the native code traps there;
+  the interpreter reports `ir.eval_fault` for both instead of returning 0.
 
 **G02-T3 Bit operations**
 
@@ -436,6 +451,12 @@ interpreter.
   - The interpreter must branch on architecture for these.
 - **Done when:** the corpus division functions from G02-T2 are Complete and
   verified on aarch64.
+- **Note (added by G02-T2):** the IR ops `MulHighUnsigned`, `MulHighSigned`,
+  `DivUnsigned`, `DivSigned`, `RemUnsigned` and `RemSigned` exist, with the
+  divisor as the third operand `c`. They fault on a zero divisor or a quotient
+  overflow, so AArch64 `udiv`/`sdiv` must guard the zero case in the IR (a
+  compare and a conditional select to zero) to match AArch64's result. Do not
+  lower them to the faulting op unguarded.
 
 **G03-T3 AArch64 jump tables**
 

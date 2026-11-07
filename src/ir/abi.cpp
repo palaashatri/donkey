@@ -173,6 +173,7 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
       reads.clear();
       collect_reads(statement.a, reads);
       collect_reads(statement.b, reads);
+      collect_reads(statement.c, reads);  // the divisor of Div and Rem
       if (statement.dest.kind == IrOperandKind::Memory) {
         collect_reads(statement.dest, reads);
       }

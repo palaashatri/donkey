@@ -25,6 +25,105 @@ std::int64_t sign_extend(std::uint64_t value, std::uint8_t width) {
   return static_cast<std::int64_t>((value ^ sign) - sign);
 }
 
+/// High 64 bits of the unsigned 128-bit product a * b.
+std::uint64_t mul_high_unsigned(std::uint64_t a, std::uint64_t b) {
+  const std::uint64_t a_lo = a & 0xffffffffULL;
+  const std::uint64_t a_hi = a >> 32U;
+  const std::uint64_t b_lo = b & 0xffffffffULL;
+  const std::uint64_t b_hi = b >> 32U;
+  const std::uint64_t low_low = a_lo * b_lo;
+  const std::uint64_t low_high = a_lo * b_hi;
+  const std::uint64_t high_low = a_hi * b_lo;
+  const std::uint64_t high_high = a_hi * b_hi;
+  const std::uint64_t middle =
+      (low_low >> 32U) + (low_high & 0xffffffffULL) + (high_low & 0xffffffffULL);
+  return high_high + (low_high >> 32U) + (high_low >> 32U) + (middle >> 32U);
+}
+
+/// High 64 bits of the signed 128-bit product a * b.
+std::uint64_t mul_high_signed(std::uint64_t a, std::uint64_t b) {
+  std::uint64_t high = mul_high_unsigned(a, b);
+  if (static_cast<std::int64_t>(a) < 0) {
+    high -= b;
+  }
+  if (static_cast<std::int64_t>(b) < 0) {
+    high -= a;
+  }
+  return high;
+}
+
+/// The high part of the 2w-byte product of two w-byte operands.
+std::uint64_t multiply_high(bool is_signed, std::uint64_t a, std::uint64_t b, std::uint8_t width) {
+  if (width >= 8) {
+    return is_signed ? mul_high_signed(a, b) : mul_high_unsigned(a, b);
+  }
+  // Operands of at most 4 bytes: the full product fits in 64 bits.
+  const unsigned shift = width * 8U;
+  if (is_signed) {
+    const std::int64_t product = sign_extend(a, width) * sign_extend(b, width);
+    return static_cast<std::uint64_t>(product >> shift);
+  }
+  return ((a & mask(width)) * (b & mask(width))) >> shift;
+}
+
+/// Restoring division of hi:lo by d. Requires d != 0 and hi < d, so that the
+/// quotient fits in 64 bits.
+void divide_unsigned_128(std::uint64_t hi, std::uint64_t lo, std::uint64_t d,
+                         std::uint64_t& quotient, std::uint64_t& remainder) {
+  std::uint64_t r = hi;
+  std::uint64_t q = 0;
+  for (int bit = 63; bit >= 0; --bit) {
+    const bool shifted_out = (r >> 63U) != 0;  // 2r does not fit in 64 bits
+    r = (r << 1U) | ((lo >> static_cast<unsigned>(bit)) & 1ULL);
+    q <<= 1U;
+    if (shifted_out || r >= d) {
+      r -= d;  // wraps correctly when shifted_out: the true value is below d
+      q |= 1ULL;
+    }
+  }
+  quotient = q;
+  remainder = r;
+}
+
+/// The x86 div (unsigned) or idiv (signed) at `width` bytes on the 128-bit
+/// dividend hi:lo and the 64-bit divisor d, both already extended to 128 and
+/// 64 bits by the caller. Returns false where x86 raises #DE: a zero divisor
+/// or a quotient outside the range of `width` bytes.
+bool divide_wide(bool is_signed, std::uint8_t width, std::uint64_t hi, std::uint64_t lo,
+                 std::uint64_t d, std::uint64_t& quotient, std::uint64_t& remainder) {
+  if (!is_signed) {
+    if (d == 0 || hi >= d) {  // hi >= d: the quotient needs more than 64 bits
+      return false;
+    }
+    divide_unsigned_128(hi, lo, d, quotient, remainder);
+    return quotient <= mask(width);
+  }
+  const bool negative_dividend = (hi >> 63U) != 0;
+  const bool negative_divisor = static_cast<std::int64_t>(d) < 0;
+  std::uint64_t dividend_hi = hi;
+  std::uint64_t dividend_lo = lo;
+  if (negative_dividend) {  // two's complement negation of the 128-bit value
+    dividend_lo = ~lo + 1U;
+    dividend_hi = ~hi + (lo == 0 ? 1U : 0U);
+  }
+  const std::uint64_t magnitude = negative_divisor ? ~d + 1U : d;
+  if (magnitude == 0 || dividend_hi >= magnitude) {
+    return false;
+  }
+  std::uint64_t magnitude_quotient = 0;
+  std::uint64_t magnitude_remainder = 0;
+  divide_unsigned_128(dividend_hi, dividend_lo, magnitude, magnitude_quotient, magnitude_remainder);
+  const bool negative_quotient = negative_dividend != negative_divisor;
+  // Signed results range over [-2^(8w-1), 2^(8w-1) - 1]: the negative bound is reachable.
+  const std::uint64_t limit = 1ULL << (width * 8U - 1U);
+  if (negative_quotient ? magnitude_quotient > limit : magnitude_quotient >= limit) {
+    return false;
+  }
+  quotient = negative_quotient ? ~magnitude_quotient + 1U : magnitude_quotient;
+  remainder = negative_dividend ? ~magnitude_remainder + 1U : magnitude_remainder;
+  return true;
+}
+
 /// Where a register name lives in the canonical register file.
 struct Slot {
   std::string canonical;
@@ -437,6 +536,55 @@ class Machine {
               const std::uint64_t carry = in ? 1 : 0;
               const std::uint64_t result = add ? *x + *y + carry : *x - *y - carry;
               ok = assign(s.dest, w, result & mask(w));
+            }
+            break;
+          }
+          case IrOp::MulHighUnsigned:
+          case IrOp::MulHighSigned: {
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value() &&
+                 assign(s.dest, w, multiply_high(s.op == IrOp::MulHighSigned, *x, *y, w) & mask(w));
+            break;
+          }
+          case IrOp::DivUnsigned:
+          case IrOp::DivSigned:
+          case IrOp::RemUnsigned:
+          case IrOp::RemSigned: {
+            const auto high = value_of(s.a);
+            const auto low = value_of(s.b);
+            const auto divisor = value_of(s.c);
+            ok = high.has_value() && low.has_value() && divisor.has_value();
+            if (ok) {
+              const bool is_signed = s.op == IrOp::DivSigned || s.op == IrOp::RemSigned;
+              std::uint64_t hi = *high;
+              std::uint64_t lo = *low;
+              std::uint64_t d = *divisor;
+              if (w < 8) {
+                // The 2w-byte dividend and the w-byte divisor are extended into
+                // the 128-bit and 64-bit operands that divide_wide takes.
+                const std::uint64_t value = ((*high & mask(w)) << (w * 8U)) | (*low & mask(w));
+                if (is_signed) {
+                  const std::int64_t signed_value =
+                      sign_extend(value, static_cast<std::uint8_t>(2 * w));
+                  hi = signed_value < 0 ? ~0ULL : 0ULL;
+                  lo = static_cast<std::uint64_t>(signed_value);
+                  d = static_cast<std::uint64_t>(sign_extend(*divisor, w));
+                } else {
+                  hi = 0;
+                  lo = value;
+                  d = *divisor & mask(w);
+                }
+              }
+              std::uint64_t quotient = 0;
+              std::uint64_t remainder = 0;
+              if (!divide_wide(is_signed, w, hi, lo, d, quotient, remainder)) {
+                fail("ir.eval_fault", "divide by zero or quotient overflow");
+                ok = false;
+                break;
+              }
+              const bool wants_quotient = s.op == IrOp::DivUnsigned || s.op == IrOp::DivSigned;
+              ok = assign(s.dest, w, (wants_quotient ? quotient : remainder) & mask(w));
             }
             break;
           }

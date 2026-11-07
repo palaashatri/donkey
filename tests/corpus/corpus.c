@@ -274,3 +274,52 @@ CORPUS unsigned long long c_sub128_hi(unsigned long long alo, unsigned long long
 CORPUS int c_add_wraps(unsigned long long x, unsigned long long y) {
   return x + y < x;
 }
+
+/* ---- double-width multiply and divide (mul, imul, div, idiv) ----
+ * Division by zero and INT_MIN / -1 trap on x86, so the signed forms return 0
+ * for them; the native code never traps. */
+CORPUS unsigned long long c_mulhi_u64(unsigned long long a, unsigned long long b) {
+  return (unsigned long long)(((unsigned __int128)a * b) >> 64);
+}
+CORPUS long long c_mulhi_s64(long long a, long long b) {
+  return (long long)(((__int128)a * b) >> 64);
+}
+CORPUS unsigned int c_udiv32(unsigned int x, unsigned int y) {
+  return y ? x / y : 0;
+}
+CORPUS unsigned int c_urem32(unsigned int x, unsigned int y) {
+  return y ? x % y : 0;
+}
+CORPUS int c_sdiv32(int x, int y) {
+  if (y == 0 || (y == -1 && x == (-2147483647 - 1))) {
+    return 0;
+  }
+  return x / y;
+}
+CORPUS int c_srem32(int x, int y) {
+  if (y == 0 || (y == -1 && x == (-2147483647 - 1))) {
+    return 0;
+  }
+  return x % y;
+}
+CORPUS unsigned long long c_udiv64(unsigned long long x, unsigned long long y) {
+  return y ? x / y : 0;
+}
+CORPUS unsigned long long c_urem64(unsigned long long x, unsigned long long y) {
+  return y ? x % y : 0;
+}
+CORPUS long long c_sdiv64(long long x, long long y) {
+  if (y == 0 || (y == -1 && x == (-9223372036854775807LL - 1))) {
+    return 0;
+  }
+  return x / y;
+}
+CORPUS long long c_srem64(long long x, long long y) {
+  if (y == 0 || (y == -1 && x == (-9223372036854775807LL - 1))) {
+    return 0;
+  }
+  return x % y;
+}
+CORPUS unsigned long long c_div10(unsigned long long x) {
+  return x / 10;
+}

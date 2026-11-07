@@ -568,6 +568,72 @@ struct Lifter {
     unsupported(block, instruction);
   }
 
+  /// mul / imul with one operand, and div / idiv, which use the implicit rax and
+  /// rdx operands: rdx:rax = rax * source, or rax = rdx:rax / source and
+  /// rdx = rdx:rax % source. The 8- and 16-bit forms use other registers and are
+  /// Unsupported. The flags after these are not modelled.
+  void lift_multiply_divide(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    flags_state = FlagsState::Unknown;
+    if (operands.size() != 1 ||
+        (operands[0].kind != OperandKind::Register && operands[0].kind != OperandKind::Memory)) {
+      unsupported(block, instruction);
+      return;
+    }
+    IrOperand source = to_ir_operand(operands[0], instruction, pointer_width);
+    const std::uint8_t width = source.width;
+    if (width != 4 && width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    if (source.kind == IrOperandKind::Memory) {
+      // The memory operand is read first, into a temporary of the operation's width.
+      const IrOperand value = temp_operand(temporary_id(), width);
+      IrStatement load;
+      load.op = IrOp::Load;
+      load.dest = value;
+      load.a = source;
+      load.width = width;
+      load.source_address = instruction.address;
+      push(block, std::move(load));
+      source = value;
+    }
+    const IrOperand accumulator = IrOperand::register_ref(width == 8 ? "rax" : "eax", width);
+    const IrOperand high = IrOperand::register_ref(width == 8 ? "rdx" : "edx", width);
+    const auto emit = [&](IrOp op, const IrOperand& dest, const IrOperand& a, const IrOperand& b,
+                          const IrOperand& c) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = dest;
+      statement.a = a;
+      statement.b = b;
+      statement.c = c;
+      statement.width = width;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    if (mnemonic == "mul" || mnemonic == "imul") {
+      // Both halves are computed before either register is written.
+      const bool is_signed = mnemonic == "imul";
+      const IrOperand high_part = temp_operand(temporary_id(), width);
+      const IrOperand low_part = temp_operand(temporary_id(), width);
+      emit(is_signed ? IrOp::MulHighSigned : IrOp::MulHighUnsigned, high_part, accumulator, source,
+           IrOperand::none());
+      emit(IrOp::Mul, low_part, accumulator, source, IrOperand::none());
+      emit(IrOp::Assign, high, high_part, IrOperand::none(), IrOperand::none());
+      emit(IrOp::Assign, accumulator, low_part, IrOperand::none(), IrOperand::none());
+      return;
+    }
+    const bool is_signed = mnemonic == "idiv";
+    const IrOperand quotient = temp_operand(temporary_id(), width);
+    const IrOperand remainder = temp_operand(temporary_id(), width);
+    emit(is_signed ? IrOp::DivSigned : IrOp::DivUnsigned, quotient, high, accumulator, source);
+    emit(is_signed ? IrOp::RemSigned : IrOp::RemUnsigned, remainder, high, accumulator, source);
+    emit(IrOp::Assign, accumulator, quotient, IrOperand::none(), IrOperand::none());
+    emit(IrOp::Assign, high, remainder, IrOperand::none(), IrOperand::none());
+  }
+
   /// xchg reg, reg: a swap through a temporary. An exchange leaves the flags alone.
   /// Returns false when the exchange is Unsupported, which invalidates the flags.
   bool lift_exchange(IrBlock& block, const Instruction& instruction) {
@@ -1192,6 +1258,9 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.lift_test(out_block, instruction);
         lifter.flags_state = Lifter::FlagsState::Exact;
         keeps_flags = true;
+      } else if (mnemonic == "mul" || mnemonic == "div" || mnemonic == "idiv" ||
+                 (mnemonic == "imul" && instruction.structured_operands.size() == 1)) {
+        lifter.lift_multiply_divide(out_block, instruction);
       } else if (is_bitwise_or_arithmetic(mnemonic) || mnemonic == "inc" || mnemonic == "dec") {
         lifter.lift_arithmetic(out_block, instruction, next_consumer(i));
         keeps_flags = true;  // lift_arithmetic set the state
