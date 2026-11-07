@@ -24,6 +24,14 @@ bool is_direct_riscv_branch(const std::string& mnemonic) {
                       [&mnemonic](const char* name) { return mnemonic == name; }) != kDirect.end();
 }
 
+/// The MIPS and PowerPC families, in their 32-bit and 64-bit forms (G13).
+bool is_mips_family(Architecture architecture) {
+  return architecture == Architecture::Mips32 || architecture == Architecture::Mips64;
+}
+bool is_ppc_family(Architecture architecture) {
+  return architecture == Architecture::Ppc32 || architecture == Architecture::Ppc64;
+}
+
 // Capstone's group flags miss some MIPS32 and PowerPC32 control transfers: `jal` has none, `jr $ra`
 // and `blr` are plain jumps, and PowerPC `bl` is a jump. For those two architectures the class is
 // refined from the mnemonic and operands, and for PowerPC from the link bit (bit 0 of the
@@ -31,7 +39,7 @@ bool is_direct_riscv_branch(const std::string& mnemonic) {
 InstructionClass refine_mips_or_ppc_class(const cs_insn& insn, Architecture architecture,
                                           Endian endian, const std::string& mnemonic,
                                           InstructionClass from_groups) {
-  if (architecture == Architecture::Mips32) {
+  if (is_mips_family(architecture)) {
     static const std::array<const char*, 10> kLinking = {
         "jal", "jalx", "jalr", "jalr.hb", "bal", "balc", "bltzal", "bgezal", "bltzall", "bgezall"};
     for (const char* linking : kLinking) {
@@ -63,7 +71,7 @@ InstructionClass refine_mips_or_ppc_class(const cs_insn& insn, Architecture arch
 }
 
 bool is_conditional_jump(Architecture architecture, const std::string& mnemonic) {
-  if (architecture == Architecture::Mips32) {
+  if (is_mips_family(architecture)) {
     // `b`, `bal`, `bc`, `balc`, `j`, `jal`, `jalr` and `jr` always transfer control. The other
     // branch mnemonics test a register or a condition (`beq`, `bnez`, `bc1t`), so they fall
     // through.
@@ -73,7 +81,7 @@ bool is_conditional_jump(Architecture architecture, const std::string& mnemonic)
     }
     return !mnemonic.empty() && mnemonic.front() == 'b';
   }
-  if (architecture == Architecture::Ppc32) {
+  if (is_ppc_family(architecture)) {
     // `b`, `ba`, `bl`, `bla`, `bctr`, `bctrl`, `blr` and `blrl` always transfer control. The other
     // forms (`bc`, `bt`, `bf`, `bdnz`, and the conditional `bcctr`/`bclr`) can fall through.
     if (mnemonic == "b" || mnemonic == "ba" || mnemonic == "bl" || mnemonic == "bla" ||
@@ -206,6 +214,16 @@ Result<Decoder> Decoder::create(Architecture architecture, Endian endian) {
       mode = static_cast<cs_mode>(
           CS_MODE_32 | (endian == Endian::Big ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN));
       break;
+    case Architecture::Mips64:
+      capstone_arch = CS_ARCH_MIPS;
+      mode = static_cast<cs_mode>(
+          CS_MODE_MIPS64 | (endian == Endian::Big ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN));
+      break;
+    case Architecture::Ppc64:
+      capstone_arch = CS_ARCH_PPC;
+      mode = static_cast<cs_mode>(
+          CS_MODE_64 | (endian == Endian::Big ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN));
+      break;
     case Architecture::RiscV64:
       // With the compressed set, so the 16-bit instructions compilers emit by default decode too.
       if (endian == Endian::Big) {
@@ -297,7 +315,7 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
                                 : InstructionClass::Jump;
   }
 
-  if ((impl_->architecture == Architecture::Mips32 || impl_->architecture == Architecture::Ppc32) &&
+  if ((is_mips_family(impl_->architecture) || is_ppc_family(impl_->architecture)) &&
       instruction->detail != nullptr) {
     result.classification = refine_mips_or_ppc_class(
         *instruction, impl_->architecture, impl_->endian, result.mnemonic, result.classification);
@@ -323,11 +341,10 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
           break;
         }
       }
-    } else if ((impl_->architecture == Architecture::Mips32 ||
-                impl_->architecture == Architecture::Ppc32) &&
+    } else if ((is_mips_family(impl_->architecture) || is_ppc_family(impl_->architecture)) &&
                instruction->detail != nullptr) {
       // The target is the last immediate operand, and Capstone gives it as an address.
-      const bool mips = impl_->architecture == Architecture::Mips32;
+      const bool mips = is_mips_family(impl_->architecture);
       const std::uint8_t operand_count =
           mips ? instruction->detail->mips.op_count : instruction->detail->ppc.op_count;
       for (int i = static_cast<int>(operand_count) - 1; i >= 0; --i) {
@@ -519,6 +536,8 @@ Result<DecodeStream> Decoder::decode(std::span<const std::byte> bytes, std::uint
       case Architecture::Arm:
       case Architecture::Mips32:
       case Architecture::Ppc32:
+      case Architecture::Mips64:
+      case Architecture::Ppc64:
         slot = 4;
         break;
       case Architecture::RiscV64:

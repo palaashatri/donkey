@@ -34,7 +34,7 @@ bool terminates_flow(InstructionClass classification) {
 /// Whether a MIPS branch, call or return runs its delay slot (the instruction after it) first. The
 /// slot is part of the same block as the transfer. Other architectures have no delay slots.
 bool has_delay_slot(Architecture architecture, const Instruction& instruction) {
-  return architecture == Architecture::Mips32 &&
+  return (architecture == Architecture::Mips32 || architecture == Architecture::Mips64) &&
          (instruction.classification == InstructionClass::Call ||
           instruction.classification == InstructionClass::Jump ||
           instruction.classification == InstructionClass::ConditionalJump ||

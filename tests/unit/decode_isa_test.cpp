@@ -304,11 +304,30 @@ TEST(DecodeIsa, MipsDelaySlotsStayWithTheirBranchesInTheGraph) {
   EXPECT_TRUE(has_edge(cfg, 0x201d4, 0x201d4, donkey::CfgEdgeKind::Jump));
 }
 
-// 64-bit MIPS and PowerPC share the 32-bit ELF machine numbers but not the instruction sets (`ld`,
-// `daddu`, 64-bit PowerPC), so the image is Unknown and is not decoded as 32-bit code.
-TEST(DecodeIsa, SixtyFourBitMipsAndPowerPcAreNotDecodedAsThirtyTwoBit) {
-  for (const char* name : {"mips64el", "ppc64"}) {
+// 64-bit MIPS and PowerPC (G13): the images decode in their 64-bit modes, and the listings agree.
+// They were refused before this change, when the decoder had no 64-bit modes.
+TEST(DecodeIsa, SixtyFourBitMipsAndPowerPcMatchTheirListings) {
+  const auto mips = load("mips64el");
+  EXPECT_EQ(mips.image.architecture, donkey::Architecture::Mips64);
+  expect_listing_matches(decode_text(mips, donkey::Architecture::Mips64), read_listing("mips64el"));
+  const auto ppc = load("ppc64");
+  EXPECT_EQ(ppc.image.architecture, donkey::Architecture::Ppc64);
+  EXPECT_EQ(ppc.image.endian, donkey::Endian::Big);
+  expect_listing_matches(decode_text(ppc, donkey::Architecture::Ppc64), read_listing("ppc64"));
+}
+
+// MIPS16 and microMIPS code is not decoded by the MIPS32 backend. Their e_flags say so, and the
+// image is Unknown with the reason recorded, rather than read as MIPS32 code. The fixtures are a
+// microMIPS build of the MIPS fixture and a small MIPS16 assembly image (their flags are checked by
+// the tests through the diagnostic, not by hand-written constants).
+TEST(DecodeIsa, MipsSixteenAndMicroMipsImagesAreRefusedWithTheirReason) {
+  for (const char* name : {"mips32el-micromips", "mips32el-mips16"}) {
     const auto loaded = load(name);
     EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Unknown) << name;
+    bool recorded = false;
+    for (const donkey::Diagnostic& diagnostic : loaded.image.diagnostics) {
+      recorded = recorded || diagnostic.code == "elf.mips_isa_extension";
+    }
+    EXPECT_TRUE(recorded) << name;
   }
 }

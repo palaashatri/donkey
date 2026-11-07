@@ -26,7 +26,9 @@ enum class Architecture : std::uint8_t {
   AArch64,
   RiscV64,
   Mips32,
-  Ppc32
+  Ppc32,
+  Mips64,
+  Ppc64
 };
 
 enum class SymbolKind : std::uint8_t {
