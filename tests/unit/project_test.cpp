@@ -1790,3 +1790,60 @@ TEST(Project, StoresLocalNamesAndRefusesBadKeysAndNames) {
   EXPECT_EQ(reopened.value()[0].variable, "frame:rbp:-8");
   EXPECT_EQ(reopened.value()[0].function_address, 0x400100U);
 }
+
+// G12-T3: the session saves its whole set of local names at once. The replacement is complete and
+// atomic: a repeated (function, key) pair is refused, and the names already stored stay.
+TEST(Project, ReplacesEveryLocalNameAtOnceAndKeepsThePreviousSetWhenRefused) {
+  TempPath path("replace-local-names");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto images = project.value().images();
+  ASSERT_TRUE(images.has_value());
+  const std::int64_t image_id = images.value()[0].id;
+
+  ASSERT_TRUE(
+      project.value()
+          .replace_local_names(image_id, {donkey::LocalName{0x400100, "arg:0", "count"},
+                                          donkey::LocalName{0x400100, "frame:rbp:-8", "total"}})
+          .has_value());
+  auto first = project.value().local_names(image_id);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_EQ(first.value().size(), 2U);
+
+  // A second set replaces the first entirely: the entry not repeated is gone.
+  ASSERT_TRUE(project.value()
+                  .replace_local_names(image_id, {donkey::LocalName{0x400100, "arg:0", "items"}})
+                  .has_value());
+  auto second = project.value().local_names(image_id);
+  ASSERT_TRUE(second.has_value());
+  ASSERT_EQ(second.value().size(), 1U);
+  EXPECT_EQ(second.value()[0].name, "items");
+
+  // A repeated pair is refused, and the set stored before the call is kept as it was.
+  const auto refused = project.value().replace_local_names(
+      image_id,
+      {donkey::LocalName{0x400100, "arg:0", "a"}, donkey::LocalName{0x400100, "arg:0", "b"}});
+  EXPECT_FALSE(refused.has_value());
+  auto kept = project.value().local_names(image_id);
+  ASSERT_TRUE(kept.has_value());
+  ASSERT_EQ(kept.value().size(), 1U);
+  EXPECT_EQ(kept.value()[0].name, "items");
+
+  // A malformed key is refused before anything is written.
+  EXPECT_FALSE(project.value()
+                   .replace_local_names(image_id, {donkey::LocalName{0x400100, "local:1", "x"}})
+                   .has_value());
+  EXPECT_FALSE(project.value()
+                   .replace_local_names(image_id + 99, {donkey::LocalName{0x400100, "arg:0", "x"}})
+                   .has_value());
+
+  // Empty set clears everything.
+  ASSERT_TRUE(project.value().replace_local_names(image_id, {}).has_value());
+  auto cleared = project.value().local_names(image_id);
+  ASSERT_TRUE(cleared.has_value());
+  EXPECT_TRUE(cleared.value().empty());
+}

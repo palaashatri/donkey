@@ -1456,6 +1456,81 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
   return Result<void>();
 }
 
+Result<void> Project::replace_local_names(std::int64_t image_id,
+                                          const std::vector<LocalName>& names) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  for (const LocalName& entry : names) {
+    if (!fits_storage(entry.function_address)) {
+      return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                             "local function address does not fit the storage integer range",
+                             entry.function_address);
+    }
+    if (!local_variable_key_valid(entry.variable)) {
+      return make_void_error(Status::InvalidInput, "project.local_key_invalid",
+                             "local key must be arg:<index> or frame:<base register>:<offset>");
+    }
+    if (!local_name_valid(entry.name)) {
+      return make_void_error(Status::InvalidInput, "project.local_name_invalid",
+                             "local name must be a C identifier of at most 128 bytes");
+    }
+  }
+  {
+    Statement check(db, "SELECT 1 FROM images WHERE id = ?1");
+    check.bind(1, image_id);
+    if (!check.ok() || !check.step()) {
+      if (!check.done()) {
+        return make_void_error(
+            Status::InternalError, "project.query_failed",
+            storage_error(db, "project.query_failed", "lookup image for local names").message);
+      }
+      return make_void_error(Status::InvalidInput, "project.image_not_found",
+                             "no image with id " + std::to_string(image_id));
+    }
+  }
+
+  // The names are replaced in one transaction. A repeated (function, key) pair is refused by the
+  // primary key, and the rollback leaves the previous names in place.
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(
+        Status::InternalError, "project.transaction_failed",
+        storage_error(db, "project.transaction_failed", "begin local names").message);
+  }
+  auto fail = [&](std::string code, const std::string& context) {
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, std::move(code),
+                           storage_error(db, code, context).message);
+  };
+  {
+    Statement remove(db, "DELETE FROM local_names WHERE image_id = ?1");
+    remove.bind(1, image_id);
+    if (!remove.execute_statement()) {
+      return fail("project.local_name_delete_failed", "clear local names");
+    }
+  }
+  for (const LocalName& entry : names) {
+    Statement insert(db,
+                     "INSERT INTO local_names(image_id, function_address, variable, name) "
+                     "VALUES(?1, ?2, ?3, ?4)");
+    insert.bind(1, image_id);
+    insert.bind(2, static_cast<std::int64_t>(entry.function_address));
+    insert.bind(3, entry.variable);
+    insert.bind(4, entry.name);
+    if (!insert.execute_statement()) {
+      return fail("project.local_name_write_failed", "insert local name");
+    }
+  }
+  if (!execute(db, "COMMIT")) {
+    const std::string message =
+        storage_error(db, "project.commit_failed", "commit local names").message;
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, "project.commit_failed", message);
+  }
+  return Result<void>();
+}
+
 Result<void> Project::replace_annotations(std::int64_t image_id,
                                           const std::vector<Annotation>& annotations) {
   if (!is_open()) {

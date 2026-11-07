@@ -176,6 +176,12 @@ class Project {
   /// Every user local name for one image, ordered by function address then key.
   [[nodiscard]] Result<std::vector<LocalName>> local_names(std::int64_t image_id) const;
 
+  /// Replace every user local name of one image in a single transaction, as replace_annotations
+  /// does for annotations. The (function address, key) pairs must be distinct: a repeated pair is
+  /// refused and the previous names stay in place. A name is checked as set_local_name checks it.
+  [[nodiscard]] Result<void> replace_local_names(std::int64_t image_id,
+                                                 const std::vector<LocalName>& names);
+
   /// Every type in the project's type store (G05-T1), validated as a whole.
   [[nodiscard]] Result<TypeTable> types() const;
 
