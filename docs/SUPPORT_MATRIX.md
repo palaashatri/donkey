@@ -146,7 +146,10 @@ compare, because GCC's table code overwrites `x0`.
 
 ### Known unsupported classes
 
-- Floating point and SIMD: vectorised loops are Partial.
+- Floating point and SIMD: vectorised loops are Partial. The IR has exact
+  IEEE operations for float and double (G01-T1, tested against native execution),
+  but no instruction is lifted to them yet, so a function with an FP instruction
+  is Partial.
 - Calls: a function that calls is Partial. Its call is rendered, and the
   callee's effects on registers and memory are not modelled.
 - `bsf`/`bsr`: the result is undefined for a zero source, so they are

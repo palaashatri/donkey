@@ -151,7 +151,7 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1); no instruction lifts to them yet, so any FP instruction still makes the function Partial | P0 | IN PROGRESS (G01-T1 DONE; T2, T3 TODO) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
@@ -237,6 +237,36 @@ interpreter.
   - Never use `float` arithmetic on the host for double operations.
   - Never compare NaN with `==`.
   - Do not enable `-ffast-math` anywhere.
+- **Status:** DONE for the IR (G01-T1), on x86-64 natively and AArch64 under
+  qemu-aarch64. No lifter emits these operations yet, so FP functions stay
+  Partial until G01-T2 and G01-T3. Added: `FAdd`, `FSub`, `FMul`, `FDiv`,
+  `FSqrt`, `FNeg`, `FAbs`, `FCompare`, `IntToFloat`, `UIntToFloat`,
+  `FloatToInt` (truncates), `FloatExtend` and `FloatTruncate`, with the width
+  of the statement as the float width (4 or 8). `IrFloatModel` on the statement
+  picks the architecture's rules: the default NaN of an invalid operation
+  (x86 negative `0xfff8…`, AArch64 positive `0x7ff8…`), the integer a
+  conversion gives for a NaN or an out-of-range value (x86 the minimum, AArch64
+  0 and saturation), and the flags a comparison sets (x86 ZF/PF/CF with
+  unordered setting all three; AArch64 NZCV with unordered 0011). NaN operands
+  are returned quieted, the first one when both are NaN. The expected bits come
+  from running the same operations natively (x86-64 SSE) and under qemu-aarch64,
+  not from host arithmetic on the test side; the two models differ exactly where
+  the two hosts do.
+  Deviations from the plan, all deliberate: (1) the IR stays untyped. A
+  float statement carries its width and the model, and the verifier checks
+  widths, so an integer operand of another width is rejected, but an 8-byte
+  integer fed to a double operation is not detected. Typed operands are a later
+  change if the decompiler needs them. (2) The x86 `jp`/`jnp` conditions were
+  added as `Parity`/`NoParity`, and the integer compare reports PF from the
+  low byte of its result, as x86 does; AArch64 never asks for parity. (3) Only
+  double-precision compares were checked against native execution; the single
+  compare uses the same code but is not measured. (4) `fuzz_ir` was not built
+  or run here.
+  Evidence: `Ir.FloatArithmeticMatchesIeee` (26 double and single cases, both
+  models), `Ir.FloatToIntIndefiniteOnX86AndSaturatesOnAArch64`,
+  `Ir.FCompareUnorderedSetsFlags`, `Ir.VerifierRejectsMixedIntFloatOperands`,
+  `Ir.FloatConstantsPrintAsExactHexadecimalFloats`. Flipping the default-NaN
+  model fails `Ir.FloatArithmeticMatchesIeee`, so it is checked.
 
 **G01-T2 x86 SSE scalar lifting** [oracle] (depends: G01-T1)
 

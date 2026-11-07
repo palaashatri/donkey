@@ -64,6 +64,22 @@ enum class IrOp : std::uint8_t {
   // the carry out and V the signed overflow. The carry in is read from the flags
   // before, as AddCarry reads it.
   AddCarryFlags,
+  // Floating point. A float is 4 bytes (IEEE single) and a double 8 bytes. The
+  // width of the statement is the width of the floating-point values it reads or
+  // produces. The operands hold the bits of those values.
+  FAdd,           ///< dest = a + b
+  FSub,           ///< dest = a - b
+  FMul,           ///< dest = a * b
+  FDiv,           ///< dest = a / b
+  FSqrt,          ///< dest = sqrt(a)
+  FNeg,           ///< dest = -a: flips the sign bit, NaN included
+  FAbs,           ///< dest = |a|: clears the sign bit, NaN included
+  FCompare,       ///< flags = compare(a, b), set as ucomis* (x86) or fcmp (AArch64) set them
+  IntToFloat,     ///< dest (float) = a (signed integer of a's width), rounded to nearest
+  UIntToFloat,    ///< dest (float) = a (unsigned integer of a's width), rounded to nearest
+  FloatToInt,     ///< dest (integer) = a (float of a's width) truncated toward zero
+  FloatExtend,    ///< dest (double) = a (float), exact
+  FloatTruncate,  ///< dest (float) = a (double), rounded to nearest
 };
 
 const char* ir_op_name(IrOp op) noexcept;
@@ -88,6 +104,10 @@ enum class IrCondition : std::uint8_t {
   NoOverflow,
   Carry,
   NoCarry,
+  // x86 PF after ucomis*: set when the comparison was unordered. AArch64 has no
+  // parity flag, so these are never asked of AArch64 flags.
+  Parity,
+  NoParity,
 };
 
 const char* ir_condition_name(IrCondition condition) noexcept;
@@ -139,6 +159,11 @@ struct IrSwitchCase {
   std::uint32_t target_block = 0;
 };
 
+/// The architecture whose floating-point rules an operation follows where they
+/// differ: the NaN an invalid operation produces, the integer a conversion gives
+/// for a NaN or an out-of-range value, and the flags a comparison sets.
+enum class IrFloatModel : std::uint8_t { X86, AArch64 };
+
 struct IrStatement {
   IrOp op = IrOp::Nop;
   IrOperand dest;
@@ -147,6 +172,8 @@ struct IrStatement {
   /// Third operand: the divisor of the Div and Rem operations.
   IrOperand c;
   IrCondition condition = IrCondition::None;
+  /// Only for the floating-point operations.
+  IrFloatModel float_model = IrFloatModel::X86;
   std::uint8_t width = 0;
   /// Address of the machine instruction this statement came from (0 for
   /// synthesized statements).

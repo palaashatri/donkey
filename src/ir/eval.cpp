@@ -4,6 +4,9 @@
 #include "donkey/ir/eval.h"
 
 #include <algorithm>
+#include <bit>
+#include <cfenv>
+#include <cmath>
 #include <cstring>
 #include <optional>
 #include <unordered_map>
@@ -78,6 +81,168 @@ AddWithCarry add_with_carry(std::uint64_t a, std::uint64_t b, bool carry_in, std
   out.nzcv =
       static_cast<std::uint8_t>((n ? 8U : 0U) | (z ? 4U : 0U) | (carry ? 2U : 0U) | (v ? 1U : 0U));
   return out;
+}
+
+// ---- floating point --------------------------------------------------------
+// The bits of a float (width 4) or a double (width 8). Host arithmetic runs only
+// on operands that are not NaN, in the operand's own precision, with the default
+// round-to-nearest-even and no fast-math. NaN handling is explicit, so the
+// result does not depend on the host's operand order.
+
+bool fp_is_nan(std::uint64_t bits, std::uint8_t width) {
+  if (width == 4) {
+    return ((bits >> 23U) & 0xFFU) == 0xFFU && (bits & 0x7FFFFFU) != 0;
+  }
+  return ((bits >> 52U) & 0x7FFU) == 0x7FFU && (bits & 0xFFFFFFFFFFFFFULL) != 0;
+}
+
+/// A NaN with its quiet bit set and its payload kept.
+std::uint64_t fp_quiet(std::uint64_t bits, std::uint8_t width) {
+  return width == 4 ? ((bits | 0x400000ULL) & 0xFFFFFFFFULL) : (bits | (1ULL << 51U));
+}
+
+/// The NaN an invalid operation produces. x86 gives the negative "real indefinite"
+/// NaN and AArch64 the positive default NaN; both were checked against native
+/// execution (docs/SUPPORT_MATRIX.md, the floating-point corpus).
+std::uint64_t fp_default_nan(IrFloatModel model, std::uint8_t width) {
+  const bool negative = model == IrFloatModel::X86;
+  if (width == 4) {
+    return negative ? 0xFFC00000ULL : 0x7FC00000ULL;
+  }
+  return negative ? 0xFFF8000000000000ULL : 0x7FF8000000000000ULL;
+}
+
+/// The value of float or double bits, exactly, as a double.
+double fp_as_double(std::uint64_t bits, std::uint8_t width) {
+  if (width == 4) {
+    return static_cast<double>(std::bit_cast<float>(static_cast<std::uint32_t>(bits)));
+  }
+  return std::bit_cast<double>(bits);
+}
+
+/// a + b, a - b, a * b or a / b. A NaN operand is returned quieted: the first one
+/// when both are NaN, which both architectures do. An invalid operation (such as
+/// inf - inf, or 0 / 0) returns the model's default NaN.
+std::uint64_t fp_binary(IrOp op, std::uint64_t x, std::uint64_t y, std::uint8_t width,
+                        IrFloatModel model) {
+  if (fp_is_nan(x, width)) {
+    return fp_quiet(x, width);
+  }
+  if (fp_is_nan(y, width)) {
+    return fp_quiet(y, width);
+  }
+  if (width == 4) {
+    const float a = std::bit_cast<float>(static_cast<std::uint32_t>(x));
+    const float b = std::bit_cast<float>(static_cast<std::uint32_t>(y));
+    const float r = op == IrOp::FAdd   ? a + b
+                    : op == IrOp::FSub ? a - b
+                    : op == IrOp::FMul ? a * b
+                                       : a / b;
+    return std::isnan(r) ? fp_default_nan(model, 4) : std::bit_cast<std::uint32_t>(r);
+  }
+  const double a = std::bit_cast<double>(x);
+  const double b = std::bit_cast<double>(y);
+  const double r = op == IrOp::FAdd   ? a + b
+                   : op == IrOp::FSub ? a - b
+                   : op == IrOp::FMul ? a * b
+                                      : a / b;
+  return std::isnan(r) ? fp_default_nan(model, 8) : std::bit_cast<std::uint64_t>(r);
+}
+
+/// The square root. A negative operand other than -0 is an invalid operation.
+std::uint64_t fp_sqrt(std::uint64_t x, std::uint8_t width, IrFloatModel model) {
+  if (fp_is_nan(x, width)) {
+    return fp_quiet(x, width);
+  }
+  const double a = fp_as_double(x, width);
+  if (a < 0) {
+    return fp_default_nan(model, width);
+  }
+  if (width == 4) {
+    return std::bit_cast<std::uint32_t>(std::sqrt(static_cast<float>(a)));
+  }
+  return std::bit_cast<std::uint64_t>(std::sqrt(a));
+}
+
+/// How two floating-point values compare. A NaN makes them unordered.
+struct FpOrder {
+  bool unordered = false;
+  bool less = false;
+  bool equal = false;
+};
+
+FpOrder fp_order(std::uint64_t x, std::uint64_t y, std::uint8_t width) {
+  FpOrder order;
+  if (fp_is_nan(x, width) || fp_is_nan(y, width)) {
+    order.unordered = true;
+    return order;
+  }
+  const double a = fp_as_double(x, width);
+  const double b = fp_as_double(y, width);
+  order.less = a < b;
+  order.equal = a == b;
+  return order;
+}
+
+/// The integer of `to` bytes that a float of `from` bytes truncates to. x86
+/// cvttsd2si gives the "integer indefinite" (the minimum) for a NaN or an
+/// out-of-range value. AArch64 fcvtzs gives 0 for a NaN and saturates otherwise.
+std::uint64_t fp_to_int(std::uint64_t bits, std::uint8_t from, std::uint8_t to,
+                        IrFloatModel model) {
+  const double a = fp_as_double(bits, from);
+  const std::uint64_t minimum = to == 8 ? 0x8000000000000000ULL : 0x80000000ULL;
+  if (std::isnan(a)) {
+    return model == IrFloatModel::X86 ? minimum : 0;
+  }
+  const double t = std::trunc(a);
+  const double limit = to == 8 ? 9223372036854775808.0 : 2147483648.0;  // 2^63 and 2^31
+  if (t >= -limit && t < limit) {
+    return static_cast<std::uint64_t>(static_cast<std::int64_t>(t)) & mask(to);
+  }
+  if (model == IrFloatModel::X86) {
+    return minimum;
+  }
+  if (t > 0) {
+    return to == 8 ? 0x7FFFFFFFFFFFFFFFULL : 0x7FFFFFFFULL;
+  }
+  return minimum;
+}
+
+/// An integer of `from` bytes as a float (width 4) or double (width 8), rounded to
+/// nearest. An unsigned value of 8 bytes at or above 2^63 is halved with its
+/// lowest bit kept as a sticky bit, converted, and doubled: one rounding, exact.
+std::uint64_t int_to_fp(std::uint64_t value, std::uint8_t from, bool is_signed, std::uint8_t to) {
+  const std::uint64_t v = value & mask(from);
+  if (is_signed || from < 8 || (v >> 63U) == 0) {
+    const std::int64_t s = is_signed ? sign_extend(v, from) : static_cast<std::int64_t>(v);
+    return to == 4 ? std::bit_cast<std::uint32_t>(static_cast<float>(s))
+                   : std::bit_cast<std::uint64_t>(static_cast<double>(s));
+  }
+  const auto half = static_cast<std::int64_t>((v >> 1U) | (v & 1U));
+  return to == 4 ? std::bit_cast<std::uint32_t>(2.0F * static_cast<float>(half))
+                 : std::bit_cast<std::uint64_t>(2.0 * static_cast<double>(half));
+}
+
+/// float to double. Exact for every value; a NaN keeps its sign and payload, and is
+/// quieted, as both architectures do.
+std::uint64_t fp_extend(std::uint64_t bits) {
+  if (fp_is_nan(bits, 4)) {
+    const std::uint64_t sign = (bits >> 31U) & 1U;
+    const std::uint64_t frac = (bits & 0x7FFFFFULL) | 0x400000ULL;
+    return (sign << 63U) | (0x7FFULL << 52U) | (frac << 29U);
+  }
+  return std::bit_cast<std::uint64_t>(fp_as_double(bits, 4));
+}
+
+/// double to float, rounded to nearest. A NaN keeps its sign and the top payload
+/// bits, and is quieted.
+std::uint64_t fp_truncate(std::uint64_t bits) {
+  if (fp_is_nan(bits, 8)) {
+    const std::uint64_t sign = (bits >> 63U) & 1U;
+    const std::uint64_t frac = ((bits & 0xFFFFFFFFFFFFFULL) >> 29U) | 0x400000ULL;
+    return (sign << 31U) | (0xFFULL << 23U) | frac;
+  }
+  return std::bit_cast<std::uint32_t>(static_cast<float>(std::bit_cast<double>(bits)));
 }
 
 std::int64_t sign_extend(std::uint64_t value, std::uint8_t width) {
@@ -434,6 +599,52 @@ class Machine {
         return c;
       case IrCondition::NoCarry:
         return !c;
+      // AArch64 has no parity flag; the lifter never asks for one.
+      case IrCondition::Parity:
+      case IrCondition::NoParity:
+        return false;
+      case IrCondition::None:
+        return false;
+    }
+    return false;
+  }
+
+  /// The x86 condition codes after a ucomis*: ZF, PF and CF as the comparison set
+  /// them, with SF and OF clear.
+  bool fp_condition_holds(IrCondition condition) const {
+    switch (condition) {
+      case IrCondition::Equal:
+      case IrCondition::Zero:
+        return fp_zf_;
+      case IrCondition::NotEqual:
+      case IrCondition::NonZero:
+        return !fp_zf_;
+      case IrCondition::UnsignedLess:
+      case IrCondition::Carry:
+        return fp_cf_;
+      case IrCondition::UnsignedGreaterEqual:
+      case IrCondition::NoCarry:
+        return !fp_cf_;
+      case IrCondition::UnsignedGreater:
+        return !fp_cf_ && !fp_zf_;
+      case IrCondition::UnsignedLessEqual:
+        return fp_cf_ || fp_zf_;
+      case IrCondition::SignedLess:  // SF != OF, and both are clear
+      case IrCondition::Negative:
+      case IrCondition::Overflow:
+        return false;
+      case IrCondition::SignedGreaterEqual:  // SF == OF
+      case IrCondition::Positive:
+      case IrCondition::NoOverflow:
+        return true;
+      case IrCondition::SignedGreater:  // ZF clear and SF == OF
+        return !fp_zf_;
+      case IrCondition::SignedLessEqual:  // ZF set or SF != OF
+        return fp_zf_;
+      case IrCondition::Parity:
+        return fp_pf_;
+      case IrCondition::NoParity:
+        return !fp_pf_;
       case IrCondition::None:
         return false;
     }
@@ -441,6 +652,9 @@ class Machine {
   }
 
   bool condition_holds(IrCondition condition) const {
+    if (fp_flags_) {
+      return fp_condition_holds(condition);
+    }
     if (explicit_flags_) {
       return explicit_condition_holds(condition);
     }
@@ -481,6 +695,12 @@ class Machine {
         case IrCondition::Carry:
         case IrCondition::Overflow:
           return false;  // logical ops clear carry and overflow
+        // x86 PF is set when the low byte of the result has an even number of ones.
+        // AArch64 has no parity flag, so the lifter never asks for one there.
+        case IrCondition::Parity:
+          return !aarch64_ && std::popcount(static_cast<unsigned>(r & 0xFFU)) % 2 == 0;
+        case IrCondition::NoParity:
+          return !aarch64_ && std::popcount(static_cast<unsigned>(r & 0xFFU)) % 2 != 0;
         // AArch64 hs is C set; x86 jae is CF clear.
         case IrCondition::UnsignedGreaterEqual:
           return !aarch64_;
@@ -498,6 +718,11 @@ class Machine {
     const bool overflow = ((sa < 0) != (sb < 0)) && ((sign_extend(diff, w) < 0) != (sa < 0));
     const bool borrow = a < b;
     switch (condition) {
+      // x86 PF of the subtraction's low byte; AArch64 has no parity flag.
+      case IrCondition::Parity:
+        return !aarch64_ && std::popcount(static_cast<unsigned>(diff & 0xFFU)) % 2 == 0;
+      case IrCondition::NoParity:
+        return !aarch64_ && std::popcount(static_cast<unsigned>(diff & 0xFFU)) % 2 != 0;
       case IrCondition::Equal:
       case IrCondition::Zero:
         return a == b;
@@ -643,6 +868,7 @@ class Machine {
               flags_width_ = s.a.width != 0 ? s.a.width : w;
               flags_test_ = s.op == IrOp::Test;
               explicit_flags_ = false;
+              fp_flags_ = false;
             }
             break;
           }
@@ -659,6 +885,7 @@ class Machine {
               nzcv_ = holds ? nzcv_of(s.op == IrOp::CondCompareAdd, *x, *y, width)
                             : static_cast<std::uint8_t>(s.c.constant & 0xFU);
               explicit_flags_ = true;
+              fp_flags_ = false;
             }
             break;
           }
@@ -741,8 +968,76 @@ class Machine {
               const AddWithCarry sum = add_with_carry(*x, *y, in, w);
               nzcv_ = sum.nzcv;
               explicit_flags_ = true;
+              fp_flags_ = false;
               ok = assign(s.dest, w, sum.result);
             }
+            break;
+          }
+          case IrOp::FAdd:
+          case IrOp::FSub:
+          case IrOp::FMul:
+          case IrOp::FDiv: {
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value() &&
+                 assign(s.dest, w, fp_binary(s.op, *x, *y, w, s.float_model));
+            break;
+          }
+          case IrOp::FSqrt: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() && assign(s.dest, w, fp_sqrt(*x, w, s.float_model));
+            break;
+          }
+          case IrOp::FNeg:
+          case IrOp::FAbs: {
+            const auto x = value_of(s.a);
+            const std::uint64_t sign = w == 4 ? 0x80000000ULL : (1ULL << 63U);
+            ok = x.has_value() &&
+                 assign(s.dest, w, (s.op == IrOp::FNeg ? *x ^ sign : *x & ~sign) & mask(w));
+            break;
+          }
+          case IrOp::FCompare: {
+            // ucomis* (x86) sets ZF, PF and CF, and unordered sets all three. fcmp
+            // (AArch64) sets NZCV: unordered 0011, equal 0110, less 1000, greater 0010.
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value();
+            if (ok) {
+              const FpOrder order = fp_order(*x, *y, w);
+              if (s.float_model == IrFloatModel::X86) {
+                fp_flags_ = true;
+                explicit_flags_ = false;
+                fp_zf_ = order.unordered || order.equal;
+                fp_pf_ = order.unordered;
+                fp_cf_ = order.unordered || order.less;
+              } else {
+                fp_flags_ = false;
+                explicit_flags_ = true;
+                nzcv_ = order.unordered ? 0x3U : order.equal ? 0x6U : order.less ? 0x8U : 0x2U;
+              }
+            }
+            break;
+          }
+          case IrOp::IntToFloat:
+          case IrOp::UIntToFloat: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() &&
+                 assign(s.dest, w, int_to_fp(*x, s.a.width, s.op == IrOp::IntToFloat, w));
+            break;
+          }
+          case IrOp::FloatToInt: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() && assign(s.dest, w, fp_to_int(*x, s.a.width, w, s.float_model));
+            break;
+          }
+          case IrOp::FloatExtend: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() && assign(s.dest, 8, fp_extend(*x));
+            break;
+          }
+          case IrOp::FloatTruncate: {
+            const auto x = value_of(s.a);
+            ok = x.has_value() && assign(s.dest, 4, fp_truncate(*x));
             break;
           }
           case IrOp::MulHighUnsigned:
@@ -827,6 +1122,11 @@ class Machine {
   // Set by a conditional compare: the flags are then the NZCV value nzcv_, not
   // the operands of a compare.
   bool explicit_flags_ = false;
+  /// Set by a floating-point compare on x86 (ucomis*): ZF, PF and CF as it sets them.
+  bool fp_flags_ = false;
+  bool fp_zf_ = false;
+  bool fp_pf_ = false;
+  bool fp_cf_ = false;
   std::uint8_t nzcv_ = 0;
 };
 
@@ -905,9 +1205,32 @@ const std::vector<std::uint8_t>* IrEvalMemory::region(std::uint64_t base) const 
   return nullptr;
 }
 
+/// The IR's floating-point operations round to nearest, and the host arithmetic in this
+/// file uses the host's current rounding mode. The mode is set to nearest for one
+/// evaluation and the caller's mode is restored afterwards.
+class NearestRounding {
+ public:
+  NearestRounding() : saved_(std::fegetround()) {
+    if (saved_ != FE_TONEAREST) {
+      std::fesetround(FE_TONEAREST);
+    }
+  }
+  ~NearestRounding() {
+    if (saved_ != FE_TONEAREST) {
+      std::fesetround(saved_);
+    }
+  }
+  NearestRounding(const NearestRounding&) = delete;
+  NearestRounding& operator=(const NearestRounding&) = delete;
+
+ private:
+  int saved_;
+};
+
 Result<IrEvalResult> evaluate_ir(const IrFunction& function,
                                  std::span<const std::uint64_t> arguments, IrEvalMemory& memory,
                                  const IrEvalOptions& options) {
+  const NearestRounding nearest;
   const std::uint64_t stack_base = options.stack_top - options.stack_size;
   if (!memory.add_region(stack_base, std::vector<std::uint8_t>(options.stack_size, 0xCC))) {
     return make_error<IrEvalResult>(Status::InvalidInput, "ir.eval_stack",

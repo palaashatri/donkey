@@ -34,6 +34,7 @@ const IrCondition* complement_of(IrCondition condition) {
       {IrCondition::SignedGreater, IrCondition::SignedLessEqual},
       {IrCondition::Zero, IrCondition::NonZero},
       {IrCondition::Carry, IrCondition::NoCarry},
+      {IrCondition::Parity, IrCondition::NoParity},
       {IrCondition::Overflow, IrCondition::NoOverflow},
   };
   for (const auto& [first, second] : kComplements) {
@@ -60,6 +61,47 @@ const char* width_type(std::uint8_t width) {
     default:
       return "u64";
   }
+}
+
+/// An exact hexadecimal floating-point literal for the bits of a float (width 4)
+/// or double (width 8), such as 0x1.8p+1. NaN and infinity are spelled out with
+/// their payload or sign. Nothing is rounded to decimal.
+std::string hex_float_literal(std::uint64_t bits, std::uint8_t width) {
+  const bool single = width == 4;
+  const unsigned frac_bits = single ? 23U : 52U;
+  const unsigned exp_bits = single ? 8U : 11U;
+  const int bias = single ? 127 : 1023;
+  const std::uint64_t frac = bits & ((1ULL << frac_bits) - 1U);
+  const std::uint64_t exp = (bits >> frac_bits) & ((1ULL << exp_bits) - 1U);
+  const bool negative = ((bits >> (frac_bits + exp_bits)) & 1U) != 0;
+  const std::string sign = negative ? "-" : "";
+  char buffer[64];
+  if (exp == (1ULL << exp_bits) - 1U) {
+    if (frac == 0) {
+      return sign + "INF";
+    }
+    std::snprintf(buffer, sizeof(buffer), "NAN(0x%llx)", static_cast<unsigned long long>(frac));
+    return sign + buffer;
+  }
+  // The fraction in hexadecimal, with its trailing zeros removed. The fraction is aligned
+  // to whole hexadecimal digits first: a single-precision fraction has 23 bits, which is
+  // printed as six digits (24 bits), so it is shifted left by one.
+  const unsigned digits = (frac_bits + 3U) / 4U;
+  const std::uint64_t aligned = frac << (digits * 4U - frac_bits);
+  char hex[32];
+  std::snprintf(hex, sizeof(hex), "%0*llx", static_cast<int>(digits),
+                static_cast<unsigned long long>(aligned));
+  std::string fraction = hex;
+  while (!fraction.empty() && fraction.back() == '0') {
+    fraction.pop_back();
+  }
+  const bool dot = !fraction.empty();
+  if (exp == 0 && frac == 0) {
+    return sign + "0x0p+0";
+  }
+  const long long power = exp == 0 ? 1 - bias : static_cast<long long>(exp) - bias;
+  std::snprintf(buffer, sizeof(buffer), "p%+lld", power);
+  return sign + (exp == 0 ? "0x0" : "0x1") + (dot ? "." : "") + fraction + buffer;
 }
 
 class Renderer {
@@ -100,6 +142,14 @@ class Renderer {
       out += buffer;
     }
     return out;
+  }
+
+  /// A floating-point operand: a constant is an exact hexadecimal float.
+  std::string float_operand(const IrOperand& value, std::uint8_t width) const {
+    if (value.kind == IrOperandKind::Constant) {
+      return hex_float_literal(value.constant, width);
+    }
+    return operand(value);
   }
 
   std::string operand(const IrOperand& value) const {
@@ -317,6 +367,46 @@ class Renderer {
       case IrOp::CondAssign:
         return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
                operand(statement.a) + ";";
+      case IrOp::FAdd:
+      case IrOp::FSub:
+      case IrOp::FMul:
+      case IrOp::FDiv: {
+        const char* symbol = statement.op == IrOp::FAdd   ? " + "
+                             : statement.op == IrOp::FSub ? " - "
+                             : statement.op == IrOp::FMul ? " * "
+                                                          : " / ";
+        return operand(statement.dest) + " = " + float_operand(statement.a, statement.width) +
+               symbol + float_operand(statement.b, statement.width) + "; /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
+      }
+      case IrOp::FSqrt:
+        return operand(statement.dest) + " = sqrt(" + float_operand(statement.a, statement.width) +
+               "); /* " + (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FNeg:
+        return operand(statement.dest) + " = -" + float_operand(statement.a, statement.width) +
+               "; /* " + (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FAbs:
+        return operand(statement.dest) + " = fabs(" + float_operand(statement.a, statement.width) +
+               "); /* " + (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FCompare:
+        return "flags = fcompare(" + float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ");";
+      case IrOp::IntToFloat:
+      case IrOp::UIntToFloat:
+        // An unsigned source keeps all of its bytes: the cast names the source's width.
+        return operand(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
+               ")" +
+               (statement.op == IrOp::UIntToFloat
+                    ? (statement.a.width == 8 ? "(unsigned long long)" : "(unsigned)")
+                    : "") +
+               operand(statement.a) + ";";
+      case IrOp::FloatToInt:
+        return operand(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
+               float_operand(statement.a, statement.a.width) + ";";
+      case IrOp::FloatExtend:
+        return operand(statement.dest) + " = (double)" + float_operand(statement.a, 4) + ";";
+      case IrOp::FloatTruncate:
+        return operand(statement.dest) + " = (float)" + float_operand(statement.a, 8) + ";";
       case IrOp::AddCarry:
       case IrOp::AddCarryFlags:
       case IrOp::SubBorrow: {
@@ -377,7 +467,7 @@ bool flags_written_in_block(const IrBlock& block, std::size_t index) {
     const IrStatement& candidate = block.statements[i];
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test ||
         candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
-        candidate.op == IrOp::AddCarryFlags) {
+        candidate.op == IrOp::AddCarryFlags || candidate.op == IrOp::FCompare) {
       return true;
     }
     if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
@@ -394,8 +484,8 @@ const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
     if (candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
-        candidate.op == IrOp::AddCarryFlags) {
-      return nullptr;  // its NZCV is not the comparison of two operands
+        candidate.op == IrOp::AddCarryFlags || candidate.op == IrOp::FCompare) {
+      return nullptr;  // its flags are not the comparison of two integer operands
     }
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
       for (const IrOperand* operand : {&candidate.a, &candidate.b}) {
@@ -486,6 +576,32 @@ const char* ir_op_name(IrOp op) noexcept {
       return "cond_compare_add";
     case IrOp::AddCarryFlags:
       return "add_carry_flags";
+    case IrOp::FAdd:
+      return "f_add";
+    case IrOp::FSub:
+      return "f_sub";
+    case IrOp::FMul:
+      return "f_mul";
+    case IrOp::FDiv:
+      return "f_div";
+    case IrOp::FSqrt:
+      return "f_sqrt";
+    case IrOp::FNeg:
+      return "f_neg";
+    case IrOp::FAbs:
+      return "f_abs";
+    case IrOp::FCompare:
+      return "f_compare";
+    case IrOp::IntToFloat:
+      return "int_to_float";
+    case IrOp::UIntToFloat:
+      return "uint_to_float";
+    case IrOp::FloatToInt:
+      return "float_to_int";
+    case IrOp::FloatExtend:
+      return "float_extend";
+    case IrOp::FloatTruncate:
+      return "float_truncate";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -562,6 +678,10 @@ const char* ir_condition_name(IrCondition condition) noexcept {
       return "carry";
     case IrCondition::NoCarry:
       return "no_carry";
+    case IrCondition::Parity:
+      return "parity";
+    case IrCondition::NoParity:
+      return "no_parity";
   }
   return "none";
 }
@@ -598,6 +718,8 @@ const char* ir_condition_operator(IrCondition condition) noexcept {
     case IrCondition::NoOverflow:
     case IrCondition::Carry:
     case IrCondition::NoCarry:
+    case IrCondition::Parity:
+    case IrCondition::NoParity:
     case IrCondition::None:
       return "?";
   }
@@ -782,6 +904,58 @@ Result<bool> verify_ir(const IrFunction& function) {
                         "bit operation operand widths must match statement width");
           }
           break;
+        case IrOp::FAdd:
+        case IrOp::FSub:
+        case IrOp::FMul:
+        case IrOp::FDiv:
+        case IrOp::FSqrt:
+        case IrOp::FNeg:
+        case IrOp::FAbs:
+        case IrOp::FCompare: {
+          // Floating-point operands are read at the statement's width, so an
+          // integer operand of another width is rejected here.
+          const auto float_width = [](std::uint8_t w) { return w == 4 || w == 8; };
+          const auto operand_ok = [&statement](const IrOperand& o) {
+            return (o.kind == IrOperandKind::Register || o.kind == IrOperandKind::Constant) &&
+                   o.width == statement.width;
+          };
+          const bool binary = statement.op != IrOp::FSqrt && statement.op != IrOp::FNeg &&
+                              statement.op != IrOp::FAbs;
+          if (!float_width(statement.width) || !operand_ok(statement.a) ||
+              (binary && !operand_ok(statement.b)) ||
+              (statement.op != IrOp::FCompare &&
+               (statement.dest.kind != IrOperandKind::Register ||
+                (statement.dest.width != 0 && statement.dest.width != statement.width)))) {
+            return fail("ir.malformed_float",
+                        "floating-point operands and destination must have the statement's width "
+                        "(4 or 8)");
+          }
+          break;
+        }
+        case IrOp::IntToFloat:
+        case IrOp::UIntToFloat:
+        case IrOp::FloatToInt:
+        case IrOp::FloatExtend:
+        case IrOp::FloatTruncate: {
+          // The source width is the width of a's values; the statement width is the
+          // width of the result.
+          const bool source_ok = (statement.a.kind == IrOperandKind::Register ||
+                                  statement.a.kind == IrOperandKind::Constant) &&
+                                 (statement.a.width == 4 || statement.a.width == 8);
+          bool shape_ok = true;
+          if (statement.op == IrOp::FloatExtend) {
+            shape_ok = statement.width == 8 && statement.a.width == 4;
+          } else if (statement.op == IrOp::FloatTruncate) {
+            shape_ok = statement.width == 4 && statement.a.width == 8;
+          }
+          if (!source_ok || !shape_ok || !(statement.width == 4 || statement.width == 8) ||
+              statement.dest.kind != IrOperandKind::Register ||
+              (statement.dest.width != 0 && statement.dest.width != statement.width)) {
+            return fail("ir.malformed_float_conversion",
+                        "conversion widths: a float is 4 or 8 bytes and an integer 4 or 8");
+          }
+          break;
+        }
         case IrOp::AddCarry:
         case IrOp::AddCarryFlags:
         case IrOp::SubBorrow:
