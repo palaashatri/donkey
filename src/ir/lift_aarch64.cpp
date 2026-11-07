@@ -162,9 +162,6 @@ struct Lifter {
   bool flags_exact = false;
   /// Set by a lift function that emitted the Compare/Test for its flags.
   bool modelled_flags = false;
-  /// Set after an adc or sbc, whose carry out is not modelled. The next carry
-  /// reader in the block needs a flag writer of its own first.
-  bool carry_consumed = false;
 
   std::uint32_t temporary_id() { return temporary++; }
 
@@ -1305,19 +1302,19 @@ struct Lifter {
 
   /// adc, sbc, adcs and sbcs. adc is a + b + C, and sbc is a - b - borrow, with the
   /// borrow the inverse of C. The carry comes from the flags before, so they must be
-  /// exact. adc and sbc leave the carry out unmodelled, so a second carry reader in
-  /// the block needs its own flag writer first. adcs and sbcs set NZCV from the
-  /// addition (C is the carry out, V the signed overflow), which the IR states
-  /// exactly. sbcs is the addition of NOT(b), as the architecture defines it.
+  /// exact. adc and sbc without S do not write NZCV, so every carry reader in the block
+  /// reads the same carry. adcs and sbcs set NZCV from the addition (C is the carry out,
+  /// V the signed overflow), which the IR states exactly. sbcs is the addition of
+  /// NOT(b), as the architecture defines it.
   void lift_add_with_carry(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const std::string& mnemonic = instruction.mnemonic;
     const bool sets_nzcv = mnemonic == "adcs" || mnemonic == "sbcs";
     const bool discard =
         operands.size() == 3 && (operands[0].reg == "xzr" || operands[0].reg == "wzr");
-    if (!flags_exact || carry_consumed || operands.size() != 3 ||
-        operands[0].kind != OperandKind::Register || operands[1].kind != OperandKind::Register ||
-        operands[2].kind != OperandKind::Register || (discard && !sets_nzcv)) {
+    if (!flags_exact || operands.size() != 3 || operands[0].kind != OperandKind::Register ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        (discard && !sets_nzcv)) {
       unsupported(block, instruction);
       return;
     }
@@ -1355,11 +1352,10 @@ struct Lifter {
     statement.b = addend;
     statement.width = width;
     statement.source_address = instruction.address;
+    statement.writes_flags = false;
     push(block, std::move(statement));
     if (sets_nzcv) {
       modelled_flags = true;  // the flags after are NZCV of this addition
-    } else {
-      carry_consumed = true;
     }
   }
 
@@ -2066,7 +2062,6 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
     // from the same operands, before anything else in the block.
     const bool entering = lifter.flags_exact;
     lifter.flags_exact = false;
-    lifter.carry_consumed = false;
     const std::uint32_t block_index = lifter.block_by_address.at(block->address);
     if (block_index > 0 && entering && lifter.out.blocks.size() == block_index) {
       const BasicBlock& previous = *lifter.blocks[block_index - 1];
@@ -2278,7 +2273,6 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
       if (sets_flags(mnemonic)) {
         lifter.flags_exact = lifter.modelled_flags;
-        lifter.carry_consumed = false;  // a new flag writer gives the next carry its own
       }
       // An unsupported statement may have written the flags, so no later flag reader
       // is exact. This also keeps an adc from reading a carry through an unsupported one.
