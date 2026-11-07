@@ -59,6 +59,11 @@ enum class IrOp : std::uint8_t {
   // IrCondition::None means unconditionally: AArch64 cmn and adds.
   CondCompare,     ///< flags = condition ? flags(a - b) : c
   CondCompareAdd,  ///< flags = condition ? flags(a + b) : c
+  // Add with carry that sets the flags (AArch64 adcs, and sbcs with the lifter's
+  // NOT of b): dest = a + b + C, and NZCV is the flags of that addition, with C
+  // the carry out and V the signed overflow. The carry in is read from the flags
+  // before, as AddCarry reads it.
+  AddCarryFlags,
 };
 
 const char* ir_op_name(IrOp op) noexcept;

@@ -41,6 +41,45 @@ std::uint8_t nzcv_of(bool add, std::uint64_t a, std::uint64_t b, std::uint8_t wi
   return static_cast<std::uint8_t>((n ? 8U : 0U) | (z ? 4U : 0U) | (c ? 2U : 0U) | (v ? 1U : 0U));
 }
 
+/// An addition with a carry in, as adcs computes it: the result and the NZCV that
+/// the flags take. C is the carry out and V the signed overflow of a + b + carry.
+struct AddWithCarry {
+  std::uint64_t result = 0;
+  std::uint8_t nzcv = 0;
+};
+
+AddWithCarry add_with_carry(std::uint64_t a, std::uint64_t b, bool carry_in, std::uint8_t width) {
+  const std::uint64_t m = mask(width);
+  a &= m;
+  b &= m;
+  const std::uint64_t in = carry_in ? 1U : 0U;
+  std::uint64_t sum = 0;
+  bool carry = false;
+  if (width >= 8) {
+    const std::uint64_t partial = a + b;
+    const bool carry_from_pair = partial < a;
+    sum = partial + in;
+    // The two carries cannot both occur: a carry in needs partial == all ones.
+    carry = carry_from_pair || sum < partial;
+  } else {
+    const std::uint64_t wide = a + b + in;
+    sum = wide & m;
+    carry = (wide >> (width * 8U)) != 0;
+  }
+  const std::uint64_t result = sum & m;
+  const bool n = ((result >> (width * 8U - 1U)) & 1U) != 0;
+  const bool z = result == 0;
+  const bool a_negative = sign_extend(a, width) < 0;
+  const bool b_negative = sign_extend(b, width) < 0;
+  const bool result_negative = sign_extend(result, width) < 0;
+  const bool v = (a_negative == b_negative) && (result_negative != a_negative);
+  AddWithCarry out;
+  out.result = result;
+  out.nzcv =
+      static_cast<std::uint8_t>((n ? 8U : 0U) | (z ? 4U : 0U) | (carry ? 2U : 0U) | (v ? 1U : 0U));
+  return out;
+}
+
 std::int64_t sign_extend(std::uint64_t value, std::uint8_t width) {
   if (width >= 8) {
     return static_cast<std::int64_t>(value);
@@ -687,6 +726,22 @@ class Machine {
               const std::uint64_t carry = in ? 1 : 0;
               const std::uint64_t result = add ? *x + *y + carry : *x - *y - carry;
               ok = assign(s.dest, w, result & mask(w));
+            }
+            break;
+          }
+          case IrOp::AddCarryFlags: {
+            // adcs, and sbcs with the lifter's NOT of b. The carry in is read from
+            // the flags before this statement, and the flags after it are NZCV of
+            // the addition.
+            const bool in = condition_holds(IrCondition::Carry);
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value();
+            if (ok) {
+              const AddWithCarry sum = add_with_carry(*x, *y, in, w);
+              nzcv_ = sum.nzcv;
+              explicit_flags_ = true;
+              ok = assign(s.dest, w, sum.result);
             }
             break;
           }

@@ -91,8 +91,10 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G03-T1 (59 functions), under qemu-aarch64 | 52/59 | 54/59 | 48/59 | SIMD (`movi`, `dup`, `fmov`, `ldr d`), `cmn`/`adc`/`sbc` (G03-T4; `sdiv`/`srem` need `cmn`), `c_switch_sparse` Partial (cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | the same as after G03-T4: SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
+| GCC 13.3, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 58/59 | 58/59 | 52/59 | SIMD and FP only (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` is Complete and verified at O0, O2 and O3 |
 | Clang 18.1, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 56/59 | 52/59 | 52/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`), `umull` (not lifted) |
 | Clang 18.1, AArch64 Linux | locally, after G03-T2 widening multiply (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`) only |
+| Clang 18.1, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | the same as after G02-T2: SIMD and FP register moves (`fmov`, `movi`, `mov v`); `c_switch_sparse` is Complete on both |
 | Apple Clang 17, arm64 macOS | CI macos-15 | 39/39 | 32/39 | 32/39 | not itemised |
 | Clang 18.1, AArch64 Linux | locally, under qemu-aarch64 | 39/39 | 32/39 | 32/39 | SIMD, `ccmp` |
 | llvm-mingw Clang 23, arm64 Windows | CI windows-11-arm (package job) | 38/39 | 32/39 | 32/39 | not itemised |
@@ -125,7 +127,7 @@ results (division by zero gives 0, and `INT_MIN / -1` gives `INT_MIN`, with no
 fault), `umulh`/`smulh`, `clz`, `cls`, `rbit`, `rev`/`rev16`/`rev32`, `extr`,
 `bfi` and `bfxil`, `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`, `smsubl`, `umnegl`
 and `smnegl` (each 32-bit source is extended to 64 bits first), `ccmp`/`ccmn`, `cmn`
-and `adds`, and `adc`/`sbc` when the flags
+and `adds`, `adc`/`sbc` and `adcs`/`sbcs` when the flags
 before them are exact (a second carry reader in a block needs its own flag
 writer, since the carry out of `adc`/`sbc` is not modelled). On
 x86 it also lifts `popcnt`, `tzcnt`, `lzcnt`,
@@ -151,9 +153,11 @@ compare, because GCC's table code overwrites `x0`.
   Unsupported until a zero-flag state exists.
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
-- AArch64 `adcs` and `sbcs`: they set flags from the carry out, which is not
-  modelled, so they are Unsupported.
-- Flags read across basic blocks. An AArch64 `ccmp`/`ccmn` whose flags before are not exact is Partial.
+- Flags read across basic blocks, except into a fall-through block with one
+  predecessor: there the cmp or test that set them is repeated (G02-T4 on x86-64,
+  G03-T4 on AArch64). Any other flag writer is not repeated, so a branch on its
+  flags in another block stays Partial. An AArch64 `ccmp`/`ccmn` whose flags before
+  are not exact is Partial.
 - AArch64 jump tables outside the GCC and Clang forms above; 32-bit ARM.
 - Functions with a cold block below their entry (GCC's -O2 hot/cold split can
   place the default path there on x86-64). The lifter keeps blocks in address
