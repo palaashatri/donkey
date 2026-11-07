@@ -2390,6 +2390,32 @@ TEST(Ir, FlagsAcrossAPushOfSpAreNotCarried) {
   EXPECT_TRUE(function.partial);
 }
 
+// `ucomisd xmm0, [rsp+8]` sets the flags for a jne in its block; the `jp` in the next block
+// (its only predecessor is that fall-through) reads the same flags. The compare is repeated
+// there, with its memory operand, which is exact: nothing between the compare and the block's
+// end can store to memory or write the address register. (rsp is the stack pointer, not a
+// parameter, so the only parameter is the xmm0 value.)
+TEST(Ir, X86FpCompareWithAMemoryOperandCarriesIntoASinglePredecessorBlock) {
+  donkey::IrFunction function;  // ucomisd xmm0, [rsp+8]; jne L; jp L; mov eax, 1; ret; L: ...
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x0f, 0x2e, 0x44, 0x24, 0x08, 0x75, 0x0c, 0x7a, 0x0a, 0xb8, 0x01, 0x00,
+       0x00, 0x00, 0xc3, 0x90, 0x90, 0x90, 0x90, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3},
+      function));
+  EXPECT_FALSE(function.partial);
+}
+
+// The same shape with a store to the compared memory between the compare and the jne. The
+// repeated compare would read the stored value, so the flags are not carried and the `jp`
+// stays Partial.
+TEST(Ir, X86FpCompareIsNotCarriedPastAStore) {
+  donkey::IrFunction function;  // ucomisd xmm0, [rsp+8]; mov [rsp+8], eax; jne L; jp L; ...
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x66, 0x0f, 0x2e, 0x44, 0x24, 0x08, 0x89, 0x44, 0x24, 0x08, 0x75, 0x0c, 0x7a, 0x0a, 0xb8,
+       0x01, 0x00, 0x00, 0x00, 0xc3, 0x90, 0x90, 0x90, 0x90, 0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3},
+      function));
+  EXPECT_TRUE(function.partial);
+}
+
 // bsf and bsr for a nonzero source are the lowest and highest set bit. The
 // result is Partial, because the destination is undefined for a zero source.
 TEST(Ir, X86BitScanForwardAndReverseAreExactForANonzeroSource) {

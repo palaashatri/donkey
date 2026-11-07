@@ -690,14 +690,30 @@ struct Lifter {
       return std::nullopt;
     }
     const Instruction& compare = analysis.instructions[*writer];
-    if ((compare.mnemonic != "cmp" && compare.mnemonic != "test") ||
+    const bool fp_compare = is_sse_compare(compare.mnemonic);
+    if ((!fp_compare && compare.mnemonic != "cmp" && compare.mnemonic != "test") ||
         compare.structured_operands.size() != 2) {
       return std::nullopt;
     }
+    if (fp_compare && !is_xmm(compare.structured_operands[0])) {
+      return std::nullopt;
+    }
     std::vector<std::string> read;
+    // A memory operand of an FP compare is re-read at the start of the next block. That is
+    // exact only when nothing between the compare and the block's end can store to memory or
+    // write the address registers: the compare must be followed by the terminator alone.
+    bool memory_operand = false;
     for (const Operand& operand : compare.structured_operands) {
       if (operand.kind == OperandKind::Register) {
         read.push_back(internal::register_family(operand.reg));
+      } else if (operand.kind == OperandKind::Memory && fp_compare) {
+        memory_operand = true;
+        if (!operand.memory.base.empty()) {
+          read.push_back(internal::register_family(operand.memory.base));
+        }
+        if (!operand.memory.index.empty()) {
+          read.push_back(internal::register_family(operand.memory.index));
+        }
       } else if (operand.kind != OperandKind::Immediate) {
         return std::nullopt;  // a memory operand could change before the next block
       }
@@ -706,6 +722,9 @@ struct Lifter {
       const Instruction& later = analysis.instructions[i];
       if (later.classification == InstructionClass::ConditionalJump && i + 1 == end) {
         continue;  // the block's terminator
+      }
+      if (memory_operand) {
+        return std::nullopt;
       }
       // cdq, cqo, cdqe, cwde, cbw and cwd write rax or rdx without an operand.
       if (later.classification != InstructionClass::Other || !preserves_flags(later.mnemonic) ||
@@ -1942,10 +1961,13 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           const Instruction& compare = analysis.instructions[*writer];
           if (compare.mnemonic == "cmp") {
             lifter.lift_compare(out_block, compare);
-          } else {
+            lifter.flags_state = entering;
+          } else if (compare.mnemonic == "test") {
             lifter.lift_test(out_block, compare);
+            lifter.flags_state = entering;
+          } else if (lifter.lift_scalar_sse(out_block, compare)) {
+            lifter.flags_state = entering;  // the FP comparison sets the flags it reads
           }
-          lifter.flags_state = entering;
         }
       }
     }
