@@ -14,7 +14,6 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
-#include "donkey/ir/debug_names.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
@@ -23,6 +22,7 @@
 #include "donkey/core/version.h"
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
+#include "donkey/ir/debug_names.h"
 #include "donkey/ir/lift.h"
 #include "donkey/patch/patch.h"
 #include "donkey/plugin/plugin.h"
