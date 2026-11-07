@@ -160,6 +160,10 @@ class Session {
   /// otherwise declares the bytes of the instruction there undefined, so analysis will not decode
   /// them. One call is one undo step.
   void undefine(std::uint64_t address);
+  /// The `A` key (G12-T2): makes the NUL-terminated string at `address` a data range of its bytes,
+  /// terminator included. Refused, with an error, when the address is not in file data or no
+  /// terminator is found within a bounded scan. One call is one undo step.
+  void define_string(std::uint64_t address);
 
   /// True when a function-boundary edit is waiting for the worker to be free.
   [[nodiscard]] bool reanalysis_pending() const;

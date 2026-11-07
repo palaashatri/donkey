@@ -42,6 +42,7 @@ enum class SymbolKind : std::uint8_t {
 enum class SymbolBinding : std::uint8_t { Unknown = 0, Local, Global, Weak };
 
 const char* format_name(BinaryFormat format) noexcept;
+
 const char* architecture_name(Architecture architecture) noexcept;
 std::optional<Architecture> parse_architecture(std::string_view name) noexcept;
 const char* symbol_kind_name(SymbolKind kind) noexcept;
@@ -129,6 +130,15 @@ struct BinaryImage {
   void add_diagnostic(Status status, std::string code, std::string message,
                       std::optional<std::uint64_t> offset = std::nullopt);
 };
+
+/// Where the byte at virtual `address` is in the file: its offset, and how many bytes of the same
+/// file-backed section follow it. Nothing when no file-backed section holds the address.
+struct FileLocation {
+  std::uint64_t offset = 0;
+  std::uint64_t remaining = 0;
+};
+[[nodiscard]] std::optional<FileLocation> file_location_of(const BinaryImage& image,
+                                                           std::uint64_t address) noexcept;
 
 struct LoadOptions {
   /// Guard against accidental multi-gigabyte allocations on hostile input.

@@ -2,8 +2,12 @@
 
 #include "donkey/core/thread_priority.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -76,9 +80,31 @@ bool text_valid_for(AnnotationKind kind, const std::string& text) {
   if (kind == AnnotationKind::DataRange) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    return parse_data_range_text(text, element_size, count);
+    bool is_string = false;
+    return parse_data_extent(text, element_size, count, is_string);
   }
   return true;
+}
+
+/// A string is searched for only this far, so defining one never scans the whole file.
+constexpr std::uint64_t kMaxStringScan = 4096;
+
+/// The byte length of the NUL-terminated string at `address`, terminator included, or nothing when
+/// the address is not in file-backed data or no terminator is found within the scan.
+std::optional<std::uint64_t> string_bytes_at(const LoadedBinary& loaded, std::uint64_t address) {
+  const std::span<const std::byte> file = loaded.data.span();
+  const std::optional<FileLocation> location = file_location_of(loaded.image, address);
+  if (!location || location->offset >= file.size()) {
+    return std::nullopt;
+  }
+  const std::uint64_t available =
+      std::min({kMaxStringScan, location->remaining, file.size() - location->offset});
+  for (std::uint64_t i = 0; i < available; ++i) {
+    if (std::to_integer<unsigned>(file[location->offset + i]) == 0) {
+      return i + 1;
+    }
+  }
+  return std::nullopt;
 }
 
 std::vector<Annotation> rows_from(const Annotations& annotations) {
@@ -118,7 +144,8 @@ AnalysisOptions analysis_options_for(const Annotations& annotations) {
   for (const auto& [address, text] : annotations.data_ranges) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    if (parse_data_range_text(text, element_size, count)) {
+    bool is_string = false;
+    if (parse_data_extent(text, element_size, count, is_string)) {
       options.user_data_ranges.push_back(UserDataRange{address, element_size, count});
     }
   }
@@ -1004,6 +1031,18 @@ void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const s
     apply_annotation_edit_locked(kind, address, text, true);
   }
   after_annotation_change(kind);
+}
+
+void Session::define_string(std::uint64_t address) {
+  const auto doc = document();
+  const std::optional<std::uint64_t> bytes =
+      doc ? string_bytes_at(doc->loaded, address) : std::nullopt;
+  if (!bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_ = "no NUL-terminated string within 4096 bytes of file data at this address";
+    return;
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_string_range_text(*bytes));
 }
 
 void Session::undefine(std::uint64_t address) {

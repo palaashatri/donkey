@@ -509,4 +509,17 @@ Result<BinaryImage> load_binary_file(const std::string& path, const LoadOptions&
   return std::move(loaded.value().image);
 }
 
+std::optional<FileLocation> file_location_of(const BinaryImage& image,
+                                             std::uint64_t address) noexcept {
+  for (const Section& section : image.sections) {
+    if (!section.has_file_data || section.file_size == 0 || address < section.address ||
+        address - section.address >= section.file_size) {
+      continue;
+    }
+    const std::uint64_t within = address - section.address;
+    return FileLocation{section.file_offset + within, section.file_size - within};
+  }
+  return std::nullopt;
+}
+
 }  // namespace donkey

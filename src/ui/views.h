@@ -15,6 +15,8 @@ void hex(const Document& document, UiState& state);
 void strings(const Document& document, UiState& state);
 void xrefs(const Document& document, UiState& state);
 void bookmarks(const Document& document, UiState& state);
+/// The defined data ranges (G12-T2): arrays, strings and undefined bytes, with Edit and Remove.
+void data_ranges(const Document& document, UiState& state);
 void debugger(const Document& document, UiState& state);
 void diagnostics(const Document& document, UiState& state);
 

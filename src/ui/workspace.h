@@ -291,6 +291,7 @@ class Workspace {
   bool show_strings_ = true;
   bool show_xrefs_ = true;
   bool show_bookmarks_ = true;
+  bool show_data_ = true;
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;

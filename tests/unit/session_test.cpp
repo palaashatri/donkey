@@ -962,6 +962,27 @@ TEST(Session, CodeStartSeedsAFunctionAndInvalidTextIsIgnored) {
 
 // G12-T1 (U): undefining an instruction declares its bytes undefined, so analysis drops it, and
 // a second undefine clears the declaration. The range covers the whole instruction.
+// G12-T2: A defines the NUL-terminated string at the address as data, terminator included, and is
+// one undo step. An address that is not in file data is refused with an error, and nothing changes.
+// tiny-elf's .rodata holds "hello world" with its terminator at 0x40018b (12 bytes).
+TEST(Session, DefineStringDefinesTheTerminatedBytesAndRefusesOthers) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+
+  session.define_string(0x400180);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x400180)), "string:12");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x400180), nullptr);
+
+  session.define_string(0x123456);  // not in any file-backed section
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x123456), nullptr);
+  EXPECT_TRUE(session.take_error().has_value());
+}
+
 TEST(Session, UndefineDeclaresInstructionBytesUndefinedAndClearsThem) {
   Session session;
   session.open(fixture_path("tiny-elf-x86_64"));

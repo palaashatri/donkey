@@ -7,6 +7,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <system_error>
 #include <utility>
 
@@ -51,28 +52,33 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
   return "unknown";
 }
 
+namespace {
+
+/// Plain decimal digits only, with no sign, space or leading zero, so each value has exactly one
+/// text. Nineteen digits cannot overflow 64 bits.
+bool parse_decimal(const std::string& digits, std::uint64_t& out) noexcept {
+  if (digits.empty() || digits.size() > 19 || (digits.size() > 1 && digits[0] == '0')) {
+    return false;
+  }
+  std::uint64_t value = 0;
+  for (const char c : digits) {
+    if (c < '0' || c > '9') {
+      return false;
+    }
+    value = value * 10U + static_cast<std::uint64_t>(c - '0');
+  }
+  out = value;
+  return true;
+}
+
+}  // namespace
+
 bool parse_data_range_text(const std::string& text, std::uint64_t& element_size,
                            std::uint64_t& count) noexcept {
   const std::size_t colon = text.find(':');
   if (colon == std::string::npos) {
     return false;
   }
-  // Plain decimal digits only, with no sign, space or leading zero, so each range has exactly
-  // one text. Nineteen digits cannot overflow 64 bits.
-  const auto parse_decimal = [](const std::string& digits, std::uint64_t& out) noexcept {
-    if (digits.empty() || digits.size() > 19 || (digits.size() > 1 && digits[0] == '0')) {
-      return false;
-    }
-    std::uint64_t value = 0;
-    for (const char c : digits) {
-      if (c < '0' || c > '9') {
-        return false;
-      }
-      value = value * 10U + static_cast<std::uint64_t>(c - '0');
-    }
-    out = value;
-    return true;
-  };
   std::uint64_t size = 0;
   std::uint64_t number = 0;
   if (!parse_decimal(text.substr(0, colon), size) ||
@@ -97,6 +103,28 @@ std::string format_data_range_text(std::uint64_t element_size, std::uint64_t cou
   return std::to_string(element_size) + ":" + std::to_string(count);
 }
 
+bool parse_data_extent(const std::string& text, std::uint64_t& element_size, std::uint64_t& count,
+                       bool& is_string) noexcept {
+  constexpr std::string_view kStringPrefix = "string:";
+  if (text.compare(0, kStringPrefix.size(), kStringPrefix) == 0) {
+    std::uint64_t bytes = 0;
+    if (!parse_decimal(text.substr(kStringPrefix.size()), bytes) || bytes == 0 ||
+        bytes > kMaxDataRangeBytes) {
+      return false;
+    }
+    element_size = 1;
+    count = bytes;
+    is_string = true;
+    return true;
+  }
+  is_string = false;
+  return parse_data_range_text(text, element_size, count);
+}
+
+std::string format_string_range_text(std::uint64_t bytes) {
+  return "string:" + std::to_string(bytes);
+}
+
 namespace {
 
 /// Whether `text` is an acceptable value for `kind`. A CodeStart must say "code" and a
@@ -108,7 +136,8 @@ bool annotation_text_valid(AnnotationKind kind, const std::string& text) {
   if (kind == AnnotationKind::DataRange) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    return parse_data_range_text(text, element_size, count);
+    bool is_string = false;
+    return parse_data_extent(text, element_size, count, is_string);
   }
   return true;
 }

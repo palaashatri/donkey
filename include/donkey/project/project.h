@@ -49,6 +49,15 @@ inline constexpr std::uint64_t kMaxDataRangeBytes = 16ULL * 1024ULL * 1024ULL;
 /// The canonical DataRange text for an element size and count.
 [[nodiscard]] std::string format_data_range_text(std::uint64_t element_size, std::uint64_t count);
 
+/// Parses either DataRange form (G12-T2): "<element size>:<count>" as above, or "string:<bytes>",
+/// a NUL-terminated string of that many bytes including the terminator, read as an array of
+/// one-byte elements (`is_string` is then true, element size 1, count bytes). The byte length is
+/// within kMaxDataRangeBytes, and the bytes are at least 1.
+[[nodiscard]] bool parse_data_extent(const std::string& text, std::uint64_t& element_size,
+                                     std::uint64_t& count, bool& is_string) noexcept;
+/// The canonical DataRange text for a string of `bytes` bytes, terminator included.
+[[nodiscard]] std::string format_string_range_text(std::uint64_t bytes);
+
 struct Annotation {
   AnnotationKind kind = AnnotationKind::Rename;
   std::uint64_t address = 0;

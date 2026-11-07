@@ -1,10 +1,18 @@
 #include <algorithm>
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
+#include <optional>
+#include <span>
 #include <string>
+#include <utility>
+#include <vector>
 
 #include "components.h"
 #include "views.h"
+
+#include "donkey/binary/image.h"
+#include "donkey/project/project.h"
 
 namespace donkey::ui::views {
 namespace {
@@ -398,6 +406,110 @@ void bookmarks(const Document& document, UiState& state) {
     ImGui::PushID(static_cast<int>(address));
     if (ImGui::SmallButton("Remove")) {
       state.annotation_kind = AnnotationKind::Bookmark;
+      state.annotation_address = address;
+      state.annotation_buffer[0] = '\0';
+      state.annotation_modal_requested = true;
+    }
+    ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
+namespace {
+
+/// The text of a string's bytes for the Data view: printable characters as they are, and the rest
+/// escaped, at most 48 characters. `count` includes the terminator, which is not shown.
+std::string string_preview(const Document& document, std::uint64_t address, std::uint64_t count) {
+  const std::optional<FileLocation> location = file_location_of(document.loaded.image, address);
+  const std::span<const std::byte> file = document.loaded.data.span();
+  if (!location || location->offset >= file.size() || count == 0) {
+    return "";
+  }
+  std::string out;
+  const std::uint64_t end =
+      std::min<std::uint64_t>({count - 1, location->remaining, file.size() - location->offset});
+  for (std::uint64_t i = 0; i < end && out.size() < 48; ++i) {
+    const unsigned char c = std::to_integer<unsigned char>(file[location->offset + i]);
+    if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') {
+      out += static_cast<char>(c);
+    } else {
+      char escaped[8];
+      std::snprintf(escaped, sizeof(escaped), "\\x%02x", static_cast<unsigned>(c));
+      out += escaped;
+    }
+  }
+  return out;
+}
+
+/// What a data range's text says, in words: the array's shape, the string and its preview, or the
+/// undefined bytes (element size 0).
+std::string describe_data_range(const Document& document, std::uint64_t address,
+                                const std::string& text) {
+  std::uint64_t element_size = 0;
+  std::uint64_t count = 0;
+  bool is_string = false;
+  if (!parse_data_extent(text, element_size, count, is_string)) {
+    return "invalid: " + text;
+  }
+  if (is_string) {
+    return "string, " + std::to_string(count) + " bytes: \"" +
+           string_preview(document, address, count) + "\"";
+  }
+  if (element_size == 0) {
+    return "undefined, " + std::to_string(count) + " bytes";
+  }
+  if (element_size == 1) {
+    return "bytes, " + std::to_string(count);
+  }
+  return "array, " + std::to_string(count) + " elements of " + std::to_string(element_size) +
+         " bytes";
+}
+
+}  // namespace
+
+void data_ranges(const Document& document, UiState& state) {
+  if (state.annotations == nullptr || state.annotations->data_ranges.empty()) {
+    ImGui::TextDisabled(
+        "No data defined. D makes a byte, A a string at the selected address, and Shift+D an "
+        "array (<size>:<count>).");
+    return;
+  }
+  const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+  if (!ImGui::BeginTable("##data", 3, flags)) {
+    return;
+  }
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+  ImGui::TableSetupColumn("Definition", ImGuiTableColumnFlags_WidthStretch, 2.5f);
+  ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+  ImGui::TableHeadersRow();
+
+  std::vector<std::pair<std::uint64_t, std::string>> sorted(state.annotations->data_ranges.begin(),
+                                                            state.annotations->data_ranges.end());
+  std::sort(sorted.begin(), sorted.end(),
+            [](const auto& a, const auto& b) { return a.first < b.first; });
+  for (const auto& [address, text] : sorted) {
+    const std::string addr_str = components::format_address(address);
+    const bool selected = state.selected_address == address;
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    if (ImGui::Selectable(addr_str.c_str(), selected, ImGuiSelectableFlags_SpanAllColumns)) {
+      state.navigate_to(address, &document);
+    }
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(describe_data_range(document, address, text).c_str());
+    ImGui::TableSetColumnIndex(2);
+    ImGui::PushID(static_cast<int>(address));
+    if (ImGui::SmallButton("Edit")) {
+      state.annotation_kind = AnnotationKind::DataRange;
+      state.annotation_address = address;
+      std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s", text.c_str());
+      state.annotation_modal_requested = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Remove")) {
+      state.annotation_kind = AnnotationKind::DataRange;
       state.annotation_address = address;
       state.annotation_buffer[0] = '\0';
       state.annotation_modal_requested = true;

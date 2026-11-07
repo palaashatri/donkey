@@ -1519,6 +1519,50 @@ TEST(Project, DataRangeTextIsCanonicalAndBounded) {
 
 // G12-T1: a code start and data ranges are stored, come back in order after a reopen, and text
 // that does not fit the kind is refused with a code, never stored.
+// G12-T2: a string is a DataRange whose text is "string:<bytes>", the terminator included. It is
+// read as an array of one-byte elements, and it is stored and read back like any other range.
+// A string of zero bytes, a bad number, or a size past the limit is refused.
+TEST(Project, ParsesAndStoresStringRangesAndRefusesBadStringText) {
+  std::uint64_t element_size = 9;
+  std::uint64_t count = 9;
+  bool is_string = false;
+  EXPECT_TRUE(donkey::parse_data_extent("string:12", element_size, count, is_string));
+  EXPECT_TRUE(is_string);
+  EXPECT_EQ(element_size, 1U);
+  EXPECT_EQ(count, 12U);
+  EXPECT_TRUE(donkey::parse_data_extent("4:16", element_size, count, is_string));
+  EXPECT_FALSE(is_string);
+  EXPECT_EQ(element_size, 4U);
+  EXPECT_EQ(count, 16U);
+  EXPECT_EQ(donkey::format_string_range_text(12), "string:12");
+  for (const char* bad : {"string:0", "string:", "string:01", "string:-1", "string:17000000",
+                          "string:1x", "string"}) {
+    EXPECT_FALSE(donkey::parse_data_extent(bad, element_size, count, is_string)) << bad;
+  }
+
+  TempPath path("string-kind");
+  const std::int64_t image_id = make_project(path.str(), "kept");
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  EXPECT_TRUE(
+      project.value()
+          .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x400180, "string:12")
+          .has_value());
+  EXPECT_FALSE(
+      project.value()
+          .set_annotation(image_id, donkey::AnnotationKind::DataRange, 0x400190, "string:0")
+          .has_value());
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto rows = reopened.value().annotations(image_id);
+  ASSERT_TRUE(rows.has_value()) << rows.diagnostic().message;
+  EXPECT_NE(std::find_if(rows.value().begin(), rows.value().end(),
+                         [](const donkey::Annotation& row) {
+                           return row.address == 0x400180 && row.text == "string:12";
+                         }),
+            rows.value().end());
+}
+
 TEST(Project, StoresCodeStartsAndDataRangesAndRefusesOtherText) {
   TempPath path("code-data-kinds");
   const std::int64_t image_id = make_project(path.str(), "kept");
