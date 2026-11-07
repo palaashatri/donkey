@@ -536,6 +536,20 @@ struct Lifter {
         push(block, std::move(statement));
         return;
       }
+      if (mnemonic == "cmn") {
+        // cmn is adds into the zero register: the flags of a + b, set unconditionally.
+        modelled_flags = true;
+        IrStatement statement;
+        statement.op = IrOp::CondCompareAdd;
+        statement.a = to_ir_operand(operands[0], kPointerWidth);
+        statement.b = source;
+        statement.c = IrOperand::constant_value(0, 1);
+        statement.condition = IrCondition::None;
+        statement.width = statement.a.width;
+        statement.source_address = instruction.address;
+        push(block, std::move(statement));
+        return;
+      }
       if (mnemonic == "tst") {
         modelled_flags = true;
         IrStatement statement;
@@ -620,6 +634,20 @@ struct Lifter {
       return;
     }
 
+    // adds sets the flags of a + b, unconditionally, from the operands before the
+    // destination is written.
+    if (mnemonic == "adds") {
+      modelled_flags = true;
+      IrStatement flags;
+      flags.op = IrOp::CondCompareAdd;
+      flags.a = left;
+      flags.b = right;
+      flags.c = IrOperand::constant_value(0, 1);
+      flags.condition = IrCondition::None;
+      flags.width = width;
+      flags.source_address = instruction.address;
+      push(block, std::move(flags));
+    }
     // subs and ands set NZCV exactly as cmp and tst of the same operands.
     // The Compare/Test reads the operands before the destination is written.
     if (mnemonic == "subs" || mnemonic == "ands") {
@@ -893,6 +921,36 @@ struct Lifter {
       return;
     }
     unsupported(block, instruction);
+  }
+
+  /// adc and sbc (without S): dest = a + b + C, or a - b - borrow, where the borrow
+  /// is not C. The carry comes from the flags before, so they must be exact. The
+  /// instruction does not write NZCV, so every carry reader in the block reads the
+  /// same carry. adcs and sbcs set flags from their carry out, which is not
+  /// modelled, so they stay Unsupported.
+  void lift_add_with_carry(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    if (!flags_exact || operands.size() != 3 || operands[0].kind != OperandKind::Register ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        operands[0].reg == "xzr" || operands[0].reg == "wzr") {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    if (width == 0 || register_width(operands[1].reg) != width ||
+        register_width(operands[2].reg) != width) {
+      unsupported(block, instruction);
+      return;
+    }
+    IrStatement statement;
+    statement.op = instruction.mnemonic == "sbc" ? IrOp::SubBorrow : IrOp::AddCarry;
+    statement.dest = to_ir_operand(operands[0], width);
+    statement.a = to_ir_operand(operands[1], width);
+    statement.b = to_ir_operand(operands[2], width);
+    statement.width = width;
+    statement.source_address = instruction.address;
+    statement.writes_flags = false;
+    push(block, std::move(statement));
   }
 
   /// ccmp and ccmn. If the condition holds over the current flags, NZCV becomes
@@ -1659,13 +1717,14 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
 
       lifter.modelled_flags = false;
+      const std::size_t statements_before = out_block.statements.size();
       if (mnemonic == "mov" || mnemonic == "movz" || mnemonic == "movn" || mnemonic == "movk") {
         lifter.lift_move(out_block, instruction);
       } else if (mnemonic == "add" || mnemonic == "adds" || mnemonic == "sub" ||
                  mnemonic == "subs" || mnemonic == "and" || mnemonic == "ands" ||
                  mnemonic == "orr" || mnemonic == "eor" || mnemonic == "cmp" || mnemonic == "tst" ||
                  mnemonic == "neg" || mnemonic == "negs" || mnemonic == "lsl" ||
-                 mnemonic == "lsr" || mnemonic == "asr" || mnemonic == "mvn") {
+                 mnemonic == "lsr" || mnemonic == "asr" || mnemonic == "mvn" || mnemonic == "cmn") {
         lifter.lift_arithmetic(out_block, instruction);
       } else if (mnemonic == "ror" || mnemonic == "ubfiz" || mnemonic == "sbfiz" ||
                  mnemonic == "ubfx" || mnemonic == "sbfx") {
@@ -1676,6 +1735,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
+      } else if (mnemonic == "adc" || mnemonic == "sbc") {
+        lifter.lift_add_with_carry(out_block, instruction);
       } else if (mnemonic == "ccmp" || mnemonic == "ccmn") {
         lifter.lift_conditional_compare(out_block, instruction);
       } else if (mnemonic == "udiv" || mnemonic == "sdiv" || mnemonic == "umulh" ||
@@ -1703,6 +1764,13 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
       if (sets_flags(mnemonic)) {
         lifter.flags_exact = lifter.modelled_flags;
+      }
+      // An unsupported statement may have written the flags, so no later flag reader
+      // is exact. This also keeps an adc from reading a carry through an unsupported one.
+      for (std::size_t s = statements_before; s < out_block.statements.size(); ++s) {
+        if (out_block.statements[s].op == IrOp::Unsupported) {
+          lifter.flags_exact = false;
+        }
       }
       if (lifter.limit_reached()) {
         lifter.mark_partial("statement limit reached");

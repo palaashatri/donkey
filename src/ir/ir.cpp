@@ -299,10 +299,14 @@ class Renderer {
       }
       case IrOp::CondCompare:
       case IrOp::CondCompareAdd:
+        // IrCondition::None is an unconditional compare (AArch64 cmn and cmp
+        // forms, which set the flags unconditionally).
         return "/* flags = " + operand(statement.a) +
                (statement.op == IrOp::CondCompare ? " - " : " + ") + operand(statement.b) +
-               " when " + ir_condition_operator(statement.condition) + ", else nzcv " +
-               operand(statement.c) + " */";
+               (statement.condition == IrCondition::None
+                    ? std::string()
+                    : " when " + std::string(ir_condition_operator(statement.condition))) +
+               ", else nzcv " + operand(statement.c) + " */";
       case IrOp::Compare:
         return "/* flags = " + operand(statement.a) + " " +
                ir_condition_operator(statement.condition) + " " + operand(statement.b) + " */";
@@ -374,7 +378,8 @@ bool flags_written_in_block(const IrBlock& block, std::size_t index) {
       return true;
     }
     if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
-        candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) {
+        ((candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) &&
+         candidate.writes_flags)) {
       return false;  // flags may have changed in a way the IR does not show
     }
   }
@@ -913,11 +918,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::CondCompare:
         case IrOp::CondCompareAdd:
           if (statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
-              statement.c.kind != IrOperandKind::Constant || statement.c.constant > 15 ||
-              statement.condition == IrCondition::None) {
-            return fail(
-                "ir.malformed_cond_compare",
-                "conditional compare needs two operands, a condition and an NZCV value 0-15");
+              statement.c.kind != IrOperandKind::Constant || statement.c.constant > 15) {
+            return fail("ir.malformed_cond_compare",
+                        "conditional compare needs two operands and an NZCV value 0-15");
           }
           if (statement.a.width != statement.width ||
               (statement.b.kind == IrOperandKind::Register &&

@@ -153,7 +153,7 @@ P0 is the most important, P3 the least.
 |---|---|---|---|---|---|
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
-| G03 | AArch64 integer gaps | Full | No `cmn`/`adc`/`sbc` (G03-T4), jump tables. `ccmp`/`ccmn` are done in G03-T1, and `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2 | P0 | IN PROGRESS (G03-T1, T2 DONE; T3, T4 TODO) |
+| G03 | AArch64 integer gaps | Full | No jump tables (G03-T3). `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, and `adc`/`sbc`/`adds`/`cmn` in G03-T4 | P0 | IN PROGRESS (G03-T1, T2, T4 DONE; T3 TODO) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
@@ -534,6 +534,26 @@ interpreter.
 - **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
   and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
   counts in `docs/SUPPORT_MATRIX.md`.
+- **Status:** DONE on GCC 13.3 under qemu-aarch64. Lifted: `adds` (flags of
+  a + b, with an unconditional `CondCompareAdd`), `cmn` (the same, into the zero
+  register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
+  the flags before). The unconditional form is `IrCondition::None` in
+  `CondCompare`/`CondCompareAdd`. Lifting `adc`/`sbc` needs exact flags, and a
+  AArch64 `adc`/`sbc` without S do not write NZCV, so every carry reader in a block reads the
+  same carry. On x86 the carry out of `adc`/`sbb` is not modelled, so a second carry reader in a
+  block is Partial.
+  `adcs`/`sbcs` stay Unsupported. Also fixed in this task: an unsupported
+  statement now clears the exact-flags state, so a later `adc` cannot read a
+  carry through it. Evidence: `Ir.AArch64CarryChainAddsThenAdcUsesTheSumsCarry`,
+  `Ir.AArch64SubtractWithBorrowUsesTheCompareBorrow`,
+  `Ir.AArch64CmnAgainstMinusOneSetsTheZeroFlag`,
+  `Ir.AArch64AddsSetsTheZeroFlagOfTheSum`,
+  `Ir.AArch64CarryWithoutAFlagWriterIsPartial`,
+  `Ir.AArch64SecondCarryReaderIsPartial`, `Ir.AArch64AddsWithCarryIsPartial`.
+  Corpus under qemu-aarch64, 59 functions: `c_add128_hi`, `c_sub128_hi`,
+  `c_add_wraps`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and `c_srem64` are Complete
+  and verified at O0, O2 and O3, and no result is WRONG. Not done: SIMD
+  (`movi`, `dup`, `fmov`, `ldr d`) and `c_switch_sparse` remain Partial.
 
 ### G04 Decompiler readability
 

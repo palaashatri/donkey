@@ -719,12 +719,13 @@ TEST(Ir, AArch64SelectsBitfieldsAndRegisterOffsetsComputeTheRealValues) {
   }
 }
 
-// A branch on flags the lifter does not model must stay Partial: here adds
-// overwrites NZCV between cmp and b.eq.
+// A branch on flags the lifter does not model must stay Partial: here negs
+// overwrites NZCV between cmp and b.eq. (adds is modelled since G03-T4, so it
+// is no longer an example of an unmodelled writer.)
 TEST(Ir, AArch64BranchAfterAnUnmodelledFlagWriterIsPartial) {
   const auto data = aarch64_bytes({
       0x6b01001f,  // cmp w0, w1
-      0x2b010002,  // adds w2, w0, w1
+      0x6b0103e2,  // negs w2, w1
       0x54000060,  // b.eq +12
       0x52800020,  // mov w0, #1
       0xd65f03c0,  // ret
@@ -2549,6 +2550,71 @@ TEST(Ir, PseudocodeDoesNotNameAnEarlierCompareAfterACondCompare) {
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   EXPECT_NE(text.value().find("if (flags"), std::string::npos) << text.value();
   EXPECT_EQ(text.value().find("if (rax"), std::string::npos) << text.value();
+}
+
+/// True when the AArch64 code lifts to a Partial function.
+bool aarch64_lifts_partial(const std::vector<std::byte>& data) {
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed.has_value() || analyzed.value().functions.empty()) {
+    return false;
+  }
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  EXPECT_TRUE(lifted.has_value());
+  return lifted.has_value() && lifted.value().partial;
+}
+
+TEST(Ir, AArch64CarryChainAddsThenAdcUsesTheSumsCarry) {
+  // adds x0, x0, x1; adc x0, x2, x3; ret. The carry is the one out of the sum.
+  const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(data));
+  EXPECT_EQ(run_aarch64_args(data, {~0ULL, 1, 5, 7}), 13U);  // the sum wraps: 5 + 7 + 1
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 5, 7}), 12U);
+}
+
+TEST(Ir, AArch64SubtractWithBorrowUsesTheCompareBorrow) {
+  // subs x0, x0, x1; sbc x0, x2, x3; ret. The borrow is not C after the subtraction.
+  const auto data = aarch64_bytes({0xeb010000, 0xda030040, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(data));
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 10, 3}), 6U);  // borrows: 10 - 3 - 1
+  EXPECT_EQ(run_aarch64_args(data, {2, 1, 10, 3}), 7U);  // no borrow: 10 - 3
+}
+
+TEST(Ir, AArch64CmnAgainstMinusOneSetsTheZeroFlag) {
+  // cmn x0, #1; cset x0, eq; ret. cmn sets the flags of x0 + 1.
+  const auto data = aarch64_bytes({0xb100041f, 0x9a9f17e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {~0ULL}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {0}), 0U);
+  EXPECT_EQ(run_aarch64_args(data, {5}), 0U);
+}
+
+TEST(Ir, AArch64AddsSetsTheZeroFlagOfTheSum) {
+  // adds x0, x0, x1; cset x0, eq; ret. eq holds when the sum is zero.
+  const auto data = aarch64_bytes({0xab010000, 0x9a9f17e0, 0xd65f03c0});
+  EXPECT_EQ(run_aarch64_args(data, {5, static_cast<std::uint64_t>(-5)}), 1U);
+  EXPECT_EQ(run_aarch64_args(data, {1, 1}), 0U);
+}
+
+TEST(Ir, AArch64CarryWithoutAFlagWriterIsPartial) {
+  // adc x0, x2, x3; ret. The carry is unknown with no flag writer before it.
+  EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0x9a030040, 0xd65f03c0})));
+}
+
+TEST(Ir, AArch64CarryReadersShareTheCarryOfTheFlagWriter) {
+  // adds x0, x0, x1; adc x0, x2, x3; adc x0, x4, x5; ret. Neither adc writes NZCV, so the
+  // second one reads the carry of the sum as well.
+  const auto data = aarch64_bytes({0xab010000, 0x9a030040, 0x9a050080, 0xd65f03c0});
+  EXPECT_FALSE(aarch64_lifts_partial(data));
+  EXPECT_EQ(run_aarch64_args(data, {~0ULL, 1, 5, 7, 2, 3}), 6U);  // carry 1: 2 + 3 + 1
+  EXPECT_EQ(run_aarch64_args(data, {1, 2, 5, 7, 2, 3}), 5U);      // no carry: 2 + 3
+}
+
+TEST(Ir, AArch64AddsWithCarryIsPartial) {
+  // adds x0, x0, x1; adcs x0, x2, x3; ret. adcs sets flags from the carry out, which
+  // is not modelled, so it is Unsupported.
+  EXPECT_TRUE(aarch64_lifts_partial(aarch64_bytes({0xab010000, 0xba030040, 0xd65f03c0})));
 }
 
 }  // namespace

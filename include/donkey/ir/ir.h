@@ -56,6 +56,7 @@ enum class IrOp : std::uint8_t {
   // interpreter then holds as an explicit NZCV value: if `condition` holds over
   // the current flags, NZCV is the flags of a - b (CondCompare) or of a + b
   // (CondCompareAdd); otherwise NZCV is the constant c, 0 to 15, in bits N Z C V.
+  // IrCondition::None means unconditionally: AArch64 cmn and adds.
   CondCompare,     ///< flags = condition ? flags(a - b) : c
   CondCompareAdd,  ///< flags = condition ? flags(a + b) : c
 };
@@ -149,6 +150,10 @@ struct IrStatement {
   std::string text;
   /// Case targets for Switch operations (dest is selector expression, a is default block).
   std::vector<IrSwitchCase> switch_cases;
+  /// False for an AArch64 adc or sbc without the S suffix: it reads the flags and leaves them
+  /// as they were, so the next carry reader reads the same carry. Every other statement sets
+  /// flags (or may, when the IR does not model that).
+  bool writes_flags = true;
 };
 
 struct IrBlock {
