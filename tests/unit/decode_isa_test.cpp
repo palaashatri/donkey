@@ -244,18 +244,64 @@ TEST(DecodeIsa, PowerPc32BranchesHaveTheirClassesAndTargets) {
   EXPECT_EQ(ret->classification, donkey::InstructionClass::Return);
 }
 
-// The CFG does not model MIPS delay slots, so a MIPS analysis is Partial, with the diagnostic that
-// says why, and not Complete.
-TEST(DecodeIsa, MipsAnalysisIsPartialBecauseDelaySlotsAreNotModelled) {
+// The MIPS graph (G13-T3): a branch, call or return runs the instruction after it (its delay slot)
+// first, so the slot stays in the same block as its branch. The path after a conditional branch
+// starts after the slot. The image has only ordinary branches, so nothing is left unmodelled.
+const donkey::BasicBlock* block_at(const donkey::ControlFlowGraph& cfg, std::uint64_t address) {
+  for (const donkey::BasicBlock& block : cfg.blocks) {
+    if (block.address == address) {
+      return &block;
+    }
+  }
+  return nullptr;
+}
+
+bool has_edge(const donkey::ControlFlowGraph& cfg, std::uint64_t from, std::uint64_t to,
+              donkey::CfgEdgeKind kind) {
+  for (const donkey::CfgEdge& edge : cfg.edges) {
+    if (edge.from == from && edge.to == to && edge.kind == kind) {
+      return true;
+    }
+  }
+  return false;
+}
+
+TEST(DecodeIsa, MipsDelaySlotsStayWithTheirBranchesInTheGraph) {
   const auto loaded = load("mips32el");
   auto result = donkey::analyze(loaded.image, loaded.data.span());
   ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
-  EXPECT_TRUE(result.value().partial);
-  bool found = false;
-  for (const donkey::Diagnostic& diagnostic : result.value().diagnostics) {
-    found = found || diagnostic.code == "analysis.mips_delay_slots";
+  const donkey::ControlFlowGraph& cfg = result.value().cfg;
+  EXPECT_FALSE(cfg.partial);
+
+  // blez at 0x20180 and its slot (nop) at 0x20184: one block of two instructions. Taken to 0x201b8,
+  // and not taken to 0x20188, which is after the slot.
+  const donkey::BasicBlock* head = block_at(cfg, 0x20180);
+  ASSERT_NE(head, nullptr);
+  EXPECT_EQ(head->instruction_count, 2U);
+  EXPECT_EQ(head->end_address, 0x20188U);
+  EXPECT_TRUE(has_edge(cfg, 0x20180, 0x201b8, donkey::CfgEdgeKind::ConditionalTrue));
+  EXPECT_TRUE(has_edge(cfg, 0x20180, 0x20188, donkey::CfgEdgeKind::ConditionalFalse));
+
+  // jr $ra at 0x201b8 and its slot (addiu $2, $zero, 0) at 0x201bc: the slot belongs to the return.
+  const donkey::BasicBlock* exit = block_at(cfg, 0x201b8);
+  ASSERT_NE(exit, nullptr);
+  EXPECT_EQ(exit->instruction_count, 2U);
+  EXPECT_EQ(exit->end_address, 0x201c0U);
+
+  // A return has no fall-through: the instruction after its slot is not an edge of the return.
+  for (const donkey::CfgEdge& edge : cfg.edges) {
+    if (edge.from == 0x201b0 || edge.from == 0x201b8) {
+      EXPECT_NE(edge.kind, donkey::CfgEdgeKind::ConditionalFalse) << std::hex << edge.from;
+    }
   }
-  EXPECT_TRUE(found);
+
+  // The self-jump `j` at 0x201d4 and its slot at 0x201d8 are one block, and the call at 0x201cc
+  // returns after its slot, at 0x201d4.
+  const donkey::BasicBlock* spin = block_at(cfg, 0x201d4);
+  ASSERT_NE(spin, nullptr);
+  EXPECT_EQ(spin->instruction_count, 2U);
+  EXPECT_TRUE(has_edge(cfg, 0x201cc, 0x20180, donkey::CfgEdgeKind::Call));
+  EXPECT_TRUE(has_edge(cfg, 0x201d4, 0x201d4, donkey::CfgEdgeKind::Jump));
 }
 
 // 64-bit MIPS and PowerPC share the 32-bit ELF machine numbers but not the instruction sets (`ld`,

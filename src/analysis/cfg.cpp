@@ -31,6 +31,36 @@ bool terminates_flow(InstructionClass classification) {
          classification == InstructionClass::Interrupt;
 }
 
+/// Whether a MIPS branch, call or return runs its delay slot (the instruction after it) first. The
+/// slot is part of the same block as the transfer. Other architectures have no delay slots.
+bool has_delay_slot(Architecture architecture, const Instruction& instruction) {
+  return architecture == Architecture::Mips32 &&
+         (instruction.classification == InstructionClass::Call ||
+          instruction.classification == InstructionClass::Jump ||
+          instruction.classification == InstructionClass::ConditionalJump ||
+          instruction.classification == InstructionClass::Return);
+}
+
+/// The MIPS branch-likely forms (`beql`, `bnel`, `bc1tl`, `bltzall`). Their slot runs only when the
+/// branch is taken, which the traversal does not model, so such a branch makes the graph partial.
+/// `bal`, `bltzal` and `bgezal` link but are not likely forms.
+bool is_branch_likely(const std::string& mnemonic) {
+  return mnemonic.size() > 2 && mnemonic.front() == 'b' && mnemonic.back() == 'l' &&
+         mnemonic != "bal" && mnemonic != "bltzal" && mnemonic != "bgezal";
+}
+
+/// Records a partial reason once per code, however many places hit it.
+void note_once(ControlFlowGraph& graph, const char* code, const std::string& message,
+               std::uint64_t address) {
+  graph.partial = true;
+  for (const Diagnostic& diagnostic : graph.diagnostics) {
+    if (diagnostic.code == code) {
+      return;
+    }
+  }
+  graph.diagnostics.push_back(Diagnostic::make(Status::Partial, code, message, address));
+}
+
 // ---- jump tables -----------------------------------------------------------
 
 constexpr std::uint64_t kMaxJumpTableEntries = 4096;
@@ -963,7 +993,35 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         }
 
         const Instruction& instruction = instructions[found->second];
-        const std::uint64_t next = address + instruction.length;
+        std::uint64_t next = address + instruction.length;
+        if (has_delay_slot(image.architecture, instruction)) {
+          // The slot runs before the transfer, so it is part of this block, and the path after a
+          // conditional branch or a call starts after it.
+          const auto slot = index_by_address.find(next);
+          if (slot == index_by_address.end() || visited.contains(next)) {
+            indirect = true;  // the slot is not a decoded instruction of this path
+            break;
+          }
+          if (decoded >= decoded_limit) {
+            truncated = true;
+            break;
+          }
+          const Instruction& delay = instructions[slot->second];
+          if (is_branch_likely(instruction.mnemonic)) {
+            note_once(graph, "analysis.mips_branch_likely",
+                      "a MIPS branch-likely form runs its delay slot only when taken; not modelled",
+                      address);
+          }
+          if (has_delay_slot(image.architecture, delay)) {
+            note_once(graph, "analysis.delay_slot_transfer",
+                      "a control transfer sits in a delay slot; the path is not followed", next);
+          }
+          visited.insert(next);
+          reached.push_back(next);
+          ++decoded;
+          run.push_back(slot->second);
+          next += delay.length;
+        }
         switch (instruction.classification) {
           case InstructionClass::Call:
             if (instruction.direct_target.has_value()) {
@@ -1046,14 +1104,30 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           }
         }
       }
+      std::uint64_t after = address + instruction.length;
+      if (has_delay_slot(image.architecture, instruction)) {
+        if (const auto slot = index_by_address.find(after); slot != index_by_address.end()) {
+          after += instructions[slot->second].length;
+        }
+      }
       if (instruction.classification != InstructionClass::Return &&
-          instruction.classification != InstructionClass::Interrupt &&
-          visited.contains(address + instruction.length)) {
-        leaders.push_back(address + instruction.length);
+          instruction.classification != InstructionClass::Interrupt && visited.contains(after)) {
+        leaders.push_back(after);
       }
     }
     std::sort(leaders.begin(), leaders.end());
     leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
+    // A delay slot must stay in its branch's block. A branch target that is a slot would split it,
+    // so that layout is reported rather than modelled.
+    for (const std::uint64_t address : reached) {
+      const Instruction& instruction = instructions[index_by_address[address]];
+      const std::uint64_t slot = address + instruction.length;
+      if (has_delay_slot(image.architecture, instruction) &&
+          std::binary_search(leaders.begin(), leaders.end(), slot)) {
+        note_once(graph, "analysis.delay_slot_target",
+                  "a branch target is a delay slot; the block layout is not modelled there", slot);
+      }
+    }
 
     std::unordered_map<std::uint64_t, std::size_t> block_by_address;
     std::uint64_t previous_end = 0;
@@ -1128,8 +1202,21 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       if (block.instruction_count == 0) {
         continue;
       }
-      const Instruction& last = instructions[block.first_instruction + block.instruction_count - 1];
-      const std::uint64_t fallthrough = last.address + last.length;
+      // A MIPS block ends with its branch's delay slot: the branch is then the terminator, and the
+      // fall-through starts after the slot.
+      const Instruction& last_instruction =
+          instructions[block.first_instruction + block.instruction_count - 1];
+      const Instruction* terminator = &last_instruction;
+      if (block.instruction_count >= 2) {
+        const Instruction& before =
+            instructions[block.first_instruction + block.instruction_count - 2];
+        if (has_delay_slot(image.architecture, before) &&
+            before.address + before.length == last_instruction.address) {
+          terminator = &before;
+        }
+      }
+      const Instruction& last = *terminator;
+      const std::uint64_t fallthrough = last_instruction.address + last_instruction.length;
       switch (last.classification) {
         case InstructionClass::Jump:
           if (last.direct_target.has_value()) {

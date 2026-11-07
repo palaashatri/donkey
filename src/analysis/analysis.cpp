@@ -369,14 +369,6 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.partial = true;
     result.diagnostics.push_back(created.diagnostic());
   }
-  if (decoder.has_value() && image.architecture == Architecture::Mips32) {
-    // A MIPS branch is followed by a delay slot, which the CFG does not model yet, so the result is
-    // Partial rather than Complete.
-    result.partial = true;
-    result.diagnostics.push_back(Diagnostic::make(
-        Status::Partial, "analysis.mips_delay_slots",
-        "MIPS delay slots are not modelled; the CFG may omit the instruction after a branch"));
-  }
 
   std::set<std::tuple<std::uint64_t, std::uint64_t, std::uint8_t>> seen_xrefs;
   std::size_t decoded = 0;
