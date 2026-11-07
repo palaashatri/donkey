@@ -181,6 +181,19 @@ struct Lifter {
     out.partial = true;
   }
 
+  /// A rounded result depends on FPCR's rounding mode, which the caller may set, and this lifter
+  /// does not model FPCR. The function is Partial, with the assumption written in its notes once.
+  void mark_rounding_dependent() {
+    static const std::string kNote =
+        "floating-point results assume the FPCR rounding mode is round to nearest; a caller may "
+        "set another mode, which is not modelled";
+    if (std::find(out.notes.begin(), out.notes.end(), kNote) == out.notes.end()) {
+      mark_partial(kNote);
+    } else {
+      out.partial = true;
+    }
+  }
+
   void push(IrBlock& block, IrStatement statement) {
     if (limit_reached()) {
       return;
@@ -783,6 +796,7 @@ struct Lifter {
                       : m == "fsub" ? IrOp::FSub
                       : m == "fmul" ? IrOp::FMul
                                     : IrOp::FDiv;
+      mark_rounding_dependent();
       emit(op, reg(ops[0], width), reg(ops[1], width), reg(ops[2], width), IrOperand::none(),
            width);
       return true;
@@ -793,6 +807,9 @@ struct Lifter {
         return false;
       }
       const IrOp op = m == "fsqrt" ? IrOp::FSqrt : m == "fneg" ? IrOp::FNeg : IrOp::FAbs;
+      if (m == "fsqrt") {
+        mark_rounding_dependent();
+      }
       emit(op, reg(ops[0], width), reg(ops[1], width), IrOperand::none(), IrOperand::none(), width);
       return true;
     }
@@ -802,6 +819,7 @@ struct Lifter {
         return false;
       }
       // Dd = Da + Dn * Dm (fmadd) or Da - Dn * Dm (fmsub), rounded once.
+      mark_rounding_dependent();
       emit(m == "fmadd" ? IrOp::FMulAdd : IrOp::FMulSub, reg(ops[0], width), reg(ops[1], width),
            reg(ops[2], width), reg(ops[3], width), width);
       return true;
@@ -823,6 +841,7 @@ struct Lifter {
     if ((m == "scvtf" || m == "ucvtf") && ops.size() == 2 && is_fp(ops[0]) && is_gp(ops[1])) {
       const std::uint8_t width = width_of_fp(ops[0]);
       const std::uint8_t integer = register_width(ops[1].reg);
+      mark_rounding_dependent();
       emit(m == "scvtf" ? IrOp::IntToFloat : IrOp::UIntToFloat, reg(ops[0], width),
            reg(ops[1], integer), IrOperand::none(), IrOperand::none(), width);
       return true;
@@ -843,6 +862,7 @@ struct Lifter {
         return true;
       }
       if (to == 4 && from == 8) {
+        mark_rounding_dependent();  // narrowing rounds; widening is exact
         emit(IrOp::FloatTruncate, reg(ops[0], 4), reg(ops[1], 8), IrOperand::none(),
              IrOperand::none(), 4);
         return true;
