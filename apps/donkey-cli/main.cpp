@@ -69,6 +69,9 @@ int main(int argc, char** argv) {
   if (command == "project") {
     return donkey::cli::command_project(rest);
   }
+  if (command == "archive") {
+    return donkey::cli::command_archive(rest);
+  }
   if (command == "debug") {
     return donkey::cli::command_debug(rest);
   }

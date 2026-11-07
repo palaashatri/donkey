@@ -101,6 +101,7 @@ endif()
 
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
+  unit/archive_test.cpp
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
@@ -727,3 +728,13 @@ foreach(_donkey_test IN LISTS _donkey_all_tests)
     set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_cli_project_db)
   endif()
 endforeach()
+
+# Static archives (G15-T1): a real GNU ar archive lists the members that `ar t` lists.
+add_test(NAME cli.archive_list_gnu
+         COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/archives/libcheck.a --json)
+set_tests_properties(cli.archive_list_gnu PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"a_function_with_a_rather_long_name.o\".*\"name\": \"other.o\"")
+
+add_test(NAME cli.archive_rejects_a_non_archive
+         COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
+set_tests_properties(cli.archive_rejects_a_non_archive PROPERTIES WILL_FAIL TRUE)

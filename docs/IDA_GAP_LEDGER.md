@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
 | G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Linux x86-64/AArch64 and Windows x64 local only | P2 | TODO |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time | P2 | TODO |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time. Static archives are listed (G15-T1, partial): `donkey-cli archive list`. No relocations, dumps, firmware or multi-image projects yet | P2 | IN PROGRESS (G15-T1 PARTIAL) |
 | G16 | Scale on real large binaries | Decades of tuning | Synthetic 1 GiB test; no real-world benchmark | P2 | TODO |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views; text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed `.app`, unsigned `.exe` | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate |
@@ -1111,6 +1111,17 @@ platform; do not write new, weaker ones.
 - **G15-T1 ELF relocatable objects and static archives.** Apply relocations
   for x86-64 and AArch64 (the common types; the rest → Partial), and list the
   `.a` members.
+  - **Status:** PARTIAL. Done: static archives are listed. `read_archive`
+    (`include/donkey/binary/archive.h`, `src/binary/archive.cpp`) reads the System V and GNU
+    names (the `//` table and `/<offset>`), the BSD `#1/<length>` names and the symbol
+    tables, with bounded member counts, names and offsets, and returns a partial index
+    at the first malformed header. `donkey-cli archive list <file> [--json]` prints the
+    members. Evidence: a GNU `ar` archive (`tests/fixtures/archives/libcheck.a`) lists the
+    same object members as `ar t` (`cli.archive_list_gnu`); eleven `Archive.*` unit tests
+    cover the BSD form, padding, truncation, the member limit and sanitizing; `fuzz_archive`
+    ran 4.2 million inputs in 60 s under ASan and UBSan with no finding. Not done:
+    relocations for ELF relocatable objects, so an object member is listed but not
+    analysed as code; the reader does not yet open a member as a binary.
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
