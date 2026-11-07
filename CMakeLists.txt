@@ -80,6 +80,7 @@ add_library(donkey_binary STATIC
   src/binary/rtti.cpp
   src/binary/core.cpp
   src/binary/inflate.cpp
+  src/binary/zstd.cpp
   src/binary/separate_debug.cpp
   src/binary/pdb.cpp
   src/binary/records.cpp
@@ -298,6 +299,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_json PRIVATE cxx_std_20)
   target_compile_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_json PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_zstd fuzz/fuzz_zstd.cpp)
+  target_link_libraries(fuzz_zstd PRIVATE donkey::binary)
+  target_compile_features(fuzz_zstd PRIVATE cxx_std_20)
+  target_compile_options(fuzz_zstd PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_zstd PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_pdb fuzz/fuzz_pdb.cpp)
   target_link_libraries(fuzz_pdb PRIVATE donkey::binary)
   target_compile_features(fuzz_pdb PRIVATE cxx_std_20)

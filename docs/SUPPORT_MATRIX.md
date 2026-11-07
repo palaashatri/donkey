@@ -26,7 +26,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 | Format | Read | Symbols | DWARF |
 |---|---|---|---|
-| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; zlib-compressed sections read (`inflate`, checked against zlib); zstd-compressed and split DWARF reported Unsupported; separate debug files found by build-id or debuglink |
+| ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; zlib- and zstd-compressed sections read (`inflate` and `zstd_decompress`, checked against zlib and the zstd library); split DWARF reported Unsupported; separate debug files found by build-id or debuglink |
 | PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB files are read separately (PDB row). |
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
 | ELF relocatable (`ET_REL`, `.o`) | laid out and linked as one image: x86-64 and AArch64 common relocations, GOT forms, COMMON symbols, x86-64 local-exec, initial-exec, global-dynamic and local-dynamic TLS, and AArch64 local-exec, initial-exec and TLSDESC (the dynamic sequences are relaxed to the static offsets as `ld` relaxes them, when the variable is defined in the object); AArch64 `-mtls-dialect=trad` DTPREL forms and the TP-relative load/store forms are reported, not applied | — | — |

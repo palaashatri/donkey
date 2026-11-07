@@ -122,6 +122,7 @@ add_executable(donkey_unit_tests
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
+  unit/zstd_test.cpp
   unit/debug_compressed_test.cpp
   unit/debug_separate_test.cpp
   unit/pdb_test.cpp

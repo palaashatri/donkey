@@ -65,3 +65,32 @@ TEST(DebugInfoCompressed, ADamagedCompressedSectionIsACodedError) {
         << info.diagnostic().code;
   }
 }
+
+// tests/fixtures/compress/dwarf-zstd.elf is dwarf-plain.elf with its debug sections compressed by
+// `objcopy --compress-debug-sections=zstd` (binutils 2.42). The same check as the zlib file: the
+// plain file is the oracle, and both must read the same functions, types and variables.
+TEST(DebugInfoCompressed, ZstdSectionsReadTheSameAsPlainOnes) {
+  auto plain = donkey::load_binary(fixture("dwarf-plain.elf"));
+  ASSERT_TRUE(plain.has_value()) << plain.diagnostic().message;
+  auto zipped = donkey::load_binary(fixture("dwarf-zstd.elf"));
+  ASSERT_TRUE(zipped.has_value()) << zipped.diagnostic().message;
+
+  auto plain_info = donkey::read_debug_info(plain.value().image, plain.value().data);
+  ASSERT_TRUE(plain_info.has_value()) << plain_info.diagnostic().code;
+  auto zipped_info = donkey::read_debug_info(zipped.value().image, zipped.value().data);
+  ASSERT_TRUE(zipped_info.has_value())
+      << zipped_info.diagnostic().code << ": " << zipped_info.diagnostic().message;
+
+  const donkey::DebugInfo& a = plain_info.value();
+  const donkey::DebugInfo& b = zipped_info.value();
+  EXPECT_FALSE(b.partial);
+  EXPECT_EQ(b.producers, a.producers);
+  EXPECT_EQ(b.types.size(), a.types.size());
+  EXPECT_EQ(b.variables.size(), a.variables.size());
+  ASSERT_EQ(b.functions.size(), a.functions.size());
+  for (std::size_t i = 0; i < a.functions.size(); ++i) {
+    EXPECT_EQ(b.functions[i].name, a.functions[i].name);
+    EXPECT_EQ(b.functions[i].address, a.functions[i].address);
+    EXPECT_EQ(b.functions[i].size, a.functions[i].size);
+  }
+}

@@ -18,6 +18,7 @@
 #include "donkey/binary/byte_reader.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/inflate.h"
+#include "donkey/binary/zstd.h"
 
 namespace donkey {
 namespace {
@@ -1476,8 +1477,9 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
     if (!section->compressed) {
       return raw;
     }
-    // SHF_COMPRESSED: an Elf64_Chdr (type, size, alignment) then a zlib stream. Only zlib
-    // (ELFCOMPRESS_ZLIB = 1) is read; the declared size must match the stream's output.
+    // SHF_COMPRESSED: an Elf64_Chdr (type, size, alignment) then the stream. zlib
+    // (ELFCOMPRESS_ZLIB = 1) and Zstandard (ELFCOMPRESS_ZSTD = 2) are read; the declared size must
+    // match the stream's output.
     const std::size_t header = image.is_64_bit() ? 24U : 12U;
     if (raw.size() < header) {
       decompression_error =
@@ -1495,13 +1497,14 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
     } else if (auto declared = chdr.u32(4, image.endian)) {
       size = declared.value();
     }
-    if (!type || type.value() != 1) {
-      decompression_error =
-          Diagnostic::make(Status::Unsupported, "dwarf.compression_type",
-                           "only zlib-compressed debug sections are read", section->file_offset);
+    if (!type || (type.value() != 1 && type.value() != 2)) {
+      decompression_error = Diagnostic::make(
+          Status::Unsupported, "dwarf.compression_type",
+          "only zlib and zstd compressed debug sections are read", section->file_offset);
       return std::nullopt;
     }
-    auto inflated = inflate_zlib(raw.subspan(header));
+    auto inflated = type.value() == 1 ? inflate_zlib(raw.subspan(header))
+                                      : zstd_decompress(raw.subspan(header));
     if (!inflated) {
       decompression_error = inflated.diagnostic();
       return std::nullopt;
