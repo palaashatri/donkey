@@ -566,7 +566,9 @@ interpreter.
   register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
   the flags before). The unconditional form is `IrCondition::None` in
   `CondCompare`/`CondCompareAdd`. Lifting `adc`/`sbc` needs exact flags, and a
-  second carry reader in a block is Partial, since the carry out is not modelled.
+  AArch64 `adc`/`sbc` without S do not write NZCV, so every carry reader in a block reads the
+  same carry. On x86 the carry out of `adc`/`sbb` is not modelled, so a second carry reader in a
+  block is Partial.
   `adcs`/`sbcs` stay Unsupported. Also fixed in this task: an unsupported
   statement now clears the exact-flags state, so a later `adc` cannot read a
   carry through it. Evidence: `Ir.AArch64CarryChainAddsThenAdcUsesTheSumsCarry`,
