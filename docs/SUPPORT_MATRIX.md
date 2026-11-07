@@ -31,6 +31,15 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
 | Raw | with explicit `--arch --base --entry` | — | — |
 
+## C++ symbol names
+
+| Scheme | Demangler | Checked against | Not covered (reported Unsupported, never guessed) |
+|---|---|---|---|
+| Itanium (`_Z`) | `demangle_itanium` (G10-T1, partial) | 502 of 512 `c++filt` corpus names match; 10 are Unsupported | expression template arguments, generic lambdas |
+| MSVC (`?`, x64 `__cdecl`) | `demangle_msvc` (G10-T2, partial) | 87 of 95 `llvm-undname` corpus names match exactly; 8 are Unsupported | templates, arrays, string literals, vftables, dynamic initialisers, function and member pointers, 32-bit forms and other calling conventions |
+
+`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4). There is no RTTI or vtable recovery (G10-T3).
+
 ## Instruction sets
 
 | ISA | Decode (Capstone 5) | CFG, xrefs | Lifter / decompiler | Jump tables | Debugger |

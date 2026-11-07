@@ -160,7 +160,7 @@ P0 is the most important, P3 the least.
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
-| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler library (G10-T1, partial): 502 of 512 corpus names match c++filt, and 10 are reported Unsupported (expression template arguments and a generic lambda). `donkey-cli info` shows the demangled form of each Itanium export (a `demangled` JSON field, and the demangled name in brackets in the human output); the raw name is kept. Not yet used by the GUI or the symbol list. No MSVC names, no RTTI or vtable recovery (G10-T4 partial, CLI only) | P1 | IN PROGRESS (G10-T1 PARTIAL; T2, T3 TODO; T4 PARTIAL) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler library (G10-T1, partial): 502 of 512 corpus names match c++filt, and 10 are reported Unsupported (expression template arguments and a generic lambda). MSVC demangler library (G10-T2, partial, 64-bit `__cdecl` forms): 87 of 95 `llvm-undname` corpus names match exactly, and 8 are reported Unsupported (templates, arrays, string literals, vftables, function and member pointers). `donkey-cli info` shows the demangled form of Itanium and MSVC exports (a `demangled` JSON field, and the demangled name in brackets in the human output); the raw name is kept. Not yet used by the GUI or the symbol list. No RTTI or vtable recovery (G10-T3 TODO); G10-T4 partial, CLI only | P1 | IN PROGRESS (G10-T1 PARTIAL; T2 PARTIAL; T3 TODO; T4 PARTIAL) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | C ABI plugins, `donkey-cli --json`; no scripting API | P1 | TODO |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
 | G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
@@ -693,6 +693,18 @@ own code.
     `c++filt` output once, with provenance. Add a fuzz target.
 - **G10-T2 MSVC demangler.** Same approach, using the public MSVC name
   decoration documentation.
+  - **Status:** PARTIAL. Done: `demangle_msvc` (`src/binary/demangle_msvc.cpp`) for the
+    64-bit forms the corpus covers: `__cdecl` free functions and members with access,
+    `static` and `virtual`, cv-qualified `this`, constructors and destructors, the operator
+    codes, builtin, class and enum types, pointers, references and rvalue references, back
+    references, and `...`. Evidence: `DemangleMsvc.CorpusMatchesLlvmUndname` (87 names
+    equal to `llvm-undname`'s text, and 8 listed names rejected as `demangle.unsupported`),
+    and the malformed-name, unsupported-form and limit tests in
+    `tests/unit/demangle_msvc_test.cpp`. The fuzz target (`fuzz_demangle`) runs both
+    schemes; 2.3 million runs in 90 seconds with no finding. Not done: templates, arrays,
+    string literals, vftables, dynamic initialisers, function and member pointers, 32-bit
+    forms and the other calling conventions. Corpus provenance:
+    `tests/fixtures/msvc/PROVENANCE.md`.
 - **G10-T3 RTTI and vtables.**
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
     pointer, function pointers), and MSVC RTTI Complete Object Locators.

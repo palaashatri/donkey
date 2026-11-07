@@ -1,0 +1,11 @@
+# Mangled names the demangler must reject as demangle.unsupported (G10-T2). Each is a form
+# the grammar does not cover yet: string literals, vftables, dynamic initialisers, arrays,
+# and a pointer to a member.
+??_C@_01FJMABOPO@x?$AA@
+??_C@_04CIMGMMMG@text?$AA@
+??_7Box@ns@@6B@
+??_7Ops@ops@@6B@
+??JOps@ops@@QEBAPEQ01@HPEQ01@H@Z
+??__Eg_box@@YAXXZ
+??__Fg_box@@YAXXZ
+?array_param@@YAXQEAHQEAY02$$CBH@Z

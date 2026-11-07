@@ -28,4 +28,16 @@ struct DemangleOptions {
 [[nodiscard]] Result<std::string> demangle_itanium(std::string_view name,
                                                    const DemangleOptions& options = {});
 
+/// True when `name` begins with the MSVC `?` prefix.
+[[nodiscard]] bool is_msvc_name(std::string_view name) noexcept;
+
+/// Demangles an MSVC-decorated name (G10-T2) for the 64-bit forms the corpus covers: functions
+/// and data with `__cdecl`, member access, `static` and `virtual`, constructors, destructors,
+/// the common operators, builtin and class types, pointers and references, back references
+/// and `...`. Output follows `llvm-undname`'s spelling, which the corpus records. Names outside
+/// that grammar (templates, arrays, string literals, vftables, `__thiscall`) are `Unsupported`
+/// (`demangle.unsupported`), never guessed; malformed names are `demangle.syntax`.
+[[nodiscard]] Result<std::string> demangle_msvc(std::string_view name,
+                                                const DemangleOptions& options = {});
+
 }  // namespace donkey

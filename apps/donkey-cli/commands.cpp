@@ -200,9 +200,13 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
   return false;
 }
 
-/// The Itanium demangling of `name`, or an empty string when `name` is not a mangled name or
-/// the demangler does not read it. The raw name is always printed too.
+/// The demangling of `name` (Itanium `_Z` or MSVC `?`), or an empty string when `name` is not a
+/// mangled name or the demangler does not read it. The raw name is always printed too.
 std::string demangled_name(const std::string& name) {
+  if (is_msvc_name(name)) {
+    const auto demangled = demangle_msvc(name);
+    return demangled.has_value() ? demangled.value() : std::string();
+  }
   if (!is_itanium_name(name)) {
     return {};
   }

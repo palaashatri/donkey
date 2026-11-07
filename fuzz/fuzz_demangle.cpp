@@ -16,7 +16,10 @@
 extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size) {
   const std::string_view name(reinterpret_cast<const char*>(data), size);
   const donkey::DemangleOptions options;
-  const auto demangled = donkey::demangle_itanium(name, options);
+  // Both schemes share the contract: a rejection carries a `demangle.` code, and an accepted
+  // name stays within the output limit. The MSVC decoration is tried for `?` names (G10-T2).
+  const auto demangled = donkey::is_msvc_name(name) ? donkey::demangle_msvc(name, options)
+                                                    : donkey::demangle_itanium(name, options);
   if (!demangled) {
     // A rejection must carry a code in the demangler's namespace, so it can be reported.
     if (demangled.diagnostic().code.rfind("demangle.", 0) != 0) {
