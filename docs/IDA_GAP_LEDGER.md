@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 arrays and strings TODO; T3 local types TODO) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. Thumb is not decoded or detected; no ISA is lifted; MIPS delay slots are not modelled; microMIPS, MIPS16 and VLE are not detected; 64-bit MIPS and PowerPC are refused | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; Thumb, lifting, CFG checks and MIPS delay slots TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records and ELF cores (T3, partial). Multi-image projects not started (T2). Windows minidumps not started (T3) | P2 | IN PROGRESS (T1 and T3 PARTIAL; T2 TODO) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
@@ -194,8 +194,8 @@ Still open, in ledger order:
   microMIPS, MIPS16 and VLE detection, and 64-bit MIPS and PowerPC. Not done.
 - G14-T1 to T4: remote debugging, FreeBSD, macOS, Windows on Arm, GUI watchpoints and AArch64
   DBGWVR. The lldb-server oracle is available for T1.
-- G15-T1 remaining TLS forms (`-mtls-dialect=trad`), G15-T2 multi-image projects, and G15-T3
-  Windows minidumps.
+- G15-T1 remaining TLS forms (`-mtls-dialect=trad`), G15-T2 multi-image projects. G15-T3 is done
+  for the formats it names; a minidump written by Windows has not been checked.
 - G16-T2: incremental re-analysis and a real-world corpus.
 - G17: UI breadth (more views, search kinds, command palette).
 - G01: verification with Apple Clang and on CI runners.
@@ -1309,9 +1309,16 @@ platform; do not write new, weaker ones.
     record is an error that names its line, never a raw load. Evidence: eight `Records.*`
     unit tests (both formats, checksums, unknown types, records after the end, the size
     limit, detection, and a file loaded through `load_binary`), and `fuzz_records` ran 3.7
-    million inputs in 46 s under ASan and UBSan with no finding. Not done: ELF core files
-    (threads and memory), Windows minidumps, and the architecture for a raw record image,
-    which the caller still supplies.
+    million inputs in 46 s under ASan and UBSan with no finding. The ELF core reader
+    (`read_elf_core`) gives the threads and file mappings, and the memory is the PT_LOAD
+    segments. **Done:** Windows minidumps (`read_minidump`, `read_minidump_memory`, `minidump.h`):
+    the architecture, exception, threads with x86-64 registers, modules with UTF-16 names,
+    and the memory ranges, read by address. Evidence: six `MinidumpReader.*` unit tests on a
+    dump made by `tests/fixtures/minidump/make_sample_minidump.py` (which follows Microsoft's
+    documented layout, not Windows output), `cli.core_minidump`, and the new
+    `fuzz/fuzz_minidump.cpp` harness, which compiles with clang (run not yet done). Not done:
+    a dump written by Windows has not been checked; other architectures keep their threads
+    without registers; the architecture for a raw record image is still supplied by the caller.
 
 ### G16 Scale
 

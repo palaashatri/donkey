@@ -79,6 +79,7 @@ add_library(donkey_binary STATIC
   src/binary/demangle_msvc.cpp
   src/binary/rtti.cpp
   src/binary/core.cpp
+  src/binary/minidump.cpp
   src/binary/inflate.cpp
   src/binary/zstd.cpp
   src/binary/separate_debug.cpp
@@ -315,6 +316,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_pdb PRIVATE cxx_std_20)
   target_compile_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_pdb PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_minidump fuzz/fuzz_minidump.cpp)
+  target_link_libraries(fuzz_minidump PRIVATE donkey::binary)
+  target_compile_features(fuzz_minidump PRIVATE cxx_std_20)
+  target_compile_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_core fuzz/fuzz_core.cpp)
   target_link_libraries(fuzz_core PRIVATE donkey::binary)
   target_compile_features(fuzz_core PRIVATE cxx_std_20)

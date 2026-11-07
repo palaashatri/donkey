@@ -19,6 +19,7 @@
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/minidump.h"
 #include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
@@ -1053,6 +1054,66 @@ int command_callgraph(const std::vector<std::string_view>& arguments) {
   return command_analysis(request, "callgraph");
 }
 
+/// A Windows minidump (G15-T3): its architecture, exception, threads, modules and memory ranges.
+int print_minidump(const LoadedBinary& loaded, bool json) {
+  auto result = read_minidump(loaded.data.span());
+  if (!result) {
+    return fail(result.diagnostic());
+  }
+  const MinidumpInfo& dump = result.value();
+  if (json) {
+    std::string out = "{\n  \"format\": \"minidump\",\n";
+    out += "  \"architecture\": " + quote(dump.architecture_name()) + ",\n";
+    out += "  \"partial\": " + std::string(dump.partial ? "true" : "false") + ",\n";
+    out += "  \"exception\": " +
+           std::string(dump.has_exception
+                           ? "{\"thread\": " + std::to_string(dump.exception.thread_id) +
+                                 ", \"code\": " + quote(hex(dump.exception.code)) +
+                                 ", \"address\": " + quote(hex(dump.exception.address)) + "}"
+                           : "null") +
+           ",\n";
+    out += "  \"threads\": [";
+    for (std::size_t i = 0; i < dump.threads.size(); ++i) {
+      const MinidumpThread& thread = dump.threads[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"id\": " + std::to_string(thread.id) + ", \"pc\": " + quote(hex(thread.pc)) +
+             ", \"sp\": " + quote(hex(thread.sp)) + "}";
+    }
+    out += "\n  ],\n  \"modules\": [";
+    for (std::size_t i = 0; i < dump.modules.size(); ++i) {
+      const MinidumpModule& module = dump.modules[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"base\": " + quote(hex(module.base)) +
+             ", \"size\": " + std::to_string(module.size) + ", \"name\": " + quote(module.name) +
+             "}";
+    }
+    out += "\n  ],\n  \"memory_ranges\": " + std::to_string(dump.memory.size()) + "\n}\n";
+    std::fputs(out.c_str(), stdout);
+    return kExitOk;
+  }
+  std::printf("minidump: %s, Windows %u.%u build %u%s\n", dump.architecture_name().c_str(),
+              static_cast<unsigned>(dump.major_version), static_cast<unsigned>(dump.minor_version),
+              static_cast<unsigned>(dump.build_number), dump.partial ? " (partial)" : "");
+  if (dump.has_exception) {
+    std::printf("exception %s in thread %u at %s\n", hex(dump.exception.code).c_str(),
+                static_cast<unsigned>(dump.exception.thread_id),
+                hex(dump.exception.address).c_str());
+  }
+  for (const MinidumpThread& thread : dump.threads) {
+    std::printf("thread %u  pc %s  sp %s\n", static_cast<unsigned>(thread.id),
+                hex(thread.pc).c_str(), hex(thread.sp).c_str());
+  }
+  for (const MinidumpModule& module : dump.modules) {
+    std::printf("module %s %s %s\n", hex(module.base).c_str(), hex(module.size).c_str(),
+                module.name.c_str());
+  }
+  std::printf("memory ranges: %zu\n", dump.memory.size());
+  for (const Diagnostic& diagnostic : dump.diagnostics) {
+    std::printf("note [%s]: %s\n", diagnostic.code.c_str(), diagnostic.message.c_str());
+  }
+  return kExitOk;
+}
+
 int command_core(const std::vector<std::string_view>& arguments) {
   std::string path;
   bool json = false;
@@ -1080,6 +1141,9 @@ int command_core(const std::vector<std::string_view>& arguments) {
   LoadedBinary loaded;
   if (!load(path, loaded, load_options)) {
     return kExitFailure;
+  }
+  if (is_minidump(loaded.data.span())) {
+    return print_minidump(loaded, json);
   }
   auto result = read_elf_core(loaded.image, loaded.data);
   if (!result) {

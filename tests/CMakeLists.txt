@@ -129,6 +129,7 @@ add_executable(donkey_unit_tests
   unit/debug_compressed_test.cpp
   unit/debug_separate_test.cpp
   unit/pdb_test.cpp
+  unit/minidump_test.cpp
   unit/relocate_got_test.cpp
   unit/relocate_common_test.cpp
   unit/records_test.cpp
@@ -287,6 +288,12 @@ add_test(NAME cli.debuginfo_debug_file_mismatch
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
                  --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
 set_tests_properties(cli.debuginfo_debug_file_mismatch PROPERTIES WILL_FAIL TRUE)
+# G15-T3: a Windows minidump is recognised by its signature and summarised: the architecture, the
+# exception and the threads it records.
+add_test(NAME cli.core_minidump
+         COMMAND donkey-cli core ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/minidump/sample.dmp)
+set_tests_properties(cli.core_minidump PROPERTIES
+  PASS_REGULAR_EXPRESSION "minidump: x86-64.*exception 0xc0000005 in thread 4660.*thread 4660")
 
 add_test(NAME sbom.valid
   COMMAND ${CMAKE_COMMAND} -DSBOM=${PROJECT_BINARY_DIR}/donkey.spdx.json
