@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <limits>
 #include <map>
 #include <optional>
@@ -43,6 +44,9 @@ constexpr std::uint32_t kR_X86_64_32S = 11;
 constexpr std::uint32_t kR_X86_64_GOTPCREL = 9;
 constexpr std::uint32_t kR_X86_64_GOTPCRELX = 41;
 constexpr std::uint32_t kR_X86_64_REX_GOTPCRELX = 42;
+constexpr std::uint32_t kR_X86_64_DTPOFF32 = 21;
+constexpr std::uint32_t kR_X86_64_TLSGD = 19;
+constexpr std::uint32_t kR_X86_64_TLSLD = 20;
 constexpr std::uint32_t kR_X86_64_TPOFF64 = 18;
 constexpr std::uint32_t kR_X86_64_GOTTPOFF = 22;
 constexpr std::uint32_t kR_X86_64_TPOFF32 = 23;
@@ -103,6 +107,68 @@ bool fits_int32(std::int64_t value) {
 }
 
 /// True for the relocation types that reach a symbol through its GOT slot.
+/// One thread-local access of a dynamic model (GD or LD) in an x86-64 section.
+struct TlsAccess {
+  std::uint64_t where = 0;         ///< the displacement's offset in its section
+  std::uint32_t type = 0;          ///< TLSGD or TLSLD
+  std::uint64_t symbol_index = 0;  ///< the symbol the access names
+  std::int64_t addend = 0;
+};
+
+/// A dynamic access as GCC and Clang emit it for x86-64: `lea x@tlsgd(%rip),%rdi` with data16
+/// padding (16 bytes with the call), or `lea x@tlsld(%rip),%rdi` (12 bytes with the call). The
+/// call's relocation is the paired PLT32 against __tls_get_addr.
+struct TlsCallSite {
+  std::uint64_t start = 0;  ///< the sequence's first byte, relative to its section
+  std::uint64_t call = 0;   ///< the offset of the call's relocation
+};
+
+/// True when the bytes `expected` sit at `at` in `out`.
+bool bytes_are(const std::vector<std::byte>& out, std::uint64_t at,
+               std::initializer_list<std::uint8_t> expected) {
+  if (at > out.size() || expected.size() > out.size() - at) {
+    return false;
+  }
+  std::size_t i = 0;
+  for (const std::uint8_t byte : expected) {
+    if (std::to_integer<std::uint8_t>(out[at + i]) != byte) {
+      return false;
+    }
+    ++i;
+  }
+  return true;
+}
+
+/// The call sequence around the displacement at `where`, if its bytes are one of the forms above.
+std::optional<TlsCallSite> match_tls_call_site(const std::vector<std::byte>& out,
+                                               std::uint64_t section_offset,
+                                               std::uint64_t section_size, std::uint64_t where,
+                                               bool local_dynamic) {
+  if (local_dynamic) {
+    // lea (7 bytes, displacement at +3), then call (5 bytes, displacement at +8).
+    if (where < 3 || where - 3 + 12 > section_size) {
+      return std::nullopt;
+    }
+    const std::uint64_t start = where - 3;
+    if (!bytes_are(out, section_offset + start, {0x48, 0x8d, 0x3d}) ||
+        !bytes_are(out, section_offset + start + 7, {0xe8})) {
+      return std::nullopt;
+    }
+    return TlsCallSite{start, start + 8};
+  }
+  // data16 lea (8 bytes, displacement at +4), then data16 data16 rex.W call (8 bytes, displacement
+  // at +12).
+  if (where < 4 || where - 4 + 16 > section_size) {
+    return std::nullopt;
+  }
+  const std::uint64_t start = where - 4;
+  if (!bytes_are(out, section_offset + start, {0x66, 0x48, 0x8d, 0x3d}) ||
+      !bytes_are(out, section_offset + start + 8, {0x66, 0x66, 0x48, 0xe8})) {
+    return std::nullopt;
+  }
+  return TlsCallSite{start, start + 12};
+}
+
 bool is_got_relocation(std::uint16_t machine, std::uint32_t type) {
   if (machine == kMachineX86_64) {
     return type == kR_X86_64_GOTPCREL || type == kR_X86_64_GOTPCRELX ||
@@ -458,6 +524,60 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
     }
     const SectionHeader& target_header = headers[target];
     const std::uint64_t entries = relocations.size / kRelaSize;
+
+    // The dynamic thread-local models (GD and LD) call __tls_get_addr. A static link relaxes each
+    // such sequence to a thread-pointer access and drops the call, as ld does. Only sequences
+    // whose bytes, call relocation and symbol all check out are relaxed; the rest are reported.
+    std::map<std::uint64_t, TlsCallSite> relaxed_sites;  // keyed by the access's displacement
+    std::set<std::uint64_t> dropped_calls;               // offsets of the calls that go away
+    bool local_dynamic_here = false;
+    if (machine.value() == kMachineX86_64) {
+      std::map<std::uint64_t, std::uint64_t> plt_calls;  // PLT32 offset -> symbol index
+      std::vector<TlsAccess> accesses;
+      for (std::uint64_t k = 0; k < entries; ++k) {
+        const std::uint64_t at = relocations.offset + k * kRelaSize;
+        const std::uint64_t where = zero_or(reader.u64(at, endian));
+        const std::uint64_t info = zero_or(reader.u64(at + 8, endian));
+        const auto type = static_cast<std::uint32_t>(info & 0xFFFF'FFFFU);
+        if (type == kR_X86_64_PLT32) {
+          plt_calls[where] = info >> 32U;
+        } else if (type == kR_X86_64_TLSGD || type == kR_X86_64_TLSLD) {
+          accesses.push_back(
+              TlsAccess{where, type, info >> 32U,
+                        static_cast<std::int64_t>(zero_or(reader.u64(at + 16, endian)))});
+        }
+      }
+      for (const TlsAccess& access : accesses) {
+        const bool local_dynamic = access.type == kR_X86_64_TLSLD;
+        const auto site = match_tls_call_site(out, *body[target], target_header.size, access.where,
+                                              local_dynamic);
+        if (!site) {
+          continue;
+        }
+        const auto call = plt_calls.find(site->call);
+        if (call == plt_calls.end() || call->second >= symbol_name.size() ||
+            symbol_name[call->second] != "__tls_get_addr") {
+          continue;
+        }
+        if (!local_dynamic) {
+          // GD becomes `lea tpoff(%rax)`: the symbol must be defined here, thread-local, and its
+          // offset must fit. The -4 of the displacement is the PC-relative correction, so the
+          // symbol's own offset is its address plus the addend plus 4.
+          if (access.symbol_index == 0 || access.symbol_index >= symbol_address.size() ||
+              !symbol_address[access.symbol_index]) {
+            continue;
+          }
+          const auto offset = tp_offset(*symbol_address[access.symbol_index] +
+                                        static_cast<std::uint64_t>(access.addend) + 4);
+          if (!offset || !fits_int32(*offset)) {
+            continue;
+          }
+        }
+        relaxed_sites[access.where] = *site;
+        dropped_calls.insert(site->call);
+        local_dynamic_here = local_dynamic_here || local_dynamic;
+      }
+    }
     for (std::uint64_t k = 0; k < entries; ++k) {
       const std::uint64_t at = relocations.offset + k * kRelaSize;
       const std::uint64_t where = zero_or(reader.u64(at, endian));
@@ -466,6 +586,11 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
       const std::uint64_t symbol_index = info >> 32U;
       const auto type = static_cast<std::uint32_t>(info & 0xFFFF'FFFFU);
 
+      // The call of a relaxed dynamic access no longer exists: its bytes now hold the
+      // thread-pointer access, and its relocation has nothing left to patch.
+      if (type == kR_X86_64_PLT32 && dropped_calls.count(where) != 0) {
+        continue;
+      }
       std::uint64_t symbol = 0;
       if (symbol_index != 0) {
         if (symbol_index >= symbol_address.size() || !symbol_address[symbol_index]) {
@@ -586,6 +711,67 @@ Result<std::vector<std::byte>> link_relocatable_object(std::span<const std::byte
             }
             store(out, file_place, static_cast<unsigned>(width),
                   static_cast<std::uint64_t>(*offset), endian);
+            break;
+          }
+          case kR_X86_64_TLSGD:
+          case kR_X86_64_TLSLD: {
+            const auto found = relaxed_sites.find(where);
+            if (found == relaxed_sites.end()) {
+              note(Status::Unsupported, "elf.tls_model",
+                   "a dynamic thread-local access is not a GCC or Clang sequence that calls "
+                   "__tls_get_addr for a symbol this object defines; it is not applied");
+              break;
+            }
+            const std::uint64_t site_at = *body[target] + found->second.start;
+            if (type == kR_X86_64_TLSLD) {
+              // The module block's base is the thread pointer; the offsets are in the add that
+              // follows (DTPOFF32 below).
+              const std::uint8_t code[12] = {0x66, 0x66, 0x66, 0x64, 0x48, 0x8b,
+                                             0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+              for (std::size_t i = 0; i < sizeof(code); ++i) {
+                out[site_at + i] = static_cast<std::byte>(code[i]);
+              }
+              break;
+            }
+            // GD: `mov %fs:0,%rax; lea tpoff(%rax),%rax`, the same 16 bytes ld writes.
+            const auto offset = tp_offset(symbol + static_cast<std::uint64_t>(addend) + 4);
+            if (!offset || !fits_int32(*offset)) {
+              note(Status::Unsupported, "elf.tls_symbol",
+                   "a thread-local symbol's offset does not fit; the access is not applied");
+              break;
+            }
+            const std::uint8_t mov[9] = {0x64, 0x48, 0x8b, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00};
+            const std::uint8_t lea[3] = {0x48, 0x8d, 0x80};
+            for (std::size_t i = 0; i < sizeof(mov); ++i) {
+              out[site_at + i] = static_cast<std::byte>(mov[i]);
+            }
+            for (std::size_t i = 0; i < sizeof(lea); ++i) {
+              out[site_at + sizeof(mov) + i] = static_cast<std::byte>(lea[i]);
+            }
+            store(out, site_at + 12, 4, static_cast<std::uint64_t>(*offset) & 0xFFFF'FFFFU, endian);
+            break;
+          }
+          case kR_X86_64_DTPOFF32: {
+            // Only the add after a relaxed local-dynamic call takes a module offset, and that
+            // offset is the variable's thread-pointer offset. Anywhere else it is not applied.
+            if (!local_dynamic_here) {
+              note(
+                  Status::Unsupported, "elf.tls_model",
+                  "a module-relative offset outside a relaxed local-dynamic access is not applied");
+              break;
+            }
+            if (where + 4 > target_header.size) {
+              note(Status::Unsupported, "elf.relocation_range",
+                   "a relocation lies outside its section");
+              break;
+            }
+            const auto offset = tp_offset(symbol + static_cast<std::uint64_t>(addend));
+            if (!offset || !fits_int32(*offset)) {
+              note(Status::Unsupported, "elf.tls_symbol",
+                   "a thread-local symbol's offset does not fit; the access is not applied");
+              break;
+            }
+            store(out, file_place, 4, static_cast<std::uint64_t>(*offset) & 0xFFFF'FFFFU, endian);
             break;
           }
           default:

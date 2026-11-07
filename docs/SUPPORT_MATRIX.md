@@ -29,7 +29,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | ELF 32/64, LE/BE | headers, segments, sections | .symtab, .dynsym (ARM mapping symbols skipped) | DWARF 2-5, 32/64-bit; zlib-compressed sections read (`inflate`, checked against zlib); zstd-compressed and split DWARF reported Unsupported; separate debug files found by build-id or debuglink |
 | PE32 / PE32+ | headers, sections (long names via COFF string table) | exports, imports, COFF symbols | MinGW-style DWARF in PE sections. PDB files are read separately (PDB row). |
 | Mach-O 32/64, universal | load commands, segments, slices | symtab | `__DWARF` sections when present. Apple keeps DWARF in .dSYM bundles, which are not read. |
-| ELF relocatable (`ET_REL`, `.o`) | laid out and linked as one image: x86-64 and AArch64 common relocations, GOT forms, COMMON symbols, x86-64 local-exec and initial-exec TLS; other TLS models reported, not applied | — | — |
+| ELF relocatable (`ET_REL`, `.o`) | laid out and linked as one image: x86-64 and AArch64 common relocations, GOT forms, COMMON symbols, x86-64 local-exec, initial-exec, global-dynamic and local-dynamic TLS (the dynamic sequences are relaxed to the static offsets, as `ld` does, when the variable is defined in the object); other TLS models reported, not applied | — | — |
 | PDB 7.00 (`pdb.h`) | procedures and code sizes, global data, struct/class/union/enum names and sizes, sections, modules, PDB GUID and age; not line information or the full type graph | — | — |
 | ELF core (`ET_CORE`) | threads with x86-64 registers, process name, file mappings (`donkey-cli core`); memory is the PT_LOAD segments | — | — |
 | Raw | with explicit `--arch --base --entry` | — | — |

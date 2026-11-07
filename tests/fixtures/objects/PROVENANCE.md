@@ -41,5 +41,15 @@ source was written for this repository. The objects hold three COMMON symbols (`
   GOTTPOFF for variables it defines itself, and `ld` relaxes the form in a static link, so the
   object is assembled with `as` and its expected slot values are the linker's layout of the
   same TLS block: -0x20, -0x1c and -0x10 (tls_pair at offset 0x10).
-- `tls-global-dynamic-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=global-dynamic tls.c`. Its
-  R_X86_64_TLSGD relocations are not applied (reported, the image is partial).
+- `tls-global-dynamic-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=global-dynamic tls.c` (GCC 13.3.0).
+  Its R_X86_64_TLSGD sequences are relaxed by a static link, as `ld` relaxes them. The expected
+  bytes of `read_tls` are the 85 bytes that `ld -static -nostdlib -e read_tls` (GNU ld 2.42)
+  writes for this object: `mov %fs:0,%rax; lea tpoff(%rax),%rax` in place of each call sequence.
+- `tls-local-dynamic-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=local-dynamic tls-local-dynamic.c`
+  (GCC 13.3.0; the source is written for this repository). The expected bytes of `read_ld` are
+  the 65 bytes that `ld -static -nostdlib -e read_ld` (GNU ld 2.42) writes: the 12-byte call
+  sequence becomes `data16 data16 data16 mov %fs:0,%rax`, and each DTPOFF32 becomes the
+  variable's thread-pointer offset.
+- `tls-global-dynamic-extern-x86_64.o`: `gcc -c -O0 -fPIC -ftls-model=global-dynamic
+  tls-extern.c` (GCC 13.3.0; written for this repository). It accesses a thread-local variable
+  the object does not define, so the access cannot be relaxed and the image stays partial.

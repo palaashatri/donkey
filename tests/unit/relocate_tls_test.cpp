@@ -102,18 +102,53 @@ TEST(RelocateTls, InitialExecSlotsHoldTheThreadPointerOffsets) {
                                                0xfffffffffffffff0ULL}));
 }
 
-// A global-dynamic access (`__tls_get_addr`) needs the dynamic linker, which a single static
-// object cannot provide. It is reported as a relocation that is not applied: the image is
-// partial, never a guessed address.
-TEST(RelocateTls, GlobalDynamicAccessesAreReportedNotGuessed) {
+// A global-dynamic access (`__tls_get_addr`) is relaxed in a static link, as `ld` does: the
+// 16-byte call sequence becomes `mov %fs:0,%rax; lea tpoff(%rax),%rax`, and the call's
+// relocation is consumed. The 85 bytes of read_tls are the bytes `ld -static` writes for the
+// same object (tests/fixtures/objects/PROVENANCE.md).
+TEST(RelocateTls, GlobalDynamicAccessesRelaxToTheLinkersThreadPointerOffsets) {
   auto loaded = donkey::load_binary(object_path("tls-global-dynamic-x86_64.o"));
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  EXPECT_FALSE(loaded.value().image.partial);
+
+  const donkey::Symbol* read = defined_symbol(loaded.value().image, "read_tls");
+  ASSERT_NE(read, nullptr);
+  const std::vector<std::byte> linked = bytes_at(loaded.value(), read->address, 85);
+  ASSERT_EQ(linked.size(), 85U);
+  EXPECT_EQ(linked, hex_bytes("f30f1efa554889e5534883ec0864488b042500000000488d80f0ffffff488b40"
+                              "0889c364488b042500000000488d80e0ffffff8b0001c364488b042500000000"
+                              "488d80e4ffffff0fb6000fbec001d8488b5df8c9c3"));
+}
+
+// A local-dynamic access calls __tls_get_addr once for the module block; the 12-byte sequence
+// becomes a thread-pointer load, and each variable's DTPOFF32 becomes its thread-pointer offset.
+// The 65 bytes of read_ld are the bytes `ld -static` writes for the same object.
+TEST(RelocateTls, LocalDynamicAccessesRelaxToTheLinkersOffsets) {
+  auto loaded = donkey::load_binary(object_path("tls-local-dynamic-x86_64.o"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  EXPECT_FALSE(loaded.value().image.partial);
+
+  const donkey::Symbol* read = defined_symbol(loaded.value().image, "read_ld");
+  ASSERT_NE(read, nullptr);
+  const std::vector<std::byte> linked = bytes_at(loaded.value(), read->address, 65);
+  ASSERT_EQ(linked.size(), 65U);
+  EXPECT_EQ(linked,
+            hex_bytes("f30f1efa554889e5534883ec0866666664488b0425000000004805f0ffffff48"
+                      "8b400889c366666664488b0425000000004805e8ffffff8b0001d8488b5df8c9c3"));
+}
+
+// A global-dynamic access to a variable this object does not define cannot be relaxed: the
+// variable's offset is unknown here. It stays partial, and the call is still reported as
+// unresolved rather than guessed.
+TEST(RelocateTls, GlobalDynamicAccessToAnUndefinedVariableStaysPartial) {
+  auto loaded = donkey::load_binary(object_path("tls-global-dynamic-extern-x86_64.o"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   EXPECT_TRUE(loaded.value().image.partial);
-  bool reported = false;
+  bool unresolved = false;
   for (const donkey::Diagnostic& diagnostic : loaded.value().image.diagnostics) {
-    if (diagnostic.code == "elf.relocation_type") {
-      reported = true;
+    if (diagnostic.code == "elf.relocation_unresolved") {
+      unresolved = true;
     }
   }
-  EXPECT_TRUE(reported);
+  EXPECT_TRUE(unresolved);
 }
