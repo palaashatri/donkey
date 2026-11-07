@@ -358,6 +358,31 @@ TEST(Cfg, AArch64ClangShapedJumpTableIsRecovered) {
   EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1024U, 0x102cU, 0x1034U, 0x103cU}));
 }
 
+/// clang_dispatch() as LLD links it. LLD relaxes the `adrp` and the `add` that
+/// form the table address into a `nop` and an `adr` that reaches the same address,
+/// because the table is within 1 MiB of the code. FreeBSD arm64 links this way.
+std::vector<std::uint32_t> lld_clang_dispatch() {
+  std::vector<std::uint32_t> words = clang_dispatch();
+  words[3] = 0xd503201fU;  // nop, in place of `adrp x9`
+  words[4] = 0x10008009U;  // adr x9, 0x2010, at 0x1010, in place of `add x9, x9, #...`
+  return words;
+}
+
+// The same table and targets as the Clang-shaped test: relaxation changes the
+// instructions that compute the base, not the code's addresses or the table.
+TEST(Cfg, AArch64LinkerRelaxedClangTableIsRecovered) {
+  const auto dispatch = aarch64_dispatch_image(lld_clang_dispatch(), {0x00, 0x02, 0x04, 0x06});
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& cfg = result.value().cfg;
+  ASSERT_EQ(cfg.jump_tables.size(), 1U);
+  const auto& table = cfg.jump_tables.front();
+  EXPECT_EQ(table.jump_address, 0x1020U);
+  EXPECT_EQ(table.check_address, 0x1000U);
+  EXPECT_EQ(table.default_target, 0x1044U);
+  EXPECT_EQ(table.targets, (std::vector<std::uint64_t>{0x1024U, 0x102cU, 0x1034U, 0x103cU}));
+}
+
 // `b.hi` takes its branch when the selector is out of range, so a table behind
 // its taken edge is on the wrong side and must not be recovered.
 TEST(Cfg, AArch64TableOnTheOutOfRangeSideIsNotRecovered) {
