@@ -164,6 +164,10 @@ class Session {
   /// terminator included. Refused, with an error, when the address is not in file data or no
   /// terminator is found within a bounded scan. One call is one undo step.
   void define_string(std::uint64_t address);
+  /// The `W` key (G12-T2): makes the NUL-terminated UTF-16LE string at `address` a data range of
+  /// its bytes, the two-byte terminator included (`string16:<bytes>`). Refused like define_string,
+  /// with no terminator unit within the scan. One call is one undo step.
+  void define_string16(std::uint64_t address);
 
   /// True when a function-boundary edit is waiting for the worker to be free.
   [[nodiscard]] bool reanalysis_pending() const;

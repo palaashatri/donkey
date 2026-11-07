@@ -80,8 +80,8 @@ bool text_valid_for(AnnotationKind kind, const std::string& text) {
   if (kind == AnnotationKind::DataRange) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    bool is_string = false;
-    return parse_data_extent(text, element_size, count, is_string);
+    StringEncoding encoding = StringEncoding::None;
+    return parse_data_extent(text, element_size, count, encoding);
   }
   return true;
 }
@@ -102,6 +102,26 @@ std::optional<std::uint64_t> string_bytes_at(const LoadedBinary& loaded, std::ui
   for (std::uint64_t i = 0; i < available; ++i) {
     if (std::to_integer<unsigned>(file[location->offset + i]) == 0) {
       return i + 1;
+    }
+  }
+  return std::nullopt;
+}
+
+/// The byte length of the UTF-16LE string at `address`, its two-byte terminator included, or
+/// nothing when the address is not in file-backed data or no terminator unit is found within the
+/// scan. The units are read from the address as they are; the address need not be aligned.
+std::optional<std::uint64_t> utf16_bytes_at(const LoadedBinary& loaded, std::uint64_t address) {
+  const std::span<const std::byte> file = loaded.data.span();
+  const std::optional<FileLocation> location = file_location_of(loaded.image, address);
+  if (!location || location->offset >= file.size()) {
+    return std::nullopt;
+  }
+  const std::uint64_t available =
+      std::min({kMaxStringScan, location->remaining, file.size() - location->offset});
+  for (std::uint64_t i = 0; i + 1 < available; i += 2) {
+    if (std::to_integer<unsigned>(file[location->offset + i]) == 0 &&
+        std::to_integer<unsigned>(file[location->offset + i + 1]) == 0) {
+      return i + 2;
     }
   }
   return std::nullopt;
@@ -144,8 +164,8 @@ AnalysisOptions analysis_options_for(const Annotations& annotations) {
   for (const auto& [address, text] : annotations.data_ranges) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    bool is_string = false;
-    if (parse_data_extent(text, element_size, count, is_string)) {
+    StringEncoding encoding = StringEncoding::None;
+    if (parse_data_extent(text, element_size, count, encoding)) {
       options.user_data_ranges.push_back(UserDataRange{address, element_size, count});
     }
   }
@@ -1043,6 +1063,18 @@ void Session::define_string(std::uint64_t address) {
     return;
   }
   set_annotation(AnnotationKind::DataRange, address, format_string_range_text(*bytes));
+}
+
+void Session::define_string16(std::uint64_t address) {
+  const auto doc = document();
+  const std::optional<std::uint64_t> bytes =
+      doc ? utf16_bytes_at(doc->loaded, address) : std::nullopt;
+  if (!bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_ = "no NUL-terminated UTF-16 string within 4096 bytes of file data at this address";
+    return;
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_utf16_range_text(*bytes));
 }
 
 void Session::undefine(std::uint64_t address) {

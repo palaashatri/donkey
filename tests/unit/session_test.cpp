@@ -983,6 +983,34 @@ TEST(Session, DefineStringDefinesTheTerminatedBytesAndRefusesOthers) {
   EXPECT_TRUE(session.take_error().has_value());
 }
 
+// G12-T2 (W): the UTF-16LE string at an address is data of its bytes, two-byte terminator included.
+// tests/fixtures/utf16 holds "Donkey" at 0x2001a8 (14 bytes) and "café 中" at 0x2001b6
+// (14 bytes). An address outside the file is refused with an error, and nothing changes.
+TEST(Session, DefineString16DefinesTheTerminatedBytesAndRefusesOthers) {
+  Session session;
+  session.open(std::string(DONKEY_FIXTURE_DIR) + "/utf16/utf16");
+  ASSERT_TRUE(wait_idle(session));
+
+  session.define_string16(0x2001a8);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x2001a8)), "string16:14");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x2001a8), nullptr);
+
+  session.define_string16(0x2001b6);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x2001b6)), "string16:14");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x2001b6), nullptr);
+
+  session.define_string16(0x123456);  // not in any file-backed section
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x123456), nullptr);
+  EXPECT_TRUE(session.take_error().has_value());
+}
+
 TEST(Session, UndefineDeclaresInstructionBytesUndefinedAndClearsThem) {
   Session session;
   session.open(fixture_path("tiny-elf-x86_64"));

@@ -253,3 +253,8 @@ FreeBSD aarch64, whose CI VM is emulated, timing limits are not enforced and
 the two timing-only scripts (1,000,000-row table, input latency under load)
 are not run.
 Screen readers are not supported: Dear ImGui exposes no accessibility tree.
+
+Data ranges (G12-T2, partial): `A` defines a NUL-terminated byte string, `W` a NUL-terminated
+UTF-16LE string (both as data of their bytes, terminator included), and `Shift+D` an array. The
+Data window lists and previews them. Covered by the scripted tests `data` and `utf16`. Not done:
+the listing draws no data rows, and the decompiler does not print string literals.

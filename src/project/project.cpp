@@ -104,8 +104,9 @@ std::string format_data_range_text(std::uint64_t element_size, std::uint64_t cou
 }
 
 bool parse_data_extent(const std::string& text, std::uint64_t& element_size, std::uint64_t& count,
-                       bool& is_string) noexcept {
+                       StringEncoding& encoding) noexcept {
   constexpr std::string_view kStringPrefix = "string:";
+  constexpr std::string_view kUtf16Prefix = "string16:";
   if (text.compare(0, kStringPrefix.size(), kStringPrefix) == 0) {
     std::uint64_t bytes = 0;
     if (!parse_decimal(text.substr(kStringPrefix.size()), bytes) || bytes == 0 ||
@@ -114,15 +115,30 @@ bool parse_data_extent(const std::string& text, std::uint64_t& element_size, std
     }
     element_size = 1;
     count = bytes;
-    is_string = true;
+    encoding = StringEncoding::Bytes;
     return true;
   }
-  is_string = false;
+  if (text.compare(0, kUtf16Prefix.size(), kUtf16Prefix) == 0) {
+    std::uint64_t bytes = 0;
+    if (!parse_decimal(text.substr(kUtf16Prefix.size()), bytes) || bytes < 2 || bytes % 2 != 0 ||
+        bytes > kMaxDataRangeBytes) {
+      return false;
+    }
+    element_size = 2;
+    count = bytes / 2;
+    encoding = StringEncoding::Utf16Le;
+    return true;
+  }
+  encoding = StringEncoding::None;
   return parse_data_range_text(text, element_size, count);
 }
 
 std::string format_string_range_text(std::uint64_t bytes) {
   return "string:" + std::to_string(bytes);
+}
+
+std::string format_utf16_range_text(std::uint64_t bytes) {
+  return "string16:" + std::to_string(bytes);
 }
 
 namespace {
@@ -136,8 +152,8 @@ bool annotation_text_valid(AnnotationKind kind, const std::string& text) {
   if (kind == AnnotationKind::DataRange) {
     std::uint64_t element_size = 0;
     std::uint64_t count = 0;
-    bool is_string = false;
-    return parse_data_extent(text, element_size, count, is_string);
+    StringEncoding encoding = StringEncoding::None;
+    return parse_data_extent(text, element_size, count, encoding);
   }
   return true;
 }

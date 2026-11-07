@@ -463,19 +463,25 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   set(DONKEY_UI_CONFIG_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-config)
   file(MAKE_DIRECTORY ${DONKEY_UI_REPORT_DIR})
   function(donkey_ui_script name)
-    cmake_parse_arguments(ARG "" "CONFIG;RENDERER" "" ${ARGN})
+    # FILE opens a file other than the debuggee (a fixture under tests/fixtures).
+    cmake_parse_arguments(ARG "" "CONFIG;RENDERER;FILE" "" ${ARGN})
     if(NOT ARG_CONFIG)
       set(ARG_CONFIG ${name})
     endif()
     if(NOT ARG_RENDERER)
       set(ARG_RENDERER software)
     endif()
+    if(ARG_FILE)
+      set(ARG_OPEN ${ARG_FILE})
+    else()
+      set(ARG_OPEN $<TARGET_FILE:donkey_test_debuggee>)
+    endif()
     add_test(NAME ui.script_${name}
              COMMAND donkey --renderer ${ARG_RENDERER}
                      --config-dir ${DONKEY_UI_CONFIG_DIR}/${ARG_CONFIG}
                      --ui-script ${CMAKE_CURRENT_SOURCE_DIR}/ui/${name}.donkeyui
                      --ui-report ${DONKEY_UI_REPORT_DIR}/${name}.json
-                     $<TARGET_FILE:donkey_test_debuggee>)
+                     ${ARG_OPEN})
     set_tests_properties(ui.script_${name} PROPERTIES
       TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
       FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
@@ -483,6 +489,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   donkey_ui_script(keyboard_ime)
   donkey_ui_script(edits)
   donkey_ui_script(data)
+  donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)
   donkey_ui_script(display_dpi_device)

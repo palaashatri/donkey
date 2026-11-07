@@ -125,6 +125,10 @@ void Workspace::draw(bool& quit) {
                state_.selected_address != 0 && session_.document()) {
       // A defines the NUL-terminated string at the address as data (G12-T2).
       session_.define_string(state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_W, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      // W defines the NUL-terminated UTF-16LE string at the address as data (G12-T2).
+      session_.define_string16(state_.selected_address);
     } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_U, false) &&
                state_.selected_address != 0 && session_.document()) {
       session_.undefine(state_.selected_address);

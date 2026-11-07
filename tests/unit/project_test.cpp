@@ -1529,19 +1529,35 @@ TEST(Project, DataRangeTextIsCanonicalAndBounded) {
 TEST(Project, ParsesAndStoresStringRangesAndRefusesBadStringText) {
   std::uint64_t element_size = 9;
   std::uint64_t count = 9;
-  bool is_string = false;
-  EXPECT_TRUE(donkey::parse_data_extent("string:12", element_size, count, is_string));
-  EXPECT_TRUE(is_string);
+  donkey::StringEncoding encoding = donkey::StringEncoding::None;
+  EXPECT_TRUE(donkey::parse_data_extent("string:12", element_size, count, encoding));
+  EXPECT_EQ(encoding, donkey::StringEncoding::Bytes);
   EXPECT_EQ(element_size, 1U);
   EXPECT_EQ(count, 12U);
-  EXPECT_TRUE(donkey::parse_data_extent("4:16", element_size, count, is_string));
-  EXPECT_FALSE(is_string);
+  EXPECT_TRUE(donkey::parse_data_extent("4:16", element_size, count, encoding));
+  EXPECT_EQ(encoding, donkey::StringEncoding::None);
   EXPECT_EQ(element_size, 4U);
   EXPECT_EQ(count, 16U);
   EXPECT_EQ(donkey::format_string_range_text(12), "string:12");
   for (const char* bad : {"string:0", "string:", "string:01", "string:-1", "string:17000000",
                           "string:1x", "string"}) {
-    EXPECT_FALSE(donkey::parse_data_extent(bad, element_size, count, is_string)) << bad;
+    EXPECT_FALSE(donkey::parse_data_extent(bad, element_size, count, encoding)) << bad;
+  }
+
+  // G12-T2: "string16:<bytes>" is UTF-16LE with its two-byte terminator. It reads as 2-byte
+  // elements, so analysis treats it as an array of code units. The byte count must be even and
+  // at least 2, and within the same bound as every data range.
+  EXPECT_TRUE(donkey::parse_data_extent("string16:14", element_size, count, encoding));
+  EXPECT_EQ(encoding, donkey::StringEncoding::Utf16Le);
+  EXPECT_EQ(element_size, 2U);
+  EXPECT_EQ(count, 7U);
+  EXPECT_TRUE(donkey::parse_data_extent("string16:2", element_size, count, encoding));
+  EXPECT_EQ(count, 1U);
+  EXPECT_TRUE(donkey::parse_data_extent("string16:16777216", element_size, count, encoding));
+  EXPECT_EQ(donkey::format_utf16_range_text(14), "string16:14");
+  for (const char* bad : {"string16:0", "string16:", "string16:3", "string16:15", "string16:x",
+                          "string16:16777218", "string16:-2"}) {
+    EXPECT_FALSE(donkey::parse_data_extent(bad, element_size, count, encoding)) << bad;
   }
 
   TempPath path("string-kind");

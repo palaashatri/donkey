@@ -1,0 +1,18 @@
+# G12-T2: W defines the NUL-terminated UTF-16LE string at the selected address as data, and undo
+# removes it. tests/fixtures/utf16 holds "Donkey" at 0x2001a8: 14 bytes with the two-byte
+# terminator, so the range is string16:14. The script opens that fixture (see tests/CMakeLists.txt).
+wait_idle
+frames 5
+assert_no_error
+
+key g
+assert_focus Go to
+text 0x2001a8
+key enter
+assert_selected 0x2001a8
+
+key w
+assert_annotation data 0x2001a8 string16:14
+key shortcut+z
+assert_annotation data 0x2001a8 -
+assert_no_error

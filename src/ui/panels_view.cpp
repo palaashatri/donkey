@@ -443,17 +443,48 @@ std::string string_preview(const Document& document, std::uint64_t address, std:
 
 /// What a data range's text says, in words: the array's shape, the string and its preview, or the
 /// undefined bytes (element size 0).
+/// The text of a UTF-16LE string for the Data view: each code unit below 0x80 that is printable is
+/// shown as it is, and every other unit as \uXXXX, at most 48 characters. `bytes` includes the
+/// terminator unit, which is not shown.
+std::string string16_preview(const Document& document, std::uint64_t address, std::uint64_t bytes) {
+  const std::optional<FileLocation> location = file_location_of(document.loaded.image, address);
+  const std::span<const std::byte> file = document.loaded.data.span();
+  if (!location || location->offset >= file.size() || bytes < 2) {
+    return "";
+  }
+  const std::uint64_t limit =
+      std::min<std::uint64_t>({bytes - 2, location->remaining, file.size() - location->offset});
+  std::string out;
+  for (std::uint64_t i = 0; i + 2 <= limit && out.size() < 48; i += 2) {
+    const unsigned unit = std::to_integer<unsigned>(file[location->offset + i]) |
+                          (std::to_integer<unsigned>(file[location->offset + i + 1]) << 8);
+    if (unit >= 0x20 && unit < 0x7f && unit != '"' && unit != '\\') {
+      out += static_cast<char>(unit);
+    } else {
+      char escaped[8];
+      std::snprintf(escaped, sizeof(escaped), "\\u%04x", unit);
+      out += escaped;
+    }
+  }
+  return out;
+}
+
 std::string describe_data_range(const Document& document, std::uint64_t address,
                                 const std::string& text) {
   std::uint64_t element_size = 0;
   std::uint64_t count = 0;
-  bool is_string = false;
-  if (!parse_data_extent(text, element_size, count, is_string)) {
+  StringEncoding encoding = StringEncoding::None;
+  if (!parse_data_extent(text, element_size, count, encoding)) {
     return "invalid: " + text;
   }
-  if (is_string) {
+  if (encoding == StringEncoding::Bytes) {
     return "string, " + std::to_string(count) + " bytes: \"" +
            string_preview(document, address, count) + "\"";
+  }
+  if (encoding == StringEncoding::Utf16Le) {
+    const std::uint64_t bytes = count * element_size;
+    return "UTF-16 string, " + std::to_string(bytes) + " bytes: \"" +
+           string16_preview(document, address, bytes) + "\"";
   }
   if (element_size == 0) {
     return "undefined, " + std::to_string(count) + " bytes";
