@@ -18,7 +18,16 @@
 namespace donkey {
 
 enum class BinaryFormat : std::uint8_t { Unknown = 0, Raw, Elf, Pe, MachO };
-enum class Architecture : std::uint8_t { Unknown = 0, X86, X86_64, Arm, AArch64, RiscV64 };
+enum class Architecture : std::uint8_t {
+  Unknown = 0,
+  X86,
+  X86_64,
+  Arm,
+  AArch64,
+  RiscV64,
+  Mips32,
+  Ppc32
+};
 
 enum class SymbolKind : std::uint8_t {
   Unknown = 0,

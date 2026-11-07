@@ -5,10 +5,11 @@
 #include <string>
 #include <vector>
 
+#include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
 #include "donkey/decode/decode.h"
 
-// The A32 and RV64GC decoders (G13), checked against llvm-objdump
+// The A32, RV64GC, MIPS32 and PPC32 decoders (G13), checked against llvm-objdump
 // (tests/fixtures/isa/PROVENANCE.md). The listings are the addresses and lengths llvm-objdump gives
 // for every instruction of each image.
 
@@ -40,7 +41,8 @@ donkey::LoadedBinary load(const std::string& name) {
   return loaded.has_value() ? std::move(loaded.value()) : donkey::LoadedBinary{};
 }
 
-// Decodes the image's .text section from its first byte, the way the analysis does.
+// Decodes the image's .text section from its first byte, the way the analysis does, in the image's
+// own byte order.
 donkey::DecodeStream decode_text(const donkey::LoadedBinary& loaded, donkey::Architecture arch) {
   const donkey::Section* text = nullptr;
   for (const donkey::Section& section : loaded.image.sections) {
@@ -52,7 +54,7 @@ donkey::DecodeStream decode_text(const donkey::LoadedBinary& loaded, donkey::Arc
   if (text == nullptr) {
     return {};
   }
-  auto decoder = donkey::Decoder::create(arch, donkey::Endian::Little);
+  auto decoder = donkey::Decoder::create(arch, loaded.image.endian);
   EXPECT_TRUE(decoder.has_value()) << decoder.diagnostic().code;
   if (!decoder.has_value()) {
     return {};
@@ -144,4 +146,123 @@ TEST(DecodeIsa, BigEndianArmAndRiscVAreRefusedByName) {
   auto riscv = donkey::Decoder::create(donkey::Architecture::RiscV64, donkey::Endian::Big);
   ASSERT_FALSE(riscv.has_value());
   EXPECT_EQ(riscv.diagnostic().code, "decode.big_endian_riscv");
+}
+
+// MIPS32 in both byte orders. The branch delay slots are decoded as ordinary instructions, because
+// the decoder does not model them, so the lengths and addresses still match llvm-objdump.
+TEST(DecodeIsa, MipsLittleEndianMatchesTheListingOfEveryInstruction) {
+  const auto loaded = load("mips32el");
+  EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Mips32);
+  EXPECT_EQ(loaded.image.endian, donkey::Endian::Little);
+  expect_listing_matches(decode_text(loaded, donkey::Architecture::Mips32),
+                         read_listing("mips32el"));
+}
+
+TEST(DecodeIsa, MipsBigEndianMatchesTheListingOfEveryInstruction) {
+  const auto loaded = load("mips32be");
+  EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Mips32);
+  EXPECT_EQ(loaded.image.endian, donkey::Endian::Big);
+  expect_listing_matches(decode_text(loaded, donkey::Architecture::Mips32),
+                         read_listing("mips32be"));
+}
+
+// PowerPC32 in both byte orders.
+TEST(DecodeIsa, PowerPc32BigEndianMatchesTheListingOfEveryInstruction) {
+  const auto loaded = load("ppc32");
+  EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Ppc32);
+  EXPECT_EQ(loaded.image.endian, donkey::Endian::Big);
+  expect_listing_matches(decode_text(loaded, donkey::Architecture::Ppc32), read_listing("ppc32"));
+}
+
+TEST(DecodeIsa, PowerPc32LittleEndianMatchesTheListingOfEveryInstruction) {
+  const auto loaded = load("ppc32le");
+  EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Ppc32);
+  EXPECT_EQ(loaded.image.endian, donkey::Endian::Little);
+  expect_listing_matches(decode_text(loaded, donkey::Architecture::Ppc32), read_listing("ppc32le"));
+}
+
+// MIPS32: `blez` and `bne` fall through, with absolute targets. `j` to its own address is an
+// unconditional Jump, `jal` is a Call, and `jr $ra` is a Return.
+TEST(DecodeIsa, MipsBranchesHaveTheirClassesAndTargets) {
+  const auto loaded = load("mips32el");
+  const auto stream = decode_text(loaded, donkey::Architecture::Mips32);
+  const donkey::Instruction* blez = at(stream, 0x20180);
+  ASSERT_NE(blez, nullptr);
+  EXPECT_EQ(blez->mnemonic, "blez");
+  EXPECT_EQ(blez->classification, donkey::InstructionClass::ConditionalJump);
+  EXPECT_EQ(blez->direct_target, std::optional<std::uint64_t>(0x201b8));
+  const donkey::Instruction* bne = at(stream, 0x201a8);
+  ASSERT_NE(bne, nullptr);
+  EXPECT_EQ(bne->mnemonic, "bne");
+  EXPECT_EQ(bne->classification, donkey::InstructionClass::ConditionalJump);
+  EXPECT_EQ(bne->direct_target, std::optional<std::uint64_t>(0x20194));
+  const donkey::Instruction* jal = at(stream, 0x201cc);
+  ASSERT_NE(jal, nullptr);
+  EXPECT_EQ(jal->classification, donkey::InstructionClass::Call);
+  EXPECT_EQ(jal->direct_target, std::optional<std::uint64_t>(0x20180));
+  const donkey::Instruction* self_jump = at(stream, 0x201d4);
+  ASSERT_NE(self_jump, nullptr);
+  EXPECT_EQ(self_jump->classification, donkey::InstructionClass::Jump);
+  EXPECT_EQ(self_jump->direct_target, std::optional<std::uint64_t>(0x201d4));
+  const donkey::Instruction* ret = at(stream, 0x201b0);
+  ASSERT_NE(ret, nullptr);
+  EXPECT_EQ(ret->classification, donkey::InstructionClass::Return);
+}
+
+// PowerPC32 (big-endian): `bf`, `bt` and `bdnz` fall through with absolute targets, `b` to a
+// nearby address and to its own address are unconditional Jumps, `bl` is a Call, and `blr` is a
+// Return.
+TEST(DecodeIsa, PowerPc32BranchesHaveTheirClassesAndTargets) {
+  const auto loaded = load("ppc32");
+  const auto stream = decode_text(loaded, donkey::Architecture::Ppc32);
+  const donkey::Instruction* bf = at(stream, 0x10010150);
+  ASSERT_NE(bf, nullptr);
+  EXPECT_EQ(bf->classification, donkey::InstructionClass::ConditionalJump);
+  EXPECT_EQ(bf->direct_target, std::optional<std::uint64_t>(0x1001018c));
+  const donkey::Instruction* bt = at(stream, 0x10010168);
+  ASSERT_NE(bt, nullptr);
+  EXPECT_EQ(bt->classification, donkey::InstructionClass::ConditionalJump);
+  EXPECT_EQ(bt->direct_target, std::optional<std::uint64_t>(0x10010174));
+  const donkey::Instruction* b = at(stream, 0x10010170);
+  ASSERT_NE(b, nullptr);
+  EXPECT_EQ(b->classification, donkey::InstructionClass::Jump);
+  EXPECT_EQ(b->direct_target, std::optional<std::uint64_t>(0x10010178));
+  const donkey::Instruction* bdnz = at(stream, 0x10010184);
+  ASSERT_NE(bdnz, nullptr);
+  EXPECT_EQ(bdnz->classification, donkey::InstructionClass::ConditionalJump);
+  EXPECT_EQ(bdnz->direct_target, std::optional<std::uint64_t>(0x10010164));
+  const donkey::Instruction* bl = at(stream, 0x100101a8);
+  ASSERT_NE(bl, nullptr);
+  EXPECT_EQ(bl->classification, donkey::InstructionClass::Call);
+  EXPECT_EQ(bl->direct_target, std::optional<std::uint64_t>(0x1001014c));
+  const donkey::Instruction* self_jump = at(stream, 0x100101ac);
+  ASSERT_NE(self_jump, nullptr);
+  EXPECT_EQ(self_jump->classification, donkey::InstructionClass::Jump);
+  EXPECT_EQ(self_jump->direct_target, std::optional<std::uint64_t>(0x100101ac));
+  const donkey::Instruction* ret = at(stream, 0x10010188);
+  ASSERT_NE(ret, nullptr);
+  EXPECT_EQ(ret->classification, donkey::InstructionClass::Return);
+}
+
+// The CFG does not model MIPS delay slots, so a MIPS analysis is Partial, with the diagnostic that
+// says why, and not Complete.
+TEST(DecodeIsa, MipsAnalysisIsPartialBecauseDelaySlotsAreNotModelled) {
+  const auto loaded = load("mips32el");
+  auto result = donkey::analyze(loaded.image, loaded.data.span());
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().partial);
+  bool found = false;
+  for (const donkey::Diagnostic& diagnostic : result.value().diagnostics) {
+    found = found || diagnostic.code == "analysis.mips_delay_slots";
+  }
+  EXPECT_TRUE(found);
+}
+
+// 64-bit MIPS and PowerPC share the 32-bit ELF machine numbers but not the instruction sets (`ld`,
+// `daddu`, 64-bit PowerPC), so the image is Unknown and is not decoded as 32-bit code.
+TEST(DecodeIsa, SixtyFourBitMipsAndPowerPcAreNotDecodedAsThirtyTwoBit) {
+  for (const char* name : {"mips64el", "ppc64"}) {
+    const auto loaded = load(name);
+    EXPECT_EQ(loaded.image.architecture, donkey::Architecture::Unknown) << name;
+  }
 }

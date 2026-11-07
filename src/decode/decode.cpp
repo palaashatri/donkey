@@ -24,7 +24,64 @@ bool is_direct_riscv_branch(const std::string& mnemonic) {
                       [&mnemonic](const char* name) { return mnemonic == name; }) != kDirect.end();
 }
 
+// Capstone's group flags miss some MIPS32 and PowerPC32 control transfers: `jal` has none, `jr $ra`
+// and `blr` are plain jumps, and PowerPC `bl` is a jump. For those two architectures the class is
+// refined from the mnemonic and operands, and for PowerPC from the link bit (bit 0 of the
+// instruction word), which `bl`, `bcl`, `bclrl` and `bcctrl` set.
+InstructionClass refine_mips_or_ppc_class(const cs_insn& insn, Architecture architecture,
+                                          Endian endian, const std::string& mnemonic,
+                                          InstructionClass from_groups) {
+  if (architecture == Architecture::Mips32) {
+    static const std::array<const char*, 10> kLinking = {
+        "jal", "jalx", "jalr", "jalr.hb", "bal", "balc", "bltzal", "bgezal", "bltzall", "bgezall"};
+    for (const char* linking : kLinking) {
+      if (mnemonic == linking) {
+        return InstructionClass::Call;
+      }
+    }
+    if (mnemonic == "jr" && insn.detail != nullptr && insn.detail->mips.op_count == 1 &&
+        insn.detail->mips.operands[0].type == MIPS_OP_REG &&
+        insn.detail->mips.operands[0].reg == MIPS_REG_RA) {
+      return InstructionClass::Return;
+    }
+    return from_groups;
+  }
+  // PowerPC32: every instruction is 4 bytes, so the link bit is in the last byte when big-endian
+  // and in the first when little-endian.
+  if ((from_groups != InstructionClass::Jump && from_groups != InstructionClass::ConditionalJump) ||
+      insn.size != 4) {
+    return from_groups;
+  }
+  const std::uint8_t link_byte = endian == Endian::Big ? insn.bytes[3] : insn.bytes[0];
+  if ((link_byte & 1U) != 0) {
+    return InstructionClass::Call;
+  }
+  if (mnemonic == "blr") {
+    return InstructionClass::Return;
+  }
+  return from_groups;
+}
+
 bool is_conditional_jump(Architecture architecture, const std::string& mnemonic) {
+  if (architecture == Architecture::Mips32) {
+    // `b`, `bal`, `bc`, `balc`, `j`, `jal`, `jalr` and `jr` always transfer control. The other
+    // branch mnemonics test a register or a condition (`beq`, `bnez`, `bc1t`), so they fall
+    // through.
+    if (mnemonic == "b" || mnemonic == "bal" || mnemonic == "bc" || mnemonic == "balc" ||
+        mnemonic == "j" || mnemonic == "jal" || mnemonic == "jalr" || mnemonic == "jr") {
+      return false;
+    }
+    return !mnemonic.empty() && mnemonic.front() == 'b';
+  }
+  if (architecture == Architecture::Ppc32) {
+    // `b`, `ba`, `bl`, `bla`, `bctr`, `bctrl`, `blr` and `blrl` always transfer control. The other
+    // forms (`bc`, `bt`, `bf`, `bdnz`, and the conditional `bcctr`/`bclr`) can fall through.
+    if (mnemonic == "b" || mnemonic == "ba" || mnemonic == "bl" || mnemonic == "bla" ||
+        mnemonic == "bctr" || mnemonic == "bctrl" || mnemonic == "blr" || mnemonic == "blrl") {
+      return false;
+    }
+    return !mnemonic.empty() && mnemonic.front() == 'b';
+  }
   if (architecture == Architecture::X86 || architecture == Architecture::X86_64) {
     if (mnemonic == "jmp" || mnemonic == "call") {
       return false;
@@ -138,6 +195,17 @@ Result<Decoder> Decoder::create(Architecture architecture, Endian endian) {
       capstone_arch = CS_ARCH_ARM;
       mode = CS_MODE_ARM;
       break;
+    case Architecture::Mips32:
+      // MIPS32 in either byte order. Branch delay slots are not modelled here (decoding only).
+      capstone_arch = CS_ARCH_MIPS;
+      mode = static_cast<cs_mode>(
+          CS_MODE_MIPS32 | (endian == Endian::Big ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN));
+      break;
+    case Architecture::Ppc32:
+      capstone_arch = CS_ARCH_PPC;
+      mode = static_cast<cs_mode>(
+          CS_MODE_32 | (endian == Endian::Big ? CS_MODE_BIG_ENDIAN : CS_MODE_LITTLE_ENDIAN));
+      break;
     case Architecture::RiscV64:
       // With the compressed set, so the 16-bit instructions compilers emit by default decode too.
       if (endian == Endian::Big) {
@@ -229,6 +297,12 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
                                 : InstructionClass::Jump;
   }
 
+  if ((impl_->architecture == Architecture::Mips32 || impl_->architecture == Architecture::Ppc32) &&
+      instruction->detail != nullptr) {
+    result.classification = refine_mips_or_ppc_class(
+        *instruction, impl_->architecture, impl_->endian, result.mnemonic, result.classification);
+  }
+
   if (result.classification == InstructionClass::Call ||
       result.classification == InstructionClass::Jump ||
       result.classification == InstructionClass::ConditionalJump) {
@@ -247,6 +321,28 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
         if (operand.type == ARM_OP_IMM) {
           result.direct_target = static_cast<std::uint64_t>(operand.imm);
           break;
+        }
+      }
+    } else if ((impl_->architecture == Architecture::Mips32 ||
+                impl_->architecture == Architecture::Ppc32) &&
+               instruction->detail != nullptr) {
+      // The target is the last immediate operand, and Capstone gives it as an address.
+      const bool mips = impl_->architecture == Architecture::Mips32;
+      const std::uint8_t operand_count =
+          mips ? instruction->detail->mips.op_count : instruction->detail->ppc.op_count;
+      for (int i = static_cast<int>(operand_count) - 1; i >= 0; --i) {
+        if (mips) {
+          const cs_mips_op& operand = instruction->detail->mips.operands[i];
+          if (operand.type == MIPS_OP_IMM) {
+            result.direct_target = static_cast<std::uint64_t>(operand.imm);
+            break;
+          }
+        } else {
+          const cs_ppc_op& operand = instruction->detail->ppc.operands[i];
+          if (operand.type == PPC_OP_IMM) {
+            result.direct_target = static_cast<std::uint64_t>(operand.imm);
+            break;
+          }
         }
       }
     } else if (impl_->architecture == Architecture::RiscV64 && instruction->detail != nullptr &&
@@ -414,13 +510,15 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
 Result<DecodeStream> Decoder::decode(std::span<const std::byte> bytes, std::uint64_t address,
                                      std::size_t max_instructions) const {
   DecodeStream stream;
-  // The smallest instruction slot: fixed 4-byte words on AArch64 and 32-bit
-  // ARM, 2 for Thumb/compressed RISC-V, 1 byte for variable-length x86.
+  // The smallest instruction slot: fixed 4-byte words on AArch64, 32-bit ARM, MIPS32 and PowerPC32,
+  // 2 for Thumb/compressed RISC-V, 1 byte for variable-length x86.
   std::size_t slot = 1;
   if (impl_ != nullptr) {
     switch (impl_->architecture) {
       case Architecture::AArch64:
       case Architecture::Arm:
+      case Architecture::Mips32:
+      case Architecture::Ppc32:
         slot = 4;
         break;
       case Architecture::RiscV64:

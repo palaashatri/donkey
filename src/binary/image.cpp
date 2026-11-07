@@ -72,6 +72,8 @@ unsigned default_bits_for_architecture(Architecture architecture) noexcept {
       return 64;
     case Architecture::X86:
     case Architecture::Arm:
+    case Architecture::Mips32:
+    case Architecture::Ppc32:
       return 32;
     case Architecture::Unknown:
       return 0;
@@ -151,6 +153,10 @@ const char* architecture_name(Architecture architecture) noexcept {
       return "aarch64";
     case Architecture::RiscV64:
       return "riscv64";
+    case Architecture::Mips32:
+      return "mips32";
+    case Architecture::Ppc32:
+      return "ppc32";
   }
   return "unknown";
 }
@@ -170,6 +176,12 @@ std::optional<Architecture> parse_architecture(std::string_view name) noexcept {
   }
   if (name == "riscv64") {
     return Architecture::RiscV64;
+  }
+  if (name == "mips32") {
+    return Architecture::Mips32;
+  }
+  if (name == "ppc32") {
+    return Architecture::Ppc32;
   }
   return std::nullopt;
 }

@@ -49,6 +49,10 @@ Architecture machine_to_architecture(std::uint16_t machine) noexcept {
       return Architecture::AArch64;
     case 243:
       return Architecture::RiscV64;
+    case 8:
+      return Architecture::Mips32;  // EM_MIPS; the 64-bit class is refused where the class is known
+    case 20:
+      return Architecture::Ppc32;  // EM_PPC
     default:
       return Architecture::Unknown;
   }
@@ -147,6 +151,10 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
   }
 
   image.architecture = machine_to_architecture(machine.value());
+  if (is_64 && (machine.value() == 8 || machine.value() == 20)) {
+    // MIPS64 and PowerPC64 use the same machine numbers as their 32-bit forms; neither is decoded.
+    image.architecture = Architecture::Unknown;
+  }
   image.entry_point = entry.value();
   image.format_detail = std::string(elf_type_name(type.value())) + (is_64 ? " ELF64" : " ELF32");
 

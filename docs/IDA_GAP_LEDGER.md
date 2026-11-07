@@ -163,7 +163,7 @@ P0 is the most important, P3 the least.
 | G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 arrays and strings TODO; T3 local types TODO) |
-| G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian) and RISC-V 64 (RV64GC, little-endian) decode, checked against llvm-objdump. Thumb is not decoded or detected; neither ISA is lifted; no MIPS or PPC | P2 | IN PROGRESS (A32 and RV64GC decode DONE; Thumb, lifting, CFG, MIPS and PPC TODO) |
+| G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. Thumb is not decoded or detected; no ISA is lifted; MIPS delay slots are not modelled; microMIPS, MIPS16 and VLE are not detected; 64-bit MIPS and PowerPC are refused | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; Thumb, lifting, CFG checks and MIPS delay slots TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records and ELF cores (T3, partial). Multi-image projects not started (T2). Windows minidumps not started (T3) | P2 | IN PROGRESS (T1 and T3 PARTIAL; T2 TODO) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
@@ -175,7 +175,8 @@ P0 is the most important, P3 the least.
 
 Completed and merged or on the integration branch (see the table for each gap's status):
 
-- G02 (T1 to T4), G03 (T1 to T4), G11 (T1 to T3), G12-T1, G13 A32 and RV64GC decoding.
+- G02 (T1 to T4), G03 (T1 to T4), G11 (T1 to T3), G12-T1, G13 A32, RV64GC, MIPS32 and PPC32
+  decoding.
 - G01-T3 with the AArch64 rounding rule, G01-T2 with the x86 rule, the G04-T3 loop structuring
   docs, and the G05-T1 review fixes.
 
@@ -188,7 +189,8 @@ Still open, in ledger order:
 - G07: .dSYM files, which need a macOS host to verify.
 - G08 SIMD lifting and G09 library identification: not started.
 - G12-T2 arrays and strings, G12-T3 local types: not started.
-- G13: Thumb, lifting for A32 and RV64, CFG checks, and MIPS and PowerPC. Not started.
+- G13: Thumb, lifting for A32, RV64, MIPS32 and PowerPC32, CFG checks (MIPS delay slots first),
+  microMIPS, MIPS16 and VLE detection, and 64-bit MIPS and PowerPC. Not done.
 - G14-T1 to T4: remote debugging, FreeBSD, macOS, Windows on Arm, GUI watchpoints and AArch64
   DBGWVR. The lldb-server oracle is available for T1.
 - G15-T1 remaining TLS forms (`-mtls-dialect=trad`), G15-T2 multi-image projects, and G15-T3
@@ -1210,8 +1212,24 @@ Each ISA, in order: decoder → CFG → lifter → corpus under qemu-user (secti
     Capstone is 5.0.9, which has the RISC-V backend, so decoding did not wait
     for the Capstone 6 decision. Not done: lifting, the CFG check and the
     qemu-user corpus.
-- **G13-T3 MIPS32/64 and PPC32/64.** Decoder and CFG first (delay slots for
-  MIPS); lifting later.
+- **G13-T3 MIPS32 and PPC32 (64-bit deferred).** Decoder and CFG first (delay
+  slots for MIPS); lifting later.
+  - **Status:** IN PROGRESS (claude/funny-meitner-cpc7oc). MIPS32 (both byte
+    orders) and PPC32 (both byte orders) decode and match llvm-objdump on their
+    test images (`DecodeIsa.MipsLittleEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.MipsBigEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.PowerPc32BigEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.PowerPc32LittleEndianMatchesTheListingOfEveryInstruction`).
+    Capstone's group flags miss some transfers (`jal`, `jr $ra`, `bl`, `blr`),
+    so those are classified from the mnemonic and the PowerPC link bit
+    (`DecodeIsa.MipsBranchesHaveTheirClassesAndTargets`,
+    `DecodeIsa.PowerPc32BranchesHaveTheirClassesAndTargets`). 64-bit MIPS and
+    PPC are refused as Unknown
+    (`DecodeIsa.SixtyFourBitMipsAndPowerPcAreNotDecodedAsThirtyTwoBit`). Not
+    done: MIPS delay slots in the CFG, microMIPS/MIPS16 and VLE detection,
+    lifting, the CFG check and the qemu corpus. Until the delay slots are
+    modelled, a MIPS analysis is Partial (`analysis.mips_delay_slots`,
+    `DecodeIsa.MipsAnalysisIsPartialBecauseDelaySlotsAreNotModelled`).
 
 ### G14 Debugger coverage
 
