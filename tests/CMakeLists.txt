@@ -104,6 +104,7 @@ add_executable(donkey_unit_tests
   unit/archive_test.cpp
   unit/relocate_test.cpp
   unit/relocate_aarch64_test.cpp
+  unit/records_test.cpp
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp

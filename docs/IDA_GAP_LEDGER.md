@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
 | G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Linux x86-64/AArch64 and Windows x64 local only | P2 | TODO |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time. Static archives are listed (G15-T1, partial): `donkey-cli archive list`. No relocations, dumps, firmware or multi-image projects yet | P2 | IN PROGRESS (G15-T1 PARTIAL) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time. Static archives are listed (G15-T1, partial): `donkey-cli archive list`. ELF relocatable objects are laid out and relocated for the common x86-64 and AArch64 types (G15-T1 relocations, partial). Intel HEX and S-record files load as flat images (G15-T3, partial). No ELF cores, minidumps or multi-image projects yet | P2 | IN PROGRESS (G15-T1 PARTIAL; T2 TODO; T3 PARTIAL) |
 | G16 | Scale on real large binaries | Decades of tuning | Synthetic 1 GiB test; no real-world benchmark | P2 | TODO |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views; text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed `.app`, unsigned `.exe` | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate |
@@ -1141,6 +1141,16 @@ platform; do not write new, weaker ones.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.
+  - **Status:** PARTIAL. Done: Intel HEX and Motorola S-records (`decode_records`,
+    `include/donkey/binary/records.h`, `src/binary/records.cpp`). A file whose first line is
+    a record is decoded into one flat image at its lowest address, with 0xFF in the gaps,
+    and analysed as a raw image; the start address becomes the entry point. A malformed
+    record is an error that names its line, never a raw load. Evidence: eight `Records.*`
+    unit tests (both formats, checksums, unknown types, records after the end, the size
+    limit, detection, and a file loaded through `load_binary`), and `fuzz_records` ran 3.7
+    million inputs in 46 s under ASan and UBSan with no finding. Not done: ELF core files
+    (threads and memory), Windows minidumps, and the architecture for a raw record image,
+    which the caller still supplies.
 
 ### G16 Scale
 
