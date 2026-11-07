@@ -94,13 +94,19 @@ def test_a_missing_file_is_refused_with_the_loader_code(client):
     assert "io.open_failed" in refused.value.message
 
 
-def test_writes_and_planned_methods_are_refused(opened):
+def test_writes_and_project_methods_are_refused_without_a_project(opened):
     with pytest.raises(RpcError) as write:
-        opened.call("rename", address="0x400100", name="entry")
+        opened.call("rename", address="0x400100", text="entry")
     assert write.value.donkey_code == "rpc.write_disabled"
-    with pytest.raises(RpcError) as planned:
-        opened.call("decompile", address="0x400100")
-    assert planned.value.donkey_code == "rpc.not_implemented"
+    with pytest.raises(RpcError) as annotations:
+        opened.call("annotations.list")
+    assert annotations.value.donkey_code == "rpc.no_project"
+
+
+def test_decompile_returns_pseudocode_for_a_function(opened):
+    result = opened.call("decompile", address="0x400100")
+    assert result["address"] == "0x400100"
+    assert "pseudocode" in result
 
 
 def test_an_unknown_method_is_not_found(client):

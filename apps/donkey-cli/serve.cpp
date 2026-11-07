@@ -15,12 +15,18 @@
 
 #include "commands.h"
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/json.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
 #include "donkey/decode/decode.h"
+#include "donkey/ir/debug_names.h"
+#include "donkey/ir/ir.h"
+#include "donkey/ir/lift.h"
+#include "donkey/project/project.h"
 #include "json.h"
+#include "serve.h"
 
 namespace donkey::cli {
 namespace {
@@ -40,7 +46,10 @@ constexpr int kMethodNotFound = -32601;
 constexpr int kInvalidParams = -32602;
 constexpr int kOpenFailed = -32000;
 constexpr int kNoImage = -32001;
-constexpr int kNotImplemented = -32002;
+constexpr int kUnknownFunction = -32004;
+constexpr int kNoProject = -32008;
+constexpr int kProjectFailed = -32009;
+constexpr int kImageNotInProject = -32010;
 constexpr int kWriteDisabled = -32003;
 constexpr int kAnalysisFailed = -32005;
 constexpr int kNotFound = -32006;
@@ -75,6 +84,11 @@ struct Session {
   bool open = false;
   LoadedBinary loaded;
   std::optional<AnalysisResult> analysis;
+  // G11: the project that `annotations.list` reads and, when writes are allowed, that the write
+  // methods change. Without `--project` there is no project.
+  std::string project_path;
+  std::optional<Project> project;
+  bool allow_write = false;
 };
 
 // Quotes a string as JSON. Names taken from a binary can hold any bytes, so bytes that are not
@@ -280,13 +294,15 @@ std::optional<RpcError> ensure_analysis(Session& session) {
   return std::nullopt;
 }
 
-Reply hello_method() {
+Reply hello_method(const Session& session) {
+  const bool writes = session.project.has_value() && session.allow_write;
   return success(
       "{\"protocol\": \"donkey.rpc.v1\", \"tool\": \"donkey-cli\", \"tool_version\": " +
       quote(version()) +
       ", \"methods\": [\"hello\", \"open\", \"info\", \"functions\", \"strings\", \"xrefs\", "
-      "\"disasm\", \"callgraph\"], \"not_implemented\": [\"decompile\", \"annotations.list\"], "
-      "\"writes\": \"disabled\"}");
+      "\"disasm\", \"callgraph\", \"decompile\", \"annotations.list\", \"rename\", \"comment\", "
+      "\"type.apply\"], \"not_implemented\": [], \"writes\": " +
+      std::string(writes ? "\"enabled\"" : "\"disabled\"") + "}");
 }
 
 Reply open_method(const JsonValue& params, Session& session) {
@@ -517,9 +533,185 @@ Reply callgraph_method(const JsonValue& params, Session& session) {
                  ", \"orphan_sites\": " + std::to_string(graph.orphan_sites) + "}");
 }
 
+// The project image that holds the open binary, matched by SHA-256. The project must have saved
+// this binary (`donkey-cli project save`) before its annotations can be read or changed.
+std::optional<RpcError> project_image(Session& session, std::int64_t& image_id) {
+  if (!session.project.has_value()) {
+    return RpcError{kNoProject, "rpc.no_project",
+                    "this method needs a project: start serve with --project <database>"};
+  }
+  if (auto error = require_image(session)) {
+    return error;
+  }
+  auto images = session.project->images();
+  if (!images) {
+    return RpcError{kProjectFailed, "rpc.project_failed",
+                    images.diagnostic().code + ": " + images.diagnostic().message};
+  }
+  for (const ProjectImage& image : images.value()) {
+    if (image.sha256 == session.loaded.image.sha256) {
+      image_id = image.id;
+      return std::nullopt;
+    }
+  }
+  return RpcError{kImageNotInProject, "rpc.image_not_in_project",
+                  "the open binary is not in the project; save it with donkey-cli project save"};
+}
+
+// G11: one function's pseudocode, lifted and named the way `donkey-cli decompile` names it.
+Reply decompile_method(const JsonValue& params, Session& session) {
+  if (auto error = require_image(session)) {
+    return failure(error->code, error->donkey_code, error->message);
+  }
+  const JsonValue* address_member = params.find("address");
+  std::uint64_t address = 0;
+  if (address_member == nullptr || !read_address(*address_member, address)) {
+    return failure(kInvalidParams, "rpc.invalid_params",
+                   "address is required and must be a number or a string");
+  }
+  if (auto error = ensure_analysis(session)) {
+    return failure(error->code, error->donkey_code, error->message);
+  }
+  const Function* function = nullptr;
+  for (const Function& candidate : session.analysis->functions) {
+    if (candidate.address == address) {
+      function = &candidate;
+      break;
+    }
+  }
+  if (function == nullptr) {
+    return failure(kUnknownFunction, "rpc.unknown_function",
+                   "no function starts at " + hex(address));
+  }
+  auto lifted = lift_function(session.loaded.image, *session.analysis, *function);
+  if (!lifted) {
+    return failure(kAnalysisFailed, "rpc.lift_failed",
+                   lifted.diagnostic().code + ": " + lifted.diagnostic().message);
+  }
+  if (auto read = read_debug_info(session.loaded.image, session.loaded.data); read.has_value()) {
+    if (const DebugFunction* named = read.value().function_at(function->address)) {
+      (void)apply_debug_parameter_names(lifted.value(), *named, read.value());
+      (void)apply_debug_stack_names(lifted.value(), *named, read.value());
+    }
+  }
+  auto text = format_pseudocode(lifted.value());
+  if (!text) {
+    return failure(kAnalysisFailed, "rpc.format_failed",
+                   text.diagnostic().code + ": " + text.diagnostic().message);
+  }
+  std::vector<std::string> notes;
+  for (const std::string& note : lifted.value().notes) {
+    notes.push_back(quote_utf8(note));
+  }
+  return success("{\"address\": " + quote(hex(function->address)) +
+                 ", \"name\": " + quote_utf8(function->name) +
+                 ", \"partial\": " + (lifted.value().partial ? "true" : "false") + ", \"notes\": " +
+                 join(notes, "[", "]") + ", \"pseudocode\": " + quote_utf8(text.value()) + "}");
+}
+
+// G11: the annotations the project holds for the open binary.
+Reply annotations_list_method(const JsonValue&, Session& session) {
+  std::int64_t image_id = 0;
+  if (auto error = project_image(session, image_id)) {
+    return failure(error->code, error->donkey_code, error->message);
+  }
+  auto rows = session.project->annotations(image_id);
+  if (!rows) {
+    return failure(kProjectFailed, "rpc.project_failed",
+                   rows.diagnostic().code + ": " + rows.diagnostic().message);
+  }
+  std::vector<std::string> items;
+  for (const Annotation& row : rows.value()) {
+    items.push_back("{\"kind\": " + quote(annotation_kind_name(row.kind)) + ", \"address\": " +
+                    quote(hex(row.address)) + ", \"text\": " + quote_utf8(row.text) + "}");
+  }
+  return success("{\"count\": " + std::to_string(items.size()) +
+                 ", \"annotations\": " + join(items, "[", "]") + "}");
+}
+
+// A write method is refused unless the server was started with a project and --allow-write.
+Reply write_refused(std::string_view method, const Session& session) {
+  const std::string reason = !session.project.has_value()
+                                 ? "no project: start serve with --project <database> --allow-write"
+                                 : "--allow-write was not given";
+  return failure(kWriteDisabled, "rpc.write_disabled",
+                 std::string(method) + " is a write method; writes are disabled (" + reason + ")");
+}
+
+// G11: rename, comment. An empty text clears the annotation, as in the project API.
+Reply annotation_write_method(const JsonValue& params, Session& session, AnnotationKind kind,
+                              std::string_view method) {
+  if (!session.allow_write || !session.project.has_value()) {
+    return write_refused(method, session);
+  }
+  std::int64_t image_id = 0;
+  if (auto error = project_image(session, image_id)) {
+    return failure(error->code, error->donkey_code, error->message);
+  }
+  const JsonValue* address_member = params.find("address");
+  std::uint64_t address = 0;
+  if (address_member == nullptr || !read_address(*address_member, address)) {
+    return failure(kInvalidParams, "rpc.invalid_params",
+                   "address is required and must be a number or a string");
+  }
+  const JsonValue* text = params.find("text");
+  if (text == nullptr || !text->is_string()) {
+    return failure(kInvalidParams, "rpc.invalid_params", "text must be a string");
+  }
+  auto written = session.project->set_annotation(image_id, kind, address, text->text);
+  if (!written) {
+    return failure(kProjectFailed, "rpc.project_failed",
+                   written.diagnostic().code + ": " + written.diagnostic().message);
+  }
+  return success("{\"method\": " + quote(method) + ", \"address\": " + quote(hex(address)) +
+                 ", \"text\": " + quote_utf8(text->text) + "}");
+}
+
+// G11: applies a stored type to an address as a function prototype or as a data slot.
+Reply type_apply_method(const JsonValue& params, Session& session) {
+  if (!session.allow_write || !session.project.has_value()) {
+    return write_refused("type.apply", session);
+  }
+  std::int64_t image_id = 0;
+  if (auto error = project_image(session, image_id)) {
+    return failure(error->code, error->donkey_code, error->message);
+  }
+  const JsonValue* address_member = params.find("address");
+  std::uint64_t address = 0;
+  if (address_member == nullptr || !read_address(*address_member, address)) {
+    return failure(kInvalidParams, "rpc.invalid_params",
+                   "address is required and must be a number or a string");
+  }
+  const JsonValue* type_member = params.find("type_id");
+  if (type_member == nullptr || !type_member->is_number() || type_member->number < 0 ||
+      type_member->number != static_cast<double>(static_cast<std::uint64_t>(type_member->number))) {
+    return failure(kInvalidParams, "rpc.invalid_params", "type_id must be a whole number");
+  }
+  TypeApplicationKind kind = TypeApplicationKind::FunctionPrototype;
+  if (const JsonValue* kind_member = params.find("kind"); kind_member != nullptr) {
+    if (!kind_member->is_string()) {
+      return failure(kInvalidParams, "rpc.invalid_params", "kind must be prototype or data");
+    }
+    if (kind_member->text == "data") {
+      kind = TypeApplicationKind::DataSlot;
+    } else if (kind_member->text != "prototype") {
+      return failure(kInvalidParams, "rpc.invalid_params", "kind must be prototype or data");
+    }
+  }
+  const auto type_id = static_cast<std::uint64_t>(type_member->number);
+  auto applied = session.project->set_type_application(image_id, kind, address, TypeId(type_id));
+  if (!applied) {
+    return failure(kProjectFailed, "rpc.project_failed",
+                   applied.diagnostic().code + ": " + applied.diagnostic().message);
+  }
+  return success("{\"method\": \"type.apply\", \"address\": " + quote(hex(address)) +
+                 ", \"type_id\": " + std::to_string(type_id) + ", \"kind\": " +
+                 quote(kind == TypeApplicationKind::DataSlot ? "data" : "prototype") + "}");
+}
+
 Reply dispatch(std::string_view method, const JsonValue& params, Session& session) {
   if (method == "hello") {
-    return hello_method();
+    return hello_method(session);
   }
   if (method == "open") {
     return open_method(params, session);
@@ -542,14 +734,20 @@ Reply dispatch(std::string_view method, const JsonValue& params, Session& sessio
   if (method == "callgraph") {
     return callgraph_method(params, session);
   }
-  if (method == "decompile" || method == "annotations.list") {
-    return failure(kNotImplemented, "rpc.not_implemented",
-                   std::string(method) + " is planned (G11) and not implemented yet");
+  if (method == "decompile") {
+    return decompile_method(params, session);
   }
-  if (method == "rename" || method == "comment" || method == "type.apply") {
-    return failure(kWriteDisabled, "rpc.write_disabled",
-                   std::string(method) +
-                       " is a write method; writes are disabled (no project, no --allow-write)");
+  if (method == "annotations.list") {
+    return annotations_list_method(params, session);
+  }
+  if (method == "rename") {
+    return annotation_write_method(params, session, AnnotationKind::Rename, method);
+  }
+  if (method == "comment") {
+    return annotation_write_method(params, session, AnnotationKind::Comment, method);
+  }
+  if (method == "type.apply") {
+    return type_apply_method(params, session);
   }
   return failure(kMethodNotFound, "rpc.method_not_found", "unknown method " + quote_utf8(method));
 }
@@ -677,11 +875,38 @@ void write_line(const std::string& text) {
 }  // namespace
 
 int command_serve(const std::vector<std::string_view>& arguments) {
-  if (!arguments.empty()) {
-    std::fprintf(stderr, "donkey-cli serve: takes no arguments; requests are read from stdin\n");
+  Session session;
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
+    if (argument == "--project") {
+      if (i + 1 >= arguments.size()) {
+        std::fprintf(stderr, "donkey-cli serve: --project needs a database path\n");
+        return 2;
+      }
+      session.project_path = std::string(arguments[++i]);
+    } else if (argument == "--allow-write") {
+      session.allow_write = true;
+    } else {
+      std::fprintf(stderr,
+                   "donkey-cli serve: unknown argument %s; requests are read from stdin, and "
+                   "the options are --project <database> and --allow-write\n",
+                   std::string(argument).c_str());
+      return 2;
+    }
+  }
+  if (session.allow_write && session.project_path.empty()) {
+    std::fprintf(stderr, "donkey-cli serve: --allow-write needs --project <database>\n");
     return 2;
   }
-  Session session;
+  if (!session.project_path.empty()) {
+    auto project = Project::open(session.project_path);
+    if (!project) {
+      std::fprintf(stderr, "donkey-cli serve: cannot open project %s: %s\n",
+                   session.project_path.c_str(), project.diagnostic().message.c_str());
+      return kExitFailure;
+    }
+    session.project.emplace(std::move(project.value()));
+  }
   std::string line;
   while (true) {
     const ReadStatus status = read_line(line);
@@ -759,6 +984,41 @@ int command_batch(const std::vector<std::string_view>& arguments) {
   std::fwrite(out.data(), 1, out.size(), stdout);
   std::fflush(stdout);
   return kExitOk;
+}
+
+}  // namespace donkey::cli
+
+namespace donkey::cli {
+
+std::string serve_text(std::string_view input) {
+  Session session;
+  std::string output;
+  std::size_t begin = 0;
+  while (true) {
+    std::size_t end = input.find('\n', begin);
+    if (end == std::string_view::npos) {
+      end = input.size();
+    }
+    std::string_view line = input.substr(begin, end - begin);
+    if (!line.empty() && line.back() == '\r') {
+      line.remove_suffix(1);
+    }
+    if (line.size() > kMaxMessageBytes) {
+      output += error_line("null", RpcError{kInvalidRequest, "rpc.too_large",
+                                            "a request is larger than the 16 MiB limit"});
+      output += '\n';
+    } else if (!line.empty()) {
+      if (auto response = handle_line(line, session)) {
+        output += *response;
+        output += '\n';
+      }
+    }
+    if (end == input.size()) {
+      break;
+    }
+    begin = end + 1;
+  }
+  return output;
 }
 
 }  // namespace donkey::cli

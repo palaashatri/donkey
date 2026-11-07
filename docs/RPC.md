@@ -1,17 +1,25 @@
 # `donkey-cli serve`: JSON-RPC protocol (`donkey.rpc.v1`)
 
-Status: **partial** (G11-T1). The read methods below work and are tested. `decompile`,
-`annotations.list` and every write method are not implemented; the server says so in its
-responses. See `docs/IDA_GAP_LEDGER.md` G11 for the plan.
+Status: **implemented** for the G11-T1 method set. Every method in the table below works and is
+tested (`cli.serve_session`, `cli.serve_project`); the write methods run only when the server is
+started with a project and `--allow-write`. Fuzzed with `fuzz_rpc`, which runs the request handling on
+arbitrary bytes. See `docs/IDA_GAP_LEDGER.md` G11.
 
 ## Running it
 
 ```bash
-donkey-cli serve
+donkey-cli serve [--project <database>] [--allow-write]
 ```
 
 The server reads requests from stdin and writes responses to stdout. Nothing else goes to stdout,
-and it exits with 0 at end of input. It takes no arguments.
+and it exits with 0 at end of input.
+
+- `--project <database>` opens a project database (see `donkey-cli project save`). `annotations.list`
+  reads the annotations the project holds for the open binary, and the write methods change them.
+  The binary must have been saved in that project, matched by its SHA-256.
+- `--allow-write` lets the write methods change the project. It needs `--project`; without it the
+  server refuses to start with exit status 2. Writes go through the project's transactions, so a
+  failed write changes nothing.
 
 ## Framing
 
@@ -44,7 +52,7 @@ write addresses as hexadecimal strings.
 
 | Method | Parameters | Result |
 |---|---|---|
-| `hello` | none | `protocol` (`donkey.rpc.v1`), `tool`, `tool_version`, the implemented `methods`, the `not_implemented` names, and `writes` (`disabled`) |
+| `hello` | none | `protocol` (`donkey.rpc.v1`), `tool`, `tool_version`, the implemented `methods`, the `not_implemented` names (none now), and `writes` (`enabled` only with a project and `--allow-write`, otherwise `disabled`) |
 | `open` | `path` (string, required) | `path`, `format`, `architecture`, `bits`, `endian`, `file_size`, `sha256`, the counts of `sections` and `symbols`, and `partial` |
 | `info` | `limit` (1 to 100000, default 1000) | `format`, `architecture`, `bits`, `endian`, `image_base`, `entry_point` (or null), `sha256`, `partial`, `sections`, `symbols_total`, `symbols` (up to `limit`), and `diagnostics` |
 | `functions` | `limit` | `status` (`Complete` or `Partial`), `count`, `functions` (name, address, end_address or null, blocks, estimated, exported), and `diagnostics` |
@@ -52,15 +60,21 @@ write addresses as hexadecimal strings.
 | `xrefs` | `address` (optional), `limit` | `count` (matching xrefs, not capped by `limit`) and `xrefs` (from, to, kind). With `address`, only xrefs to that address |
 | `disasm` | `address` (required), `count` (1 to 4096, default 64) | `address` and `instructions` (address, bytes, length, mnemonic, operands, class, target or null), starting at the decoded instruction at `address` |
 | `callgraph` | `limit` | `edge_count`, `edges` (caller, callee, site), `unresolved` and `orphan_sites` |
+| `decompile` | `address` (required, the start of a function) | `address`, `name`, `partial`, `notes` (why the result is Partial, if it is), and `pseudocode`. Names come from the binary's debug information when it has any, as in `donkey-cli decompile` |
+| `annotations.list` | none; needs `--project` | `count` and `annotations` (kind, address, text) the project holds for the open binary |
+| `rename` | `address` (required), `text` (required; empty clears it) | `method`, `address`, `text`. Needs `--project` and `--allow-write` |
+| `comment` | `address` (required), `text` (required; empty clears it) | `method`, `address`, `text`. Needs `--project` and `--allow-write` |
+| `type.apply` | `address` (required), `type_id` (required, a whole number), `kind` (`prototype` by default, or `data`) | `method`, `address`, `type_id`, `kind`. The type must be in the project; a prototype must name a function type. Needs `--project` and `--allow-write` |
 
 Methods that need an open binary return `rpc.no_image` until `open` succeeds. `disasm` returns
-`rpc.not_found` when no decoded instruction starts at the address.
+`rpc.not_found` when no decoded instruction starts at the address. `decompile` returns
+`rpc.unknown_function` when no function starts at the address.
 
-### Not implemented
+### Writes
 
-- `decompile` and `annotations.list` return `rpc.not_implemented`.
-- `rename`, `comment` and `type.apply` return `rpc.write_disabled`. Writes need a project and an
-  explicit `--allow-write` flag, and neither exists yet. Nothing is written to any file.
+A write method is refused with `rpc.write_disabled` unless the server has a project and was started
+with `--allow-write`. The refusal says which of the two is missing. Writes are persisted to the
+project database at once; `donkey-cli project annotations <database> <image-id>` reads them back.
 
 ## Batch mode
 
@@ -88,10 +102,14 @@ are stable; the messages are for people and may change.
 | -32602 | `rpc.invalid_params` | A parameter is missing, has the wrong type, or is out of range |
 | -32000 | `rpc.open_failed` | The file could not be loaded. The message carries the loader's code |
 | -32001 | `rpc.no_image` | No binary is open |
-| -32002 | `rpc.not_implemented` | A planned method (see above) |
-| -32003 | `rpc.write_disabled` | A write method (see above) |
-| -32005 | `rpc.analysis_failed` | The analysis failed. The message carries its code |
+| -32002 | (retired) | Formerly `rpc.not_implemented`; no method returns it now |
+| -32003 | `rpc.write_disabled` | A write method was called without a project or without `--allow-write` |
+| -32004 | `rpc.unknown_function` | `decompile` found no function at the address |
+| -32005 | `rpc.analysis_failed` | The analysis, lift or format failed. The message carries its code |
 | -32006 | `rpc.not_found` | `disasm` found no decoded instruction at the address |
+| -32008 | `rpc.no_project` | `annotations.list` or a write method needs a project (`--project`) |
+| -32009 | `rpc.project_failed` | The project refused the read or the write. The message carries its code (for example `project.type_not_found`) |
+| -32010 | `rpc.image_not_in_project` | The open binary has not been saved in the project |
 
 ## Example
 
@@ -106,8 +124,9 @@ are stable; the messages are for people and may change.
 ```
 
 The notification (`hello` with no `id`) produces no line. The check that runs this session is
-`cmake/checks/check_serve.cmake` (CTest `cli.serve_session`). `cmake/checks/check_batch.cmake`
-(CTest `cli.batch_script`) checks batch mode.
+`cmake/checks/check_serve.cmake` (CTest `cli.serve_session`). `cmake/checks/check_serve_project.cmake`
+(CTest `cli.serve_project`) checks decompile, the project methods, persisted writes and the refusals.
+`cmake/checks/check_batch.cmake` (CTest `cli.batch_script`) checks batch mode.
 
 ## Limits and what is not covered
 
@@ -116,8 +135,8 @@ The notification (`hello` with no `id`) produces no line. The check that runs th
 - Lists are capped by `limit`; the caps are reported as counts where a count is cheap to give.
 - The JSON reader (`include/donkey/core/json.h`) rejects duplicate object keys and nesting deeper
   than 64. It is fuzzed (`fuzz_json`).
-- Not covered yet: `decompile`, `annotations.list`, write methods, `--allow-write`, and any
-  transport other than stdin/stdout.
+- The transport is stdin and stdout only. There is no network transport, and no authentication,
+  because the server runs with the caller's own rights on the caller's own files.
 
 ## Python client
 

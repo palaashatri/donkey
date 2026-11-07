@@ -75,7 +75,7 @@ expect_response("${output}"
 expect_response("${output}"
   "\"id\": null, \"error\": {\"code\": -32700" "\"donkey_code\": \"rpc.parse\"")
 expect_response("${output}"
-  "\"id\": 7, \"error\": {\"code\": -32002" "\"donkey_code\": \"rpc.not_implemented\"")
+  "\"id\": 7, \"error\": {\"code\": -32602" "\"donkey_code\": \"rpc.invalid_params\"")
 expect_response("${output}"
   "\"id\": 8, \"error\": {\"code\": -32003" "\"donkey_code\": \"rpc.write_disabled\"")
 expect_response("${output}"

@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","id":1,"method":"rename","params":{"address":"0x400109","text":"x"}}
+{"jsonrpc":"2.0","id":2,"method":"type.apply","params":{"address":"0x400100","type_id":-1}}
+not json
+{"jsonrpc":"2.0","method":"hello"}

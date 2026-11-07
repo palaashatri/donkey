@@ -215,6 +215,13 @@ add_test(NAME cli.serve_session
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
                  -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve.cmake)
 set_tests_properties(cli.serve_session PROPERTIES TIMEOUT 300)
+add_test(NAME cli.serve_project
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve_project.cmake)
+set_tests_properties(cli.serve_project PROPERTIES TIMEOUT 300)
 add_test(NAME cli.batch_script
          COMMAND ${CMAKE_COMMAND}
                  -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
