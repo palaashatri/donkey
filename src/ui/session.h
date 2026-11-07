@@ -3,12 +3,14 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
@@ -44,7 +46,14 @@ struct Annotations {
   /// parse_data_range_text). Changing either re-runs analysis (G12-T1).
   std::unordered_map<std::uint64_t, std::string> code_starts;
   std::unordered_map<std::uint64_t, std::string> data_ranges;
+  /// User names of locals (G12-T3), keyed by (function entry, local key; see LocalName).
+  std::map<std::pair<std::uint64_t, std::string>, std::string> local_names;
 
+  [[nodiscard]] const std::string* local_name_at(std::uint64_t function_address,
+                                                 const std::string& variable) const {
+    const auto it = local_names.find({function_address, variable});
+    return it == local_names.end() ? nullptr : &it->second;
+  }
   [[nodiscard]] const std::string* code_start_at(std::uint64_t address) const {
     const auto it = code_starts.find(address);
     return it == code_starts.end() ? nullptr : &it->second;
@@ -74,11 +83,15 @@ struct Annotations {
   }
 };
 
+/// One undoable edit. For a local name edit (`local` true) `address` is the function's entry and
+/// `variable` the local key; `kind` is then unused.
 struct AnnotationEdit {
   AnnotationKind kind = AnnotationKind::Rename;
   std::uint64_t address = 0;
   std::string old_text;
   std::string new_text;
+  bool local = false;
+  std::string variable;
 };
 
 /// Loads, analyses and persists files on a worker thread. The render thread
@@ -169,6 +182,13 @@ class Session {
   /// with no terminator unit within the scan. One call is one undo step.
   void define_string16(std::uint64_t address);
 
+  /// Name one local of the function at `function_address` (G12-T3). `variable` is a local key
+  /// ("arg:<index>" or "frame:<base>:<offset>"), `name` a C identifier that is not a keyword; an
+  /// empty name clears the name. An invalid key or name is refused with an error and nothing
+  /// changes. Names are display-only, so no analysis re-runs. One call is one undo step.
+  void set_local_name(std::uint64_t function_address, const std::string& variable,
+                      const std::string& name);
+
   /// True when a function-boundary edit is waiting for the worker to be free.
   [[nodiscard]] bool reanalysis_pending() const;
   /// Re-analyse the open document with the current function edits. Deferred
@@ -198,6 +218,8 @@ class Session {
   void fail(std::uint64_t generation, const std::string& message, const std::string& status);
   void publish_project(std::string path, std::int64_t image_id);
   void apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t address,
+                                    const std::string& text, bool record_undo);
+  void apply_local_name_edit_locked(std::uint64_t function_address, const std::string& variable,
                                     const std::string& text, bool record_undo);
 
   mutable std::mutex mutex_;

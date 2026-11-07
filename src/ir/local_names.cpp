@@ -110,6 +110,10 @@ bool parse_key(const std::string& variable, Key& key) {
 
 }  // namespace
 
+bool user_local_name_usable(const std::string& name) noexcept {
+  return is_c_identifier(name) && c_keywords().count(name) == 0;
+}
+
 Result<LocalNameResult> apply_user_local_names(IrFunction& function,
                                                const std::vector<UserLocalName>& names) {
   // Pass 1: check every name and key before anything changes.

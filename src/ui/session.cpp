@@ -1,6 +1,7 @@
 #include "session.h"
 
 #include "donkey/core/thread_priority.h"
+#include "donkey/ir/local_names.h"
 
 #include <algorithm>
 #include <chrono>
@@ -24,8 +25,12 @@ AnalysisOptions analysis_options() {
   return options;
 }
 
-std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& rows) {
+std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& rows,
+                                              const std::vector<LocalName>& local_names) {
   auto annotations = std::make_shared<Annotations>();
+  for (const LocalName& local : local_names) {
+    annotations->local_names[{local.function_address, local.variable}] = local.name;
+  }
   for (const Annotation& annotation : rows) {
     switch (annotation.kind) {
       case AnnotationKind::Rename:
@@ -149,6 +154,15 @@ std::vector<Annotation> rows_from(const Annotations& annotations) {
   }
   for (const auto& [address, text] : annotations.functions) {
     rows.push_back(Annotation{AnnotationKind::FunctionStart, address, text});
+  }
+  return rows;
+}
+
+std::vector<LocalName> local_names_from(const Annotations& annotations) {
+  std::vector<LocalName> rows;
+  rows.reserve(annotations.local_names.size());
+  for (const auto& [key, name] : annotations.local_names) {
+    rows.push_back(LocalName{key.first, key.second, name});
   }
   return rows;
 }
@@ -439,6 +453,7 @@ void Session::open_project(const std::string& path) {
     std::string image_path;
     std::int64_t image_id = 0;
     std::vector<Annotation> stored;
+    std::vector<LocalName> stored_local_names;
     std::string failure;
     std::string failure_status;
     {
@@ -470,6 +485,14 @@ void Session::open_project(const std::string& path) {
             failure_status = "Failed to read annotations";
           } else {
             stored = std::move(annotations.value());
+            auto local_names = project.value().local_names(image_id);
+            if (!local_names) {
+              failure =
+                  local_names.diagnostic().message + " [" + local_names.diagnostic().code + "]";
+              failure_status = "Failed to read local names";
+            } else {
+              stored_local_names = std::move(local_names.value());
+            }
           }
         }
       }
@@ -498,7 +521,7 @@ void Session::open_project(const std::string& path) {
            "Failed to load project image");
       return;
     }
-    auto annotations = annotations_from(stored);
+    auto annotations = annotations_from(stored, stored_local_names);
     AnalysisOptions options = analysis_options_for(*annotations);
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
@@ -586,7 +609,11 @@ void Session::save_project(const std::string& path) {
           failure = image_id.diagnostic().message + " [" + image_id.diagnostic().code + "]";
         } else {
           const std::vector<Annotation> rows = rows_from(*annotations);
+          const std::vector<LocalName> names = local_names_from(*annotations);
           auto replaced = project.value().replace_annotations(image_id.value(), rows);
+          if (replaced) {
+            replaced = project.value().replace_local_names(image_id.value(), names);
+          }
           if (!replaced) {
             failure = replaced.diagnostic().message + " [" + replaced.diagnostic().code + "]";
           } else {
@@ -781,6 +808,7 @@ void Session::restore_project(const std::string& backup_path) {
     std::string image_path;
     std::int64_t image_id = 0;
     std::vector<Annotation> stored;
+    std::vector<LocalName> stored_local_names;
     std::string failure;
     {
       auto project = Project::open(target_path);
@@ -801,12 +829,19 @@ void Session::restore_project(const std::string& backup_path) {
             failure = annotations.diagnostic().message + " [" + annotations.diagnostic().code + "]";
           } else {
             stored = std::move(annotations.value());
+            auto local_names = project.value().local_names(image_id);
+            if (!local_names) {
+              failure =
+                  local_names.diagnostic().message + " [" + local_names.diagnostic().code + "]";
+            } else {
+              stored_local_names = std::move(local_names.value());
+            }
           }
         }
       }
     }
 
-    auto annotations = annotations_from(stored);
+    auto annotations = annotations_from(stored, stored_local_names);
 
     {
       // A newer operation started after the commit owns the workspace; it
@@ -1030,7 +1065,12 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
   }
 
   if (record_undo) {
-    undo_stack_.push_back(AnnotationEdit{kind, address, old_text, text});
+    AnnotationEdit edit;
+    edit.kind = kind;
+    edit.address = address;
+    edit.old_text = old_text;
+    edit.new_text = text;
+    undo_stack_.push_back(std::move(edit));
     redo_stack_.clear();
   }
 
@@ -1043,6 +1083,51 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
   }
   annotations_ = std::move(next);
   dirty_ = true;
+}
+
+void Session::apply_local_name_edit_locked(std::uint64_t function_address,
+                                           const std::string& variable, const std::string& text,
+                                           bool record_undo) {
+  const std::string* current = annotations_->local_name_at(function_address, variable);
+  const std::string old_text = current != nullptr ? *current : std::string();
+  if (old_text == text) {
+    return;
+  }
+
+  if (record_undo) {
+    AnnotationEdit edit;
+    edit.address = function_address;
+    edit.old_text = old_text;
+    edit.new_text = text;
+    edit.local = true;
+    edit.variable = variable;
+    undo_stack_.push_back(std::move(edit));
+    redo_stack_.clear();
+  }
+
+  auto next = std::make_shared<Annotations>(*annotations_);
+  const auto key = std::make_pair(function_address, variable);
+  if (text.empty()) {
+    next->local_names.erase(key);
+  } else {
+    next->local_names[key] = text;
+  }
+  annotations_ = std::move(next);
+  dirty_ = true;
+}
+
+void Session::set_local_name(std::uint64_t function_address, const std::string& variable,
+                             const std::string& name) {
+  const bool key_ok = local_variable_key_valid(variable);
+  const bool name_ok = name.empty() || user_local_name_usable(name);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!key_ok || !name_ok) {
+    error_ =
+        "a local name must be a C identifier that is not a keyword, at most 128 bytes, and "
+        "its key must be arg:<index> or frame:<base register>:<offset>";
+    return;
+  }
+  apply_local_name_edit_locked(function_address, variable, name, true);
 }
 
 void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text) {
@@ -1198,6 +1283,11 @@ bool Session::undo() {
   }
   AnnotationEdit edit = std::move(undo_stack_.back());
   undo_stack_.pop_back();
+  if (edit.local) {
+    apply_local_name_edit_locked(edit.address, edit.variable, edit.old_text, false);
+    redo_stack_.push_back(std::move(edit));
+    return true;
+  }
   apply_annotation_edit_locked(edit.kind, edit.address, edit.old_text, false);
   const AnnotationKind kind = edit.kind;
   redo_stack_.push_back(std::move(edit));
@@ -1213,6 +1303,11 @@ bool Session::redo() {
   }
   AnnotationEdit edit = std::move(redo_stack_.back());
   redo_stack_.pop_back();
+  if (edit.local) {
+    apply_local_name_edit_locked(edit.address, edit.variable, edit.new_text, false);
+    undo_stack_.push_back(std::move(edit));
+    return true;
+  }
   apply_annotation_edit_locked(edit.kind, edit.address, edit.new_text, false);
   const AnnotationKind kind = edit.kind;
   undo_stack_.push_back(std::move(edit));

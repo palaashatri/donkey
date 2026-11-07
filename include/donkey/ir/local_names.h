@@ -30,6 +30,10 @@ struct LocalNameResult {
   std::size_t stale = 0;
 };
 
+/// True when `name` is a C identifier of at most 128 bytes that is not a C keyword: the names that
+/// apply_user_local_names accepts.
+[[nodiscard]] bool user_local_name_usable(const std::string& name) noexcept;
+
 /// Applies `names` to `function`. A frame slot that the function accesses but that has no local
 /// yet becomes one, with the width of its accesses, so the decompiler declares it. The whole set is
 /// refused, and the function is left as it was, when a name is not a C identifier or is a C

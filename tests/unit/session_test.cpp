@@ -1034,3 +1034,74 @@ TEST(Session, UndefineDeclaresInstructionBytesUndefinedAndClearsThem) {
   EXPECT_EQ(session.annotations()->data_range_at(0x40010b), nullptr);
   EXPECT_TRUE(session_has_instruction(session, 0x40010b));
 }
+
+// G12-T3: a local name is display-only and undoable. A keyword, a non-identifier or a malformed
+// key is refused with an error, and the names stay as they were.
+TEST(Session, LocalNamesSetUndoRedoAndRefuseBadEdits) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  const auto document_before = session.document();
+
+  session.set_local_name(0x400100, "arg:0", "count");
+  EXPECT_TRUE(session.dirty());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  // A name is display-only, so the analysis is not re-run and the document is the same object.
+  EXPECT_TRUE(session.document() == document_before);
+
+  session.set_local_name(0x400100, "arg:0", "int");
+  EXPECT_TRUE(session.take_error().has_value());
+  session.set_local_name(0x400100, "arg:0", "1count");
+  EXPECT_TRUE(session.take_error().has_value());
+  session.set_local_name(0x400100, "local:1", "x");
+  EXPECT_TRUE(session.take_error().has_value());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_EQ(session.annotations()->local_names.size(), 1U);
+
+  ASSERT_TRUE(session.undo());
+  EXPECT_EQ(session.annotations()->local_name_at(0x400100, "arg:0"), nullptr);
+  ASSERT_TRUE(session.redo());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_FALSE(session.redo());
+
+  // An empty name clears the name, and undo brings it back.
+  session.set_local_name(0x400100, "arg:0", "");
+  EXPECT_EQ(session.annotations()->local_name_at(0x400100, "arg:0"), nullptr);
+  ASSERT_TRUE(session.undo());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+}
+
+// G12-T3: local names are saved with the project and read back when it is opened.
+TEST(Session, LocalNamesSaveAndReopenWithTheProject) {
+  TempPath path("local-names");
+  create_project_with_annotations(path.str());
+
+  {
+    Session session;
+    session.open_project(path.str());
+    ASSERT_TRUE(wait_idle(session));
+    ASSERT_FALSE(session.take_error().has_value());
+    session.set_local_name(0x400100, "arg:0", "count");
+    session.set_local_name(0x400100, "frame:rbp:-8", "total");
+    session.save_project(path.str());
+    ASSERT_TRUE(wait_idle(session));
+    ASSERT_FALSE(session.take_error().has_value()) << "project save failed";
+    EXPECT_FALSE(session.dirty());
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto images = reopened.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  auto names = reopened.value().local_names(images.value().front().id);
+  ASSERT_TRUE(names.has_value());
+  EXPECT_EQ(names.value().size(), 2U);
+
+  Session session;
+  session.open_project(path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "frame:rbp:-8")), "total");
+}
