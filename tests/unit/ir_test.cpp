@@ -1107,7 +1107,11 @@ TEST(Ir, LiftsAArch64StraightLineFunction) {
   ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
   ASSERT_FALSE(analyzed.value().functions.empty()) << "no seeded function";
 
-  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  // The lifter's own output: the statement passes are tested separately.
+  donkey::LiftOptions lifter_only;
+  lifter_only.run_passes = false;
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front(),
+                                      lifter_only);
   ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   auto verified = donkey::verify_ir(lifted.value());
   ASSERT_TRUE(verified.has_value())
@@ -1174,7 +1178,10 @@ TEST(Ir, LiftsMachOArm64EntryPoint) {
 
   const donkey::Function* entry = function_at(analyzed.value(), 0x100000F00);
   ASSERT_NE(entry, nullptr);
-  auto lifted = donkey::lift_function(loaded.value().image, analyzed.value(), *entry);
+  donkey::LiftOptions
+      lifter_only;  // the lifter's own output: the statement passes are tested separately
+  lifter_only.run_passes = false;
+  auto lifted = donkey::lift_function(loaded.value().image, analyzed.value(), *entry, lifter_only);
   ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   auto verified = donkey::verify_ir(lifted.value());
   ASSERT_TRUE(verified.has_value())
@@ -3539,6 +3546,38 @@ TEST(Ir, X86ConditionalMoveOfADoubleWordZeroExtendsEvenWhenItFails) {
       {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, 0x48, 0x39, 0xf7, 0x0f, 0x4c, 0xc2, 0xc3}, f));
   EXPECT_EQ(run_x86_64(f, {5, 3, 7}), 0xffffffffULL);  // not less: eax kept, zero-extended
   EXPECT_EQ(run_x86_64(f, {1, 3, 7}), 7U);             // less: eax = edx
+}
+
+// G04-T2: copy propagation and removal of dead register writes.
+TEST(Ir, CopyPropagationReadsTheSourceAndDropsTheCopy) {
+  donkey::IrFunction f;  // mov rax, rdi; add rax, rsi; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0xc3}, f));
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rax = rdi + rsi;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("rax = rdi;"), std::string::npos) << text.value();
+  EXPECT_EQ(run_x86_64(f, {5, 7}), 12U);
+}
+
+TEST(Ir, DeadRegisterWriteIsRemoved) {
+  donkey::IrFunction f;  // mov rdx, rdi; mov rax, rsi; ret: rdx is never read
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xfa, 0x48, 0x89, 0xf0, 0xc3}, f));
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("rdx"), std::string::npos) << text.value();
+  // The return reads rsi directly, so the copy into rax is gone too.
+  EXPECT_NE(text.value().find("return rsi;"), std::string::npos) << text.value();
+  EXPECT_EQ(run_x86_64(f, {5, 7}), 7U);
+}
+
+// Windows x64 and x86-32 keep rsi and rdi across calls, so the epilogue's restore of rsi is not
+// a dead write even though nothing in the function reads it afterwards.
+TEST(Ir, CalleeSavedRsiWriteIsKeptAtReturn) {
+  donkey::IrFunction f;  // mov rsi, rdx; mov eax, 1; ret
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xd6, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rsi"), std::string::npos) << text.value();
 }
 
 }  // namespace

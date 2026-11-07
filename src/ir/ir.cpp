@@ -10,6 +10,7 @@
 
 #include "donkey/ir/abi.h"
 #include "ir_internal.h"
+#include "optimize.h"
 #include "registers.h"
 
 namespace donkey {
@@ -1670,6 +1671,25 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   recover_pointer_structs(function);
   if (options.after_pass) {
     options.after_pass("recover_pointer_structs", function);
+  }
+  // The statement passes run after the signature is inferred, so the parameters do not
+  // change when a read of an argument register is removed.
+  internal::propagate_copies(function);
+  if (options.after_pass) {
+    options.after_pass("propagate_copies", function);
+  }
+  internal::remove_dead_temporaries(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_temporaries", function);
+  }
+  internal::remove_dead_register_writes(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_register_writes", function);
+  }
+  // The register writes removed above can leave temporaries with no reader.
+  internal::remove_dead_temporaries(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_temporaries", function);
   }
 }
 

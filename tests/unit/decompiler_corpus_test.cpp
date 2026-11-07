@@ -773,6 +773,93 @@ TEST(DecompilerCorpus, StructLayoutRecoveredBehindAPointerArgument) {
 // on all corpus vectors and must give the same observation as the lifter's
 // output, Partial functions included. The test also checks that the hook saw
 // each pass, and that the pipeline matches what lift_function produces.
+// G04-T2 measurement: the total number of pseudocode statement lines across the corpus,
+// before and after the statement passes (the state after recover_pointer_structs is "before").
+// The statement passes must make it smaller at every level.
+TEST(DecompilerCorpus, StatementPassesShortenThePseudocode) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+
+    std::vector<std::size_t> before_lines;
+    std::vector<std::size_t> after_lines;
+    for (const CorpusFunction& entry : kCorpus) {
+      const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
+      ASSERT_NE(function, nullptr) << entry.name;
+      donkey::LiftOptions raw_options;
+      raw_options.run_passes = false;
+      auto raw =
+          donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+      ASSERT_TRUE(raw.has_value()) << entry.name;
+
+      donkey::PassOptions pass_options;
+      pass_options.architecture = loaded.value().image.architecture;
+      pass_options.format = loaded.value().image.format;
+      donkey::IrFunction before;
+      pass_options.after_pass = [&before](std::string_view pass, const donkey::IrFunction& after) {
+        if (pass == "recover_pointer_structs") {
+          before = after;
+        }
+      };
+      donkey::IrFunction piped = raw.value();
+      donkey::run_ir_passes(piped, pass_options);
+
+      // Statement lines: the lines of the body that hold a C statement. Headers, notes,
+      // labels and braces are not counted, so the measure does not depend on them.
+      const auto count_lines = [](const donkey::IrFunction& f) -> std::size_t {
+        auto text = donkey::format_pseudocode(f);
+        if (!text.has_value()) {
+          return 0;
+        }
+        std::size_t count = 0;
+        std::size_t start = 0;
+        const std::string& body = text.value();
+        while (start < body.size()) {
+          std::size_t end = body.find('\n', start);
+          if (end == std::string::npos) {
+            end = body.size();
+          }
+          const std::string_view line(body.data() + start, end - start);
+          const std::size_t first = line.find_first_not_of(' ');
+          if (first != std::string_view::npos && line.substr(first, 2) != "//" &&
+              line.find(';') != std::string_view::npos) {
+            ++count;
+          }
+          start = end + 1;
+        }
+        return count;
+      };
+      const std::size_t lines_before = count_lines(before);
+      const std::size_t lines_after = count_lines(piped);
+      if (lines_before == 0 || lines_after == 0) {
+        continue;  // the function does not render; the other tests report it
+      }
+      before_lines.push_back(lines_before);
+      after_lines.push_back(lines_after);
+    }
+    ASSERT_FALSE(before_lines.empty()) << library.level;
+    // The assertion is on the total over the corpus. A median over 59 functions moves only
+    // when half of them change, so it hid a drop of 54 lines at AArch64 O0.
+    std::size_t total_before = 0;
+    std::size_t total_after = 0;
+    for (const std::size_t lines : before_lines) {
+      total_before += lines;
+    }
+    for (const std::size_t lines : after_lines) {
+      total_after += lines;
+    }
+    std::printf(
+        "pseudocode statement lines, total over %zu functions at %s: before %zu, after %zu\n",
+        before_lines.size(), library.level, total_before, total_after);
+    EXPECT_LT(total_after, total_before) << library.level;
+  }
+}
+
 TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
 #if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
   GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
@@ -815,8 +902,10 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       for (const PassSnapshot& version : versions) {
         passes.push_back(version.pass);
       }
-      EXPECT_EQ(passes,
-                (std::vector<std::string>{"lift", "infer_signature", "recover_pointer_structs"}))
+      EXPECT_EQ(passes, (std::vector<std::string>{
+                            "lift", "infer_signature", "recover_pointer_structs",
+                            "propagate_copies", "remove_dead_temporaries",
+                            "remove_dead_register_writes", "remove_dead_temporaries"}))
           << library.level << " " << entry.name << ": the hook must see every pass, in order";
 
       auto production = donkey::lift_function(loaded.value().image, analysis.value(), *function);
