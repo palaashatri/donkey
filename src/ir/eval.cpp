@@ -15,6 +15,32 @@ std::uint64_t mask(std::uint8_t width) {
   return width >= 8 ? ~0ULL : ((1ULL << (width * 8U)) - 1U);
 }
 
+std::int64_t sign_extend(std::uint64_t value, std::uint8_t width);
+
+/// NZCV in bits 3 to 0 (N, Z, C, V), as AArch64 sets them after a - b (add
+/// false) or a + b (add true). C is the AArch64 carry: after a subtraction it is
+/// set when there is no borrow.
+std::uint8_t nzcv_of(bool add, std::uint64_t a, std::uint64_t b, std::uint8_t width) {
+  const std::uint64_t m = mask(width);
+  a &= m;
+  b &= m;
+  const std::uint64_t result = (add ? a + b : a - b) & m;
+  const bool n = ((result >> (width * 8U - 1U)) & 1U) != 0;
+  const bool z = result == 0;
+  bool c = false;
+  if (add) {
+    c = width >= 8 ? (a + b) < a : ((a + b) >> (width * 8U)) != 0;
+  } else {
+    c = a >= b;
+  }
+  const std::int64_t sa = sign_extend(a, width);
+  const std::int64_t sb = sign_extend(b, width);
+  const bool result_negative = sign_extend(result, width) < 0;
+  const bool v = add ? ((sa < 0) == (sb < 0)) && (result_negative != (sa < 0))
+                     : ((sa < 0) != (sb < 0)) && (result_negative != (sa < 0));
+  return static_cast<std::uint8_t>((n ? 8U : 0U) | (z ? 4U : 0U) | (c ? 2U : 0U) | (v ? 1U : 0U));
+}
+
 std::int64_t sign_extend(std::uint64_t value, std::uint8_t width) {
   if (width >= 8) {
     return static_cast<std::int64_t>(value);
@@ -327,7 +353,58 @@ class Machine {
     }
   }
 
+  /// Conditions over an explicit NZCV value (after a conditional compare). They
+  /// follow AArch64: C is the carry, so lo is C clear and hs is C set.
+  bool explicit_condition_holds(IrCondition condition) const {
+    const bool n = (nzcv_ & 8U) != 0;
+    const bool z = (nzcv_ & 4U) != 0;
+    const bool c = (nzcv_ & 2U) != 0;
+    const bool v = (nzcv_ & 1U) != 0;
+    switch (condition) {
+      case IrCondition::Equal:
+      case IrCondition::Zero:
+        return z;
+      case IrCondition::NotEqual:
+      case IrCondition::NonZero:
+        return !z;
+      case IrCondition::UnsignedLess:
+        return !c;
+      case IrCondition::UnsignedGreaterEqual:
+        return c;
+      case IrCondition::UnsignedGreater:
+        return c && !z;
+      case IrCondition::UnsignedLessEqual:
+        return !c || z;
+      case IrCondition::SignedLess:
+        return n != v;
+      case IrCondition::SignedGreaterEqual:
+        return n == v;
+      case IrCondition::SignedGreater:
+        return !z && n == v;
+      case IrCondition::SignedLessEqual:
+        return z || n != v;
+      case IrCondition::Negative:
+        return n;
+      case IrCondition::Positive:
+        return !n;
+      case IrCondition::Overflow:
+        return v;
+      case IrCondition::NoOverflow:
+        return !v;
+      case IrCondition::Carry:
+        return c;
+      case IrCondition::NoCarry:
+        return !c;
+      case IrCondition::None:
+        return false;
+    }
+    return false;
+  }
+
   bool condition_holds(IrCondition condition) const {
+    if (explicit_flags_) {
+      return explicit_condition_holds(condition);
+    }
     const std::uint8_t w = flags_width_ == 0 ? 8 : flags_width_;
     const std::uint64_t a = flags_a_ & mask(w);
     const std::uint64_t b = flags_b_ & mask(w);
@@ -337,12 +414,18 @@ class Machine {
       switch (condition) {
         case IrCondition::Equal:
         case IrCondition::Zero:
-        case IrCondition::UnsignedLessEqual:
           return r == 0;
         case IrCondition::NotEqual:
         case IrCondition::NonZero:
-        case IrCondition::UnsignedGreater:
           return r != 0;
+        // A logical test clears the carry on both ISAs, so the unsigned
+        // conditions depend on which ISA's meaning the IR condition has.
+        // x86 ja is CF clear and ZF clear; AArch64 hi is C set and Z clear.
+        case IrCondition::UnsignedGreater:
+          return aarch64_ ? false : r != 0;
+        // x86 jbe is CF or ZF; AArch64 ls is C clear or Z set.
+        case IrCondition::UnsignedLessEqual:
+          return aarch64_ ? true : r == 0;
         case IrCondition::Negative:
         case IrCondition::SignedLess:
           return sr < 0;
@@ -353,11 +436,15 @@ class Machine {
           return sr <= 0;
         case IrCondition::SignedGreater:
           return sr > 0;
+        // AArch64 lo is C clear; x86 jb is CF set.
         case IrCondition::UnsignedLess:
+          return aarch64_;
         case IrCondition::Carry:
         case IrCondition::Overflow:
           return false;  // logical ops clear carry and overflow
+        // AArch64 hs is C set; x86 jae is CF clear.
         case IrCondition::UnsignedGreaterEqual:
+          return !aarch64_;
         case IrCondition::NoCarry:
         case IrCondition::NoOverflow:
           return true;
@@ -516,6 +603,22 @@ class Machine {
               flags_b_ = *y;
               flags_width_ = s.a.width != 0 ? s.a.width : w;
               flags_test_ = s.op == IrOp::Test;
+              explicit_flags_ = false;
+            }
+            break;
+          }
+          case IrOp::CondCompare:
+          case IrOp::CondCompareAdd: {
+            // The condition is read from the flags before this statement.
+            const auto x = value_of(s.a);
+            const auto y = value_of(s.b);
+            ok = x.has_value() && y.has_value() && s.c.kind == IrOperandKind::Constant;
+            if (ok) {
+              const std::uint8_t width = s.width == 0 ? 8 : s.width;
+              nzcv_ = condition_holds(s.condition)
+                          ? nzcv_of(s.op == IrOp::CondCompareAdd, *x, *y, width)
+                          : static_cast<std::uint8_t>(s.c.constant & 0xFU);
+              explicit_flags_ = true;
             }
             break;
           }
@@ -665,6 +768,10 @@ class Machine {
   std::uint64_t flags_b_ = 0;
   std::uint8_t flags_width_ = 0;
   bool flags_test_ = false;
+  // Set by a conditional compare: the flags are then the NZCV value nzcv_, not
+  // the operands of a compare.
+  bool explicit_flags_ = false;
+  std::uint8_t nzcv_ = 0;
 };
 
 }  // namespace
