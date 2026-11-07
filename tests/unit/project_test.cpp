@@ -1483,11 +1483,14 @@ TEST(Types, DwarfStructsMatchTheirByteSize) {
   const donkey::TypeTable table = donkey::types_from_debug_info(info.value());
   const auto valid = table.validate();
   std::size_t checked = 0;
+  // Every struct and union the reader found, with its size, so that a failure says what was read.
+  std::string seen;
   for (const auto& [offset, source] : info.value().types) {
     if (source.kind != donkey::DebugTypeKind::Struct &&
         source.kind != donkey::DebugTypeKind::Union) {
       continue;
     }
+    seen += " " + source.name + "(" + std::to_string(source.byte_size) + ")";
     if (source.byte_size == 0) {
       continue;  // a declaration only: no size to compare
     }
@@ -1497,7 +1500,8 @@ TEST(Types, DwarfStructsMatchTheirByteSize) {
     EXPECT_EQ(size.value(), source.byte_size) << source.name;
     ++checked;
   }
-  EXPECT_GT(checked, 0U) << "the debuggee has structs to check";
+  EXPECT_GT(checked, 0U) << "the debuggee has structs to check; " << info.value().types.size()
+                         << " debug types were read; struct and union sizes seen:" << seen;
 }
 
 }  // namespace
