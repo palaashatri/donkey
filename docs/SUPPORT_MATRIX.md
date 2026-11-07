@@ -212,6 +212,9 @@ compare, because GCC's table code overwrites `x0`.
   blocks (G02-T4).
 - Memory forms of `bt`, `bts`, `btr` and `btc`: the bit can lie outside the
   operand, so they are Unsupported.
+- Carry out of `adc`/`sbb` is not modelled, so `adc; adc` chains stay Partial. An `adc`/`sbb`
+  after an instruction that emitted Unsupported is not lifted with the earlier carry (G02-T1).
+  AArch64 `adc`/`sbc`/`cmn` are not lifted.
 - Flags read across basic blocks, except into a fall-through block with one
   predecessor: there the cmp or test that set them is repeated (G02-T4 on x86-64,
   G03-T4 on AArch64). Any other flag writer is not repeated, so a branch on its

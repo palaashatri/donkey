@@ -2149,6 +2149,7 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       }
 
       const auto flags_before = lifter.flags_state;
+      const std::size_t statements_before = out_block.statements.size();
       bool keeps_flags = preserves_flags(mnemonic);
       if (is_scalar_sse(mnemonic)) {
         if (!lifter.lift_scalar_sse(out_block, instruction)) {
@@ -2222,7 +2223,14 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         lifter.unsupported(out_block, instruction);
         keeps_flags = false;
       }
-      if (!keeps_flags) {
+      // An instruction that emitted Unsupported may have written the flags, whatever its mnemonic
+      // says, so their state is unknown after it. A later carry is then not read across it.
+      bool emitted_unsupported = false;
+      for (std::size_t s = statements_before; s < out_block.statements.size(); ++s) {
+        emitted_unsupported =
+            emitted_unsupported || out_block.statements[s].op == IrOp::Unsupported;
+      }
+      if (!keeps_flags || emitted_unsupported) {
         lifter.flags_state = Lifter::FlagsState::Unknown;
       } else if (preserves_flags(mnemonic)) {
         lifter.flags_state = flags_before;

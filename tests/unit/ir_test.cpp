@@ -2689,6 +2689,23 @@ TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
   }
 }
 
+TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedMove) {
+  // cmp rdi, rsi; mov r8w, 1; adc rdx, rcx; mov rax, rdx; ret
+  // The 16-bit move to r8w has no IR width, so it is Unsupported and may have written the flags.
+  // The flags are then unknown, so the adc is not lifted with the compare's carry: the function is
+  // partial. Before this rule the adc was lifted, and the verifier rejected the whole function.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x48, 0x39, 0xf7, 0x66, 0x41, 0xb8, 0x01, 0x00, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3},
+      f));
+  EXPECT_TRUE(f.partial);
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      EXPECT_NE(statement.op, donkey::IrOp::AddCarry);
+    }
+  }
+}
+
 TEST(Ir, X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature) {
   // mov rax, rdi; mov edx, 0; div rsi; ret: the divisor is rsi, the second argument.
   // (mov, not xor, for rdx: an xor reads its register and would add rdx as an input.)
