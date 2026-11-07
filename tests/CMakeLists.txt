@@ -138,6 +138,7 @@ add_executable(donkey_unit_tests
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
+  unit/decode_isa_test.cpp
   unit/foundation_test.cpp
   unit/json_test.cpp
   unit/graph_layout_test.cpp

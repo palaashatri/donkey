@@ -54,7 +54,8 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | x86-64 | yes | yes | integer subset and scalar SSE (`ss`/`sd`): see the corpora below | yes, absolute and PC-relative tables, including `sub`-based bounds checks | Linux, Windows |
 | x86-32 | yes | yes | smaller subset (cdecl stack arguments are not recovered) | yes | no |
 | AArch64 | yes | yes, with ADRP folding | integer subset and scalar floating point (`s` and `d` registers): see the corpora below | yes for the GCC and Clang forms; other shapes are reported as unresolved indirect branches | Linux |
-| 32-bit ARM, RISC-V | decode or none | partial | Unsupported (reported, never guessed) | no | no |
+| 32-bit ARM (A32 only) | yes, little-endian; matches llvm-objdump on the test image (55 instructions). Thumb is not decoded or detected, so Thumb code is read as A32 and gives wrong results | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
+| RISC-V 64 (RV64GC) | yes, little-endian; matches llvm-objdump on the test image (56 instructions, compressed included) | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
 
 ## Decompiler corpus
 

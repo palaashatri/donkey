@@ -1,8 +1,10 @@
 #include "donkey/decode/decode.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
+#include <string>
 #include <utility>
 
 #include <capstone/capstone.h>
@@ -11,6 +13,16 @@
 
 namespace donkey {
 namespace {
+
+// The RISC-V branches and jumps whose target is an offset from the instruction (`jal`, `j`, the
+// conditional branches and their compressed forms). `jalr` and `c.jr` are indirect.
+bool is_direct_riscv_branch(const std::string& mnemonic) {
+  static const std::array<const char*, 14> kDirect = {"j",      "c.j",    "jal",  "c.jal", "beq",
+                                                      "bne",    "blt",    "bge",  "bltu",  "bgeu",
+                                                      "c.beqz", "c.bnez", "beqz", "bnez"};
+  return std::find_if(kDirect.begin(), kDirect.end(),
+                      [&mnemonic](const char* name) { return mnemonic == name; }) != kDirect.end();
+}
 
 bool is_conditional_jump(Architecture architecture, const std::string& mnemonic) {
   if (architecture == Architecture::X86 || architecture == Architecture::X86_64) {
@@ -24,6 +36,31 @@ bool is_conditional_jump(Architecture architecture, const std::string& mnemonic)
       return true;
     }
     return mnemonic == "cbz" || mnemonic == "cbnz" || mnemonic == "tbz" || mnemonic == "tbnz";
+  }
+  if (architecture == Architecture::Arm) {
+    // A32: `b`, `bl` and `bx` are unconditional. A condition code after the `b` makes the branch
+    // conditional (`beq`, `blt`, `bhi`), and so does one after the link bit (`bleq`). The suffix
+    // is tested whole first: `lt` is a condition, not a link bit followed by `t`.
+    static const std::array<const char*, 14> kConditions = {
+        "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le"};
+    if (mnemonic.empty() || mnemonic.front() != 'b') {
+      return false;
+    }
+    const auto is_condition = [](const std::string& suffix) {
+      return std::find_if(kConditions.begin(), kConditions.end(), [&suffix](const char* condition) {
+               return suffix == condition;
+             }) != kConditions.end();
+    };
+    const std::string rest = mnemonic.substr(1);
+    if (is_condition(rest)) {
+      return true;
+    }
+    return rest.size() > 1 && rest.front() == 'l' && is_condition(rest.substr(1));
+  }
+  if (architecture == Architecture::RiscV64) {
+    // The conditional branches of the base and compressed sets.
+    return mnemonic == "beq" || mnemonic == "bne" || mnemonic == "blt" || mnemonic == "bge" ||
+           mnemonic == "bltu" || mnemonic == "bgeu" || mnemonic == "c.beqz" || mnemonic == "c.bnez";
   }
   return false;
 }
@@ -91,6 +128,24 @@ Result<Decoder> Decoder::create(Architecture architecture, Endian endian) {
     case Architecture::AArch64:
       capstone_arch = CS_ARCH_ARM64;
       mode = CS_MODE_ARM;
+      break;
+    case Architecture::Arm:
+      // A32 only: Thumb code would decode as garbage, so Thumb is not decoded (see the docs).
+      if (endian == Endian::Big) {
+        return make_error<Decoder>(Status::Unsupported, "decode.big_endian_arm",
+                                   "big-endian ARM images are not decoded");
+      }
+      capstone_arch = CS_ARCH_ARM;
+      mode = CS_MODE_ARM;
+      break;
+    case Architecture::RiscV64:
+      // With the compressed set, so the 16-bit instructions compilers emit by default decode too.
+      if (endian == Endian::Big) {
+        return make_error<Decoder>(Status::Unsupported, "decode.big_endian_riscv",
+                                   "big-endian RISC-V images are not decoded");
+      }
+      capstone_arch = CS_ARCH_RISCV;
+      mode = static_cast<cs_mode>(CS_MODE_RISCV64 | CS_MODE_RISCVC);
       break;
     default:
       return make_error<Decoder>(Status::Unsupported, "decode.unsupported_architecture",
@@ -183,6 +238,27 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
       const cs_x86_op& operand = instruction->detail->x86.operands[0];
       if (operand.type == X86_OP_IMM) {
         result.direct_target = static_cast<std::uint64_t>(operand.imm);
+      }
+    } else if (impl_->architecture == Architecture::Arm && instruction->detail != nullptr &&
+               instruction->detail->arm.op_count > 0) {
+      // A32 branches take their target as the immediate operand (`b #0x...`).
+      for (int i = instruction->detail->arm.op_count - 1; i >= 0; --i) {
+        const cs_arm_op& operand = instruction->detail->arm.operands[i];
+        if (operand.type == ARM_OP_IMM) {
+          result.direct_target = static_cast<std::uint64_t>(operand.imm);
+          break;
+        }
+      }
+    } else if (impl_->architecture == Architecture::RiscV64 && instruction->detail != nullptr &&
+               instruction->detail->riscv.op_count > 0 && is_direct_riscv_branch(result.mnemonic)) {
+      // RISC-V gives a branch's immediate as an offset from the instruction, not an address.
+      // Only the direct forms have one: `jalr` takes its immediate from a register.
+      for (int i = instruction->detail->riscv.op_count - 1; i >= 0; --i) {
+        const cs_riscv_op& operand = instruction->detail->riscv.operands[i];
+        if (operand.type == RISCV_OP_IMM) {
+          result.direct_target = instruction->address + static_cast<std::uint64_t>(operand.imm);
+          break;
+        }
       }
     } else if (impl_->architecture == Architecture::AArch64 && instruction->detail != nullptr &&
                instruction->detail->arm64.op_count > 0) {
