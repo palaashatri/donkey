@@ -47,6 +47,13 @@ else()
   target_compile_options(donkey_test_debuggee PRIVATE -O0 -g -fno-omit-frame-pointer)
   target_compile_options(donkey_test_module PRIVATE -O0 -g -fno-omit-frame-pointer)
 endif()
+# On macOS the linker leaves the DWARF of an image in its object files. dsymutil gathers it into a
+# .dSYM bundle, which the debug-name tests read; the image itself has no .debug_info section.
+if(APPLE)
+  add_custom_command(TARGET donkey_test_module POST_BUILD
+                     COMMAND dsymutil $<TARGET_FILE:donkey_test_module>
+                     VERBATIM)
+endif()
 target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 # Functions described by DW_AT_ranges (GCC hot/cold splitting at -O2).
 if(NOT MSVC)

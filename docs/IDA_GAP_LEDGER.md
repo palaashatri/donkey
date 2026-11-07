@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | No `bsf`/`bsr`; flags do not cross blocks. `adc`/`sbb` done in G02-T1, double-width `mul`/`div` in G02-T2, and `bt`/`bts`/`btr`/`btc`, `popcnt`, `tzcnt`, `lzcnt`, `bswap` and `movbe` (register forms) in G02-T3, which is partial | P0 | IN PROGRESS (G02-T1, T2 DONE; T3 partial, bsf/bsr open; T4 TODO) |
 | G03 | AArch64 integer gaps | Full | `ccmp`/`ccmn` are done in G03-T1, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`cls`/`rbit`/`rev*`, `extr`, `bfi`/`bfxil` in G03-T2, `adc`/`sbc`/`adds`/`cmn` in G03-T4, jump tables (GCC and Clang forms) in G03-T3, and the widening multiplies (`umull`/`smull`/`umaddl` and the rest) in G03-T2. `adcs`/`sbcs` and cross-block flags into single-predecessor fall-through blocks (G03-T4 follow-up) | P0 | DONE (G03-T1 to T4; the Partial functions left in the corpus are FP and SIMD, owned by G01 and G08) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form not done; break, continue and integer negation done; T4 TODO) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases are merged (G04-T1); copy propagation and dead-code removal (G04-T2), without SSA or memory forwarding; no `for` loops | P0 | IN PROGRESS (G04-T0, T1 and T2 DONE; T3 PARTIAL, `for` form not done; break, continue and integer negation done; T4 PARTIAL, register parameters named, stack slots not) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
 | G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
@@ -769,6 +769,20 @@ for Partial functions.
   `src/binary/dwarf.cpp` and `include/donkey/binary/debug_info.h`. Names are
   display-only; user renames (G12) always win.
 - **Done when:** a test on the `-g` debuggee shows the real parameter names.
+- **Status:** PARTIAL. Done: a function's parameters that arrive in registers take the
+  names of the debug information's parameters, in order. `apply_debug_parameter_names`
+  (`include/donkey/ir/debug_names.h`, `src/ir/debug_names.cpp`) applies them only when the
+  counts match, every debug parameter is a scalar of the size and class of the register the
+  function reads, and the names are distinct C identifiers; a structure or array passed by
+  value is refused, because it cannot be matched by position. It renames the parameters and
+  the pointer structures that refer to them, and it changes no type or statement. Evidence:
+  `DecompilerCorpus.ParameterNamesComeFromTheDebugInformation`, which shows `u32 value` for
+  `donkey_module_answer` in the `-g -O0` module fixture, and a refusal case. Not done: stack
+  slots. At `-O0` the argument is stored to a frame slot (`*(u32 *)(rsp - 0x4) = rdi`), and
+  the slot keeps its address form, because the reader records only static (`DW_OP_addr`)
+  locations and not `DW_OP_fbreg` ones; the frame-local names are not recovered. The
+  decompiler also spells integer types by width (`u32`), not by their C names; the name is
+  the debug information's and the type spelling is the decompiler's.
 
 ### G05 Type system and user types
 
