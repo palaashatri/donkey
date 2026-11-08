@@ -2573,6 +2573,20 @@ TEST(Ir, StatementBudgetKeepsEveryBlockTerminated) {
   EXPECT_EQ(statements.back().op, donkey::IrOp::Return);
 }
 
+TEST(Ir, X86ReturnIsDeterminedWhenOnePathWritesFourBytes) {
+  // test rsi, rsi; je zero; mov rax, rdi; jmp done; zero: mov eax, 0; done: ret
+  // The 4-byte write zero-extends into rax, so both paths define the returned register and the
+  // function is Complete. Before this rule the widths 4 and 8 at the join made the return unknown.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x85, 0xf6, 0x74, 0x05, 0x48, 0x89, 0xf8, 0xeb, 0x05, 0xb8,
+                               0x00, 0x00, 0x00, 0x00, 0xc3},
+                              f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_TRUE(donkey::verify_ir(f).has_value());
+  EXPECT_EQ(run_x86_64(f, {5, 1}), 5U);
+  EXPECT_EQ(run_x86_64(f, {5, 0}), 0U);
+}
+
 TEST(Ir, X86DivideFaultsWhereTheHardwareDivideErrors) {
   // mov rax, rdi; xor edx, edx; div rsi; ret
   donkey::IrFunction quotient;

@@ -1743,8 +1743,18 @@ ReturnDefinition join(const ReturnDefinition& a, const ReturnDefinition& b) {
     return a;
   }
   ReturnDefinition out = a;
-  if (a.unknown || b.unknown || a.float_value != b.float_value || a.width != b.width) {
+  if (a.unknown || b.unknown || a.float_value != b.float_value) {
     out.unknown = true;
+  } else if (a.width != b.width) {
+    // A 4-byte integer write zero-extends into the whole register on x86-64 and AArch64, so it
+    // defines the return value as an 8-byte write does: `mov eax, 0` on one path and `mov rax,
+    // rdx` on the other return the full register. A narrower write keeps the other bytes, and a
+    // floating-point width is part of the value's type, so those widths must match.
+    if (a.float_value || a.width < 4 || b.width < 4) {
+      out.unknown = true;
+    } else {
+      out.width = a.width > b.width ? a.width : b.width;
+    }
   }
   return out;
 }
