@@ -2439,6 +2439,140 @@ TEST(Ir, VerifierRejectsAMemoryDivisorOfTheWrongWidth) {
   EXPECT_EQ(rejected.diagnostic().code, "ir.type_width_mismatch");
 }
 
+TEST(Ir, VerifierRejectsAConstantWiderThanTheStatement) {
+  // A constant with bits above the statement width cannot be read at that width. The rule covers
+  // a high multiply's second source and every source of a divide; a constant that fits is valid.
+  const auto verify_one = [](donkey::IrStatement statement) {
+    donkey::IrBlock block;
+    block.statements.push_back(std::move(statement));
+    donkey::IrStatement ret;
+    ret.op = donkey::IrOp::Return;
+    ret.a = donkey::IrOperand::register_ref("rax", 4);
+    ret.width = 4;
+    block.statements.push_back(ret);
+    donkey::IrFunction function;
+    function.name = "constant_source";
+    function.blocks.push_back(std::move(block));
+    return donkey::verify_ir(function);
+  };
+
+  donkey::IrStatement high;
+  high.op = donkey::IrOp::MulHighUnsigned;
+  high.dest = donkey::IrOperand::register_ref("rax", 4);
+  high.a = donkey::IrOperand::register_ref("rdx", 4);
+  high.width = 4;
+  high.b = donkey::IrOperand::constant_value(0x100000000ULL, 4);
+  const auto wide_multiplier = verify_one(high);
+  ASSERT_FALSE(wide_multiplier.has_value());
+  EXPECT_EQ(wide_multiplier.diagnostic().code, "ir.type_width_mismatch");
+  high.b = donkey::IrOperand::constant_value(0xffffffffULL, 4);
+  EXPECT_TRUE(verify_one(high).has_value());
+
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 4);
+  divide.a = donkey::IrOperand::register_ref("rdx", 4);
+  divide.b = donkey::IrOperand::register_ref("rax", 4);
+  divide.width = 4;
+  divide.c = donkey::IrOperand::constant_value(0x100000000ULL, 4);
+  const auto wide_divisor = verify_one(divide);
+  ASSERT_FALSE(wide_divisor.has_value());
+  EXPECT_EQ(wide_divisor.diagnostic().code, "ir.type_width_mismatch");
+  divide.c = donkey::IrOperand::constant_value(0xffffffffULL, 4);
+  EXPECT_TRUE(verify_one(divide).has_value());
+
+  divide.c = donkey::IrOperand::register_ref("rcx", 4);
+  divide.a = donkey::IrOperand::constant_value(0x100000000ULL, 4);
+  const auto wide_dividend = verify_one(divide);
+  ASSERT_FALSE(wide_dividend.has_value());
+  EXPECT_EQ(wide_dividend.diagnostic().code, "ir.type_width_mismatch");
+}
+
+TEST(Ir, PointerRecoveryCountsAMemoryDivisor) {
+  // mov rax, [rdi]; div qword [rdi + 8]: the divisor is the only access at offset 8, so the layout
+  // is inferred only if recovery visits the divisor as well as the other operands.
+  donkey::IrFunction function;
+  function.name = "divide_by_field";
+  function.parameters.push_back(donkey::IrParameter{"a0", 8, "rdi", false, std::string()});
+  donkey::IrBlock block;
+  donkey::IrStatement load;
+  load.op = donkey::IrOp::Assign;
+  load.dest = donkey::IrOperand::register_ref("rax", 8);
+  load.a = donkey::IrOperand::memory_reference("rdi", "", 1, 0, 8);
+  load.width = 8;
+  block.statements.push_back(load);
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.c = donkey::IrOperand::memory_reference("rdi", "", 1, 8, 8);
+  divide.width = 8;
+  block.statements.push_back(divide);
+  block.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(block));
+
+  donkey::recover_pointer_structs(function);
+  ASSERT_EQ(function.pointer_structs.size(), 1U);
+  const auto& fields = function.pointer_structs.front().fields;
+  ASSERT_EQ(fields.size(), 2U);
+  EXPECT_EQ(fields[0].offset, 0);
+  EXPECT_EQ(fields[1].offset, 8);
+  EXPECT_EQ(fields[1].width, 8);
+}
+
+TEST(Ir, StackRecoveryCountsAMemoryDivisor) {
+  // div dword [ebp - 8]: the only use of the local at -8 is the divisor, so it is recovered only if
+  // recovery inspects the divisor as well as the other operands.
+  donkey::IrFunction function;
+  function.name = "divide_by_local";
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("eax", 4);
+  divide.a = donkey::IrOperand::register_ref("edx", 4);
+  divide.b = donkey::IrOperand::register_ref("eax", 4);
+  divide.c = donkey::IrOperand::memory_reference("ebp", "", 1, -8, 4);
+  divide.width = 4;
+  block.statements.push_back(divide);
+  block.statements.push_back(return_statement());
+  function.blocks.push_back(std::move(block));
+
+  donkey::recover_stack_variables(function);
+  ASSERT_EQ(function.local_variables.size(), 1U);
+  EXPECT_EQ(function.local_variables[0].name, "local_8");
+  EXPECT_EQ(function.local_variables[0].offset, -8);
+}
+
+TEST(Ir, StatementBudgetKeepsEveryBlockTerminated) {
+  // mov rax, rdi; xor edx, edx; div rsi; ret. A budget of two statements is spent before the
+  // return. The return is still emitted, so the block is terminated, and the function is partial.
+  const std::vector<std::uint8_t> raw = {0x48, 0x89, 0xf8, 0x31, 0xd2, 0x48, 0xf7, 0xf6, 0xc3};
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value());
+  ASSERT_FALSE(analyzed.value().functions.empty());
+
+  donkey::LiftOptions options;
+  options.max_statements = 2;
+  auto lifted =
+      donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front(), options);
+  ASSERT_TRUE(lifted.has_value());
+  EXPECT_TRUE(lifted.value().partial);
+  const auto verified = donkey::verify_ir(lifted.value());
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
+  ASSERT_FALSE(lifted.value().blocks.empty());
+  const auto& statements = lifted.value().blocks.back().statements;
+  ASSERT_FALSE(statements.empty());
+  EXPECT_EQ(statements.back().op, donkey::IrOp::Return);
+}
+
 TEST(Ir, X86DivideFaultsWhereTheHardwareDivideErrors) {
   // mov rax, rdi; xor edx, edx; div rsi; ret
   donkey::IrFunction quotient;

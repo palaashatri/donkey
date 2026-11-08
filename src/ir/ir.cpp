@@ -500,6 +500,13 @@ class Renderer {
   const IrFunction& function_;
 };
 
+/// A constant operand whose value has bits above the statement width, which the statement
+/// could not read at that width. Widths of 8 bytes or more have no such bits.
+bool constant_wider_than(const IrOperand& operand, std::uint8_t width) {
+  return operand.kind == IrOperandKind::Constant && width < 8 &&
+         (operand.constant >> (8U * width)) != 0;
+}
+
 }  // namespace
 
 namespace detail {
@@ -922,7 +929,9 @@ Result<bool> verify_ir(const IrFunction& function) {
               statement.a.width != statement.dest.width ||
               ((statement.b.kind == IrOperandKind::Register ||
                 statement.b.kind == IrOperandKind::Memory) &&
-               statement.b.width != statement.dest.width)) {
+               statement.b.width != statement.dest.width) ||
+              constant_wider_than(statement.a, statement.width) ||
+              constant_wider_than(statement.b, statement.width)) {
             return fail("ir.type_width_mismatch",
                         "high multiply operand widths must match statement width");
           }
@@ -939,15 +948,16 @@ Result<bool> verify_ir(const IrFunction& function) {
             return fail("ir.malformed_divide",
                         "divide needs a register destination and a 2-part dividend and divisor");
           }
-          // A constant divisor must fit the statement width. Register and memory divisors must
-          // have that width, since the evaluator reads them at it.
+          // Register and memory divisors must have the statement width, since the evaluator reads
+          // them at it. A constant source must fit that width, so no bits are dropped unnoticed.
           if (statement.dest.width != statement.width || statement.a.width != statement.width ||
               statement.b.width != statement.width ||
               ((statement.c.kind == IrOperandKind::Register ||
                 statement.c.kind == IrOperandKind::Memory) &&
                statement.c.width != statement.width) ||
-              (statement.c.kind == IrOperandKind::Constant && statement.width < 8 &&
-               (statement.c.constant >> (8U * statement.width)) != 0)) {
+              constant_wider_than(statement.a, statement.width) ||
+              constant_wider_than(statement.b, statement.width) ||
+              constant_wider_than(statement.c, statement.width)) {
             return fail("ir.type_width_mismatch",
                         "divide operand widths must match statement width");
           }
