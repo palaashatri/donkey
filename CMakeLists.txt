@@ -210,6 +210,7 @@ donkey_apply_warnings(donkey_plugin)
 # thread. It has no SDL or ImGui dependency, so it is built headless and is
 # covered by the unit tests even when the desktop shell is disabled.
 add_library(donkey_session STATIC
+  src/ui/names.cpp
   src/ui/session.cpp
 )
 add_library(donkey::session ALIAS donkey_session)

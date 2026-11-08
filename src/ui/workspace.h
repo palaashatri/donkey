@@ -101,6 +101,8 @@ struct UiState {
   std::string string_filter;
   /// The Classes panel filter (G10-T4).
   std::string class_filter;
+  /// Readable names of the symbols the views show (G10-T4), cached by raw name.
+  std::unordered_map<std::string, std::string> readable_names;
   std::string xref_filter;
   std::string disassembly_filter;
   bool show_hex_bytes = true;
@@ -274,6 +276,8 @@ class Workspace {
 
   /// Resolve a "Go to" query: a hex address (0x optional) or a function,
   /// symbol or user-renamed name. Returns 0 when nothing matches.
+  /// The name a view shows for the function at `address` (G10-T4), or empty.
+  [[nodiscard]] std::string function_name_shown(std::uint64_t address);
   [[nodiscard]] std::uint64_t resolve_location(const std::string& query) const;
 
  private:

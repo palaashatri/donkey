@@ -573,6 +573,19 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_function_name") {
+    // assert_function_name ADDRESS|NAME TEXT: the views show TEXT for that function (G10-T4).
+    // TEXT is the rest of the line, so it may contain spaces.
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    const std::string got = address != 0 ? workspace.function_name_shown(address) : std::string();
+    if (address == 0 || got != want) {
+      fail(c, "the views show '" + got + "' for " + location + ", wanted '" + want + "'");
+    }
+    return true;
+  }
   if (c.name == "assert_focus") {
     ImGuiWindow* nav = GImGui->NavWindow;
     if (!name_matches(nav != nullptr ? nav->Name : nullptr, c.rest)) {

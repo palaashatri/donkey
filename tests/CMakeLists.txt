@@ -516,6 +516,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   # are the ones the fixture declares. The fixture exists only where the RTTI test builds it.
   if(TARGET donkey_test_hierarchy)
     donkey_ui_script(classes FILE $<TARGET_FILE:donkey_test_hierarchy>)
+    donkey_ui_script(readable_names FILE $<TARGET_FILE:donkey_test_hierarchy>)
   endif()
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)

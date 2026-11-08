@@ -5,6 +5,9 @@
 
 namespace donkey::ui::views {
 
+/// The name a view shows for a function: the user's rename as typed, otherwise the demangled form
+/// of its symbol (G10-T4). The raw symbol is what a tooltip shows when the two differ.
+[[nodiscard]] std::string shown_function_name(UiState& state, const Function& function);
 void overview(const Document& document, UiState& state);
 void sections(const Document& document, UiState& state);
 void functions(const Document& document, UiState& state);

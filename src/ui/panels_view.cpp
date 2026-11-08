@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "components.h"
+#include "names.h"
 #include "views.h"
 
 #include "donkey/binary/image.h"
@@ -144,13 +145,28 @@ const Function* function_containing(const Document& document, std::uint64_t addr
   return best;
 }
 
-std::string function_label(const Document& document, std::uint64_t address) {
+std::string function_label(UiState& state, const Document& document, std::uint64_t address) {
   for (const Function& function : document.analysis.functions) {
     if (function.address == address) {
-      return function.name;
+      return shown_function_name(state, function);
     }
   }
   return components::format_address(address);
+}
+
+/// After a function's Selectable: its raw symbol in a tooltip when the readable name differs.
+void raw_name_tooltip(UiState& state, const Document& document, std::uint64_t address) {
+  if (!ImGui::IsItemHovered()) {
+    return;
+  }
+  for (const Function& function : document.analysis.functions) {
+    if (function.address == address) {
+      if (shown_function_name(state, function) != function.name) {
+        ImGui::SetTooltip("%s", function.name.c_str());
+      }
+      return;
+    }
+  }
 }
 
 /// Callers and callees of the selected function, from the call graph.
@@ -167,18 +183,23 @@ void call_graph_panel(const Document& document, UiState& state) {
   for (const auto& site : graph.unresolved) {
     indirect += site.caller == function->address ? 1 : 0;
   }
-  ImGui::TextDisabled("%s: calls %zu, called by %zu%s", function->name.c_str(), callees.size(),
+  const std::string shown = shown_function_name(state, *function);
+  ImGui::TextDisabled("%s: calls %zu, called by %zu%s", shown.c_str(), callees.size(),
                       callers.size(),
                       indirect != 0 ? (", " + std::to_string(indirect) + " indirect").c_str() : "");
+  if (ImGui::IsItemHovered() && shown != function->name) {
+    ImGui::SetTooltip("%s", function->name.c_str());
+  }
   if (ImGui::BeginChild("##calls", ImVec2(0.0f, 0.0f))) {
     if (ImGui::TreeNodeEx("Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
       for (const CallGraphEdge& edge : callees) {
         ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
-        const std::string label = function_label(document, edge.callee) + "  (at " +
+        const std::string label = function_label(state, document, edge.callee) + "  (at " +
                                   components::format_address(edge.site) + ")";
         if (ImGui::Selectable(label.c_str())) {
           state.navigate_to(edge.callee, &document);
         }
+        raw_name_tooltip(state, document, edge.callee);
         ImGui::PopID();
       }
       ImGui::TreePop();
@@ -186,11 +207,12 @@ void call_graph_panel(const Document& document, UiState& state) {
     if (ImGui::TreeNodeEx("Called by", ImGuiTreeNodeFlags_DefaultOpen)) {
       for (const CallGraphEdge& edge : callers) {
         ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
-        const std::string label = function_label(document, edge.caller) + "  (at " +
+        const std::string label = function_label(state, document, edge.caller) + "  (at " +
                                   components::format_address(edge.site) + ")";
         if (ImGui::Selectable(label.c_str())) {
           state.navigate_to(edge.site, &document);
         }
+        raw_name_tooltip(state, document, edge.caller);
         ImGui::PopID();
       }
       ImGui::TreePop();
@@ -200,6 +222,15 @@ void call_graph_panel(const Document& document, UiState& state) {
 }
 
 }  // namespace
+
+std::string shown_function_name(UiState& state, const Function& function) {
+  const std::string* renamed =
+      state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
+  if (renamed != nullptr) {
+    return *renamed;  // a user's name is shown as typed
+  }
+  return cached_readable_name(state.readable_names, function.name);
+}
 
 void functions(const Document& document, UiState& state) {
   components::search_field("##functionfilter", state.function_filter, "Filter functions");
@@ -222,8 +253,9 @@ void functions(const Document& document, UiState& state) {
   for (const Function& function : document.analysis.functions) {
     const std::string* renamed =
         state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
-    const std::string display = renamed != nullptr ? *renamed : function.name;
-    if (!matches(display, state.function_filter)) {
+    const std::string display = shown_function_name(state, function);
+    if (!matches(display, state.function_filter) &&
+        !matches(function.name, state.function_filter)) {
       continue;
     }
     ImGui::TableNextRow();
@@ -238,7 +270,7 @@ void functions(const Document& document, UiState& state) {
         state.annotation_kind = AnnotationKind::Rename;
         state.annotation_address = function.address;
         std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
-                      display.c_str());
+                      (renamed != nullptr ? *renamed : function.name).c_str());
         state.annotation_modal_requested = true;
       }
       const std::string* comment =
@@ -256,7 +288,9 @@ void functions(const Document& document, UiState& state) {
     ImGui::TextUnformatted(display.c_str());
     const DebugFunction* debug =
         document.debug_info ? document.debug_info->function_at(function.address) : nullptr;
-    if (debug != nullptr && ImGui::IsItemHovered()) {
+    if (debug == nullptr && display != function.name && ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", function.name.c_str());
+    } else if (debug != nullptr && ImGui::IsItemHovered()) {
       std::string tip = document.debug_info->prototype(*debug);
       if (!debug->file.empty()) {
         tip += "\n" + debug->file + ":" + std::to_string(debug->line);
@@ -596,6 +630,9 @@ void classes(const Document& document, UiState& state) {
     if (ImGui::Selectable(label.c_str(), state.selected_address == address,
                           ImGuiSelectableFlags_SpanAllColumns)) {
       state.navigate_to(address, &document);
+    }
+    if (ImGui::IsItemHovered() && !cls.typeinfo_symbol.empty()) {
+      ImGui::SetTooltip("%s", cls.typeinfo_symbol.c_str());
     }
     ImGui::TableSetColumnIndex(1);
     ImGui::TextUnformatted(rtti_kind_name(cls.kind));

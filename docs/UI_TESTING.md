@@ -36,6 +36,7 @@ xvfb-run -a build/dev-linux/apps/donkey/donkey --renderer software \
 | `display_dpi_device` | M10, A22 | Display-scale changes rebuild style and font scale (2.0, 1.25, 1.0); a window left where no display is gets moved back when a display is removed; a lost graphics device is recreated (twice) with both Dear ImGui backends, and drawing continues. Runs on the software renderer and on the default renderer (SDL_GPU where available). |
 | `layout_save` + `layout_restore` | A22 | A panel undocked in one run is still floating in the next: the dock layout persists in the per-user preference directory (or `--config-dir`). |
 | `classes` | G10-T4 | The Classes window lists the hierarchy fixture's RTTI (passed as FILE): each class's direct bases in declaration order (`assert_rtti_class`, `assert_rtti_bases`; a mutated expectation fails the script). |
+| `readable_names` | G10-T4 | Function names are shown readable (`_ZN5ShapeD2Ev` as `Shape::~Shape()`, `main` as `main`) through `assert_function_name`, which reads the text the Functions list and the other views draw with. |
 | `responsiveness` | DESIGN §12.2 | With 8 background analysis threads, input-to-frame p95 ≤ 50 ms. |
 | `screenshots` | docs | Captures `docs/images/screenshots/` from the demo program (`tests/fixtures/demo/demo.c`): workspace, jump-table switch, DWARF prototype, component gallery and, where a native debugger exists, a breakpoint stop. Files go to `$DONKEY_SCREENSHOT_DIR` as BMP; `tools/screenshots_to_png.py` converts them. The `package` workflow's manual run commits every platform's set. |
 

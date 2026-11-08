@@ -1,0 +1,13 @@
+# G10-T4: the Functions panel shows a C++ function by its demangled name. The fixture
+# (tests/fixtures/rtti/hierarchy.cpp, built as donkey_test_hierarchy) defines _ZN5ShapeD2Ev, the
+# destructor of Shape, which the demangler reads as Shape::~Shape(). A plain C name is shown as it is,
+# and the raw symbol is still what a "Go to" finds. The panel's text is read through the same helper
+# the panel draws with, so the assertion checks what is shown.
+wait_idle
+frames 5
+assert_no_error
+
+assert_function_name _ZN5ShapeD2Ev Shape::~Shape()
+assert_function_name main main
+assert_function_name 0x118a Shape::~Shape()
+assert_no_error

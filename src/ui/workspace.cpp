@@ -551,6 +551,19 @@ bool Workspace::debug_stopped_for_testing() const {
          state_.debug_controller->snapshot().state == debug::SessionState::Stopped;
 }
 
+std::string Workspace::function_name_shown(std::uint64_t address) {
+  const auto document = session_.document();
+  if (!document) {
+    return {};
+  }
+  for (const Function& function : document->analysis.functions) {
+    if (function.address == address) {
+      return views::shown_function_name(state_, function);
+    }
+  }
+  return {};
+}
+
 std::uint64_t Workspace::resolve_location(const std::string& query) const {
   std::string text = query;
   while (!text.empty() && (text.back() == ' ' || text.back() == '\t')) {
