@@ -19,12 +19,18 @@ std::string fixture(const std::string& name) {
   return std::string(DONKEY_FIXTURE_DIR) + "/" + name;
 }
 
+// Reads a fixture in chunks. An istreambuf_iterator read trips a GCC -O3 null-dereference
+// diagnostic inside libstdc++, which the Release build treats as an error.
 std::vector<std::byte> read_fixture(const std::string& name) {
   std::ifstream file(fixture(name), std::ios::binary);
-  const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-  std::vector<std::byte> bytes(text.size());
-  for (std::size_t i = 0; i < text.size(); ++i) {
-    bytes[i] = static_cast<std::byte>(text[i]);
+  std::vector<std::byte> bytes;
+  char buffer[4096];
+  while (file) {
+    file.read(buffer, sizeof(buffer));
+    const auto count = static_cast<std::size_t>(file.gcount());
+    for (std::size_t i = 0; i < count; ++i) {
+      bytes.push_back(static_cast<std::byte>(buffer[i]));
+    }
   }
   return bytes;
 }

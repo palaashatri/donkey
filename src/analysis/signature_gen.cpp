@@ -18,7 +18,6 @@ namespace {
 constexpr std::uint64_t kSectionHeaderSize = 64;  // Elf64_Shdr
 constexpr std::uint64_t kSymbolSize = 24;         // Elf64_Sym
 constexpr std::uint64_t kRelaSize = 24;           // Elf64_Rela
-constexpr std::uint64_t kMaxSections = 65536;
 constexpr std::uint64_t kMaxSymbols = 1'000'000;
 constexpr std::uint64_t kMaxRelocations = 1'000'000;
 constexpr std::uint64_t kMaxFunctionBytes = std::uint64_t{16} << 20;  // the signature length limit
@@ -189,9 +188,7 @@ Result<bool> object_signatures(std::span<const std::byte> bytes, SignatureGenRes
     return make_error<bool>(Status::InvalidInput, "sig.truncated",
                             "the section header size is not 64 bytes");
   }
-  if (shnum.value() > kMaxSections) {
-    return make_error<bool>(Status::ResourceLimit, "sig.limit", "too many sections");
-  }
+  // A section count is 16 bits, so it is at most 65535; the table must also fit in the file.
   const std::uint64_t table_size = std::uint64_t{shnum.value()} * kSectionHeaderSize;
   if (shoff.value() > bytes.size() || table_size > bytes.size() - shoff.value()) {
     return make_error<bool>(Status::InvalidInput, "sig.truncated",
