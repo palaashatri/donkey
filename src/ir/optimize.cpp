@@ -424,4 +424,80 @@ void remove_dead_register_writes(IrFunction& function) {
   }
 }
 
+namespace {
+
+/// The live-in set of every block, by iteration to a fixed point over the successors.
+std::vector<Live> live_in_sets(const IrFunction& function) {
+  const std::size_t count = function.blocks.size();
+  std::vector<std::vector<std::size_t>> successors(count);
+  for (std::size_t b = 0; b < count; ++b) {
+    successors[b] = successors_of(function, b);
+  }
+  std::vector<Live> live_in(count);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t b = count; b-- > 0;) {
+      Live live_out;
+      for (const std::size_t next : successors[b]) {
+        live_out.unite(live_in[next]);
+      }
+      Live updated = walk_block(function.blocks[b], live_out, nullptr);
+      if (!(updated == live_in[b])) {
+        live_in[b] = updated;
+        changed = true;
+      }
+    }
+  }
+  return live_in;
+}
+
+/// The register family a plain register write names, when it is not a temporary.
+bool is_named_register(const IrOperand& operand) {
+  return operand.kind == IrOperandKind::Register && !operand.reg.empty() &&
+         !is_temporary(operand.reg);
+}
+
+}  // namespace
+
+void forward_compare_loads(IrFunction& function) {
+  // A compiler without optimisation loads a counter into a register and compares the register:
+  //   rax = *(u32 *)(rbp - 8); flags = (u32)rax >= *(u32 *)(rbp - 0x1c); if (...) goto exit;
+  // The compare can read the memory itself, because nothing runs between the load and the
+  // compare, so the register is not needed when the compare reads it and the register is dead
+  // after the compare. The load is then removed. Only that shape is rewritten.
+  const std::vector<Live> live_in = live_in_sets(function);
+  const std::size_t count = function.blocks.size();
+  for (std::size_t b = 0; b < count; ++b) {
+    IrBlock& block = function.blocks[b];
+    for (std::size_t i = 0; i + 1 < block.statements.size(); ++i) {
+      const IrStatement& load = block.statements[i];
+      const IrStatement& compare = block.statements[i + 1];
+      if ((load.op != IrOp::Assign && load.op != IrOp::Load) || !is_named_register(load.dest) ||
+          load.a.kind != IrOperandKind::Memory || load.dest.width != load.a.width ||
+          compare.op != IrOp::Compare || compare.a.kind != IrOperandKind::Register ||
+          family(compare.a.reg) != family(load.dest.reg) || compare.a.width != load.dest.width) {
+        continue;
+      }
+      const std::string name = family(load.dest.reg);
+      if (compare.b.kind == IrOperandKind::Register && family(compare.b.reg) == name) {
+        continue;  // the compare reads the register twice
+      }
+      // The register must be dead after the compare: live_out of the block, through the tail.
+      Live live;
+      for (const std::size_t next : successors_of(function, b)) {
+        live.unite(live_in[next]);
+      }
+      IrBlock tail;
+      tail.statements.assign(block.statements.begin() + static_cast<std::ptrdiff_t>(i + 2),
+                             block.statements.end());
+      if (walk_block(tail, live, nullptr).contains(name)) {
+        continue;
+      }
+      block.statements[i + 1].a = load.a;
+      block.statements.erase(block.statements.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+  }
+}
+
 }  // namespace donkey::internal

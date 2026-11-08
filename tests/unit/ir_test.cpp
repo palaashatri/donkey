@@ -2573,6 +2573,91 @@ TEST(Ir, StatementBudgetKeepsEveryBlockTerminated) {
   EXPECT_EQ(statements.back().op, donkey::IrOp::Return);
 }
 
+TEST(Ir, StructuresRotatedLoopAsWhile) {
+  // xor eax, eax; xor ecx, ecx; jmp test; body: add eax, ecx; inc ecx; test: cmp ecx, edi;
+  // jl body; ret. The compiler put the test after the body, so the lifted blocks are
+  // [entry, body, test, return] and the arrangement pass swaps the body and the test.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x31, 0xc0, 0x31, 0xc9, 0xeb, 0x04, 0x01, 0xc8, 0xff, 0xc1, 0x39, 0xf9, 0x7c, 0xf8, 0xc3},
+      function));
+  EXPECT_FALSE(function.partial);
+  // The rearranged blocks compute the same thing: 0 + 1 + 2 + 3 + 4 for an argument of 5.
+  EXPECT_EQ(run_x86_64(function, {5}), 10U);
+  EXPECT_EQ(run_x86_64(function, {0}), 0U);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("while ("), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto "), std::string::npos) << text.value();
+}
+
+namespace {
+
+// A function of three blocks: the entry loads [rbp - 8] into eax, compares it with 5 and
+// branches to block 2 when it is less; blocks 1 and 2 return the register `returned`.
+donkey::IrFunction load_compare_branch(const std::string& returned) {
+  donkey::IrFunction function;
+  donkey::IrBlock entry;
+  donkey::IrStatement load;
+  load.op = donkey::IrOp::Assign;
+  load.dest = donkey::IrOperand::register_ref("rax", 4);
+  load.a = donkey::IrOperand::memory_reference("rbp", "", 1, -8, 4);
+  load.width = 4;
+  entry.statements.push_back(load);
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::Compare;
+  compare.a = donkey::IrOperand::register_ref("rax", 4);
+  compare.b = donkey::IrOperand::constant_value(5, 4);
+  compare.condition = donkey::IrCondition::SignedLess;
+  compare.width = 4;
+  entry.statements.push_back(compare);
+  donkey::IrStatement branch;
+  branch.op = donkey::IrOp::CondBranch;
+  branch.condition = donkey::IrCondition::SignedLess;
+  branch.b = donkey::IrOperand::block_ref(2);
+  branch.width = 4;
+  entry.statements.push_back(branch);
+  function.blocks.push_back(entry);
+  for (int i = 0; i < 2; ++i) {
+    donkey::IrBlock block;
+    donkey::IrStatement ret;
+    ret.op = donkey::IrOp::Return;
+    ret.a = donkey::IrOperand::register_ref(returned, 8);
+    ret.width = 8;
+    block.statements.push_back(ret);
+    function.blocks.push_back(block);
+  }
+  return function;
+}
+
+}  // namespace
+
+TEST(Ir, ACompareReadsTheMemoryOfALoadThatNothingElseReads) {
+  // The exit returns rbx, so rax is dead after the compare: the compare reads the memory and the
+  // load is removed. The statements are exact: the value compared is the one the load read.
+  donkey::IrFunction function = load_compare_branch("rbx");
+  donkey::PassOptions options;
+  options.architecture = donkey::Architecture::X86_64;
+  donkey::run_ir_passes(function, options);
+  const auto& statements = function.blocks.front().statements;
+  ASSERT_EQ(statements.size(), 2U);
+  EXPECT_EQ(statements[0].op, donkey::IrOp::Compare);
+  EXPECT_EQ(statements[0].a.kind, donkey::IrOperandKind::Memory);
+  EXPECT_EQ(statements[1].op, donkey::IrOp::CondBranch);
+}
+
+TEST(Ir, ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare) {
+  // The block that returns rax reads it after the compare, so the load must stay.
+  donkey::IrFunction function = load_compare_branch("rax");
+  donkey::PassOptions options;
+  options.architecture = donkey::Architecture::X86_64;
+  donkey::run_ir_passes(function, options);
+  const auto& statements = function.blocks.front().statements;
+  ASSERT_EQ(statements.size(), 3U);
+  EXPECT_EQ(statements[0].op, donkey::IrOp::Assign);
+  EXPECT_EQ(statements[1].a.kind, donkey::IrOperandKind::Register);
+}
+
 TEST(Ir, X86ReturnIsDeterminedWhenOnePathWritesFourBytes) {
   // test rsi, rsi; je zero; mov rax, rdi; jmp done; zero: mov eax, 0; done: ret
   // The 4-byte write zero-extends into rax, so both paths define the returned register and the

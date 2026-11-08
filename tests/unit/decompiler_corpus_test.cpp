@@ -918,10 +918,11 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       for (const PassSnapshot& version : versions) {
         passes.push_back(version.pass);
       }
-      EXPECT_EQ(passes, (std::vector<std::string>{
-                            "lift", "infer_signature", "recover_pointer_structs",
-                            "propagate_copies", "remove_dead_temporaries",
-                            "remove_dead_register_writes", "remove_dead_temporaries"}))
+      EXPECT_EQ(passes,
+                (std::vector<std::string>{"lift", "infer_signature", "recover_pointer_structs",
+                                          "propagate_copies", "remove_dead_temporaries",
+                                          "remove_dead_register_writes", "remove_dead_temporaries",
+                                          "forward_compare_loads", "arrange_loop_tests"}))
           << library.level << " " << entry.name << ": the hook must see every pass, in order";
 
       auto production = donkey::lift_function(loaded.value().image, analysis.value(), *function);

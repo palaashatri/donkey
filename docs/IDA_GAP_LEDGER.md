@@ -798,6 +798,19 @@ for Partial functions.
   it into `for (init; cond; step)` would move the step in front of the test, and that is
   only equal when the loop is entered with the test true, which needs a proof from the
   entry guard.
+  A loop compiled with its test after its body and entered by a jump to the test
+  (GCC and Clang at -O0) is now laid out with the test first and printed as a `while`: the
+  pass `arrange_loop_tests` swaps the two blocks, negates the test and renumbers the
+  references, which is exact, and `forward_compare_loads` reads a counter that a compare
+  takes straight from memory when nothing else reads the register. `c_sum_array` at -O0
+  prints `while (*(u32 *)(rbp - 0x8) < *(u32 *)(rbp - 0x1c)) { ... }` with no labels.
+  Evidence: `Ir.StructuresRotatedLoopAsWhile` (its result is checked by the interpreter),
+  `Ir.ACompareReadsTheMemoryOfALoadThatNothingElseReads`,
+  `Ir.ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare`, and
+  `DecompilerCorpus.EveryPassPreservesSemantics` with the two passes in its list. Still not
+  done, so the task stays PARTIAL: no corpus loop prints as `for`. The -O0 counters are stack
+  slots, which the `for` planner does not recognise (its init and step must be register
+  assignments, and the step is three statements), and the -O2 loops are guarded do-while loops.
   Step 2 is done for `break`. A branch from a loop body to the loop's exit prints
   `break;`, and the body's exit is the one the loop's own test leaves to, with the blocks
   the header dominates below it included (so a `break` block that no path back to the
