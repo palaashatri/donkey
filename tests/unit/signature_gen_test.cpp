@@ -56,9 +56,10 @@ donkey::SignatureGenOptions library_options() {
 }  // namespace
 
 // The fixture library is sig/gen/sigfuncs.c built with -ffunction-sections into an object and an
-// archive (sig/gen/PROVENANCE.md). Its global functions are sig_add, sig_mul, sig_lookup and
-// sig_call_external. sig_local is static, and sig_table is data: neither may be named.
-TEST(SignatureGen, NamesTheGlobalFunctionsOfAnArchiveAndNoLocalOne) {
+// archive (sig/gen/PROVENANCE.md). Its functions are sig_add, sig_mul, sig_lookup and
+// sig_call_external (global) and sig_local (static, named too: a static body that is byte-identical
+// to a global one is then ambiguous, not named after the global). sig_table is data: not named.
+TEST(SignatureGen, NamesTheFunctionsOfAnArchiveIncludingTheStaticOnes) {
   const std::vector<std::byte> archive = read_fixture("sig/gen/libsigfuncs.a");
   auto generated = donkey::generate_signatures(archive, library_options());
   ASSERT_TRUE(generated.has_value()) << generated.diagnostic().code;
@@ -67,9 +68,9 @@ TEST(SignatureGen, NamesTheGlobalFunctionsOfAnArchiveAndNoLocalOne) {
   for (const donkey::Signature& signature : result.set.signatures) {
     names.insert(signature.name);
   }
-  EXPECT_EQ(names,
-            (std::set<std::string>{"sig_add", "sig_mul", "sig_lookup", "sig_call_external"}));
-  EXPECT_EQ(result.functions, 4U);
+  EXPECT_EQ(names, (std::set<std::string>{"sig_add", "sig_mul", "sig_lookup", "sig_call_external",
+                                          "sig_local"}));
+  EXPECT_EQ(result.functions, 5U);
   EXPECT_EQ(result.skipped, 0U);
   EXPECT_FALSE(result.partial);
   EXPECT_TRUE(result.notes.empty());
@@ -171,8 +172,9 @@ TEST(SignatureGen, AMatchInTheLinkedProgramNamesTheLibraryFunctionsAndNoOther) {
   for (const auto& [address, name] : named) {
     names.insert(name);
   }
-  EXPECT_EQ(names,
-            (std::set<std::string>{"sig_add", "sig_mul", "sig_lookup", "sig_call_external"}));
+  // sig_local is linked in and called, so the static copy is named too.
+  EXPECT_EQ(names, (std::set<std::string>{"sig_add", "sig_mul", "sig_lookup", "sig_call_external",
+                                          "sig_local"}));
   for (const donkey::Symbol& symbol : program.value().image.symbols) {
     if (symbol.name == "sig_external" || symbol.name == "_start") {
       EXPECT_EQ(named.count(symbol.address), 0U) << symbol.name;

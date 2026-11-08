@@ -236,9 +236,9 @@ compare, because GCC's table code overwrites `x0`.
 
 | Capability | Status | Evidence |
 |---|---|---|
-| Generate a set from x86-64 ELF relocatable objects and static archives (`donkey-cli sig make`) | Done for global and weak functions with a size. Local functions, shared objects, PE import libraries and AArch64 are not read | `SignatureGen.*`, `cli.sig_make_*`, `fuzz_sig_object` |
-| Match a set against a binary (`identify_functions`) | Library API only: no CLI command matches a set yet | `Signatures.*`, `SignatureGen.AMatchInTheLinkedProgram*` |
-| Shipped signature sets | None. Nothing is named from signatures unless a user loads a set | — |
+| Generate a set from x86-64 ELF relocatable objects and static archives (`donkey-cli sig make`) | Done for functions with a size, global, weak and local. Shared objects, PE import libraries and AArch64 are not read | `SignatureGen.*`, `cli.sig_make_*`, `fuzz_sig_object` |
+| Match a set against a binary (`identify_functions`, `identify_at_starts`) | Library API only: no CLI command matches a set yet. Byte-identical aliases are reported ambiguous and named nothing | `Signatures.*`, `SignatureGen.AMatchInTheLinkedProgram*` |
+| Shipped signature sets | musl 1.2.4 (`signatures/musl-1.2.4.json`, MIT). On a static musl program, 34 of 67 known functions are named, 28 are ambiguous aliases, 5 are not matched, and none is named wrongly | `Signatures.IdentifyMuslFunctionsInAStaticBinary` |
 
 ## Automation
 

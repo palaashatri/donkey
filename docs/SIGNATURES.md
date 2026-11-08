@@ -1,12 +1,14 @@
 # Library function signatures (G09)
 
-Status: **G09-T1 partial, G09-T2 partial.** The format, the reader and writer, and the matcher are
-implemented and tested (`include/donkey/analysis/signatures.h`, `src/analysis/signatures.cpp`). The
-generator (G09-T2, `include/donkey/analysis/signature_gen.h`, `src/analysis/signature_gen.cpp`,
-`donkey-cli sig make`) makes a set from x86-64 ELF relocatable objects and static archives. Not yet:
-shared objects, PE import libraries, an AArch64 generator, a CLI command that matches a set against a
-binary, and any shipped signature set (G09-T3, which needs licence review of each library first). No
-signature set is shipped with Donkey, and nothing is named from signatures unless a user loads one.
+Status: **G09-T1 partial, G09-T2 partial, G09-T3 partial.** The format, the reader and writer, and the
+matcher are implemented and tested (`include/donkey/analysis/signatures.h`,
+`src/analysis/signatures.cpp`). The generator (G09-T2, `include/donkey/analysis/signature_gen.h`,
+`src/analysis/signature_gen.cpp`, `donkey-cli sig make`) makes a set from x86-64 ELF relocatable objects
+and static archives. One set is shipped: musl 1.2.4 (`signatures/musl-1.2.4.json`, MIT), identified in a
+static program by `Signatures.IdentifyMuslFunctionsInAStaticBinary`; see "Shipped set: musl 1.2.4".
+Not yet: shared objects, PE import libraries, an AArch64 generator, a CLI command that matches a set
+against a binary, the other libraries of the plan (compiler-rt, libc++, MinGW CRT, FreeBSD libc), and the
+owner's decision on the naming bar (see below). Nothing is named from signatures unless a user loads a set.
 
 ## The format: `donkey.signatures.v1`
 
@@ -75,10 +77,13 @@ The input is an ELF relocatable object (`.o`, x86-64, 64-bit little-endian) or a
 relocatable members are read one by one. The file is read as the compiler wrote it. It is not laid out
 or relocated, and nothing is run.
 
-- **Which functions:** the global and weak `FUNC` symbols that have a size and are in an executable
-  section. Local (`static`) functions are not named, because one name can be defined in several members.
-  An alias (two names for one body) gives two signatures with identical bytes, which the matcher reports
-  as ambiguous and names nothing.
+- **Which functions:** the `FUNC` symbols that have a size and are in an executable section, global,
+  weak and local (`static`) alike. An alias (two names for one body, in the same or in another member)
+  gives two signatures with identical bytes, which the matcher reports as ambiguous and names nothing.
+  Local functions are included because a static body that is byte-identical to a global one would
+  otherwise be named after the global, which is a wrong name for the linked binary; with both in the
+  set the two are ambiguous instead. This reversed the first design, which named only global functions
+  (see Verification).
 - **Wildcards:** each relocation in a function's section that patches bytes inside the function makes
   a wildcard of the width its type patches (for example 4 bytes for `R_X86_64_PLT32`, 8 for
   `R_X86_64_64`). Overlapping wildcards are merged.
@@ -96,9 +101,52 @@ Tests: `SignatureGen.*` (ten tests) and `cli.sig_make_*` (two) on a fixture libr
 `tests/fixtures/sig/gen/PROVENANCE.md`). They check the names, the lengths against the object's own
 symbol sizes, the wildcard offsets against `readelf -r`, a match of the library's functions in a program
 that links it (with no other name), the refusals, and a function with an unknown relocation type.
-Mutations checked: ignoring the relocations fails three tests, including the linked-program match, and
-naming local functions fails two. `fuzz_sig_object` checks that every accepted set meets the format and
+Mutations checked: ignoring the relocations fails three tests, including the linked-program match.
+Dropping the local functions from the set (the first design) fails `Signatures.IdentifyMuslFunctionsInAStaticBinary`
+with two wrong names (`0x401700` named `__libc_malloc_impl`, which is the body of the static
+`__simple_malloc`, and `0x4051b0` named `__syscall_cp_c`, the body of the static `sccp`), and restoring the
+local functions passes it again. `fuzz_sig_object` checks that every accepted set meets the format and
 reads back to the same text.
+
+## Two ways to match
+
+- `identify_functions` takes each function's start and end from the caller (the analysis). A signature
+  is compared only with a function of its own length.
+- `identify_at_starts` takes candidate starts only. Each start is compared with every distinct signature
+  length, and the longest length whose signatures match is reported, with that length in
+  `SignatureMatch::length`. The extents are not needed, because each signature carries its length.
+  The cost is at most starts x distinct lengths comparisons. A start that the user named is skipped.
+
+## Shipped set: musl 1.2.4 (G09-T3)
+
+`signatures/musl-1.2.4.json` is generated by `donkey-cli sig make` from the `libc.a` of the Ubuntu 24.04
+`musl-dev` package (1.2.4-2), a MIT-licensed library. It has 2,096 signatures, 1,653 of them with
+wildcards, and no skipped function. Its provenance and hashes are in `signatures/PROVENANCE.md`.
+
+The test program is `tests/fixtures/sig/musl/sig_musl.c`, linked statically against musl and stripped.
+`symbols.txt` lists the symbols of the unstripped build. The test finds the functions with the analysis,
+gives every 16-byte boundary in an executable section as a candidate start, and compares the names with
+the symbols. Measured on the fixture, with 67 known functions (the symbols the set has a signature for):
+
+| Outcome | Functions |
+|---|---|
+| Named, and correct | 34 |
+| Ambiguous (byte-identical alias of another library function; named nothing) | 28 |
+| No signature matched | 5 |
+| Named wrongly | 0 |
+
+The ledger asks for at least 90 % of the known functions named. That is not reached, and it cannot be
+reached by a rule that is sound here: under the ambiguity rule above, a function with a byte-identical
+alias is never named, and 28 of the 67 have one (for example `strtol` and `strtoll`, whose signatures match
+the same bytes). The owner decides whether a byte-identical alias may be named after one of its
+names, or whether 90 % identified (named or flagged ambiguous, 62 of 67 here) is the bar. The test
+asserts the properties that hold: no wrong name, at least 90 % identified, and at least half named.
+
+Two of the five unmatched functions were checked byte by byte: `__init_libc` and `__init_ssp` match
+their signature's prefix, and the bytes differ in the tail, outside the wildcards. That fits a linker
+relaxation (for example GOTPCRELX, which rewrites `mov` to `lea`) that the generator does not mask.
+The other three are not examined yet. A missed name is the safe direction, and the gap is in the
+generator's wildcards, not in the matcher.
 
 ## Limits
 
@@ -106,8 +154,9 @@ reads back to the same text.
   change in a matching function. A function that differs in any other byte is not identified, which
   is the safe direction: a missed name is better than a wrong one. The generator (G09-T2) will read the
   relocations to find them.
-- **The matcher is a scan over functions in the analysis.** It does not search for code that the
-  analysis did not find as a function.
+- **The start mode looks only at candidate starts** (the analysis's functions and each 16-byte boundary
+  in an executable section). Code that starts at another offset is not searched; a byte-by-byte scan
+  would cost one comparison per byte and is not done.
 - **The CRC covers the whole tail.** A signature cannot match a function that is the same code with a
   different length or a different ending.
 - **Only the names in the set are known.** A set from one library does not say what other code is
@@ -116,11 +165,13 @@ reads back to the same text.
 
 ## Verification
 
-- `Signatures.*` (nine unit tests): the CRC check value; a function matches its own signature with the
+- `Signatures.*` (thirteen unit tests): the CRC check value; a function matches its own signature with the
   provenance; wildcards leave relocated bytes out (in the prefix and in the tail) and nothing else;
   ambiguity names nothing; user-named functions are skipped; another architecture is refused; the
   canonical text round-trips; malformed sets are refused, each with its reason; bad inputs to the
-  builder are refused.
+  builder are refused; the start mode matches at its start with the signature's own length, skips
+  user-named starts and reports the longest of several matching lengths; and the musl identification
+  described above.
 - Mutation checks: naming the first candidate when names differ fails the ambiguity test; not skipping
   user-named functions fails the user-name test; not zeroing the wildcard bytes in the tail fails the
   wildcard test. (The first form of the wildcard test put its only wildcard in the prefix, and the

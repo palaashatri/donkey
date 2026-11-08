@@ -159,7 +159,7 @@ P0 is the most important, P3 the least.
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
-| G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). The generator for x86-64 ELF objects and static archives, `donkey-cli sig make` (T2, partial: no shared objects, PE import libraries or AArch64). No shipped sets (T3) | P1 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 TODO) |
+| G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). The generator for x86-64 ELF objects and static archives, `donkey-cli sig make` (T2, partial: no shared objects, PE import libraries or AArch64). One shipped set, musl 1.2.4 (MIT), identifying 34 of 67 known functions of a static musl program, 0 named wrongly, 28 byte-identical aliases reported ambiguous (T3, partial; the 90 % named bar is an owner decision) | P1 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 PARTIAL, owner decision open) |
 | G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
@@ -1058,9 +1058,9 @@ own code.
 - **G09-T1 Signature format and matcher.**
   - **Status:** PARTIAL. Done: the format and its strict reader and writer, the matcher, and the
     naming rules (`include/donkey/analysis/signatures.h`, `src/analysis/signatures.cpp`). Evidence:
-    `Signatures.*` (nine unit tests, with three mutations checked), and `fuzz_sig`. Not done: the
-    library-level match test (`Signatures.IdentifyMuslFunctionsInAStaticBinary`) and the CLI, which need
-    G09-T2 and G09-T3.
+    `Signatures.*` (thirteen unit tests, with three mutations checked), and `fuzz_sig`. The library-level
+    match test is `Signatures.IdentifyMuslFunctionsInAStaticBinary` (G09-T3). Not done: a CLI command that
+    matches a set against a binary.
   1. Design an original format, documented in `docs/SIGNATURES.md`: for each
      function, the first N bytes with a mask for relocated bytes, the length,
      a CRC32 of the remaining bytes up to the function end, the name, and the
@@ -1078,13 +1078,34 @@ own code.
     size are named. Each relocation inside a function makes a wildcard of its width, and a function that
     cannot be described exactly (an unknown relocation type, a relocation past its end, a compressed or
     out-of-file section) is skipped with a note. `donkey-cli sig make` writes the set, with `--license`
-    required because the format requires it. Evidence: `SignatureGen.*` (ten tests, on
+    required because the format requires it. Local (static) functions are named as well as global and weak
+    ones: a static body identical to a global one is then ambiguous, not named after the global (see
+    `docs/SIGNATURES.md`, "Which functions"). Evidence: `SignatureGen.*` (ten tests, on
     `tests/fixtures/sig/gen/`), whose match test links the library into `sig_static` and checks that the
-    four library functions are named and nothing else is; `cli.sig_make_writes_a_set_from_an_archive` and
-    `cli.sig_make_refuses_an_executable`; `fuzz_sig_object`. Mutations checked: ignoring relocations fails
-    three tests, and naming local functions fails two. Not done: shared objects (`.so`), PE import
-    libraries, an AArch64 generator, and the `--lib` name taken from the file itself.
-- **G09-T3 Signature sets.**
+    five library functions (four global, one static) are named and nothing else is;
+    `cli.sig_make_writes_a_set_from_an_archive` and `cli.sig_make_refuses_an_executable`;
+    `fuzz_sig_object`. Mutations checked: ignoring relocations fails three tests; dropping the local
+    functions fails `Signatures.IdentifyMuslFunctionsInAStaticBinary` with two wrong names, and restoring
+    them passes. Not done: shared objects (`.so`), PE import libraries, an AArch64 generator, and the
+    `--lib` name taken from the file itself. Known gap: the wildcards do not cover a linker's relaxation of
+    an opcode (GOTPCRELX `mov` to `lea`), which leaves some functions unmatched.
+- **G09-T3 Signature sets.** Status: PARTIAL, one set shipped and an owner decision open.
+  - Shipped: `signatures/musl-1.2.4.json` (musl 1.2.4, MIT, 2,096 signatures), with its provenance in
+    `signatures/PROVENANCE.md`. Identification on a static musl program (`tests/fixtures/sig/musl/`):
+    of 67 known functions, 34 named and correct, 28 ambiguous byte-identical aliases (named nothing, by
+    the rule of G09-T1 point 3), 5 unmatched, and 0 named wrongly. Matching uses the new start-address
+    mode, `identify_at_starts`, because the analysis's extents of this stripped program are wrong for
+    many functions (checked on the 47 known global functions of the first measurement: 10 had the wrong extent,
+    and 16 were not found as functions by the analysis).
+  - **[owner decision]** The plan asks for at least 90 % of the known functions named. Under the
+    ambiguity rule, a byte-identical alias is never named, and 28 of 67 have one, so that bar cannot be
+    met soundly. The options are: accept 90 % identified (named or flagged ambiguous, 62 of 67 here,
+    which the test asserts) with at least half named, or allow an alias to be named after one of its
+    names, which can name a function wrongly. The test holds the first.
+  - The plan also asks for a CI build of a musl binary. The fixture is committed instead, with its
+    ground truth (`tests/fixtures/sig/musl/symbols.txt`), so CI does not need `musl-gcc`.
+  - Not yet: the other libraries of the plan (compiler-rt, libc++, MinGW CRT, FreeBSD libc).
+- **G09-T3 Signature sets.** (The plan below is the original; the status above records what was done.)
   - Generate sets only from libraries whose licence allows redistribution of
     derived data: musl (MIT), compiler-rt and libc++ (Apache-2.0 with LLVM
     exception), the MinGW-w64 CRT (check its notices), and FreeBSD libc
@@ -1094,7 +1115,8 @@ own code.
 - **Tests:**
   - `Signatures.IdentifyMuslFunctionsInAStaticBinary`: build a static
     binary against musl in CI; at least 90 % of known functions named and
-    0 wrong names.
+    0 wrong names. (Measured: 0 wrong; 92 % identified; 51 % named. See the
+    owner decision above.)
   - `Signatures.AmbiguousPatternsNameNothing`
   - fuzz target `fuzz_sig`
 

@@ -76,6 +76,7 @@ struct SignatureMatch {
   std::string provenance;  ///< "signature <library> <version>"; empty when ambiguous
   bool ambiguous = false;
   std::size_t candidates = 0;  ///< the signatures that matched
+  std::uint32_t length = 0;    ///< the matched length in bytes (the start mode only)
 };
 
 /// Matches each function against the set. A function whose bytes are unreadable, or that a user has
@@ -84,5 +85,14 @@ struct SignatureMatch {
 [[nodiscard]] Result<std::vector<SignatureMatch>> identify_functions(
     const SignatureSet& set, const BinaryImage& image, std::span<const std::byte> file,
     std::span<const SignatureFunction> functions, std::span<const std::uint64_t> user_named);
+
+/// Matches each candidate start address against every signature length, for a function whose
+/// extent is not known (a stripped file, where the analysis may stop too early or too late). A
+/// start matched by signatures of several lengths reports the longest; the matched length is
+/// in `SignatureMatch::length`. Costs at most starts x distinct lengths comparisons, and a
+/// start that a user named is skipped. The same architecture check as identify_functions.
+[[nodiscard]] Result<std::vector<SignatureMatch>> identify_at_starts(
+    const SignatureSet& set, const BinaryImage& image, std::span<const std::byte> file,
+    std::span<const std::uint64_t> starts, std::span<const std::uint64_t> user_named);
 
 }  // namespace donkey

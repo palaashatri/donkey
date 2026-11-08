@@ -33,6 +33,7 @@ constexpr std::uint32_t kShtNobits = 8;
 constexpr std::uint64_t kShfExecinstr = 0x4;
 constexpr std::uint64_t kShfCompressed = 0x800;
 constexpr std::uint8_t kSttFunc = 2;
+constexpr std::uint8_t kStbLocal = 0;
 constexpr std::uint8_t kStbGlobal = 1;
 constexpr std::uint8_t kStbWeak = 2;
 constexpr std::uint16_t kShnLoreserve = 0xff00;
@@ -272,7 +273,7 @@ Result<bool> object_signatures(std::span<const std::byte> bytes, SignatureGenRes
     }
   }
 
-  // The global functions, each with its bytes and wildcards.
+  // The functions, each with its bytes and wildcards: global, weak and local (static) ones.
   const std::uint64_t symbol_count = std::min(symtab.size / kSymbolSize, kMaxSymbols);
   if (symtab.size / kSymbolSize > kMaxSymbols) {
     scan.partial = true;
@@ -292,7 +293,8 @@ Result<bool> object_signatures(std::span<const std::byte> bytes, SignatureGenRes
     }
     const std::uint8_t kind = info.value() & 0xfU;
     const std::uint8_t binding = info.value() >> 4U;
-    if (kind != kSttFunc || (binding != kStbGlobal && binding != kStbWeak)) {
+    if (kind != kSttFunc ||
+        (binding != kStbLocal && binding != kStbGlobal && binding != kStbWeak)) {
       continue;
     }
     if (shndx.value() == 0 || shndx.value() >= kShnLoreserve || size.value() == 0) {

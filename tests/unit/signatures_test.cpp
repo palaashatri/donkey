@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -256,4 +257,56 @@ TEST(Signatures, MakingASignatureRefusesBadInput) {
       donkey::make_signature(body, "overlap", {SignatureWildcard{0, 4}, SignatureWildcard{2, 2}})
           .has_value());
   EXPECT_FALSE(donkey::make_signature(body, "empty_span", {SignatureWildcard{2, 0}}).has_value());
+}
+
+// The start mode (G09-T3): a candidate start is matched with each signature's own length, so an
+// analysis that stopped too early or ran past the function does not matter.
+TEST(Signatures, StartModeMatchesASignatureWithItsOwnLengthAtTheStart) {
+  const auto body = function_bytes(40, 1);
+  auto signature = donkey::make_signature(body, "lib_func");
+  ASSERT_TRUE(signature.has_value()) << signature.diagnostic().message;
+  std::vector<std::byte> file(body.begin(), body.end());
+  file.resize(64, std::byte{0xCC});  // the bytes after the function do not belong to it
+  const BinaryImage image = image_of(file.size());
+  const std::vector<std::uint64_t> starts{kBase, kBase + 1};
+  auto result = donkey::identify_at_starts(set_for({signature.value()}), image, file, starts, {});
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  ASSERT_EQ(result.value().size(), 1U);  // kBase + 1 is not the start of a signature's bytes
+  EXPECT_EQ(result.value()[0].address, kBase);
+  EXPECT_EQ(result.value()[0].name, "lib_func");
+  EXPECT_EQ(result.value()[0].length, 40U);
+  EXPECT_FALSE(result.value()[0].ambiguous);
+}
+
+TEST(Signatures, StartModeNeverNamesAStartTheUserNamed) {
+  const auto body = function_bytes(40, 1);
+  auto signature = donkey::make_signature(body, "lib_func");
+  ASSERT_TRUE(signature.has_value());
+  std::vector<std::byte> file(body.begin(), body.end());
+  const BinaryImage image = image_of(file.size());
+  const std::vector<std::uint64_t> starts{kBase};
+  const std::vector<std::uint64_t> named{kBase};
+  auto result =
+      donkey::identify_at_starts(set_for({signature.value()}), image, file, starts, named);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().empty());
+}
+
+// Two signatures match at the same start, one for the whole body and one for its first 20 bytes.
+// The longer one is the function's extent, so its name is reported with its length.
+TEST(Signatures, StartModeReportsTheLongestOfSeveralMatchingLengths) {
+  const auto body = function_bytes(40, 1);
+  auto whole = donkey::make_signature(body, "whole");
+  auto head = donkey::make_signature(std::span<const std::byte>(body.data(), 20), "head");
+  ASSERT_TRUE(whole.has_value());
+  ASSERT_TRUE(head.has_value());
+  std::vector<std::byte> file(body.begin(), body.end());
+  const BinaryImage image = image_of(file.size());
+  const std::vector<std::uint64_t> starts{kBase};
+  auto result =
+      donkey::identify_at_starts(set_for({head.value(), whole.value()}), image, file, starts, {});
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  ASSERT_EQ(result.value().size(), 1U);
+  EXPECT_EQ(result.value()[0].name, "whole");
+  EXPECT_EQ(result.value()[0].length, 40U);
 }

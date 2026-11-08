@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <charconv>
 #include <cstdio>
+#include <functional>
 #include <limits>
 #include <map>
 #include <set>
@@ -399,6 +400,75 @@ Result<std::vector<SignatureMatch>> identify_functions(const SignatureSet& set,
       match.ambiguous = true;
     }
     out.push_back(std::move(match));
+  }
+  return out;
+}
+
+Result<std::vector<SignatureMatch>> identify_at_starts(const SignatureSet& set,
+                                                       const BinaryImage& image,
+                                                       std::span<const std::byte> file,
+                                                       std::span<const std::uint64_t> starts,
+                                                       std::span<const std::uint64_t> user_named) {
+  if (set.architecture != architecture_name(image.architecture)) {
+    return make_error<std::vector<SignatureMatch>>(Status::Unsupported, "sig.architecture",
+                                                   "the signature set is for " + set.architecture +
+                                                       " and the image is " +
+                                                       architecture_name(image.architecture));
+  }
+  std::unordered_map<std::uint32_t, std::vector<const Signature*>> by_length;
+  for (const Signature& signature : set.signatures) {
+    if (signature.length <= kMaxFunctionBytes) {
+      by_length[signature.length].push_back(&signature);
+    }
+  }
+  std::vector<std::uint32_t> lengths;
+  for (const auto& [length, group] : by_length) {
+    lengths.push_back(length);
+  }
+  std::sort(lengths.begin(), lengths.end(), std::greater<>());  // longest first
+  const std::set<std::uint64_t> named(user_named.begin(), user_named.end());
+
+  std::vector<SignatureMatch> out;
+  for (const std::uint64_t start : starts) {
+    if (named.contains(start)) {
+      continue;
+    }
+    auto offset = image.va_to_file_offset(start);
+    if (!offset || offset.value() > file.size()) {
+      continue;
+    }
+    // The longest length whose signatures match here wins; the others are not reported.
+    for (const std::uint32_t length : lengths) {
+      if (length > file.size() - offset.value()) {
+        continue;
+      }
+      const std::span<const std::byte> bytes =
+          file.subspan(static_cast<std::size_t>(offset.value()), length);
+      std::vector<const Signature*> candidates;
+      for (const Signature* signature : by_length[length]) {
+        if (matches(*signature, bytes)) {
+          candidates.push_back(signature);
+        }
+      }
+      if (candidates.empty()) {
+        continue;
+      }
+      SignatureMatch match;
+      match.address = start;
+      match.length = length;
+      match.candidates = candidates.size();
+      const std::string& first = candidates.front()->name;
+      const bool same_name = std::all_of(candidates.begin(), candidates.end(),
+                                         [&first](const Signature* s) { return s->name == first; });
+      if (same_name) {
+        match.name = first;
+        match.provenance = "signature " + set.library + " " + set.version;
+      } else {
+        match.ambiguous = true;
+      }
+      out.push_back(std::move(match));
+      break;
+    }
   }
   return out;
 }
