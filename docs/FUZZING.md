@@ -8,6 +8,7 @@ Donkey uses LLVM `libFuzzer` combined with AddressSanitizer (ASan) and Undefined
 |---|---|---|---|
 | `fuzz_binary` | `fuzz/fuzz_binary.cpp` | `parse_binary` → `analyze` → `lift_function` → `verify_ir` → `format_pseudocode` | `tests/fuzz/corpus/binary` |
 | `fuzz_ir` | `fuzz/fuzz_ir.cpp` | Randomized `IrFunction` mutation, statement generation, verifier agreement, pseudocode rendering | `tests/fuzz/corpus/ir` |
+| `fuzz_sig` | `fuzz/fuzz_sig.cpp` | `parse_signature_set` → `write_signature_set` (accepted sets must round-trip) | `tests/fuzz/corpus/sig` |
 
 ## Building Fuzzers
 
