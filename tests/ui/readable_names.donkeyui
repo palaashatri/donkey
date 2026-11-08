@@ -10,4 +10,5 @@ assert_no_error
 assert_function_name _ZN5ShapeD2Ev Shape::~Shape()
 assert_function_name main main
 assert_function_name 0x118a Shape::~Shape()
+assert_function_containing _ZN5ShapeD2Ev Shape::~Shape()
 assert_no_error

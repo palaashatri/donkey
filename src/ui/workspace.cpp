@@ -830,6 +830,19 @@ bool Workspace::symbol_kind(const std::string& raw, std::string& kind) {
   return false;
 }
 
+bool Workspace::function_containing_name(std::uint64_t address, std::string& shown) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  const Function* function = views::function_containing_address(*document, address);
+  if (function == nullptr) {
+    return false;
+  }
+  shown = views::shown_function_name(state_, *function);
+  return true;
+}
+
 void Workspace::set_xref_depth(int depth) {
   state_.xref_depth = depth < 1 ? 1 : (depth > 2 ? 2 : depth);
 }

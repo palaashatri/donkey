@@ -368,19 +368,84 @@ void strings(const Document& document, UiState& state) {
   ImGui::EndTable();
 }
 
+namespace {
+
+/// Functions sorted by entry address, built once per document, so the Xrefs window can find the
+/// function containing an address without a scan per row (G10-T4).
+struct FunctionIndex {
+  const Document* document = nullptr;
+  std::vector<const Function*> by_address;
+};
+
+const FunctionIndex& function_index(const Document& document) {
+  static FunctionIndex index;
+  if (index.document != &document) {
+    index.document = &document;
+    index.by_address.clear();
+    for (const Function& function : document.analysis.functions) {
+      index.by_address.push_back(&function);
+    }
+    std::sort(index.by_address.begin(), index.by_address.end(),
+              [](const Function* a, const Function* b) { return a->address < b->address; });
+  }
+  return index;
+}
+
+/// The function that contains `address`, by the rule function_containing uses: the function
+/// starting at it, or else the one with the largest start whose extent covers it.
+const Function* containing_function(const Document& document, std::uint64_t address) {
+  const std::vector<const Function*>& starts = function_index(document).by_address;
+  auto it =
+      std::upper_bound(starts.begin(), starts.end(), address,
+                       [](std::uint64_t value, const Function* f) { return value < f->address; });
+  while (it != starts.begin()) {
+    --it;
+    const Function* function = *it;
+    if (function->address == address) {
+      return function;
+    }
+    if (function->has_extent && address < function->end_address) {
+      return function;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+const Function* function_containing_address(const Document& document, std::uint64_t address) {
+  return containing_function(document, address);
+}
+
 void xrefs(const Document& document, UiState& state) {
   components::search_field("##xreffilter", state.xref_filter, "Filter by kind, source or target");
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
-  if (!ImGui::BeginTable("##xrefs", 3, flags)) {
+  if (!ImGui::BeginTable("##xrefs", 5, flags)) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
   ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("In", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthStretch, 1.0f);
   ImGui::TableHeadersRow();
+
+  // The function name a row shows, and the raw symbol as its tooltip when the two differ (G10-T4).
+  const auto name_cell = [&](std::uint64_t address) {
+    const Function* function = containing_function(document, address);
+    if (function == nullptr) {
+      ImGui::TextDisabled("-");
+      return;
+    }
+    const std::string shown = shown_function_name(state, *function);
+    ImGui::TextUnformatted(shown.c_str());
+    if (ImGui::IsItemHovered() && shown != function->name) {
+      ImGui::SetTooltip("%s", function->name.c_str());
+    }
+  };
 
   for (const Xref& xref : document.analysis.xrefs) {
     const std::string from = components::format_address(xref.from);
@@ -396,8 +461,12 @@ void xrefs(const Document& document, UiState& state) {
       state.selected_address = xref.from;
     }
     ImGui::TableSetColumnIndex(1);
-    ImGui::TextUnformatted(to.c_str());
+    name_cell(xref.from);
     ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(to.c_str());
+    ImGui::TableSetColumnIndex(3);
+    name_cell(xref.to);
+    ImGui::TableSetColumnIndex(4);
     ImGui::TextDisabled("%s", kind.c_str());
   }
   ImGui::EndTable();

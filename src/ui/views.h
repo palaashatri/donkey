@@ -53,6 +53,10 @@ struct XrefNeighbourhood {
                                                    std::size_t max_nodes);
 /// The cross-reference graph window (G17).
 void xref_graph(const Document& document, UiState& state);
+/// The function that contains `address`, by the rule the call graph panel uses (G10-T4), or
+/// nullptr.
+[[nodiscard]] const Function* function_containing_address(const Document& document,
+                                                          std::uint64_t address);
 /// The Symbols window (G17): the image's symbols, filtered by the words typed.
 void symbols(const Document& document, UiState& state);
 /// The symbol indices the Symbols window lists, in symbol order (the filter applied).

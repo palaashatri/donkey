@@ -104,6 +104,11 @@ void xref_graph(const Document& document, UiState& state) {
     ImGui::TextDisabled("Select a function to see its callers and callees.");
     return;
   }
+  const std::string selected_shown = shown_function_name(state, *selected);
+  ImGui::TextUnformatted(selected_shown.c_str());
+  if (ImGui::IsItemHovered() && selected_shown != selected->name) {
+    ImGui::SetTooltip("%s", selected->name.c_str());
+  }
   static const char* const kDepths =
       "1 call deep\0"
       "2 calls deep\0";

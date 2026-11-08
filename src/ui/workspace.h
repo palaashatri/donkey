@@ -336,6 +336,8 @@ class Workspace {
   [[nodiscard]] bool symbol_shown(const std::string& raw, std::string& shown);
   void set_symbol_filter(const std::string& filter);
   void set_xref_depth(int depth);
+  /// The name the views show for the function containing `address`, or false when none does.
+  [[nodiscard]] bool function_containing_name(std::uint64_t address, std::string& shown);
   [[nodiscard]] bool symbol_kind(const std::string& raw, std::string& kind);
   /// Blocks until the search that is running has finished (UI scripts only).
   void wait_search();

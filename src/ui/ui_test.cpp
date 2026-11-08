@@ -628,6 +628,20 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_function_containing") {
+    // assert_function_containing ADDRESS-OR-NAME TEXT: the function containing that address is
+    // shown as TEXT (G10-T4). TEXT is the rest of the line, so it may contain spaces.
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    std::string got;
+    if (address == 0 || !workspace.function_containing_name(address, got) || got != want) {
+      fail(c, "the function containing " + location + " is shown as '" + got + "', wanted '" +
+                  want + "'");
+    }
+    return true;
+  }
   if (c.name == "xref_depth") {
     // xref_depth 1|2: the cross-reference graph shows that many calls out (G17).
     workspace.set_xref_depth(static_cast<int>(number(0, 1.0)));
