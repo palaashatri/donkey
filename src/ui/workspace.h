@@ -99,6 +99,8 @@ struct UiState {
   std::string section_filter;
   std::string function_filter;
   std::string string_filter;
+  /// The Classes panel filter (G10-T4).
+  std::string class_filter;
   std::string xref_filter;
   std::string disassembly_filter;
   bool show_hex_bytes = true;
@@ -301,6 +303,7 @@ class Workspace {
   bool show_data_ = true;
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
+  bool show_classes_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
   char goto_buffer_[256] = {};

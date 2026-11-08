@@ -534,6 +534,45 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_rtti_class" || c.name == "assert_rtti_bases") {
+    // assert_rtti_class NAME: the Classes panel lists the class. assert_rtti_bases NAME LIST:
+    // its direct bases by name, in order, joined with commas; "-" when it has none (G10-T4).
+    const auto document = session.document();
+    if (!document || !document->rtti) {
+      fail(c,
+           "no RTTI is loaded: " + (document ? document->rtti_note : std::string("no document")));
+      return true;
+    }
+    const std::string name = arg(0);
+    const RttiClass* found = nullptr;
+    for (const RttiClass& cls : document->rtti->classes) {
+      if (cls.name == name) {
+        found = &cls;
+        break;
+      }
+    }
+    if (found == nullptr) {
+      fail(c, "no class named '" + name + "'");
+      return true;
+    }
+    if (c.name == "assert_rtti_bases") {
+      std::string got;
+      for (const std::uint64_t base : found->bases) {
+        const RttiClass* resolved = find_rtti_class(*document->rtti, base);
+        if (!got.empty()) {
+          got += ",";
+        }
+        got += resolved != nullptr ? resolved->name : std::string("<unnamed>");
+      }
+      if (got.empty()) {
+        got = "-";
+      }
+      if (got != arg(1)) {
+        fail(c, "bases of " + name + " are '" + got + "', wanted '" + arg(1) + "'");
+      }
+    }
+    return true;
+  }
   if (c.name == "assert_focus") {
     ImGuiWindow* nav = GImGui->NavWindow;
     if (!name_matches(nav != nullptr ? nav->Name : nullptr, c.rest)) {

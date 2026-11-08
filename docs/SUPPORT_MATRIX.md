@@ -42,7 +42,7 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | Itanium (`_Z`) | `demangle_itanium` (G10-T1, partial) | 502 of 512 `c++filt` corpus names match; 10 are Unsupported | expression template arguments, generic lambdas |
 | MSVC (`?`, x64 `__cdecl`) | `demangle_msvc` (G10-T2, partial) | 87 of 95 `llvm-undname` corpus names match exactly; 8 are Unsupported | templates, arrays, string literals, vftables, dynamic initialisers, function and member pointers, 32-bit forms and other calling conventions |
 
-`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4).
+`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app's Classes window (G10-T4) lists the Itanium classes of an ELF image with their direct bases, vtable address and slot count, from the RTTI reader; it is checked by `ui.script_classes` on the hierarchy fixture only. Other images show why they have no RTTI. Demangled names are not yet shown in the disassembly, the decompiler, the graph or the xref lists, and the MSVC RTTI is not read (G10-T4 open).
 
 | Itanium RTTI and vtables (ELF) | Reader | Checked against | Not covered |
 |---|---|---|---|

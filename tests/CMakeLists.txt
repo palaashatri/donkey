@@ -512,6 +512,11 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     donkey_ui_script(data)
   endif()
   donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
+  # The Classes panel (G10-T4) lists the RTTI of the hierarchy fixture: the bases of each class
+  # are the ones the fixture declares. The fixture exists only where the RTTI test builds it.
+  if(TARGET donkey_test_hierarchy)
+    donkey_ui_script(classes FILE $<TARGET_FILE:donkey_test_hierarchy>)
+  endif()
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)
   donkey_ui_script(display_dpi_device)

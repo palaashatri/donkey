@@ -35,6 +35,7 @@ xvfb-run -a build/dev-linux/apps/donkey/donkey --renderer software \
 | `virtualization` | M2 | A 1,000,000-row table, jumped across in 300 frames: at most 200 rows submitted per frame, Dear ImGui's persistent storage grows by at most 16 entries, p95 frame time ≤ 33 ms. |
 | `display_dpi_device` | M10, A22 | Display-scale changes rebuild style and font scale (2.0, 1.25, 1.0); a window left where no display is gets moved back when a display is removed; a lost graphics device is recreated (twice) with both Dear ImGui backends, and drawing continues. Runs on the software renderer and on the default renderer (SDL_GPU where available). |
 | `layout_save` + `layout_restore` | A22 | A panel undocked in one run is still floating in the next: the dock layout persists in the per-user preference directory (or `--config-dir`). |
+| `classes` | G10-T4 | The Classes window lists the hierarchy fixture's RTTI (passed as FILE): each class's direct bases in declaration order (`assert_rtti_class`, `assert_rtti_bases`; a mutated expectation fails the script). |
 | `responsiveness` | DESIGN §12.2 | With 8 background analysis threads, input-to-frame p95 ≤ 50 ms. |
 | `screenshots` | docs | Captures `docs/images/screenshots/` from the demo program (`tests/fixtures/demo/demo.c`): workspace, jump-table switch, DWARF prototype, component gallery and, where a native debugger exists, a breakpoint stop. Files go to `$DONKEY_SCREENSHOT_DIR` as BMP; `tools/screenshots_to_png.py` converts them. The `package` workflow's manual run commits every platform's set. |
 

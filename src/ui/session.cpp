@@ -213,6 +213,26 @@ void attach_debug_info(Document& document, const CancellationToken& token) {
   document.debug_info = std::make_shared<const DebugInfo>(std::move(info.value()));
 }
 
+/// Itanium RTTI for a freshly loaded document (on the worker). Only ELF images are read; the
+/// note says why an image has none, so the Classes panel never shows an empty table silently.
+void attach_rtti(Document& document) {
+  auto info = read_itanium_rtti(document.loaded.image, document.loaded.data);
+  if (!info) {
+    document.rtti_note = info.diagnostic().code == "rtti.unsupported_image"
+                             ? "This image has no Itanium RTTI (only ELF images are read)"
+                             : info.diagnostic().message + " [" + info.diagnostic().code + "]";
+    return;
+  }
+  std::size_t vtables = 0;
+  for (const RttiClass& cls : info.value().classes) {
+    vtables += cls.vtable_address != 0 ? 1 : 0;
+  }
+  document.rtti_note = std::to_string(info.value().classes.size()) + " classes, " +
+                       std::to_string(vtables) + " vtables" +
+                       (info.value().partial ? " (partial)" : "");
+  document.rtti = std::make_shared<const RttiInfo>(std::move(info.value()));
+}
+
 /// Debug-info names for functions without a symbol name (user renames are
 /// applied on top by the views, so they always win).
 void apply_debug_names(Document& document) {
@@ -399,6 +419,7 @@ void Session::open(const std::string& path) {
       debug_info_hook();
     }
     attach_debug_info(*document, token);
+    attach_rtti(*document);
     // A cancel during the DWARF parse returns what was read so far; the open
     // is still cancelled, not published with partial debug info.
     if (token.is_cancelled()) {
@@ -542,6 +563,7 @@ void Session::open_project(const std::string& path) {
       debug_info_hook();
     }
     attach_debug_info(*document, token);
+    attach_rtti(*document);
     if (token.is_cancelled()) {
       fail(generation, "Operation cancelled", "Cancelled");
       return;
@@ -900,6 +922,7 @@ void Session::restore_project(const std::string& backup_path) {
       document->loaded = std::move(loaded.value());
       document->analysis = std::move(*analysis);
       attach_debug_info(*document, token);
+      attach_rtti(*document);
       if (token.is_cancelled()) {
         document.reset();
       } else {

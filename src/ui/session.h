@@ -16,6 +16,7 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/rtti.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/project/project.h"
 
@@ -31,6 +32,10 @@ struct Document {
   /// have no symbol name, and never replace a user rename.
   std::shared_ptr<const DebugInfo> debug_info;
   std::string debug_info_note;
+  /// Itanium classes and vtables (G10-T3), read on the worker. Null when the image has none
+  /// or it could not be read; `rtti_note` says which. Names are display-only.
+  std::shared_ptr<const RttiInfo> rtti;
+  std::string rtti_note;
 };
 
 /// Address-keyed user annotations. Snapshots are immutable and swapped under

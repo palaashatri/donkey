@@ -19,5 +19,8 @@ void bookmarks(const Document& document, UiState& state);
 void data_ranges(const Document& document, UiState& state);
 void debugger(const Document& document, UiState& state);
 void diagnostics(const Document& document, UiState& state);
+/// Itanium classes from the image's RTTI (G10-T3): name, kind, direct bases, vtable and slot
+/// count. Selecting a class navigates to its vtable, or its typeinfo when it has none (G10-T4).
+void classes(const Document& document, UiState& state);
 
 }  // namespace donkey::ui::views

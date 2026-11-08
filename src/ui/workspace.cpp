@@ -25,6 +25,7 @@ constexpr const char* kDataWindow = "Data";
 constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
+constexpr const char* kClassesWindow = "Classes";
 
 ImGuiWindowFlags panel_flags() {
   return ImGuiWindowFlags_NoCollapse;
@@ -466,6 +467,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kDataWindow, nullptr, &show_data_);
     ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
+    ImGui::MenuItem(kClassesWindow, nullptr, &show_classes_);
     ImGui::Separator();
     if (ImGui::MenuItem("Reset Layout")) {
       reset_layout();
@@ -790,6 +792,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDiagnosticsWindow, &show_diagnostics_, panel_flags());
     if (document) {
       views::diagnostics(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_classes_) {
+    ImGui::Begin(kClassesWindow, &show_classes_, panel_flags());
+    if (document) {
+      views::classes(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

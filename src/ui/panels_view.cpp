@@ -12,6 +12,7 @@
 #include "views.h"
 
 #include "donkey/binary/image.h"
+#include "donkey/binary/rtti.h"
 #include "donkey/project/project.h"
 
 namespace donkey::ui::views {
@@ -546,6 +547,68 @@ void data_ranges(const Document& document, UiState& state) {
       state.annotation_modal_requested = true;
     }
     ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
+void classes(const Document& document, UiState& state) {
+  components::search_field("##classfilter", state.class_filter, "Filter classes");
+  if (!document.rtti) {
+    ImGui::TextWrapped("%s", document.rtti_note.empty() ? "No RTTI was read for this image."
+                                                        : document.rtti_note.c_str());
+    return;
+  }
+  const RttiInfo& info = *document.rtti;
+  ImGui::TextDisabled("%s", document.rtti_note.c_str());
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+  if (!ImGui::BeginTable("##classes", 5, flags)) {
+    return;
+  }
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Class", ImGuiTableColumnFlags_WidthStretch, 2.4f);
+  ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+  ImGui::TableSetupColumn("Bases", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+  ImGui::TableSetupColumn("Vtable", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+  ImGui::TableSetupColumn("Slots", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+  ImGui::TableHeadersRow();
+
+  for (const RttiClass& cls : info.classes) {
+    if (!matches(cls.name, state.class_filter)) {
+      continue;
+    }
+    const std::uint64_t address =
+        cls.vtable_address != 0 ? cls.vtable_address : cls.typeinfo_address;
+    std::string bases;
+    for (const std::uint64_t base : cls.bases) {
+      const RttiClass* found = find_rtti_class(info, base);
+      if (!bases.empty()) {
+        bases += ", ";
+      }
+      bases += found != nullptr ? found->name : components::format_address(base);
+    }
+    std::size_t slots = cls.groups.empty() ? 0 : cls.groups.front().slots.size();
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    const std::string label = cls.name + "##" + std::to_string(cls.typeinfo_address);
+    if (ImGui::Selectable(label.c_str(), state.selected_address == address,
+                          ImGuiSelectableFlags_SpanAllColumns)) {
+      state.navigate_to(address, &document);
+    }
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(rtti_kind_name(cls.kind));
+    ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(bases.empty() ? "-" : bases.c_str());
+    ImGui::TableSetColumnIndex(3);
+    if (cls.vtable_address != 0) {
+      ImGui::TextUnformatted(components::format_address(cls.vtable_address).c_str());
+    } else {
+      ImGui::TextDisabled("-");
+    }
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%zu", slots);
   }
   ImGui::EndTable();
 }
