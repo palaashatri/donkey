@@ -247,7 +247,9 @@ Command palette (Ctrl/Cmd+Shift+P, G17-T1): the commands the menus run and a Sho
 
 Search window (G17-T2): byte patterns with `??` wildcards, an immediate number (decimal or 0x hex) and an ECMAScript regular expression over each instruction's "mnemonic operands" text. Searches run in the background, keep the newest result, cap the hits at 10,000 and can be cancelled. An immediate search reads every number in the operand text, so a displacement or an address can match as well. Checked by `search.*` (core) and `ui.script_search`.
 
-Symbols window (G17-T3): every symbol of the image with its kind, binding and size, the readable name of each (raw name as the tooltip), and a case-insensitive word filter. Checked by `ui.script_symbols`. Not yet: the theme editor and synchronised views (G17).
+Symbols window (G17-T3): every symbol of the image with its kind, binding and size, the readable name of each (raw name as the tooltip), and a case-insensitive word filter. Checked by `ui.script_symbols`.
+
+Xref Graph window (G17-T4): the call neighbourhood of the selected function, callers on the left and callees on the right, one column per call depth (1 or 2), at most 64 functions. Built from the analysis's direct calls only: indirect calls are not drawn. Clicking a node navigates to it. Checked by `ui.script_xref_graph` against the CLI's call graph. Not yet: the theme editor and synchronised views (G17).
 
 Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform
 whose package job runs them: keyboard-only navigation, IME commit and

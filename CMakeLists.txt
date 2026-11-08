@@ -249,6 +249,7 @@ if(DONKEY_BUILD_UI)
     src/ui/panels_view.cpp
     src/ui/search_view.cpp
     src/ui/symbols_view.cpp
+    src/ui/xref_graph_view.cpp
     src/ui/theme.cpp
     src/ui/ui_test.cpp
     src/ui/workspace.cpp

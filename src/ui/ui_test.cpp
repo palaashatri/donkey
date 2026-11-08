@@ -574,8 +574,8 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     return true;
   }
   if (c.name == "search_run") {
-    // search_run BYTES|IMMEDIATE|TEXT QUERY: runs a search as the Search window's button does. QUERY
-    // is the rest of the line, so it may contain spaces (G17).
+    // search_run BYTES|IMMEDIATE|TEXT QUERY: runs a search as the Search window's button does.
+    // QUERY is the rest of the line, so it may contain spaces (G17).
     const std::size_t space = c.rest.find(' ');
     const std::string kind_name = c.rest.substr(0, space);
     const std::string query = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
@@ -594,7 +594,8 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     return true;
   }
   if (c.name == "symbols_filter") {
-    // symbols_filter TEXT: the Symbols window lists the symbols that match every word of TEXT (G17).
+    // symbols_filter TEXT: the Symbols window lists the symbols that match every word of TEXT
+    // (G17).
     workspace.set_symbol_filter(c.rest);
     return true;
   }
@@ -627,6 +628,44 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "xref_depth") {
+    // xref_depth 1|2: the cross-reference graph shows that many calls out (G17).
+    workspace.set_xref_depth(static_cast<int>(number(0, 1.0)));
+    return true;
+  }
+  if (c.name == "assert_xref_graph") {
+    // assert_xref_graph NODES EDGES: the cross-reference graph of the selected function has those
+    // counts (G17).
+    std::size_t nodes = 0;
+    std::size_t edges = 0;
+    std::vector<std::string> names;
+    if (!workspace.xref_graph_snapshot(nodes, edges, names)) {
+      fail(c, "no function is selected for the cross-reference graph");
+      return true;
+    }
+    const auto want_nodes = static_cast<std::size_t>(number(0, -1.0));
+    const auto want_edges = static_cast<std::size_t>(number(1, -1.0));
+    if (nodes != want_nodes || edges != want_edges) {
+      fail(c, "the graph has " + std::to_string(nodes) + " functions and " + std::to_string(edges) +
+                  " calls, wanted " + std::to_string(want_nodes) + " and " +
+                  std::to_string(want_edges));
+    }
+    return true;
+  }
+  if (c.name == "assert_xref_graph_has") {
+    // assert_xref_graph_has NAME: the graph has a function shown as NAME.
+    std::size_t nodes = 0;
+    std::size_t edges = 0;
+    std::vector<std::string> names;
+    if (!workspace.xref_graph_snapshot(nodes, edges, names)) {
+      fail(c, "no function is selected for the cross-reference graph");
+      return true;
+    }
+    if (std::find(names.begin(), names.end(), arg(0)) == names.end()) {
+      fail(c, "the cross-reference graph has no function " + arg(0));
+    }
+    return true;
+  }
   if (c.name == "wait_search") {
     workspace.wait_search();
     return true;
@@ -656,7 +695,8 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     return true;
   }
   if (c.name == "assert_search_preview") {
-    // assert_search_preview ADDRESS-OR-NAME TEXT: the hit at that address shows TEXT (the rest of the line).
+    // assert_search_preview ADDRESS-OR-NAME TEXT: the hit at that address shows TEXT (the rest of
+    // the line).
     const std::size_t space = c.rest.find(' ');
     const std::string location = c.rest.substr(0, space);
     const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);

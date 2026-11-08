@@ -30,6 +30,7 @@ constexpr const char* kDiagnosticsWindow = "Diagnostics";
 constexpr const char* kClassesWindow = "Classes";
 constexpr const char* kSearchWindow = "Search";
 constexpr const char* kSymbolsWindow = "Symbols";
+constexpr const char* kXrefGraphWindow = "Xref Graph";
 constexpr const char* kCommandPalette = "Command Palette";
 
 ImGuiWindowFlags panel_flags() {
@@ -442,22 +443,18 @@ std::vector<Workspace::PaletteEntry> Workspace::palette_entries() {
   const bool bookmarked =
       state_.annotations != nullptr && state_.annotations->has_bookmark(state_.selected_address);
   entries.push_back(PaletteEntry{bookmarked ? "Remove Bookmark" : "Toggle Bookmark", "Cmd+B",
-                                 selected, [this] {
-                                   session_.toggle_bookmark(state_.selected_address);
-                                 }});
-  entries.push_back(PaletteEntry{"Back", "Alt+Left", state_.can_nav_back(), [this] {
-                                   state_.nav_back(session_.document().get());
-                                 }});
-  entries.push_back(PaletteEntry{"Forward", "Alt+Right", state_.can_nav_forward(), [this] {
-                                   state_.nav_forward(session_.document().get());
-                                 }});
+                                 selected,
+                                 [this] { session_.toggle_bookmark(state_.selected_address); }});
+  entries.push_back(PaletteEntry{"Back", "Alt+Left", state_.can_nav_back(),
+                                 [this] { state_.nav_back(session_.document().get()); }});
+  entries.push_back(PaletteEntry{"Forward", "Alt+Right", state_.can_nav_forward(),
+                                 [this] { state_.nav_forward(session_.document().get()); }});
   entries.push_back(
       PaletteEntry{"Undo", "Cmd+Z", session_.can_undo(), [this] { session_.undo(); }});
   entries.push_back(
       PaletteEntry{"Redo", "Cmd+Shift+Z", session_.can_redo(), [this] { session_.redo(); }});
-  entries.push_back(PaletteEntry{"Save Project", "Cmd+S", session_.has_project() && idle, [this] {
-                                   session_.save_project(session_.project_path());
-                                 }});
+  entries.push_back(PaletteEntry{"Save Project", "Cmd+S", session_.has_project() && idle,
+                                 [this] { session_.save_project(session_.project_path()); }});
   entries.push_back(PaletteEntry{"Reload", "", !session_.path().empty() && idle,
                                  [this] { session_.open(session_.path()); }});
   entries.push_back(PaletteEntry{"Reset Layout", "", true, [this] { reset_layout(); }});
@@ -486,6 +483,7 @@ std::vector<Workspace::PaletteEntry> Workspace::palette_entries() {
   show(kClassesWindow, &show_classes_);
   show(kSearchWindow, &show_search_);
   show(kSymbolsWindow, &show_symbols_);
+  show(kXrefGraphWindow, &show_xref_graph_);
   return entries;
 }
 
@@ -684,6 +682,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kClassesWindow, nullptr, &show_classes_);
     ImGui::MenuItem(kSearchWindow, nullptr, &show_search_);
     ImGui::MenuItem(kSymbolsWindow, nullptr, &show_symbols_);
+    ImGui::MenuItem(kXrefGraphWindow, nullptr, &show_xref_graph_);
     ImGui::Separator();
     if (ImGui::MenuItem("Reset Layout")) {
       reset_layout();
@@ -773,8 +772,29 @@ void Workspace::run_search(SearchKind kind, const std::string& query) {
     return;
   }
   state_.search->kind_input = static_cast<int>(kind);
-  std::snprintf(state_.search->query_input, sizeof(state_.search->query_input), "%s", query.c_str());
+  std::snprintf(state_.search->query_input, sizeof(state_.search->query_input), "%s",
+                query.c_str());
   state_.search->start(state_.search_document_owner, kind, query);
+}
+
+bool Workspace::xref_graph_snapshot(std::size_t& nodes, std::size_t& edges,
+                                    std::vector<std::string>& names) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  const views::XrefNeighbourhood graph =
+      views::xref_neighbourhood(*document, state_, state_.selected_address, state_.xref_depth, 64);
+  if (graph.nodes.empty()) {
+    return false;
+  }
+  nodes = graph.nodes.size();
+  edges = graph.edges.size();
+  names.clear();
+  for (const views::XrefNode& node : graph.nodes) {
+    names.push_back(node.shown);
+  }
+  return true;
 }
 
 std::size_t Workspace::symbol_row_count() {
@@ -808,6 +828,10 @@ bool Workspace::symbol_kind(const std::string& raw, std::string& kind) {
     }
   }
   return false;
+}
+
+void Workspace::set_xref_depth(int depth) {
+  state_.xref_depth = depth < 1 ? 1 : (depth > 2 ? 2 : depth);
 }
 
 void Workspace::set_symbol_filter(const std::string& filter) {
@@ -1108,6 +1132,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDiagnosticsWindow, &show_diagnostics_, panel_flags());
     if (document) {
       views::diagnostics(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_xref_graph_) {
+    ImGui::Begin(kXrefGraphWindow, &show_xref_graph_, panel_flags());
+    if (document) {
+      views::xref_graph(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

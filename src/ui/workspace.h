@@ -95,14 +95,15 @@ void draw_component_gallery(GalleryState& gallery);
 /// the instruction text.
 enum class SearchKind : int { Bytes = 0, Immediate = 1, Text = 2 };
 
-/// One hit of a search, with the text it is shown with: the bytes at the address, or the instruction.
+/// One hit of a search, with the text it is shown with: the bytes at the address, or the
+/// instruction.
 struct SearchRow {
   std::uint64_t address = 0;
   std::string preview;
 };
 
-/// The Search window's searches (G17). A search runs on the scheduler, never on the render thread, and
-/// only the newest one is kept. The window reads the last finished result under `mutex`.
+/// The Search window's searches (G17). A search runs on the scheduler, never on the render thread,
+/// and only the newest one is kept. The window reads the last finished result under `mutex`.
 struct AsyncSearchState {
   AsyncSearchState() = default;
   ~AsyncSearchState() = default;
@@ -120,11 +121,11 @@ struct AsyncSearchState {
   char query_input[256] = {};
 
   std::mutex mutex;
-  std::uint64_t generation = 0;   // guarded by mutex
-  bool running = false;           // guarded by mutex
-  std::string error;              // guarded by mutex: "code: message" when the pattern is refused
-  std::string status;             // guarded by mutex
-  std::vector<SearchRow> rows;    // guarded by mutex
+  std::uint64_t generation = 0;  // guarded by mutex
+  bool running = false;          // guarded by mutex
+  std::string error;             // guarded by mutex: "code: message" when the pattern is refused
+  std::string status;            // guarded by mutex
+  std::vector<SearchRow> rows;   // guarded by mutex
 
   /// Declared last, so it is destroyed first: its workers stop before the members above go.
   JobScheduler scheduler{1};
@@ -142,6 +143,8 @@ struct UiState {
   std::string class_filter;
   /// The Symbols window filter (G17).
   std::string symbol_filter;
+  /// The cross-reference graph's depth: 1 or 2 calls out (G17).
+  int xref_depth = 1;
   /// Readable names of the symbols the views show (G10-T4), cached by raw name.
   std::unordered_map<std::string, std::string> readable_names;
   std::string xref_filter;
@@ -320,13 +323,19 @@ class Workspace {
 
   /// Resolve a "Go to" query: a hex address (0x optional) or a function,
   /// symbol or user-renamed name. Returns 0 when nothing matches.
-  /// Runs a search of the open document, as the Search window's button does (G17). The UI tests use it.
+  /// Runs a search of the open document, as the Search window's button does (G17). The UI tests use
+  /// it.
   void run_search(SearchKind kind, const std::string& query);
   /// The Symbols window: how many symbols it lists under the filter, and the readable name of the
   /// first symbol with a raw name (UI scripts only; the window draws the same rows).
   [[nodiscard]] std::size_t symbol_row_count();
+  /// The cross-reference graph of the selected function: its node and edge counts and the readable
+  /// names of its nodes. False when no function is selected.
+  [[nodiscard]] bool xref_graph_snapshot(std::size_t& nodes, std::size_t& edges,
+                                         std::vector<std::string>& names);
   [[nodiscard]] bool symbol_shown(const std::string& raw, std::string& shown);
   void set_symbol_filter(const std::string& filter);
+  void set_xref_depth(int depth);
   [[nodiscard]] bool symbol_kind(const std::string& raw, std::string& kind);
   /// Blocks until the search that is running has finished (UI scripts only).
   void wait_search();
@@ -383,6 +392,7 @@ class Workspace {
   bool show_classes_ = true;
   bool show_search_ = true;
   bool show_symbols_ = true;
+  bool show_xref_graph_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
   /// The command palette: opened by its shortcut, filtered by the text in its field, and closed

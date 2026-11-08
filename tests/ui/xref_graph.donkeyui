@@ -1,0 +1,20 @@
+# G17: the cross-reference graph draws the call neighbourhood of the selected function. Go to main in
+# the debuggee (its entry, 0x1380). One call out, main has five functions in its graph and four calls
+# among them; two calls out, eleven and eleven. Both numbers are the CLI's own call graph walked the
+# same way (donkey-cli callgraph --json), not a second copy of the rule.
+wait_idle
+frames 5
+assert_no_error
+
+key g
+text main
+key enter
+frames 3
+assert_xref_graph 5 4
+assert_xref_graph_has main
+assert_xref_graph_has donkey_debuggee_tick
+
+xref_depth 2
+frames 2
+assert_xref_graph 11 11
+assert_no_error
