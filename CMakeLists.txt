@@ -79,6 +79,8 @@ add_library(donkey_binary STATIC
   src/binary/demangle_msvc.cpp
   src/binary/rtti.cpp
   src/binary/link.cpp
+  src/binary/plt.cpp
+  src/binary/elf_dynamic.cpp
   src/binary/core.cpp
   src/binary/minidump.cpp
   src/binary/inflate.cpp
@@ -112,6 +114,7 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/link_calls.cpp
   src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)

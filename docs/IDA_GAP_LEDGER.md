@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution across images (`donkey-cli link`) done; cross-image references and project integration not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs across images (`donkey-cli link`, `project link`) done for ELF; GOT-indirect calls and PE references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
@@ -1121,9 +1121,11 @@ own code.
     mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
     (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
     `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
-    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
-    resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
-    hierarchy panel is G10-T4.
+    AArch64 PLT stubs are named at any stride, BTI-prefixed ones included (`PltStubsAArch64.*`,
+    fixtures in `tests/fixtures/link/aarch64/`). The PLT stub reader is shared with the cross-image
+    call resolution of G15-T2 (`src/binary/plt.cpp`).
+    Not done: MSVC RTTI (Complete Object Locators), and call-site resolution in the decompiler
+    (`call [reg + k]` through a known vtable). The GUI class hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
     pointer, function pointers), and MSVC RTTI Complete Object Locators.
   - Build a class hierarchy.
@@ -1340,18 +1342,35 @@ platform; do not write new, weaker ones.
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
-  - **Status:** PARTIAL. Done: `resolve_imports` (`include/donkey/binary/link.h`,
-    `src/binary/link.cpp`) binds each import of an image to the first other image, in link
-    order, that exports the name and is one of the libraries the importer names: DT_NEEDED for
-    ELF (matched against the provider's DT_SONAME or file name), the DLL named by a PE import
-    (matched by file name). Unbound imports are counted. `donkey-cli link <executable>
-    <library>... [--json]` loads the images in link order and prints each binding and the
-    unbound count. Evidence: five `Link.*` unit tests on three fixtures in
-    `tests/fixtures/link/`; the library rule is checked by mutation (removing it fails the two
-    tests that depend on it); `cli.link_binds_imports_to_needed_libraries` and
-    `cli.link_needs_a_library` in CTest. Not done: cross-image references (a call through a
-    bound import, with the provider's address as its target); the result is not yet in the
-    project; PE imports are matched by DLL name only, not by ordinal or forwarded exports.
+  - **Status:** PARTIAL. Done for ELF:
+    - `resolve_imports` (`include/donkey/binary/link.h`, `src/binary/link.cpp`) binds each import
+      of an image to the first other image, in link order, that exports the name and is one of
+      the libraries the importer names: DT_NEEDED (matched against the provider's DT_SONAME or
+      file name), or the DLL named by a PE import (matched by file name). Unbound imports are
+      counted.
+    - `plt_stub_imports` (`include/donkey/binary/plt.h`, `src/binary/plt.cpp`) names each PLT stub
+      by the import its JUMP_SLOT relocation calls. x86-64 stubs and AArch64 stubs are read; the
+      AArch64 scan tries every 4-byte position, because lld 18's BTI stubs are 24 bytes apart
+      (16-byte scanning named one of the two imports in the fixture and missed the other).
+    - `resolve_import_calls` (`include/donkey/analysis/link_calls.h`, `src/analysis/link_calls.cpp`)
+      binds each call or jump the analysis finds through a stub to the export `resolve_imports`
+      chose, so a call to `provided_fn@plt` names the provider's address. A call to an import no
+      input exports is listed as unbound.
+    - `donkey-cli link <executable> <library>... [--json]` prints the bindings, the calls and the
+      unbound counts, and reports when an analysis was partial.
+    - `donkey-cli project link <database> [--json]` links the images of a project in the order they
+      were saved (the first is the executable). Each file must still match the SHA-256 the project
+      recorded; a changed file is refused with `project.image_changed`.
+    - Evidence: `Link.*` (5), `LinkCalls.*` (3), `PltStubs.*` (3), `PltStubsAArch64.*` and
+      `LinkCallsAArch64.*` on the BTI fixtures in `tests/fixtures/link/aarch64/`; CTest
+      `cli.link_*`, `cli.project_link_*`, and `cli.project_link_refusals` (a changed file and a
+      one-image project are refused). Mutations checked: removing the library rule fails two
+      `Link.*` tests; looking up stubs by the call site fails two `LinkCalls.*` tests; removing
+      the SHA-256 check fails `cli.project_link_refusals`.
+    - Not done: calls through a GOT slot (`call [rip+x]`, which `-fno-plt` code makes); imports
+      used as data pointers (their xrefs are data, not calls); PE and Mach-O cross-image calls
+      (the PE import is an IAT slot, not a stub); ordinal imports and forwarded exports. The
+      project does not store the cross-image results: `project link` recomputes them.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.

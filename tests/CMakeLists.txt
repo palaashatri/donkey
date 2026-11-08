@@ -139,6 +139,8 @@ add_executable(donkey_unit_tests
   unit/demangle_msvc_test.cpp
   unit/rtti_test.cpp
   unit/link_test.cpp
+  unit/link_calls_test.cpp
+  unit/link_aarch64_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
@@ -617,6 +619,37 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     DEPENDS cli.project_save_elf_json)
 endif()
 
+# Several images in one project (G15-T2): the images are linked in the order they were saved,
+# so the executable is saved first and the provider last.
+set(DONKEY_CLI_LINK_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-link.db")
+add_test(NAME cli.project_link_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_LINK_DB}
+                 ${DONKEY_CLI_LINK_DB}-shm ${DONKEY_CLI_LINK_DB}-wal)
+add_test(NAME cli.project_link_save_executable
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so --json)
+set_tests_properties(cli.project_link_save_executable PROPERTIES DEPENDS cli.project_link_reset)
+add_test(NAME cli.project_link_save_other
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1 --json)
+set_tests_properties(cli.project_link_save_other PROPERTIES DEPENDS cli.project_link_save_executable)
+add_test(NAME cli.project_link_save_provider
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.project_link_save_provider PROPERTIES DEPENDS cli.project_link_save_other)
+add_test(NAME cli.project_link_reports_calls
+         COMMAND donkey-cli project link ${DONKEY_CLI_LINK_DB} --json)
+set_tests_properties(cli.project_link_reports_calls PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null"
+  DEPENDS cli.project_link_save_provider)
+
+add_test(NAME cli.project_link_refusals
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cli/project_link_refusals.cmake)
+
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
@@ -921,6 +954,15 @@ add_test(NAME cli.link_binds_imports_to_needed_libraries
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
 set_tests_properties(cli.link_binds_imports_to_needed_libraries PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"library\": \"libprovider.so.1\".*\"name\": \"missing_fn\", \"provider\": null, \"library\": \"\", \"address\": null")
+
+# Calls through PLT stubs (G15-T2): the consumer's call to provided_fn is bound to the export the
+# consumer needs, and its call to missing_fn is listed as unbound rather than dropped.
+add_test(NAME cli.link_reports_calls_through_plt_stubs
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_reports_calls_through_plt_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null")
 
 # A link needs at least two images: the executable and one library.
 add_test(NAME cli.link_needs_a_library
