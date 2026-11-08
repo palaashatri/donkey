@@ -3,6 +3,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -27,6 +28,8 @@ namespace donkey::ui {
 struct LiftRequest {
   Function function;
   std::vector<UserLocalName> locals;
+  /// The user-defined strings of the document, as the literals the pseudocode prints (G12-T2).
+  std::map<std::uint64_t, std::string> string_literals;
 };
 
 struct AsyncDecompileState {

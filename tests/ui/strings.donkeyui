@@ -1,0 +1,51 @@
+# G12-T2: a string the user defines in the desktop app prints as its C literal in the decompiled
+# function. The fixture (tests/fixtures/strings/hello-x86_64) is non-PIE: main at 0x401130 loads
+# "hello, donkey" from 0x402004 with movabs, and the string is 14 bytes with its terminator. Before
+# the string is defined, main shows the address; after A defines it, main shows the literal; undo
+# restores the address. Opens nothing itself: the test passes the fixture on the command line.
+wait_idle
+frames 5
+assert_no_error
+
+key g
+assert_focus Go to
+text 0x401130
+key enter
+assert_selected 0x401130
+wait_idle
+assert_pseudocode rdi = 0x402004;
+
+key g
+assert_focus Go to
+text 0x402004
+key enter
+assert_selected 0x402004
+key a
+assert_annotation data 0x402004 string:14
+wait_idle
+
+key g
+assert_focus Go to
+text 0x401130
+key enter
+assert_selected 0x401130
+wait_idle
+assert_pseudocode rdi = (u64)("hello, donkey");
+
+key g
+assert_focus Go to
+text 0x402004
+key enter
+assert_selected 0x402004
+key shortcut+z
+assert_annotation data 0x402004 -
+wait_idle
+
+key g
+assert_focus Go to
+text 0x401130
+key enter
+assert_selected 0x401130
+wait_idle
+assert_pseudocode rdi = 0x402004;
+assert_no_error

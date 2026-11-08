@@ -104,7 +104,8 @@ Flow: `frames N`, `wait_idle [ms]`, `measure LABEL FRAMES`,
 `require_window_off_display` … `end_require`, `require_native_debugger` …
 `end_require`, `dump_nav`, `quit`.
 
-Assertions: `assert_selected ADDRESS|NAME`,
+Assertions: `assert_selected ADDRESS|NAME`, `assert_pseudocode TEXT` (the decompiler's current text
+contains TEXT),
 `assert_annotation rename|comment|code|data ADDRESS|NAME TEXT|-` (`-` means the
 annotation is absent; `data` takes the DataRange text, `ELEMENT:COUNT`),
 `assert_focus WINDOW`, `assert_text_input 0|1`, `assert_ime_rect`,

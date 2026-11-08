@@ -533,6 +533,11 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     donkey_ui_script(readable_names FILE $<TARGET_FILE:donkey_test_hierarchy>)
     donkey_ui_script(symbols FILE $<TARGET_FILE:donkey_test_hierarchy>)
   endif()
+  # The strings script defines a string in the desktop app and expects the decompiled main to print it
+  # as a literal (G12-T2). The fixture is the x86-64 Linux string fixture (non-PIE, fixed addresses).
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(strings FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64)
+  endif()
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)
   donkey_ui_script(display_dpi_device)

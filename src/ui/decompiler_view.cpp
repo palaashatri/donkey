@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <thread>
 #include <vector>
@@ -7,6 +8,7 @@
 #include "components.h"
 #include "donkey/ir/lift.h"
 #include "donkey/ir/local_names.h"
+#include "donkey/project/string_literals.h"
 #include "imgui.h"
 #include "views.h"
 
@@ -15,7 +17,8 @@ namespace donkey::ui {
 namespace {
 
 AsyncDecompileState::Output lift_and_format(const Document& document, const Function& target,
-                                            const std::vector<UserLocalName>& locals) {
+                                            const std::vector<UserLocalName>& locals,
+                                            const std::map<std::uint64_t, std::string>& literals) {
   AsyncDecompileState::Output out;
   auto lifted = lift_function(document.loaded.image, document.analysis, target);
   if (!lifted) {
@@ -32,7 +35,9 @@ AsyncDecompileState::Output lift_and_format(const Document& document, const Func
       out.code = applied.diagnostic().code;
     }
   }
-  auto text = format_pseudocode_lines(lifted.value());
+  PseudocodeOptions options;
+  options.string_literals = literals;
+  auto text = format_pseudocode_lines(lifted.value(), options);
   if (!text) {
     out.status = "InvalidIR";
     out.code = text.diagnostic().code;
@@ -54,8 +59,35 @@ std::string local_names_key(const std::vector<UserLocalName>& locals) {
 }
 
 /// The identity of one lifted text: the printed function name and the user's local names.
-std::string cache_key(const Function& target, const std::vector<UserLocalName>& locals) {
-  return std::to_string(target.address) + ":" + target.name + "|" + local_names_key(locals);
+std::string cache_key(const Function& target, const std::vector<UserLocalName>& locals,
+                      const std::map<std::uint64_t, std::string>& literals) {
+  std::string key =
+      std::to_string(target.address) + ":" + target.name + "|" + local_names_key(locals);
+  // The literals change what is printed, so they are part of the identity too.
+  key += "|";
+  for (const auto& [address, literal] : literals) {
+    key += std::to_string(address) + "=" + literal + ";";
+  }
+  return key;
+}
+
+/// The C literals of the strings the user defined in this document (G12-T2), from the annotation
+/// snapshot. Built on the render thread, so the worker never reads the annotations.
+std::map<std::uint64_t, std::string> literals_of(const Document& document,
+                                                 const Annotations* annotations) {
+  if (annotations == nullptr || annotations->data_ranges.empty()) {
+    return {};
+  }
+  std::vector<Annotation> rows;
+  rows.reserve(annotations->data_ranges.size());
+  for (const auto& [address, text] : annotations->data_ranges) {
+    Annotation row;
+    row.kind = AnnotationKind::DataRange;
+    row.address = address;
+    row.text = text;
+    rows.push_back(std::move(row));
+  }
+  return string_literals(rows, document.loaded.image, document.loaded.data);
 }
 
 }  // namespace
@@ -74,7 +106,7 @@ void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const 
   if (!doc) {
     return;
   }
-  const std::string key = cache_key(request.function, request.locals);
+  const std::string key = cache_key(request.function, request.locals, request.string_literals);
   {
     std::lock_guard<std::mutex> lock(mutex);
     current_generation = gen;
@@ -101,7 +133,8 @@ void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const 
             return;  // superseded before the CPU-heavy part
           }
         }
-        Output out = lift_and_format(*doc, request.function, request.locals);
+        Output out =
+            lift_and_format(*doc, request.function, request.locals, request.string_literals);
         std::lock_guard<std::mutex> lock(mutex);
         if (cache_document == doc.get()) {
           cache[key] = out;
@@ -125,7 +158,7 @@ void AsyncDecompileState::prefetch(const std::shared_ptr<const Document>& doc,
     return;
   }
   for (LiftRequest& target : targets) {
-    const std::string key = cache_key(target.function, target.locals);
+    const std::string key = cache_key(target.function, target.locals, target.string_literals);
     {
       std::lock_guard<std::mutex> lock(mutex);
       reset_cache_for(doc.get());
@@ -139,7 +172,8 @@ void AsyncDecompileState::prefetch(const std::shared_ptr<const Document>& doc,
           if (token.is_cancelled()) {
             return;
           }
-          Output out = lift_and_format(*doc, target.function, target.locals);
+          Output out =
+              lift_and_format(*doc, target.function, target.locals, target.string_literals);
           std::lock_guard<std::mutex> lock(mutex);
           if (cache_document == doc.get() && !token.is_cancelled()) {
             cache.emplace(key, std::move(out));
@@ -199,7 +233,8 @@ void refresh(UiState& state, const Document& document, const Function& function)
   }
   const std::vector<UserLocalName> locals = local_names_of(state.annotations, function.address);
   // What is shown is identified by the printed name and the local names, as the cache key is.
-  const std::string identity = cache_key(target, locals);
+  const std::map<std::uint64_t, std::string> literals = literals_of(document, state.annotations);
+  const std::string identity = cache_key(target, locals, literals);
 
   // 1. If currently showing this exact function and not in progress, nothing to do.
   if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
@@ -251,7 +286,7 @@ void refresh(UiState& state, const Document& document, const Function& function)
   }
 
   state.async_decompile->request_lift(gen, state.pseudocode_document_owner,
-                                      LiftRequest{std::move(target), locals});
+                                      LiftRequest{std::move(target), locals, literals});
 
   // Callees are the likeliest next stop; lift a few in the background.
   constexpr std::size_t kPrefetch = 4;
@@ -271,8 +306,8 @@ void refresh(UiState& state, const Document& document, const Function& function)
             callee.name = *rename;
           }
         }
-        next.push_back(
-            LiftRequest{std::move(callee), local_names_of(state.annotations, candidate.address)});
+        next.push_back(LiftRequest{std::move(callee),
+                                   local_names_of(state.annotations, candidate.address), literals});
         break;
       }
     }

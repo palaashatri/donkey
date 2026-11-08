@@ -750,6 +750,14 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_pseudocode") {
+    // assert_pseudocode TEXT: the decompiler's current text contains TEXT (G12-T2 literals).
+    const std::string& shown = workspace.state().pseudocode_text;
+    if (c.rest.empty() || shown.find(c.rest) == std::string::npos) {
+      fail(c, "the pseudocode does not contain '" + c.rest + "'");
+    }
+    return true;
+  }
   if (c.name == "assert_focus") {
     ImGuiWindow* nav = GImGui->NavWindow;
     if (!name_matches(nav != nullptr ? nav->Name : nullptr, c.rest)) {
