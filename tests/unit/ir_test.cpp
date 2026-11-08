@@ -4309,3 +4309,79 @@ TEST(Ir, NegatedFloatCompareStaysAFlagTest) {
   EXPECT_EQ(text.find("xmm0"), std::string::npos) << text;
   EXPECT_EQ(text.find("!("), std::string::npos) << text;
 }
+
+// A `lea` of the address of a string the user defined prints the literal in place of the address
+// (G12-T2). Other addresses print as they did before.
+TEST(Ir, ALeaOfAUserStringPrintsTheLiteralInPlaceOfTheAddress) {
+  // lea rax, [rip+0]; ret: rax is the address of the instruction after the lea.
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x8d, 0x05, 0x00, 0x00, 0x00, 0x00, 0xc3}, f));
+  auto plain = donkey::format_pseudocode(f);
+  ASSERT_TRUE(plain.has_value()) << plain.diagnostic().message;
+  const std::size_t at = plain.value().find("(u64)(0x");
+  ASSERT_NE(at, std::string::npos) << plain.value();
+  const std::size_t start = at + std::string("(u64)(").size();
+  const std::size_t end = plain.value().find(')', start);
+  ASSERT_NE(end, std::string::npos);
+  const std::uint64_t address = std::stoull(plain.value().substr(start, end - start), nullptr, 16);
+
+  donkey::PseudocodeOptions named;
+  named.string_literals[address] = "\"hi\"";
+  auto literal = donkey::format_pseudocode(f, named);
+  ASSERT_TRUE(literal.has_value()) << literal.diagnostic().message;
+  EXPECT_NE(literal.value().find("= (u64)(\"hi\");"), std::string::npos) << literal.value();
+  EXPECT_EQ(literal.value().find("0x"), std::string::npos) << literal.value();
+
+  // A literal for some other address changes nothing.
+  donkey::PseudocodeOptions elsewhere;
+  elsewhere.string_literals[address + 1] = "\"hi\"";
+  auto unchanged = donkey::format_pseudocode(f, elsewhere);
+  ASSERT_TRUE(unchanged.has_value());
+  EXPECT_EQ(unchanged.value(), plain.value());
+}
+
+// The same literal in code with control flow, which the structurer prints (G12-T2).
+TEST(Ir, AStringLiteralIsPrintedInStructuredCodeToo) {
+  // test rdi, rdi; je +8; lea rax, [rip+0]; ret; xor eax, eax; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x85, 0xff, 0x74, 0x08, 0x48, 0x8d, 0x05, 0x00, 0x00, 0x00,
+                               0x00, 0xc3, 0x31, 0xc0, 0xc3},
+                              f));
+  auto plain = donkey::format_pseudocode(f);
+  ASSERT_TRUE(plain.has_value()) << plain.diagnostic().message;
+  const std::size_t at = plain.value().find("(u64)(0x");
+  ASSERT_NE(at, std::string::npos) << plain.value();
+  const std::size_t start = at + std::string("(u64)(").size();
+  const std::size_t end = plain.value().find(')', start);
+  ASSERT_NE(end, std::string::npos);
+  const std::uint64_t address = std::stoull(plain.value().substr(start, end - start), nullptr, 16);
+  donkey::PseudocodeOptions named;
+  named.string_literals[address] = "\"hi\"";
+  auto literal = donkey::format_pseudocode(f, named);
+  ASSERT_TRUE(literal.has_value()) << literal.diagnostic().message;
+  EXPECT_NE(literal.value().find("(u64)(\"hi\");"), std::string::npos) << literal.value();
+  EXPECT_NE(literal.value().find("if ("), std::string::npos) << literal.value();
+}
+
+// A `movabs` of a string's absolute address (a non-PIE build) prints the literal (G12-T2).
+TEST(Ir, AMovOfAStringAddressPrintsTheLiteral) {
+  // movabs rdi, 0x402004; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0xbf, 0x04, 0x20, 0x40, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc3}, f));
+  auto plain = donkey::format_pseudocode(f);
+  ASSERT_TRUE(plain.has_value()) << plain.diagnostic().message;
+  EXPECT_NE(plain.value().find("rdi = 0x402004;"), std::string::npos) << plain.value();
+  donkey::PseudocodeOptions named;
+  named.string_literals[0x402004] = "\"hi\"";
+  auto literal = donkey::format_pseudocode(f, named);
+  ASSERT_TRUE(literal.has_value()) << literal.diagnostic().message;
+  EXPECT_NE(literal.value().find("rdi = (u64)(\"hi\");"), std::string::npos) << literal.value();
+  // The same constant in another place is not a string address and keeps its form: a different
+  // address does not match.
+  donkey::PseudocodeOptions other;
+  other.string_literals[0x402005] = "\"hi\"";
+  auto unchanged = donkey::format_pseudocode(f, other);
+  ASSERT_TRUE(unchanged.has_value());
+  EXPECT_EQ(unchanged.value(), plain.value());
+}

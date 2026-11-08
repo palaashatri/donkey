@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <map>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -315,11 +316,24 @@ struct Pseudocode {
   std::vector<PseudocodeLine> lines;
 };
 
+/// How the pseudocode renders addresses that the user has given meaning to (G12-T2).
+struct PseudocodeOptions {
+  /// Address of a NUL-terminated string the user defined, to its C literal (quotes included). A
+  /// `lea` of exactly that address, or a 4- or 8-byte constant assigned to a register that is
+  /// exactly that address (a `mov` of an absolute address), prints the literal in place of the
+  /// address. Other uses of the address print as before.
+  std::map<std::uint64_t, std::string> string_literals;
+};
+
 /// Verified C-like rendering of an IR function broken into line records with source addresses.
 [[nodiscard]] Result<Pseudocode> format_pseudocode_lines(const IrFunction& function);
+[[nodiscard]] Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
+                                                         const PseudocodeOptions& options);
 
 /// Verified C-like rendering of an IR function. Returns the verifier's
 /// diagnostic if the IR is malformed; it never prints partial garbage.
 [[nodiscard]] Result<std::string> format_pseudocode(const IrFunction& function);
+[[nodiscard]] Result<std::string> format_pseudocode(const IrFunction& function,
+                                                    const PseudocodeOptions& options);
 
 }  // namespace donkey

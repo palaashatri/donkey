@@ -40,6 +40,7 @@
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/string_literals.h"
 #include "donkey/project/types.h"
 #include "json.h"
 
@@ -806,6 +807,7 @@ void print_usage(std::FILE* out) {
       " [--json]\n"
       "  donkey-cli link <executable> <library>... [--json]\n"
       "  donkey-cli project link <database> [--json]\n"
+      "  donkey-cli project string <database> <image-id> <address> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
       "  donkey-cli project save <database> <binary> [--json]\n"
       "  donkey-cli project info <database> [--json]\n"
@@ -1697,6 +1699,8 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // The local names the project saved for this binary (G12-T3). They are applied after the debug
   // names, so a user name wins.
   std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
+  // The strings the project defines, as the literals the pseudocode prints (G12-T2).
+  PseudocodeOptions pseudo_options;
   if (!request.project_path.empty()) {
     auto project = Project::open(request.project_path);
     if (!project) {
@@ -1725,6 +1729,11 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     for (const LocalName& entry : names.value()) {
       user_names[entry.function_address].push_back(UserLocalName{entry.variable, entry.name});
     }
+    auto rows = project.value().annotations(*image_id);
+    if (!rows) {
+      return fail(rows.diagnostic());
+    }
+    pseudo_options.string_literals = string_literals(rows.value(), loaded.image, loaded.data);
   }
 
   // The DWARF of the binary, when it has any, names the parameters and the frame slots of
@@ -1784,7 +1793,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         ++written;
         continue;
       }
-      auto pseudo_res = format_pseudocode_lines(lifted.value());
+      auto pseudo_res = format_pseudocode_lines(lifted.value(), pseudo_options);
       if (!pseudo_res) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
@@ -1828,7 +1837,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
                   lifted.diagnostic().code.c_str());
       continue;
     }
-    auto text = format_pseudocode(lifted.value());
+    auto text = format_pseudocode(lifted.value(), pseudo_options);
     if (!text) {
       std::printf("// %s: rejected IR (%s: %s)\n", display_name(function->name).c_str(),
                   text.diagnostic().code.c_str(), text.diagnostic().message.c_str());
@@ -2351,7 +2360,7 @@ int command_link(const std::vector<std::string_view>& arguments) {
 
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
-    return usage_error("project needs a subcommand: save, info, link or type");
+    return usage_error("project needs a subcommand: save, info, link, string or type");
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
@@ -2524,6 +2533,99 @@ int command_project(const std::vector<std::string_view>& arguments) {
                     image.architecture.c_str(), image.bits, hex(image.entry_point).c_str(),
                     image.sections, image.functions, image.analysis_partial ? " (partial)" : "");
       }
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "string") {
+    // project string <db> <image-id> <address>: the NUL-terminated string at that address becomes a
+    // string range of the project (G12-T2). The bytes come from the saved binary, and only when its
+    // SHA-256 still matches the project's record.
+    if (positional.size() != 3) {
+      return usage_error("project string needs a database, image id and address");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t address = 0;
+    if (!parse_u64(positional[2], address)) {
+      return usage_error("invalid address");
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    const ProjectImage* found = nullptr;
+    for (const ProjectImage& image : images.value()) {
+      if (image.id == static_cast<std::int64_t>(parsed_id)) {
+        found = &image;
+        break;
+      }
+    }
+    if (found == nullptr) {
+      return usage_error("no image with that id in the project");
+    }
+    auto loaded = donkey::load_binary(found->path);
+    if (!loaded) {
+      return fail(loaded.diagnostic());
+    }
+    if (loaded.value().image.sha256 != found->sha256) {
+      std::fprintf(stderr,
+                   "error [project.image_changed]: %s no longer matches the hash the project "
+                   "recorded\n",
+                   found->path.c_str());
+      return kExitFailure;
+    }
+    auto offset = loaded.value().image.va_to_file_offset(address);
+    if (!offset) {
+      return fail(Diagnostic::make(
+          Status::InvalidInput, "cli.unmapped_address",
+          "the address " + hex(address) + " is not in a section of the image", std::nullopt));
+    }
+    const std::span<const std::byte> file = loaded.value().data;
+    const std::uint64_t available =
+        file.size() - std::min<std::uint64_t>(file.size(), offset.value());
+    const std::uint64_t limit = std::min<std::uint64_t>(available, donkey::kMaxDataRangeBytes);
+    std::uint64_t length = 0;
+    while (length < limit &&
+           file[static_cast<std::size_t>(offset.value() + length)] != std::byte{0}) {
+      ++length;
+    }
+    if (length == limit) {
+      return fail(Diagnostic::make(Status::InvalidInput, "cli.no_terminator",
+                                   "no NUL terminator within the range the image holds at that "
+                                   "address",
+                                   address));
+    }
+    const std::string text = donkey::format_string_range_text(length + 1);
+    auto written = project.value().set_annotation(static_cast<std::int64_t>(parsed_id),
+                                                  AnnotationKind::DataRange, address, text);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"address\": " + quote(hex(address)) + ",\n";
+      out += "  \"text\": " + quote(text) + ",\n";
+      out += "  \"bytes\": " + std::to_string(length + 1) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Set string at %s in image %llu: %llu bytes with the terminator\n",
+                  hex(address).c_str(), static_cast<unsigned long long>(parsed_id),
+                  static_cast<unsigned long long>(length + 1));
     }
     return kExitOk;
   }

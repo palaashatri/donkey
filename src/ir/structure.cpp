@@ -177,7 +177,9 @@ struct ForPlan {
 };
 
 struct Structurer {
-  explicit Structurer(const IrFunction& function) : function_(function) {}
+  Structurer(const IrFunction& function,
+             const std::map<std::uint64_t, std::string>* string_literals)
+      : function_(function), string_literals_(string_literals) {}
 
   std::optional<std::string> run() {
     const std::size_t count = function_.blocks.size();
@@ -235,7 +237,8 @@ struct Structurer {
         continue;  // printed in the header of the `for` loop it steps
       }
       const IrStatement* previous = flags_producer(body, index);
-      const std::string text = render_statement(function_, body.statements[index], previous);
+      const std::string text =
+          render_statement(function_, body.statements[index], previous, string_literals_);
       if (!text.empty()) {
         line(text, body.statements[index].source_address);
         line_of_[statement_key(block, index)] = lines_.size() - 1;
@@ -371,8 +374,8 @@ struct Structurer {
     const IrBlock& preheader = function_.blocks[plan.preheader];
     const IrBlock& latch_block = function_.blocks[plan.latch];
     const IrStatement& init = preheader.statements[plan.init_index];
-    std::string init_text =
-        render_statement(function_, init, flags_producer(preheader, plan.init_index));
+    std::string init_text = render_statement(
+        function_, init, flags_producer(preheader, plan.init_index), string_literals_);
     std::string step_text = step_text_of(latch_block, plan);
     if (init_text.size() < 2 || step_text.size() < 2 || init_text.back() != ';' ||
         step_text.back() != ';') {
@@ -411,7 +414,7 @@ struct Structurer {
   std::string step_text_of(const IrBlock& latch, const ForPlan& plan) const {
     if (plan.step_first == plan.step_last) {
       return render_statement(function_, latch.statements[plan.step_last],
-                              flags_producer(latch, plan.step_last));
+                              flags_producer(latch, plan.step_last), string_literals_);
     }
     const IrStatement& add = latch.statements[plan.step_last - 1];
     const IrStatement& store = latch.statements[plan.step_last];
@@ -422,7 +425,7 @@ struct Structurer {
     update.b = add.b;
     update.width = store.a.width;
     update.source_address = store.source_address;
-    return render_statement(function_, update, nullptr);
+    return render_statement(function_, update, nullptr, string_literals_);
   }
 
   bool find_loops() {
@@ -637,7 +640,7 @@ struct Structurer {
     const IrBlock& block = function_.blocks[branch_block];
     const IrStatement& branch = block.statements.back();
     const IrStatement* previous = flags_producer(block, block.statements.size() - 1);
-    return render_condition(function_, branch, previous, negate);
+    return render_condition(function_, branch, previous, negate, string_literals_);
   }
 
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
@@ -699,7 +702,7 @@ struct Structurer {
         if (!frames_.empty()) {
           ++frames_.back().switch_depth;
         }
-        line("switch (" + render_operand(function_, terminator.dest) + ") {");
+        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {");
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
           char val_buf[32];
@@ -927,6 +930,7 @@ struct Structurer {
   }
 
   const IrFunction& function_;
+  const std::map<std::uint64_t, std::string>* string_literals_ = nullptr;
   Graph graph_;
   std::vector<BitSet> dominators_;
   std::vector<BlockId> immediate_post_dominator_;
@@ -954,13 +958,13 @@ struct Structurer {
 }  // namespace
 
 std::optional<std::string> format_structured_body(const IrFunction& function) {
-  Structurer structurer(function);
+  Structurer structurer(function, nullptr);
   return structurer.run();
 }
 
 std::optional<std::vector<StructuredLine>> format_structured_body_lines(
-    const IrFunction& function) {
-  Structurer structurer(function);
+    const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals) {
+  Structurer structurer(function, string_literals);
   if (!structurer.run().has_value()) {
     return std::nullopt;
   }

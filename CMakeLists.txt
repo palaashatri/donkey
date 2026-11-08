@@ -155,6 +155,7 @@ donkey_apply_warnings(donkey_ir)
 add_library(donkey_project STATIC
   src/project/cdecl.cpp
   src/project/project.cpp
+  src/project/string_literals.cpp
   src/project/types.cpp
 )
 add_library(donkey::project ALIAS donkey_project)

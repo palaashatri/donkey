@@ -146,6 +146,7 @@ add_executable(donkey_unit_tests
   unit/link_calls_test.cpp
   unit/link_aarch64_test.cpp
   unit/condition_test.cpp
+  unit/string_literals_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
@@ -635,6 +636,36 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     TIMEOUT 120
     DEPENDS cli.project_save_elf_json)
 endif()
+
+# User-defined strings as literals (G12-T2): the string the fixture passes to puts is defined in a
+# project, and the decompiled main prints it. Without the project the address is printed.
+add_test(NAME cli.decompile_without_a_string_prints_the_address
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
+                 --function 0x401130)
+set_tests_properties(cli.decompile_without_a_string_prints_the_address PROPERTIES
+  PASS_REGULAR_EXPRESSION "rdi = 0x402004;")
+set(DONKEY_CLI_STRING_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-string.db")
+add_test(NAME cli.project_string_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_STRING_DB}
+                 ${DONKEY_CLI_STRING_DB}-shm ${DONKEY_CLI_STRING_DB}-wal)
+add_test(NAME cli.project_string_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_STRING_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64 --json)
+set_tests_properties(cli.project_string_save PROPERTIES DEPENDS cli.project_string_reset)
+add_test(NAME cli.project_string_define
+         COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x402004 --json)
+set_tests_properties(cli.project_string_define PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\\"text\\\": \\\"string:14\\\""
+  DEPENDS cli.project_string_save)
+add_test(NAME cli.project_string_decompile_prints_the_literal
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
+                 --project ${DONKEY_CLI_STRING_DB} --function 0x401130)
+set_tests_properties(cli.project_string_decompile_prints_the_literal PROPERTIES
+  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\);"
+  DEPENDS cli.project_string_define)
+add_test(NAME cli.project_string_refuses_an_unmapped_address
+         COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x9999999)
+set_tests_properties(cli.project_string_refuses_an_unmapped_address PROPERTIES WILL_FAIL TRUE)
 
 # Several images in one project (G15-T2): the images are linked in the order they were saved,
 # so the executable is saved first and the provider last.
