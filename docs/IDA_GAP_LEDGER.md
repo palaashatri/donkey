@@ -171,7 +171,7 @@ P0 is the most important, P3 the least.
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64, with conditions, and conditional breakpoints on Linux (x86-64; AArch64 compiled, not run in this change), in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs and, on x86-64, GOT slots read directly, across images (`donkey-cli link`, `project link`), done for ELF; calls through a register loaded from a GOT slot, AArch64 GOT calls, and PE and Mach-O references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
-| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
+| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions and over one real large binary (LLVM's libLLVM.so.1, 123 MB), with time, peak memory and the status each run reports. The block bound is now exact. Memory is about 1 KB per decoded instruction (T1, partial: one real binary, no UI frame times). Incremental re-analysis not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
@@ -1564,7 +1564,17 @@ platform; do not write new, weaker ones.
 ### G16 Scale
 
 - **G16-T1 Real-world benchmark.**
-  - A CI job (`workflow_dispatch` only) downloads pinned, checksummed,
+  - **Status:** PARTIAL. Done: `tools/bench/scale_benchmark.py --binary PATH` measures
+    `donkey-cli analyze` on an existing binary, with its SHA-256, wall time and peak RSS. The manual
+    workflow's `real-binary` job runs it on libLLVM.so.1 from the pinned package
+    `libllvm18=1:18.1.3-1ubuntu1` at 1M and 10M instructions (not run on the hosted runner yet). The
+    local series, with the machine and the diagnostics, is in `docs/BENCHMARKS.md`. Every run is
+    Partial, because each budget or the block bound stops it first. Two defects found by this
+    benchmark were fixed: the block bound was exceeded (`Cfg.TheBlockBoundHoldsAcrossFunctions`),
+    and the instruction-budget diagnostic was repeated per function
+    (`Cfg.TheInstructionLimitIsReportedOnceForAllFunctions`). Not done: UI frame times with the UI
+    scripts; a second real binary (Firefox `libxul` is not redistributable, so it is not committed).
+  - Design (kept for reference): A CI job (`workflow_dispatch` only) downloads pinned, checksummed,
     redistributable large binaries and records analysis time, peak RSS and
     UI frame times with the UI scripts. Results go into
     `docs/BENCHMARKS.md`, labelled with the machine.

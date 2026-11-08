@@ -438,6 +438,86 @@ TEST(Cfg, TheBlockBoundIsReportedOnce) {
     }
   }
   EXPECT_EQ(reported, 1U);
+  // The bound is exact: the graph never holds more blocks than the limit.
+  EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
+}
+
+/// `functions` functions, each a run of `jumps` two-byte jumps and a return, called in turn from
+/// main. Each jump is a block of its own.
+std::vector<std::byte> call_chain_image(std::size_t functions, std::size_t jumps) {
+  const std::size_t first_function = 32;
+  const std::size_t function_size = 2 * jumps + 1;
+  std::vector<std::byte> data(first_function + functions * function_size, std::byte{0xCC});
+  for (std::size_t k = 0; k < functions; ++k) {
+    const std::size_t call_at = 5 * k;
+    const std::size_t target = first_function + k * function_size;
+    const auto rel = static_cast<std::uint32_t>(static_cast<std::int32_t>(
+        static_cast<std::int64_t>(target) - static_cast<std::int64_t>(call_at + 5)));
+    data[call_at] = std::byte{0xE8};
+    for (std::size_t b = 0; b < 4; ++b) {
+      data[call_at + 1 + b] = static_cast<std::byte>((rel >> (8 * b)) & 0xFF);
+    }
+  }
+  data[5 * functions] = std::byte{0xC3};
+  for (std::size_t k = 0; k < functions; ++k) {
+    const std::size_t start = first_function + k * function_size;
+    for (std::size_t j = 0; j < jumps; ++j) {
+      data[start + 2 * j] = std::byte{0xEB};
+      data[start + 2 * j + 1] = std::byte{0x00};
+    }
+    data[start + 2 * jumps] = std::byte{0xC3};
+  }
+  return data;
+}
+
+std::size_t count_diagnostics(const donkey::ControlFlowGraph& cfg, const char* code) {
+  std::size_t count = 0;
+  for (const auto& diagnostic : cfg.diagnostics) {
+    if (diagnostic.code == code) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+// Five functions of 60,000 jumps each. The bound is reached inside the fourth, and the fifth must
+// not add blocks: a graph that checks the bound only after a block is made would still exceed it
+// by one block for each function that follows the limit. The result is reported once.
+TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
+  const auto data = call_chain_image(5, 60'000);
+  const auto image = synthetic_image(data.size());
+  AnalysisOptions options;
+  options.max_instructions = 1'000'000;
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  ASSERT_TRUE(result.value().cfg.partial);
+  EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.block_limit"), 1U);
+}
+
+// The traversal's instruction budget is reported once, with the number of functions it cut short,
+// not once per function. The graph is built directly from a full decode, with a smaller budget, so
+// the traversal (not the linear decode) is what runs out.
+TEST(Cfg, TheInstructionLimitIsReportedOnceForAllFunctions) {
+  const auto data = call_chain_image(5, 200);
+  const auto image = synthetic_image(data.size());
+  auto full = donkey::analyze(image, data);
+  ASSERT_TRUE(full.has_value()) << full.diagnostic().message;
+  ASSERT_FALSE(full.value().functions.empty());
+  AnalysisOptions options;
+  options.max_instructions = 600;
+  auto cfg = donkey::build_control_flow_graph(image, full.value().instructions,
+                                              full.value().functions, options, data);
+  ASSERT_TRUE(cfg.has_value()) << cfg.diagnostic().message;
+  EXPECT_TRUE(cfg.value().partial);
+  std::size_t reported = 0;
+  for (const auto& diagnostic : cfg.value().diagnostics) {
+    if (diagnostic.code == "analysis.instruction_limit") {
+      ++reported;
+      EXPECT_NE(diagnostic.message.find(" function(s)"), std::string::npos) << diagnostic.message;
+    }
+  }
+  EXPECT_EQ(reported, 1U);
 }
 
 }  // namespace
