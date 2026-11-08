@@ -1121,7 +1121,12 @@ own code.
     mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
     (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
     `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
-    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
+    Not done: MSVC RTTI (Complete Object Locators). AArch64 PLT stubs: a shared object
+    linked with BTI (`clang --target=aarch64-linux-gnu -mbranch-protection=bti`, lld 18) has a
+    32-byte PLT0 header and 24-byte entries (`adrp`, `ldr`, `add`, `br`, two `nop`s), so the
+    reader's scan at 16-byte steps misses the entries that do not start on a 16-byte boundary.
+    The fix is to scan at 4-byte steps; it is not made, because a test needs a vtable whose
+    entry points at a PLT stub, which a PIC shared object does not produce. Call-site
     resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
     hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
