@@ -595,13 +595,20 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
                                   << o.detail;
   }
 
-  // The carry-chain functions are Complete under Clang 18.1 on x86-64 at every
-  // level. A fall back to Partial would hide a wrong carry, so it must fail here.
+  // The carry-chain functions and the double-width multiply and divide functions are
+  // Complete under Clang 18.1 on x86-64 at every level. A fall back to Partial would hide
+  // a wrong carry or quotient, so it must fail here. GCC 13 leaves c_sdiv64 Partial at
+  // every level and c_udiv64 Partial at -O0; that is reported, not claimed.
 #if defined(__x86_64__) || defined(_M_X64)
   if (std::strstr(DONKEY_CORPUS_COMPILER, "Clang 18") != nullptr) {
     for (const Outcome& o : outcomes) {
-      if (o.function != "c_add128_hi" && o.function != "c_sub128_hi" &&
-          o.function != "c_add_wraps") {
+      const bool carry =
+          o.function == "c_add128_hi" || o.function == "c_sub128_hi" || o.function == "c_add_wraps";
+      const bool wide = o.function == "c_mulhi_u64" || o.function == "c_mulhi_s64" ||
+                        o.function == "c_udiv32" || o.function == "c_sdiv32" ||
+                        o.function == "c_udiv64" || o.function == "c_sdiv64" ||
+                        o.function == "c_div10";
+      if (!carry && !wide) {
         continue;
       }
       EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function;
