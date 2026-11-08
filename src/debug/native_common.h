@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "donkey/binary/image.h"
+#include "donkey/debug/condition.h"
 #include "donkey/debug/debug.h"
 
 namespace donkey::debug::native {
@@ -24,6 +25,8 @@ struct SoftwareBreakpoint {
   bool inserted = false;
   bool internal = false;  ///< temporary (entry, step-over, step-out); never listed
   std::string tag;        ///< why an internal breakpoint exists ("entry", "step")
+  /// The parsed condition of a conditional breakpoint (info.condition holds its text).
+  std::optional<donkey::debug::BreakCondition> condition;
 };
 
 inline Result<bool> invalid_state(const std::string& message) {

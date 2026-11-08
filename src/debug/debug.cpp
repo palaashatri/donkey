@@ -185,6 +185,13 @@ Result<bool> DebugAdapter::remove_watchpoint(std::uint64_t /*id*/) {
                           "hardware watchpoints are not implemented on this host or adapter");
 }
 
+Result<Breakpoint> DebugAdapter::set_conditional_breakpoint(std::uint64_t /*address*/,
+                                                            const std::string& /*condition*/) {
+  return make_error<Breakpoint>(Status::Unsupported, "debug.conditions_unsupported",
+                                "conditional breakpoints are not implemented on this host or "
+                                "adapter");
+}
+
 Result<StopInfo> DebugAdapter::wait_for_event(int timeout_ms) {
   const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
   while (true) {

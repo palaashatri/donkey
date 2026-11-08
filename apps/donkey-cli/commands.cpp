@@ -25,6 +25,7 @@
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
+#include "donkey/debug/condition.h"
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/debug_names.h"
@@ -807,7 +808,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project local-names <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
-      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
+      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
+      "SYMBOL|ADDR CONDITION]... [--watch "
       "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
       " [--mock] [--json]\n"
       "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
@@ -2556,6 +2558,57 @@ std::string json_stop(const DebugStopRecord& stop) {
 }
 
 /// Resolve a breakpoint spec: a hex/decimal static address or a symbol name.
+bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out);
+
+/// A condition with each `*SYMBOL` operand replaced by the symbol's static address, so a condition
+/// can name a data symbol the way --break names a function. Other text is left as it is.
+Result<std::string> resolve_condition_symbols(const BinaryImage* image, std::string_view text) {
+  std::string out;
+  std::size_t i = 0;
+  while (i < text.size()) {
+    if (text[i] != '*') {
+      out.push_back(text[i]);
+      ++i;
+      continue;
+    }
+    std::size_t start = i + 1;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+      ++start;
+    }
+    const bool identifier =
+        start < text.size() &&
+        (std::isalpha(static_cast<unsigned char>(text[start])) != 0 || text[start] == '_');
+    if (!identifier) {
+      out.push_back('*');
+      ++i;
+      continue;
+    }
+    std::size_t end = start;
+    while (end < text.size() &&
+           (std::isalnum(static_cast<unsigned char>(text[end])) != 0 || text[end] == '_')) {
+      ++end;
+    }
+    const std::string_view name = text.substr(start, end - start);
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, name, address)) {
+      return make_error<std::string>(
+          Status::InvalidInput, "debug.unknown_symbol",
+          "no symbol named `" + std::string(name) + "` for a condition operand");
+    }
+    out += "*" + hex(address);
+    i = end;
+  }
+  return out;
+}
+
+/// A condition as the adapter takes it: the operand, the operator and the value. A memory operand
+/// is written at `memory_address`, the runtime address.
+std::string condition_text(const debug::BreakCondition& condition, std::uint64_t memory_address) {
+  const std::string operand =
+      condition.memory ? "*" + hex(memory_address) : condition.register_name;
+  return operand + " " + debug::condition_op_text(condition.op) + " " + hex(condition.value);
+}
+
 bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out) {
   if (parse_u64(spec, out)) {
     return true;
@@ -2591,6 +2644,7 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
   std::vector<std::string> watch_specs;
+  std::vector<std::pair<std::string, std::string>> conditional_specs;  // location, condition
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -2600,6 +2654,13 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       mock = true;
     } else if (arg == "--run") {
       run = true;
+    } else if (arg == "--break-if") {
+      std::string_view spec;
+      std::string_view condition;
+      if (!take_value(arguments, i, spec) || !take_value(arguments, i, condition)) {
+        return usage_error("--break-if needs a location and a condition");
+      }
+      conditional_specs.emplace_back(std::string(spec), std::string(condition));
     } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
@@ -2646,6 +2707,31 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     static_breaks.push_back(address);
   }
 
+  // A conditional breakpoint's condition is checked here, before anything runs, so a malformed one
+  // or an unknown symbol is refused before the target is started.
+  struct PendingCondition {
+    std::uint64_t static_address = 0;
+    debug::BreakCondition condition;
+  };
+  std::vector<PendingCondition> pending_conditions;
+  for (const auto& [spec, text] : conditional_specs) {
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, spec, address)) {
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_breakpoint",
+                             "no symbol or address '" + spec + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto resolved = resolve_condition_symbols(image, text);
+    if (!resolved) {
+      return fail(resolved.diagnostic());
+    }
+    auto parsed = debug::parse_break_condition(resolved.value());
+    if (!parsed) {
+      return fail(parsed.diagnostic());
+    }
+    pending_conditions.push_back(PendingCondition{address, parsed.value()});
+  }
+
   debug::LaunchConfig config;
   config.binary_path = binary_path;
   config.arguments = args;
@@ -2680,6 +2766,19 @@ int command_debug(const std::vector<std::string_view>& arguments) {
 
   for (std::uint64_t address : static_breaks) {
     auto bp = adapter->set_breakpoint(translator.static_to_runtime(address));
+    if (!bp) {
+      (void)adapter->terminate();
+      return fail(bp.diagnostic());
+    }
+  }
+  for (const PendingCondition& pending : pending_conditions) {
+    // A memory operand's address is a file address in the condition, and the target sees it at
+    // its runtime address.
+    const std::uint64_t memory =
+        pending.condition.memory ? translator.static_to_runtime(pending.condition.address) : 0;
+    auto bp =
+        adapter->set_conditional_breakpoint(translator.static_to_runtime(pending.static_address),
+                                            condition_text(pending.condition, memory));
     if (!bp) {
       (void)adapter->terminate();
       return fail(bp.diagnostic());

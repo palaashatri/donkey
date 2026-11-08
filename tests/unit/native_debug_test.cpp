@@ -786,3 +786,120 @@ TEST(DebugController, ReportsFailuresInTheSnapshot) {
 }
 
 }  // namespace
+
+// Conditional breakpoints (G14-T5). A breakpoint whose condition is false is passed over: the
+// target runs on, no hit is counted and nothing is reported. Memory and register operands are both
+// read at the hit, on x86-64 and AArch64.
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
+#if defined(__x86_64__)
+constexpr const char* kStackPointerName = "rsp";
+#else
+constexpr const char* kStackPointerName = "sp";
+#endif
+
+std::string memory_condition(std::uint64_t address, const char* op, int value) {
+  char text[96];
+  std::snprintf(text, sizeof(text), "*0x%llx %s %d", static_cast<unsigned long long>(address), op,
+                value);
+  return text;
+}
+
+// The counter is 0, 1 and 2 at the three calls to donkey_debuggee_tick, so the condition holds at
+// the third call only. The hit count the breakpoint reports counts that one stop.
+TEST(NativeDebug, ConditionalBreakpointStopsOnlyWhenItsConditionHolds) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
+  const std::uint64_t counter =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  const std::string condition = memory_condition(counter, "==", 2);
+
+  auto bp = adapter->set_conditional_breakpoint(tick, condition);
+  ASSERT_TRUE(bp.has_value()) << bp.diagnostic().code << ": " << bp.diagnostic().message;
+  EXPECT_EQ(bp.value().condition, condition);
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto event = adapter->wait_for_event(10000);
+  ASSERT_TRUE(event.has_value());
+  ASSERT_EQ(event.value().reason, StopReason::Breakpoint) << event.value().description;
+  EXPECT_EQ(pc(*adapter), tick);
+  EXPECT_EQ(read_int(*adapter, counter), 2);
+
+  // set_breakpoint returns the existing breakpoint with its current count.
+  auto current = adapter->set_breakpoint(tick);
+  ASSERT_TRUE(current.has_value());
+  EXPECT_EQ(current.value().id, bp.value().id);
+  EXPECT_EQ(current.value().hit_count, 1U);
+  EXPECT_EQ(current.value().condition, condition);
+
+  // Removed, the breakpoint no longer stops, and the program runs to its own exit: three ticks.
+  ASSERT_TRUE(adapter->remove_breakpoint(bp.value().id).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited) << exited.value().description;
+  EXPECT_EQ(exited.value().exit_code, 42);
+}
+
+// A register condition that holds at the first call stops there, with the counter still 0.
+TEST(NativeDebug, ConditionOnARegisterIsReadAtTheHit) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
+  const std::uint64_t counter =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  auto bp = adapter->set_conditional_breakpoint(tick, std::string(kStackPointerName) + " != 0");
+  ASSERT_TRUE(bp.has_value()) << bp.diagnostic().message;
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto event = adapter->wait_for_event(10000);
+  ASSERT_TRUE(event.has_value());
+  ASSERT_EQ(event.value().reason, StopReason::Breakpoint) << event.value().description;
+  EXPECT_EQ(read_int(*adapter, counter), 0);
+  ASSERT_TRUE(adapter->terminate().has_value());
+}
+
+// A condition that is false at every call never stops: the program runs to its own exit, which
+// shows that all three traps were passed over.
+TEST(NativeDebug, ConditionalBreakpointWhoseConditionIsFalseNeverStops) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
+  auto bp = adapter->set_conditional_breakpoint(tick, std::string(kStackPointerName) + " == 0");
+  ASSERT_TRUE(bp.has_value()) << bp.diagnostic().message;
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited) << exited.value().description;
+  EXPECT_EQ(exited.value().exit_code, 42);
+}
+
+// A condition is checked before anything is set. A plain breakpoint already at the address is not
+// given a condition behind the user's back: the request is refused and the plain one is unchanged.
+TEST(NativeDebug, ConditionalBreakpointsAreRefusedWhenTheyCannotBeHonoured) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t tick = translator.static_to_runtime(static_symbol("donkey_debuggee_tick"));
+
+  auto malformed = adapter->set_conditional_breakpoint(tick, "rsp ==");
+  ASSERT_FALSE(malformed.has_value());
+  EXPECT_EQ(malformed.diagnostic().code, "debug.condition");
+
+  auto unknown = adapter->set_conditional_breakpoint(tick, "nosuchregister == 1");
+  ASSERT_FALSE(unknown.has_value());
+  EXPECT_EQ(unknown.diagnostic().code, "debug.condition_register");
+
+  auto plain = adapter->set_breakpoint(tick);
+  ASSERT_TRUE(plain.has_value()) << plain.diagnostic().message;
+  auto clash = adapter->set_conditional_breakpoint(tick, std::string(kStackPointerName) + " == 0");
+  ASSERT_FALSE(clash.has_value());
+  EXPECT_EQ(clash.diagnostic().code, "debug.breakpoint_exists");
+  auto unchanged = adapter->set_breakpoint(tick);
+  ASSERT_TRUE(unchanged.has_value());
+  EXPECT_EQ(unchanged.value().id, plain.value().id);
+  EXPECT_TRUE(unchanged.value().condition.empty());
+  ASSERT_TRUE(adapter->terminate().has_value());
+}
+#endif

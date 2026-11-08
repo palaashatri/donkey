@@ -164,7 +164,7 @@ P0 is the most important, P3 the least.
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
-| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
+| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64 and conditional breakpoints on Linux (x86-64 and AArch64) in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
@@ -1307,6 +1307,29 @@ platform; do not write new, weaker ones.
 - **G14-T4 Windows on Arm.** ARM64 `CONTEXT` in `native_windows.cpp`.
 - **G14-T5 Hardware watchpoints and conditional breakpoints.** Use the debug
   registers (x86 DR0-DR7, AArch64 DBGWVR through ptrace) where the OS allows.
+  - **Status:** PARTIAL. Done on Linux x86-64: hardware watchpoints in DR0-DR3 and DR7
+    (`set_watchpoint`, `donkey-cli debug launch --watch`). Done on Linux (x86-64 and
+    AArch64): conditional software breakpoints. `set_conditional_breakpoint` takes a condition
+    `<operand> <op> <value>` (`include/donkey/debug/condition.h`, `src/debug/condition.cpp`): the
+    operand is a host register (`rsp`, `x0`) or the 8-byte word at an address (`*0x4010`), the
+    operator is one of `== != < <= > >=`, and the value is decimal or hex. A condition is parsed
+    when it is set, and a register the host does not have is refused. A trap whose conditions are
+    all false is passed over: the thread steps off the breakpoint with every other thread stopped,
+    the breakpoint goes back in, and the target runs on. No hit is counted and nothing is
+    reported. A condition that cannot be read stops the target and says why. A breakpoint that
+    already exists at the address is refused, because attaching a condition would change it.
+    `donkey-cli debug launch --break-if SYMBOL|ADDR CONDITION` takes the same syntax; a `*SYMBOL`
+    operand names a data symbol, and the address is a file address that is translated to runtime.
+    Evidence: `BreakCondition.*` (parser and comparison truth tables), `NativeDebug.Conditional*`
+    and `NativeDebug.ConditionOnARegisterIsReadAtTheHit` against `donkey_test_debuggee` (the stop
+    comes at the third call, the hit count is 1, a false condition never stops and the program
+    exits 42), `cli.debug_native_condition_json`, `cli.debug_mock_condition_is_unsupported` and
+    `cli.debug_break_if_rejects_a_malformed_condition`. Mutations checked: never passing a trap
+    fails two native tests; not reinserting the breakpoint after the silent step fails the
+    counting test. The AArch64 path is compiled but not run: the test host is x86-64.
+    Not done: conditions on hardware watchpoints; conditions with more than one comparison; a
+    condition on a register of a thread other than the one that hit; remote debugging (T1);
+    FreeBSD, macOS and Windows on Arm (T2 to T4).
 
 ### G15 Loaders and multiple images
 
