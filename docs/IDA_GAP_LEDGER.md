@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution across images (`donkey-cli link`) done; cross-image references and project integration not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
@@ -1344,12 +1344,14 @@ platform; do not write new, weaker ones.
     `src/binary/link.cpp`) binds each import of an image to the first other image, in link
     order, that exports the name and is one of the libraries the importer names: DT_NEEDED for
     ELF (matched against the provider's DT_SONAME or file name), the DLL named by a PE import
-    (matched by file name). Unbound imports are counted. Evidence: five `Link.*` unit tests on
-    three fixtures in `tests/fixtures/link/`; the library rule is checked by mutation (removing
-    it fails the two tests that depend on it). Not done: cross-image references (a call through
-    a bound import, with the provider's address as its target); the result is not yet in
-    `donkey-cli` or in the project; PE imports are matched by DLL name only, not by ordinal or
-    forwarded exports.
+    (matched by file name). Unbound imports are counted. `donkey-cli link <executable>
+    <library>... [--json]` loads the images in link order and prints each binding and the
+    unbound count. Evidence: five `Link.*` unit tests on three fixtures in
+    `tests/fixtures/link/`; the library rule is checked by mutation (removing it fails the two
+    tests that depend on it); `cli.link_binds_imports_to_needed_libraries` and
+    `cli.link_needs_a_library` in CTest. Not done: cross-image references (a call through a
+    bound import, with the provider's address as its target); the result is not yet in the
+    project; PE imports are matched by DLL name only, not by ordinal or forwarded exports.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.

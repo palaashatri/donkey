@@ -912,3 +912,17 @@ set_tests_properties(cli.archive_list_gnu PROPERTIES
 add_test(NAME cli.archive_rejects_a_non_archive
          COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
 set_tests_properties(cli.archive_rejects_a_non_archive PROPERTIES WILL_FAIL TRUE)
+
+# Several images (G15-T2): the consumer's import is bound to the library it needs, not to the
+# first input that exports the name (libother.so.1 is listed before libprovider.so.1).
+add_test(NAME cli.link_binds_imports_to_needed_libraries
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_binds_imports_to_needed_libraries PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"library\": \"libprovider.so.1\".*\"name\": \"missing_fn\", \"provider\": null, \"library\": \"\", \"address\": null")
+
+# A link needs at least two images: the executable and one library.
+add_test(NAME cli.link_needs_a_library
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so)
+set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
