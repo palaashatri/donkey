@@ -1121,7 +1121,11 @@ own code.
     mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
     (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
     `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
-    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
+    Done since: MSVC RTTI for x64 PE images (`read_msvc_rtti`: complete object locators, type
+    descriptors, class hierarchy descriptors and the vtables they name; checked on a fixture against
+    the source, `RttiMsvc.*`, and fuzzed by `fuzz_rtti`, which now dispatches by format). AArch64 PLT
+    stubs of the 16-byte form are named.
+    Not done: 32-bit MSVC and virtual base classes, AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
     resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
     hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo

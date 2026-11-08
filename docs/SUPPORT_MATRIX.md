@@ -44,6 +44,8 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 
 `donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4).
 
+| MSVC RTTI and vtables (x64 PE) | `read_msvc_rtti` (G10-T3, partial) | The x64 fixture `tests/fixtures/rtti/msvc/hierarchy.exe` (clang 18 for the MSVC target, linked with LLD; see its PROVENANCE.md). The class names, the direct bases (a three-level chain, so an indirect base is not listed), the vtable groups and the slot counts are checked against the source (`RttiMsvc.*`). The COL-to-vtable reference is checked against the file bytes | 32-bit MSVC; virtual base classes (the vbtable); class names that are templates or use special characters (reported, not shown); the names of the slots (no PDB symbols); call sites through a vtable |
+
 | Itanium RTTI and vtables (ELF) | Reader | Checked against | Not covered |
 |---|---|---|---|
 | x86-64 and AArch64, PIE and non-PIE | `read_itanium_rtti` (G10-T3, partial) | `gdb` on the x86-64 non-PIE fixture: vtable slots, typeinfo bases and offsets-to-top match; the PIE build gives the same graph. AArch64 builds of the same source (`aarch64-linux-gnu-g++`, PIE and non-PIE) give the same graph and name the pure-virtual slot through its PLT stub | Only the 16-byte PLT entry form is decoded for AArch64 (a BTI-prefixed entry stays unnamed and reports `rtti.plt_unnamed`); AArch64 is not run in CI; MSVC RTTI (Complete Object Locators) is not read; no call-site resolution in the decompiler |
