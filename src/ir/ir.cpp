@@ -912,13 +912,16 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::MulHighUnsigned:
         case IrOp::MulHighSigned:
           if (statement.dest.kind != IrOperandKind::Register ||
-              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None) {
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block) {
             return fail("ir.malformed_mul_high",
                         "high multiply needs a register destination and two sources");
           }
           if (statement.dest.width != statement.width ||
               statement.a.width != statement.dest.width ||
-              (statement.b.kind == IrOperandKind::Register &&
+              ((statement.b.kind == IrOperandKind::Register ||
+                statement.b.kind == IrOperandKind::Memory) &&
                statement.b.width != statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "high multiply operand widths must match statement width");
@@ -930,14 +933,21 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::RemSigned:
           if (statement.dest.kind != IrOperandKind::Register ||
               statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
-              statement.c.kind == IrOperandKind::None) {
+              statement.c.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block ||
+              statement.c.kind == IrOperandKind::Block) {
             return fail("ir.malformed_divide",
                         "divide needs a register destination and a 2-part dividend and divisor");
           }
+          // A constant divisor must fit the statement width. Register and memory divisors must
+          // have that width, since the evaluator reads them at it.
           if (statement.dest.width != statement.width || statement.a.width != statement.width ||
               statement.b.width != statement.width ||
-              (statement.c.kind == IrOperandKind::Register &&
-               statement.c.width != statement.width)) {
+              ((statement.c.kind == IrOperandKind::Register ||
+                statement.c.kind == IrOperandKind::Memory) &&
+               statement.c.width != statement.width) ||
+              (statement.c.kind == IrOperandKind::Constant && statement.width < 8 &&
+               (statement.c.constant >> (8U * statement.width)) != 0)) {
             return fail("ir.type_width_mismatch",
                         "divide operand widths must match statement width");
           }
@@ -1578,6 +1588,7 @@ void recover_pointer_structs(IrFunction& function) {
         visit(statement.dest);
         visit(statement.a);
         visit(statement.b);
+        visit(statement.c);
         // The writing statement itself may still read the old value; any
         // access after it goes through the new value.
         if (straight_line && i > first_write && touched) {
@@ -1664,6 +1675,7 @@ void recover_stack_variables(IrFunction& function) {
       inspect_operand(stmt.dest);
       inspect_operand(stmt.a);
       inspect_operand(stmt.b);
+      inspect_operand(stmt.c);
     }
   }
 

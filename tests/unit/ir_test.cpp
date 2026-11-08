@@ -2379,6 +2379,66 @@ TEST(Ir, X86DivAndIdivReturnTheQuotientAndTheRemainder) {
   EXPECT_EQ(run_x86_64(signed_remainder, {100, neg(7)}), 2U);
 }
 
+TEST(Ir, X86DivideReadsTheHighHalfOfTheDividend) {
+  // mov rdx, rdi; xor eax, eax; div rsi; ret: rdx:rax is 1:0, which is 2^64, divided by 2.
+  donkey::IrFunction quotient;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0xfa, 0x31, 0xc0, 0x48, 0xf7, 0xf6, 0xc3}, quotient));
+  EXPECT_FALSE(quotient.partial);
+  EXPECT_EQ(run_x86_64(quotient, {1, 2}), 0x8000000000000000ULL);
+  // A high half no smaller than the divisor makes the quotient overflow, which is a fault.
+  const auto overflow = evaluate_x86_64(quotient, {2, 1});
+  ASSERT_FALSE(overflow.has_value());
+  EXPECT_EQ(overflow.diagnostic().code, "ir.eval_fault");
+}
+
+TEST(Ir, VerifierRejectsABlockReferenceAsADivisor) {
+  // A block is a branch target, not a value, so it cannot be a divisor.
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 8);
+  divide.a = donkey::IrOperand::register_ref("rdx", 8);
+  divide.b = donkey::IrOperand::register_ref("rax", 8);
+  divide.c = donkey::IrOperand::block_ref(0);
+  divide.width = 8;
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.malformed_divide");
+}
+
+TEST(Ir, VerifierRejectsAMemoryDivisorOfTheWrongWidth) {
+  // A 4-byte divide reads its divisor at 4 bytes; an 8-byte memory divisor does not match.
+  donkey::IrBlock block;
+  donkey::IrStatement divide;
+  divide.op = donkey::IrOp::DivUnsigned;
+  divide.dest = donkey::IrOperand::register_ref("rax", 4);
+  divide.a = donkey::IrOperand::register_ref("rdx", 4);
+  divide.b = donkey::IrOperand::register_ref("rax", 4);
+  divide.c = donkey::IrOperand::memory_reference("rsi", "", 1, 0, 8);
+  divide.width = 4;
+  block.statements.push_back(divide);
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.a = donkey::IrOperand::register_ref("rax", 4);
+  ret.width = 4;
+  block.statements.push_back(ret);
+  donkey::IrFunction function;
+  function.name = "divide";
+  function.blocks.push_back(std::move(block));
+  const auto rejected = donkey::verify_ir(function);
+  ASSERT_FALSE(rejected.has_value());
+  EXPECT_EQ(rejected.diagnostic().code, "ir.type_width_mismatch");
+}
+
 TEST(Ir, X86DivideFaultsWhereTheHardwareDivideErrors) {
   // mov rax, rdi; xor edx, edx; div rsi; ret
   donkey::IrFunction quotient;

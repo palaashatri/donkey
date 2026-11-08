@@ -294,7 +294,13 @@ struct Lifter {
   bool limit_reached() const { return statement_count >= options.max_statements; }
 
   void push(IrBlock& block, IrStatement statement) {
-    if (limit_reached()) {
+    // A block needs its terminator even when the statement budget is spent, or the IR does not
+    // verify. Anything else dropped at the limit makes the function Partial, so a truncated body
+    // is never reported as Complete.
+    const bool terminator = statement.op == IrOp::Branch || statement.op == IrOp::CondBranch ||
+                            statement.op == IrOp::Switch || statement.op == IrOp::Return;
+    if (limit_reached() && !terminator) {
+      out.partial = true;
       return;
     }
     if (statement.width == 0) {
