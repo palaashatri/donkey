@@ -918,11 +918,11 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       for (const PassSnapshot& version : versions) {
         passes.push_back(version.pass);
       }
-      EXPECT_EQ(passes,
-                (std::vector<std::string>{"lift", "infer_signature", "recover_pointer_structs",
-                                          "propagate_copies", "remove_dead_temporaries",
-                                          "remove_dead_register_writes", "remove_dead_temporaries",
-                                          "forward_compare_loads", "arrange_loop_tests"}))
+      EXPECT_EQ(passes, (std::vector<std::string>{
+                            "lift", "infer_signature", "forward_slot_copies", "propagate_copies",
+                            "recover_pointer_structs", "remove_dead_temporaries",
+                            "remove_dead_register_writes", "remove_dead_temporaries",
+                            "forward_compare_loads", "arrange_loop_tests"}))
           << library.level << " " << entry.name << ": the hook must see every pass, in order";
 
       auto production = donkey::lift_function(loaded.value().image, analysis.value(), *function);
@@ -1371,6 +1371,60 @@ TEST(DecompilerCorpus, AppliedPrototypeNamesStructFields) {
   GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
 #endif
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  ASSERT_TRUE(analysis.has_value());
+  const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
+  ASSERT_NE(function, nullptr);
+  auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+  ASSERT_TRUE(lifted.has_value());
+  const donkey::IrFunction& ir = lifted.value();
+
+  // struct corpus_point { int x; int y; long long z; unsigned char tag; } at 0, 4, 8, 16:
+  // x = 3, y = 5, z = 100, tag = 7.
+  std::vector<std::uint8_t> point(24, 0);
+  store_little_endian(point, 0, 4, 3);
+  store_little_endian(point, 4, 4, 5);
+  store_little_endian(point, 8, 8, 100);
+  store_little_endian(point, 16, 1, 7);
+  constexpr std::uint64_t kPoint = 0x10000;
+  const std::array<std::uint64_t, 1> arguments{kPoint};
+  donkey::IrEvalOptions eval_options;
+  eval_options.architecture = loaded.value().image.architecture;
+  eval_options.convention = host_convention();
+  const auto evaluate = [&](const donkey::IrFunction& candidate) {
+    donkey::IrEvalMemory memory;
+    EXPECT_TRUE(memory.add_region(kPoint, point, false));
+    return donkey::evaluate_ir(candidate, arguments, memory, eval_options);
+  };
+  auto before = evaluate(ir);
+  ASSERT_TRUE(before.has_value()) << before.diagnostic().code;
+  EXPECT_EQ(before.value().return_value, 120U);  // 3 + 2 * 5 + 100 + 7
+
+  donkey::IrFunction applied_function = ir;
+  auto applied = donkey::apply_prototype(applied_function, corpus_point_prototype());
+  ASSERT_TRUE(applied.has_value())
+      << applied.diagnostic().code << ": " << applied.diagnostic().message;
+  ASSERT_TRUE(donkey::verify_ir(applied_function).has_value());
+  auto text = donkey::format_pseudocode(applied_function);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_NE(text.value().find("(struct corpus_point *p)"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("p->z"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("p->tag"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("f_8"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("a0_fields"), std::string::npos) << text.value();
+
+  // A prototype changes no statement, so the function computes the same value.
+  auto after = evaluate(applied_function);
+  ASSERT_TRUE(after.has_value()) << after.diagnostic().code;
+  EXPECT_EQ(after.value().return_value, before.value().return_value);
+}
+
+TEST(DecompilerCorpus, AppliedPrototypeReachesAnO0SpilledParameter) {
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "the corpus oracle runs on x86-64 and AArch64 hosts";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
   ASSERT_TRUE(loaded.has_value());
   auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
   ASSERT_TRUE(analysis.has_value());

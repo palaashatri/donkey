@@ -1778,15 +1778,21 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   if (options.after_pass) {
     options.after_pass("infer_signature", function);
   }
-  recover_pointer_structs(function);
-  if (options.after_pass) {
-    options.after_pass("recover_pointer_structs", function);
-  }
   // The statement passes run after the signature is inferred, so the parameters do not
-  // change when a read of an argument register is removed.
+  // change when a read of an argument register is removed. A parameter that the code spills
+  // to the stack and reloads (an unoptimised build) is read through the copies that the slot
+  // forwarding and the copy propagation leave, so the accesses it makes are recovered below.
+  internal::forward_slot_copies(function);
+  if (options.after_pass) {
+    options.after_pass("forward_slot_copies", function);
+  }
   internal::propagate_copies(function);
   if (options.after_pass) {
     options.after_pass("propagate_copies", function);
+  }
+  recover_pointer_structs(function);
+  if (options.after_pass) {
+    options.after_pass("recover_pointer_structs", function);
   }
   internal::remove_dead_temporaries(function);
   if (options.after_pass) {

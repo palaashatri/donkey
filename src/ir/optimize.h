@@ -26,6 +26,10 @@ void remove_dead_temporaries(IrFunction& function);
 /// statement may read any register. Loads, stores and calls are never removed.
 void remove_dead_register_writes(IrFunction& function);
 
+/// Replaces a load from a frame slot by a copy of the register that was stored to the slot, while
+/// neither the slot nor the register has changed (G05-T3). Only 8-byte accesses are forwarded.
+void forward_slot_copies(IrFunction& function);
+
 /// Reads a register that was loaded from memory and compared on the next statement straight from
 /// the memory, and removes the load, when the register is dead after the compare (G04-T3). The
 /// compare sees the same value at the same point, so the change is exact.

@@ -950,8 +950,17 @@ for Partial functions.
   (the value of `c_point_sum` on a concrete `corpus_point` is the same before and after
   the prototype, 120), `DecompilerCorpus.AppliedPrototypeThatContradictsTheFunctionIsRefused`,
   and the full headless ctest suite (415 of 415) and the Release `DecompilerCorpus.*`, `Ir.*`
-  and `Types.*` suites (166 of 166), on Linux x86-64. Not done: step 3, types flowing
-  forward through copies and loads, so a value loaded from a typed field is not typed. The
+  and `Types.*` suites (166 of 166), on Linux x86-64. Step 3 is partly done: a parameter
+  that an unoptimised build spills to the stack and reloads is still that parameter.
+  `forward_slot_copies` turns an 8-byte reload of a slot into a copy of the register that
+  was stored there, while neither the slot nor the register has changed; copy propagation
+  then carries the copy into the accesses, and the pointer structure is recovered before the
+  printer runs. A prototype applied to the -O0 `c_point_sum` prints `p->z` and keeps the
+  value (`DecompilerCorpus.AppliedPrototypeReachesAnO0SpilledParameter`), and the forwarding
+  is tested in `Ir.ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter` and
+  `Ir.ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore`. Not done: a value loaded from a
+  typed pointer member keeps no type, so a pointer member of a structure is not followed to
+  its pointee; and the forwarding does not cross a block boundary. The
   conversion from a `TypeTable` to an `IrPrototype` is written by the caller (the test does
   it); the CLI and UI that would do it are G05-T4.
 

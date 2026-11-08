@@ -500,4 +500,88 @@ void forward_compare_loads(IrFunction& function) {
   }
 }
 
+namespace {
+
+/// A frame slot whose value is the register `source`: stored from it, and neither the slot nor
+/// the register has been written since.
+struct SlotValue {
+  IrOperand slot;
+  std::string source;
+};
+
+/// Whether two memory operands name the same slot exactly.
+bool same_slot(const IrOperand& a, const IrOperand& b) {
+  return a.kind == b.kind && a.reg == b.reg && a.index == b.index && a.scale == b.scale &&
+         a.constant == b.constant && a.width == b.width;
+}
+
+/// Whether a write to `written` may change any byte of `slot`. The write is known not to
+/// overlap only when both name the same base with no index, and their byte ranges are apart.
+bool may_overlap(const IrOperand& written, const IrOperand& slot) {
+  if (!written.index.empty() || !slot.index.empty() || written.reg.empty() ||
+      family(written.reg) != family(slot.reg)) {
+    return true;
+  }
+  const auto start_written = static_cast<std::int64_t>(written.constant);
+  const auto start_slot = static_cast<std::int64_t>(slot.constant);
+  return start_written < start_slot + static_cast<std::int64_t>(slot.width) &&
+         start_slot < start_written + static_cast<std::int64_t>(written.width);
+}
+
+}  // namespace
+
+void forward_slot_copies(IrFunction& function) {
+  // A value stored to a frame slot and loaded back before either changes is a copy of the
+  // register it was stored from. The load becomes a register copy, which copy propagation then
+  // carries into the accesses that follow, so an access through a spilled parameter reads that
+  // parameter. Only an 8-byte store and an 8-byte load are forwarded.
+  for (IrBlock& block : function.blocks) {
+    std::vector<SlotValue> known;
+    for (IrStatement& statement : block.statements) {
+      if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
+        known.clear();  // the callee or the unknown statement may write any slot or register
+        continue;
+      }
+      if ((statement.op == IrOp::Assign || statement.op == IrOp::Load) &&
+          statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+          !is_temporary(statement.dest.reg) && statement.a.kind == IrOperandKind::Memory &&
+          statement.dest.width == 8 && statement.a.width == 8 && statement.width == 8) {
+        for (const SlotValue& value : known) {
+          if (same_slot(value.slot, statement.a)) {
+            if (family(value.source) != family(statement.dest.reg)) {
+              statement.op = IrOp::Assign;
+              statement.a = IrOperand::register_ref(value.source, 8);
+            }
+            break;
+          }
+        }
+      }
+      if (statement.op == IrOp::Store || statement.dest.kind == IrOperandKind::Memory) {
+        const IrOperand& written = statement.op == IrOp::Store ? statement.a : statement.dest;
+        known.erase(std::remove_if(known.begin(), known.end(),
+                                   [&written](const SlotValue& value) {
+                                     return may_overlap(written, value.slot);
+                                   }),
+                    known.end());
+      }
+      if (writes_destination(statement.op) && statement.dest.kind == IrOperandKind::Register &&
+          !statement.dest.reg.empty()) {
+        const std::string written = family(statement.dest.reg);
+        known.erase(std::remove_if(
+                        known.begin(), known.end(),
+                        [&written](const SlotValue& value) {
+                          return value.source == written || family(value.slot.reg) == written ||
+                                 (!value.slot.index.empty() && family(value.slot.index) == written);
+                        }),
+                    known.end());
+      }
+      if (statement.op == IrOp::Store && statement.a.kind == IrOperandKind::Memory &&
+          statement.a.width == 8 && statement.b.kind == IrOperandKind::Register &&
+          statement.b.width == 8 && !statement.b.reg.empty() && !is_temporary(statement.b.reg)) {
+        known.push_back(SlotValue{statement.a, family(statement.b.reg)});
+      }
+    }
+  }
+}
+
 }  // namespace donkey::internal

@@ -2678,6 +2678,43 @@ TEST(Ir, StructuresCounterInMemoryAsFor) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
+TEST(Ir, ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter) {
+  // mov [rbp - 8], rdi; mov rax, [rbp - 8]; mov eax, [rax + 4]; mov rdx, [rbp - 8];
+  // mov ecx, [rdx + 8]; add eax, ecx; ret. An unoptimised build keeps the pointer in a frame
+  // slot. The reloads are copies of rdi while the slot is unchanged, so both accesses are
+  // accesses through the parameter, and its structure has the two fields.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0x7d, 0xf8, 0x48, 0x8b, 0x45, 0xf8, 0x8b, 0x40, 0x04,
+                               0x48, 0x8b, 0x55, 0xf8, 0x8b, 0x4a, 0x08, 0x01, 0xc8, 0xc3},
+                              function));
+  ASSERT_EQ(function.pointer_structs.size(), 1U);
+  const donkey::IrPointerStruct& structure = function.pointer_structs.front();
+  EXPECT_EQ(structure.base_register, "rdi");
+  ASSERT_EQ(structure.fields.size(), 2U);
+  EXPECT_EQ(structure.fields[0].offset, 4);
+  EXPECT_EQ(structure.fields[1].offset, 8);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("a0->f_4"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("a0->f_8"), std::string::npos) << text.value();
+}
+
+TEST(Ir, ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore) {
+  // mov [rbp - 8], rdi; mov [rbp - 8], rsi; then two reloads through the slot. The second store
+  // replaces the first, so the reloads are copies of rsi and not of rdi: the structure is
+  // recovered for rsi, and rdi is never accessed.
+  donkey::IrFunction function;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0x7d, 0xf8, 0x48, 0x89, 0x75, 0xf8, 0x48, 0x8b, 0x45, 0xf8, 0x8b,
+                       0x40, 0x04, 0x48, 0x8b, 0x55, 0xf8, 0x8b, 0x4a, 0x08, 0x01, 0xc8, 0xc3},
+                      function));
+  for (const donkey::IrPointerStruct& structure : function.pointer_structs) {
+    EXPECT_NE(structure.base_register, "rdi") << "an access went through the first store's value";
+  }
+  ASSERT_EQ(function.pointer_structs.size(), 1U);
+  EXPECT_EQ(function.pointer_structs.front().base_register, "rsi");
+}
+
 TEST(Ir, X86ReturnIsDeterminedWhenOnePathWritesFourBytes) {
   // test rsi, rsi; je zero; mov rax, rdi; jmp done; zero: mov eax, 0; done: ret
   // The 4-byte write zero-extends into rax, so both paths define the returned register and the
