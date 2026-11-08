@@ -15,23 +15,25 @@
 
 namespace donkey {
 
-/// One call or jump in an image of the link set that goes through one of its PLT stubs.
+/// One call or jump in an image of the link set that goes through one of its PLT stubs or GOT
+/// slots.
 struct ImportCall {
   std::size_t importer = 0;               ///< index into the link inputs
   std::uint64_t from = 0;                 ///< address of the call or jump instruction
   XrefKind kind = XrefKind::Unknown;      ///< Call or Jump
-  std::uint64_t stub = 0;                 ///< the importer's PLT stub it goes through
-  std::string name;                       ///< the imported name the stub calls
+  std::uint64_t stub = 0;                 ///< the PLT stub it jumps to, or the GOT slot it reads
+  std::string name;                       ///< the imported name the stub or slot is for
   std::size_t provider = kUnboundImport;  ///< the input whose export it binds to, or unbound
   std::uint64_t to = 0;                   ///< the provider's address for the export; 0 if unbound
 };
 
 /// Binds each call and jump through a PLT stub to the export that `linked` chose for that import,
-/// so a call to `provided_fn@plt` names the provider's `provided_fn`. An unbound import is listed
-/// with `provider` set to kUnboundImport rather than dropped. `analyses[i]` must be the analysis of
-/// `inputs[i]`. Not listed: calls through a GOT slot (`call [rip+x]`, as -fno-plt code makes) and
-/// imports used as data pointers. A partial analysis can miss call sites, which the caller must
-/// report.
+/// so a call to `provided_fn@plt` names the provider's `provided_fn`. A call that reads a GOT slot
+/// directly (`call *slot(%rip)`, as -fno-plt code makes) is bound the same way. An unbound import
+/// is listed with `provider` set to kUnboundImport rather than dropped. `analyses[i]` must be the
+/// analysis of `inputs[i]`. Not listed: a call through a register the code loaded from a slot
+/// first, and imports used as data pointers. A partial analysis can miss call sites, which the
+/// caller must report.
 [[nodiscard]] Result<std::vector<ImportCall>> resolve_import_calls(
     std::span<const LinkInput> inputs, const LinkResult& linked,
     std::span<const AnalysisResult> analyses);

@@ -165,7 +165,7 @@ P0 is the most important, P3 the least.
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs across images (`donkey-cli link`, `project link`) done for ELF; GOT-indirect calls and PE references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs and, on x86-64, GOT slots read directly, across images (`donkey-cli link`, `project link`), done for ELF; calls through a register loaded from a GOT slot, AArch64 GOT calls, and PE and Mach-O references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
@@ -1367,10 +1367,26 @@ platform; do not write new, weaker ones.
       one-image project are refused). Mutations checked: removing the library rule fails two
       `Link.*` tests; looking up stubs by the call site fails two `LinkCalls.*` tests; removing
       the SHA-256 check fails `cli.project_link_refusals`.
-    - Not done: calls through a GOT slot (`call [rip+x]`, which `-fno-plt` code makes); imports
-      used as data pointers (their xrefs are data, not calls); PE and Mach-O cross-image calls
-      (the PE import is an IAT slot, not a stub); ordinal imports and forwarded exports. The
-      project does not store the cross-image results: `project link` recomputes them.
+    - Done (x86-64 ELF): calls that read a GOT slot directly (`call *slot(%rip)`, which `-fno-plt`
+      code makes) are bound like PLT calls. `got_import_slots` (`include/donkey/binary/plt.h`)
+      names each GLOB_DAT slot of an import, and a Data xref from an indirect call or jump to such
+      a slot is an `ImportCall`; a plain load of the slot is not listed. A symbol the image defines
+      is not an import, so neither its PLT stub nor its GOT slot is named (this was a bug in the
+      PLT reader, found by the fixture: the stub of an interposable own function was listed as an
+      unbound import). Evidence: `GotSlots.*` (2), `LinkCalls.ACallThroughAGotSlot*` (2),
+      `LinkCalls.ALoadOfAGotSlot*`, `LinkCalls.ACallThroughARegisterLoaded*`,
+      `LinkCalls.ACallToAFunctionTheImageDefinesIsNotListed`, `PltStubs.AStubForAFunction*`, and
+      `cli.link_reports_calls_through_got_slots`, on `libconsumer_got.so` (built with `-fno-plt`,
+      see `tests/fixtures/link/PROVENANCE.md`). Mutations checked: removing the indirect-transfer
+      check fails the two negative `LinkCalls` tests; removing the imported-name filter from the
+      GOT reader fails `GotSlots.ASymbolTheImageDefinesIsNotAnImportSlot`; removing it from the PLT
+      reader fails the two own-function tests.
+    - Not done: a call through a register that code loaded from a GOT slot first (the call does
+      not read the slot itself, so it is not bound; `libconsumer_got.so`'s `_init` is the
+      fixture for this); imports used as data pointers (their xrefs are data, not calls); PE and
+      Mach-O cross-image calls (the PE import is an IAT slot, not a stub); AArch64 GOT calls
+      (`adrp`/`ldr`/`blr`); ordinal imports and forwarded exports. The project does not store the
+      cross-image results: `project link` recomputes them.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.

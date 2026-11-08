@@ -20,4 +20,12 @@ namespace donkey {
 [[nodiscard]] std::map<std::uint64_t, std::string> plt_stub_imports(
     const BinaryImage& image, std::span<const std::byte> data);
 
+/// The GOT slots of an x86-64 ELF image that a GLOB_DAT relocation in `.rela.dyn` names, keyed by
+/// slot address, each with the imported name. Code built with -fno-plt calls such an import with
+/// `call *slot(%rip)`, which reads the slot instead of going through a stub. A slot is listed only
+/// when a relocation names it. AArch64 GOT loads are not read, and neither is a slot that code
+/// reaches only through a register it loaded first.
+[[nodiscard]] std::map<std::uint64_t, std::string> got_import_slots(
+    const BinaryImage& image, std::span<const std::byte> data);
+
 }  // namespace donkey

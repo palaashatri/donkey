@@ -964,6 +964,16 @@ add_test(NAME cli.link_reports_calls_through_plt_stubs
 set_tests_properties(cli.link_reports_calls_through_plt_stubs PROPERTIES
   PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null")
 
+# Calls through GOT slots (G15-T2): the -fno-plt consumer's call to provided_fn reads its GOT slot
+# and is bound to the export the consumer needs. The function it defines itself, which it calls
+# through a PLT stub, is not an import and must not be listed.
+add_test(NAME cli.link_reports_calls_through_got_slots
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer_got.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_reports_calls_through_got_slots PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null"
+  FAIL_REGULAR_EXPRESSION "own_fn")
+
 # A link needs at least two images: the executable and one library.
 add_test(NAME cli.link_needs_a_library
          COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so)

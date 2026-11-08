@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -17,7 +18,20 @@ using binary::detail::kMaxRelocationEntries;
 using binary::detail::kRelaEntrySize;
 
 constexpr std::uint64_t kJumpSlotX86_64 = 7;      // R_X86_64_JUMP_SLOT
+constexpr std::uint64_t kGlobDatX86_64 = 6;       // R_X86_64_GLOB_DAT
 constexpr std::uint64_t kJumpSlotAArch64 = 1026;  // R_AARCH64_JUMP_SLOT
+
+/// The names the image imports: its undefined dynamic symbols. A relocation can also name a symbol
+/// the image defines, and that is not an import.
+std::set<std::string> imported_names(const BinaryImage& image) {
+  std::set<std::string> imported;
+  for (const Symbol& symbol : image.symbols) {
+    if (symbol.imported) {
+      imported.insert(symbol.name);
+    }
+  }
+  return imported;
+}
 
 /// The GOT slot an AArch64 PLT entry jumps through: `adrp x16, page; ldr x17, [x16, #off];
 /// add x16, x16, #lo; br x17`, the 16-byte entry of `.plt` and `.plt.sec`. The slot is the page
@@ -66,6 +80,7 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
   const std::uint64_t jump_slot = aarch64 ? kJumpSlotAArch64 : kJumpSlotX86_64;
   // The GOT slot each JUMP_SLOT relocation fills, and the import it names.
   std::map<std::uint64_t, std::string> got_names;
+  const std::set<std::string> imported = imported_names(image);
   const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
   const ByteReader reader(data);
   for (const Section& section : image.sections) {
@@ -84,7 +99,13 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
         continue;
       }
       const std::uint64_t symbol = info_word.value() >> 32;
-      got_names[place.value()] = symbol < names.size() ? names[symbol] : std::string();
+      const std::string name = symbol < names.size() ? names[symbol] : std::string();
+      // A JUMP_SLOT can name an interposable function the image defines and exports. Its stub is
+      // a call to the image's own function, not to an import, so the stub gets no name.
+      if (imported.count(name) == 0) {
+        continue;
+      }
+      got_names[place.value()] = name;
     }
   }
   // x86-64: each PLT entry starts with an indirect jump through its GOT slot (`ff 25 disp32`).
@@ -134,6 +155,43 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
     }
   }
   return stubs;
+}
+
+std::map<std::uint64_t, std::string> got_import_slots(const BinaryImage& image,
+                                                      std::span<const std::byte> data) {
+  std::map<std::uint64_t, std::string> slots;
+  if (image.architecture != Architecture::X86_64) {
+    return slots;
+  }
+  // A GLOB_DAT can also name a symbol the image defines (an address the image takes for itself).
+  // Only the names the image imports are listed, so a call to its own function is never reported
+  // as an unbound import.
+  const std::set<std::string> imported = imported_names(image);
+  const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
+  const ByteReader reader(data);
+  for (const Section& section : image.sections) {
+    if (section.name != ".rela.dyn" || !section.has_file_data) {
+      continue;
+    }
+    const std::uint64_t count = section.file_size / kRelaEntrySize;
+    for (std::uint64_t i = 0; i < count && i < kMaxRelocationEntries; ++i) {
+      const std::uint64_t entry = section.file_offset + i * kRelaEntrySize;
+      const auto place = reader.u64(entry, Endian::Little);
+      const auto info_word = reader.u64(entry + 8, Endian::Little);
+      if (!place || !info_word) {
+        break;
+      }
+      if ((info_word.value() & 0xffffffffU) != kGlobDatX86_64) {
+        continue;
+      }
+      const std::uint64_t symbol = info_word.value() >> 32;
+      if (symbol == 0 || symbol >= names.size() || imported.count(names[symbol]) == 0) {
+        continue;
+      }
+      slots[place.value()] = names[symbol];
+    }
+  }
+  return slots;
 }
 
 }  // namespace donkey

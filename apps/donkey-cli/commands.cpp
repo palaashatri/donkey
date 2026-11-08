@@ -2188,8 +2188,8 @@ int report_link(const std::vector<std::string>& labels,
                     binding.library.c_str(), hex(binding.address).c_str());
       }
     }
-    std::printf("%zu calls through PLT stubs, %zu to imports no input exports\n", calls.size(),
-                unbound_calls);
+    std::printf("%zu calls through PLT stubs or GOT slots, %zu to imports no input exports\n",
+                calls.size(), unbound_calls);
     for (const donkey::ImportCall& call : calls) {
       const std::string& importer = labels[call.importer];
       if (call.provider == donkey::kUnboundImport) {

@@ -23,7 +23,9 @@ Result<std::vector<ImportCall>> resolve_import_calls(std::span<const LinkInput> 
     }
     const std::map<std::uint64_t, std::string> stubs =
         plt_stub_imports(*inputs[importer].image, inputs[importer].data);
-    if (stubs.empty()) {
+    const std::map<std::uint64_t, std::string> slots =
+        got_import_slots(*inputs[importer].image, inputs[importer].data);
+    if (stubs.empty() && slots.empty()) {
       continue;
     }
     // The export each of this importer's imports is bound to, by name.
@@ -33,27 +35,60 @@ Result<std::vector<ImportCall>> resolve_import_calls(std::span<const LinkInput> 
         bound.emplace(binding.name, &binding);
       }
     }
-    for (const Xref& xref : analyses[importer].xrefs) {
-      if (xref.kind != XrefKind::Call && xref.kind != XrefKind::Jump) {
+    // Each indirect call or jump of this importer, by address, with its kind. A GOT slot is
+    // reached by one of these: `call *slot(%rip)` is a call through the slot, and a plain load of
+    // the slot (`mov slot(%rip), %rax`) is not a transfer of control, so it is not listed.
+    std::map<std::uint64_t, XrefKind> indirect;
+    for (const Instruction& instruction : analyses[importer].instructions) {
+      if (instruction.direct_target.has_value()) {
         continue;
       }
-      const auto stub = stubs.find(xref.to);
-      if (stub == stubs.end()) {
-        continue;
+      if (instruction.classification == InstructionClass::Call) {
+        indirect.emplace(instruction.address, XrefKind::Call);
+      } else if (instruction.classification == InstructionClass::Jump) {
+        indirect.emplace(instruction.address, XrefKind::Jump);
       }
-      ImportCall call;
-      call.importer = importer;
-      call.from = xref.from;
-      call.kind = xref.kind;
-      call.stub = xref.to;
-      call.name = stub->second;
+    }
+    const auto bind = [&bound](ImportCall& call) {
       if (const auto found = bound.find(call.name); found != bound.end()) {
         if (found->second->provider != kUnboundImport) {
           call.provider = found->second->provider;
           call.to = found->second->address;
         }
       }
-      calls.push_back(std::move(call));
+    };
+    for (const Xref& xref : analyses[importer].xrefs) {
+      if (xref.kind == XrefKind::Call || xref.kind == XrefKind::Jump) {
+        const auto stub = stubs.find(xref.to);
+        if (stub == stubs.end()) {
+          continue;
+        }
+        ImportCall call;
+        call.importer = importer;
+        call.from = xref.from;
+        call.kind = xref.kind;
+        call.stub = xref.to;
+        call.name = stub->second;
+        bind(call);
+        calls.push_back(std::move(call));
+      } else if (xref.kind == XrefKind::Data) {
+        const auto slot = slots.find(xref.to);
+        if (slot == slots.end()) {
+          continue;
+        }
+        const auto transfer = indirect.find(xref.from);
+        if (transfer == indirect.end()) {
+          continue;
+        }
+        ImportCall call;
+        call.importer = importer;
+        call.from = xref.from;
+        call.kind = transfer->second;
+        call.stub = xref.to;
+        call.name = slot->second;
+        bind(call);
+        calls.push_back(std::move(call));
+      }
     }
   }
   return calls;
