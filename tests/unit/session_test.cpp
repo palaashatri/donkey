@@ -898,3 +898,210 @@ TEST(Session, SlowRestoreReplacementDoesNotBlockTheSession) {
 }
 
 }  // namespace
+
+namespace {
+
+bool session_has_instruction(const Session& session, std::uint64_t address) {
+  const auto document = session.document();
+  if (document == nullptr) {
+    return false;
+  }
+  return std::any_of(
+      document->analysis.instructions.begin(), document->analysis.instructions.end(),
+      [&](const donkey::Instruction& instruction) { return instruction.address == address; });
+}
+
+}  // namespace
+
+// G12-T1: declaring the callee's bytes as data removes its instructions from the re-analysed
+// document, and undo puts them back.
+TEST(Session, DataRangeRemovesCodeAndUndoRestoresIt) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_TRUE(session_has_instruction(session, 0x400109));
+  ASSERT_TRUE(has_function(session, 0x400109));
+
+  session.set_annotation(donkey::AnnotationKind::DataRange, 0x400109, "0:1");
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x400109)), "0:1");
+  EXPECT_FALSE(session_has_instruction(session, 0x400109));
+  EXPECT_TRUE(session_has_instruction(session, 0x40010a));
+  EXPECT_FALSE(has_function(session, 0x400109));
+
+  ASSERT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x400109), nullptr);
+  EXPECT_TRUE(session_has_instruction(session, 0x400109));
+  EXPECT_TRUE(has_function(session, 0x400109));
+}
+
+// G12-T1: a code start makes a function where there was none, and text that does not fit the kind
+// is ignored, so no annotation and no re-analysis result.
+TEST(Session, CodeStartSeedsAFunctionAndInvalidTextIsIgnored) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(has_function(session, 0x40010c));
+
+  session.set_annotation(donkey::AnnotationKind::CodeStart, 0x40010c, "code");
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_TRUE(has_function(session, 0x40010c));
+
+  session.set_annotation(donkey::AnnotationKind::CodeStart, 0x40010d, "go");
+  session.set_annotation(donkey::AnnotationKind::DataRange, 0x40010e, "3:2");
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->code_start_at(0x40010d), nullptr);
+  EXPECT_EQ(session.annotations()->data_range_at(0x40010e), nullptr);
+  EXPECT_FALSE(has_function(session, 0x40010d));
+
+  ASSERT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_FALSE(has_function(session, 0x40010c));
+}
+
+// G12-T1 (U): undefining an instruction declares its bytes undefined, so analysis drops it, and
+// a second undefine clears the declaration. The range covers the whole instruction.
+// G12-T2: A defines the NUL-terminated string at the address as data, terminator included, and is
+// one undo step. An address that is not in file data is refused with an error, and nothing changes.
+// tiny-elf's .rodata holds "hello world" with its terminator at 0x40018b (12 bytes).
+TEST(Session, DefineStringDefinesTheTerminatedBytesAndRefusesOthers) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+
+  session.define_string(0x400180);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x400180)), "string:12");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x400180), nullptr);
+
+  session.define_string(0x123456);  // not in any file-backed section
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x123456), nullptr);
+  EXPECT_TRUE(session.take_error().has_value());
+}
+
+// G12-T2 (W): the UTF-16LE string at an address is data of its bytes, two-byte terminator included.
+// tests/fixtures/utf16 holds "Donkey" at 0x2001a8 (14 bytes) and "café 中" at 0x2001b6
+// (14 bytes). An address outside the file is refused with an error, and nothing changes.
+TEST(Session, DefineString16DefinesTheTerminatedBytesAndRefusesOthers) {
+  Session session;
+  session.open(std::string(DONKEY_FIXTURE_DIR) + "/utf16/utf16");
+  ASSERT_TRUE(wait_idle(session));
+
+  session.define_string16(0x2001a8);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x2001a8)), "string16:14");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x2001a8), nullptr);
+
+  session.define_string16(0x2001b6);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x2001b6)), "string16:14");
+  EXPECT_TRUE(session.undo());
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x2001b6), nullptr);
+
+  session.define_string16(0x123456);  // not in any file-backed section
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x123456), nullptr);
+  EXPECT_TRUE(session.take_error().has_value());
+}
+
+TEST(Session, UndefineDeclaresInstructionBytesUndefinedAndClearsThem) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_TRUE(session_has_instruction(session, 0x40010b));  // ret, one byte
+  ASSERT_TRUE(session_has_instruction(session, 0x400104));  // call, five bytes
+
+  session.undefine(0x40010b);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x40010b)), "0:1");
+  EXPECT_FALSE(session_has_instruction(session, 0x40010b));
+
+  session.undefine(0x400104);
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(text_of(session.annotations()->data_range_at(0x400104)), "0:5");
+  EXPECT_FALSE(session_has_instruction(session, 0x400104));
+  EXPECT_TRUE(session_has_instruction(session, 0x400109)) << "the range ends where the call does";
+
+  session.undefine(0x40010b);  // clears the one-byte range
+  ASSERT_TRUE(wait_idle(session));
+  EXPECT_EQ(session.annotations()->data_range_at(0x40010b), nullptr);
+  EXPECT_TRUE(session_has_instruction(session, 0x40010b));
+}
+
+// G12-T3: a local name is display-only and undoable. A keyword, a non-identifier or a malformed
+// key is refused with an error, and the names stay as they were.
+TEST(Session, LocalNamesSetUndoRedoAndRefuseBadEdits) {
+  Session session;
+  session.open(fixture_path("tiny-elf-x86_64"));
+  ASSERT_TRUE(wait_idle(session));
+  const auto document_before = session.document();
+
+  session.set_local_name(0x400100, "arg:0", "count");
+  EXPECT_TRUE(session.dirty());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  // A name is display-only, so the analysis is not re-run and the document is the same object.
+  EXPECT_TRUE(session.document() == document_before);
+
+  session.set_local_name(0x400100, "arg:0", "int");
+  EXPECT_TRUE(session.take_error().has_value());
+  session.set_local_name(0x400100, "arg:0", "1count");
+  EXPECT_TRUE(session.take_error().has_value());
+  session.set_local_name(0x400100, "local:1", "x");
+  EXPECT_TRUE(session.take_error().has_value());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_EQ(session.annotations()->local_names.size(), 1U);
+
+  ASSERT_TRUE(session.undo());
+  EXPECT_EQ(session.annotations()->local_name_at(0x400100, "arg:0"), nullptr);
+  ASSERT_TRUE(session.redo());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_FALSE(session.redo());
+
+  // An empty name clears the name, and undo brings it back.
+  session.set_local_name(0x400100, "arg:0", "");
+  EXPECT_EQ(session.annotations()->local_name_at(0x400100, "arg:0"), nullptr);
+  ASSERT_TRUE(session.undo());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+}
+
+// G12-T3: local names are saved with the project and read back when it is opened.
+TEST(Session, LocalNamesSaveAndReopenWithTheProject) {
+  TempPath path("local-names");
+  create_project_with_annotations(path.str());
+
+  {
+    Session session;
+    session.open_project(path.str());
+    ASSERT_TRUE(wait_idle(session));
+    ASSERT_FALSE(session.take_error().has_value());
+    session.set_local_name(0x400100, "arg:0", "count");
+    session.set_local_name(0x400100, "frame:rbp:-8", "total");
+    session.save_project(path.str());
+    ASSERT_TRUE(wait_idle(session));
+    ASSERT_FALSE(session.take_error().has_value()) << "project save failed";
+    EXPECT_FALSE(session.dirty());
+  }
+
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  auto images = reopened.value().images();
+  ASSERT_TRUE(images.has_value());
+  ASSERT_EQ(images.value().size(), 1U);
+  auto names = reopened.value().local_names(images.value().front().id);
+  ASSERT_TRUE(names.has_value());
+  EXPECT_EQ(names.value().size(), 2U);
+
+  Session session;
+  session.open_project(path.str());
+  ASSERT_TRUE(wait_idle(session));
+  ASSERT_FALSE(session.take_error().has_value());
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "arg:0")), "count");
+  EXPECT_EQ(text_of(session.annotations()->local_name_at(0x400100, "frame:rbp:-8")), "total");
+}

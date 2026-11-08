@@ -71,7 +71,7 @@ jobs:
       - name: Test (including UI smoke tests on Xvfb)
         run: |
           mkdir -p -m 700 "$XDG_RUNTIME_DIR"
-          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4
+          xvfb-run -a -s "-screen 0 1600x1000x24" ctest --preset package-linux --parallel 4 --output-on-failure
       - name: Package
         working-directory: build/package-linux
         run: |
@@ -173,7 +173,7 @@ jobs:
       - name: Build
         run: cmake --build --preset package-macos --parallel
       - name: Test
-        run: ctest --preset package-macos --parallel 4
+        run: ctest --preset package-macos --parallel 4 --output-on-failure
       - name: Package
         working-directory: build/package-macos
         env:
@@ -268,7 +268,7 @@ jobs:
       - name: Build
         run: cmake --build --preset package-windows --parallel
       - name: Test
-        run: ctest --preset package-windows --parallel 4
+        run: ctest --preset package-windows --parallel 4 --output-on-failure
       - name: Package
         working-directory: build/package-windows
         shell: pwsh
@@ -356,6 +356,14 @@ jobs:
             build/package-freebsd/apps/donkey-cli/donkey-cli analyze \
               build/package-freebsd/tests/donkey_test_debuggee --json \
               | grep -E '"status"|"code"' || true
+            # Diagnostic: the code this compiler emits for the jump-table fixture. The
+            # DecompilerCorpus.JumpTable* tests fail on this host only, and the fixture is
+            # not kept after the build.
+            for f in $(find build/package-freebsd/tests -name '*jump_table_O2*' -type f); do
+              echo "== disassembly of $f"
+              (llvm-objdump -d "$f" 2>/dev/null || objdump -d "$f" 2>/dev/null || echo "no objdump") \
+                | sed -n '/<jt_dispatch16>:/,/^$/p' | head -48
+            done
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             sleep 2
             # The aarch64 VM runs without hardware virtualisation (about 70 min
@@ -369,7 +377,7 @@ jobs:
               exclude='ui[.]script_(virtualization|responsiveness)'
               export DONKEY_UI_NO_TIMING=1
             fi
-            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 ${exclude:+-E "$exclude"}
+            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 --output-on-failure ${exclude:+-E "$exclude"}
             mkdir -p screenshots
             cp build/package-freebsd/tests/screenshots/*.bmp screenshots/ || true
             (cd build/package-freebsd && cpack)

@@ -1,0 +1,40 @@
+# G12-T1: C makes the selected address code, D makes it one byte of data, and U clears
+# user code or data there. Undo and redo follow each edit. Opens nothing itself: the test
+# passes the debuggee on the command line.
+wait_idle
+frames 5
+assert_no_error
+
+# Select main, the debuggee's entry symbol.
+key g
+assert_focus Go to
+text main
+key enter
+assert_selected main
+
+# C makes code; U clears a code start.
+key c
+assert_annotation code main code
+key u
+assert_annotation code main -
+
+# D makes one byte of data; U clears data and leaves the code start alone.
+key c
+key d
+assert_annotation data main 1:1
+key u
+assert_annotation data main -
+assert_annotation code main code
+
+# Undo walks back: the data clear, the data byte, the code start, then the code clear.
+key shortcut+z
+assert_annotation data main 1:1
+key shortcut+z
+assert_annotation data main -
+key shortcut+z
+assert_annotation code main -
+key shortcut+z
+assert_annotation code main code
+key shortcut+shift+z
+assert_annotation code main -
+assert_no_error

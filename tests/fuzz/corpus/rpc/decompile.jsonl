@@ -1,0 +1,3 @@
+{"jsonrpc":"2.0","id":1,"method":"open","params":{"path":"tests/fixtures/binaries/tiny-elf-x86_64"}}
+{"jsonrpc":"2.0","id":2,"method":"decompile","params":{"address":"0x400100"}}
+{"jsonrpc":"2.0","id":3,"method":"annotations.list"}

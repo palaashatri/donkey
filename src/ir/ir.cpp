@@ -10,6 +10,7 @@
 
 #include "donkey/ir/abi.h"
 #include "ir_internal.h"
+#include "optimize.h"
 #include "registers.h"
 
 namespace donkey {
@@ -34,6 +35,7 @@ const IrCondition* complement_of(IrCondition condition) {
       {IrCondition::SignedGreater, IrCondition::SignedLessEqual},
       {IrCondition::Zero, IrCondition::NonZero},
       {IrCondition::Carry, IrCondition::NoCarry},
+      {IrCondition::Parity, IrCondition::NoParity},
       {IrCondition::Overflow, IrCondition::NoOverflow},
   };
   for (const auto& [first, second] : kComplements) {
@@ -60,6 +62,58 @@ const char* width_type(std::uint8_t width) {
     default:
       return "u64";
   }
+}
+
+/// The C type of a value `width` bytes wide: float or double for a floating-point value.
+const char* value_type(std::uint8_t width, bool floating_point) {
+  if (floating_point && width == 4) {
+    return "float";
+  }
+  if (floating_point && width == 8) {
+    return "double";
+  }
+  return width_type(width);
+}
+
+/// An exact hexadecimal floating-point literal for the bits of a float (width 4)
+/// or double (width 8), such as 0x1.8p+1. NaN and infinity are spelled out with
+/// their payload or sign. Nothing is rounded to decimal.
+std::string hex_float_literal(std::uint64_t bits, std::uint8_t width) {
+  const bool single = width == 4;
+  const unsigned frac_bits = single ? 23U : 52U;
+  const unsigned exp_bits = single ? 8U : 11U;
+  const int bias = single ? 127 : 1023;
+  const std::uint64_t frac = bits & ((1ULL << frac_bits) - 1U);
+  const std::uint64_t exp = (bits >> frac_bits) & ((1ULL << exp_bits) - 1U);
+  const bool negative = ((bits >> (frac_bits + exp_bits)) & 1U) != 0;
+  const std::string sign = negative ? "-" : "";
+  char buffer[64];
+  if (exp == (1ULL << exp_bits) - 1U) {
+    if (frac == 0) {
+      return sign + "INF";
+    }
+    std::snprintf(buffer, sizeof(buffer), "NAN(0x%llx)", static_cast<unsigned long long>(frac));
+    return sign + buffer;
+  }
+  // The fraction in hexadecimal, with its trailing zeros removed. The fraction is aligned
+  // to whole hexadecimal digits first: a single-precision fraction has 23 bits, which is
+  // printed as six digits (24 bits), so it is shifted left by one.
+  const unsigned digits = (frac_bits + 3U) / 4U;
+  const std::uint64_t aligned = frac << (digits * 4U - frac_bits);
+  char hex[32];
+  std::snprintf(hex, sizeof(hex), "%0*llx", static_cast<int>(digits),
+                static_cast<unsigned long long>(aligned));
+  std::string fraction = hex;
+  while (!fraction.empty() && fraction.back() == '0') {
+    fraction.pop_back();
+  }
+  const bool dot = !fraction.empty();
+  if (exp == 0 && frac == 0) {
+    return sign + "0x0p+0";
+  }
+  const long long power = exp == 0 ? 1 - bias : static_cast<long long>(exp) - bias;
+  std::snprintf(buffer, sizeof(buffer), "p%+lld", power);
+  return sign + (exp == 0 ? "0x0" : "0x1") + (dot ? "." : "") + fraction + buffer;
 }
 
 class Renderer {
@@ -102,7 +156,32 @@ class Renderer {
     return out;
   }
 
+  /// A floating-point operand: a constant is an exact hexadecimal float.
+  std::string float_operand(const IrOperand& value, std::uint8_t width) const {
+    if (value.kind == IrOperandKind::Constant) {
+      return hex_float_literal(value.constant, width);
+    }
+    // A register read here is a floating-point value: the integer width cast of operand()
+    // would misstate it, so the register is shown by name.
+    return operand_text(value);
+  }
+
+  /// A destination: a write to a canonical register is shown by name, because its
+  /// width is the write rule (a 4-byte write zero-extends).
+  std::string destination(const IrOperand& value) const { return operand_text(value); }
+
+  /// A value read. A read narrower than the 8-byte register it names shows its width,
+  /// so that (u8)rax is not mistaken for all of rax.
   std::string operand(const IrOperand& value) const {
+    std::string text = operand_text(value);
+    if (value.kind == IrOperandKind::Register && value.width != 0 && value.width < 8 &&
+        value.reg.rfind("var_", 0) != 0 && internal::register_family(value.reg) == value.reg) {
+      return std::string("(") + width_type(value.width) + ")" + text;
+    }
+    return text;
+  }
+
+  std::string operand_text(const IrOperand& value) const {
     switch (value.kind) {
       case IrOperandKind::None:
         return "?";
@@ -122,6 +201,9 @@ class Renderer {
         return buffer;
       }
       case IrOperandKind::Memory: {
+        if (!value.name.empty()) {
+          return value.name;
+        }
         if (value.index.empty()) {
           for (const IrPointerStruct& recovered : function_.pointer_structs) {
             if (recovered.base_register != value.reg) {
@@ -130,6 +212,9 @@ class Renderer {
             for (const IrStructField& field : recovered.fields) {
               if (field.offset == static_cast<std::int64_t>(value.constant) &&
                   field.width == value.width) {
+                if (!field.name.empty()) {
+                  return recovered.parameter + "->" + field.name;
+                }
                 char buffer[96];
                 std::snprintf(buffer, sizeof(buffer), "%s->f_%llx", recovered.parameter.c_str(),
                               static_cast<unsigned long long>(field.offset));
@@ -201,7 +286,7 @@ class Renderer {
       case IrOp::Nop:
         return "";
       case IrOp::Assign:
-        return operand(statement.dest) + " = " + operand(statement.a) + ";";
+        return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Add:
       case IrOp::Sub:
       case IrOp::Mul:
@@ -243,20 +328,20 @@ class Renderer {
           default:
             break;
         }
-        return operand(statement.dest) + " = " + operand(statement.a) + " " + symbol + " " +
+        return destination(statement.dest) + " = " + operand(statement.a) + " " + symbol + " " +
                operand(statement.b) + ";";
       }
       case IrOp::ZeroExtend:
-        return operand(statement.dest) + " = (" + width_type(statement.dest.width) + ")" +
+        return destination(statement.dest) + " = (" + width_type(statement.dest.width) + ")" +
                operand(statement.a) + ";";
       case IrOp::SignExtend:
-        return operand(statement.dest) + " = (s" +
+        return destination(statement.dest) + " = (s" +
                std::to_string(static_cast<unsigned>(statement.dest.width) * 8) + ")" +
                operand(statement.a) + ";";
       case IrOp::Lea:
-        return operand(statement.dest) + " = (u64)(" + address_expression(statement.a) + ");";
+        return destination(statement.dest) + " = (u64)(" + address_expression(statement.a) + ");";
       case IrOp::Load:
-        return operand(statement.dest) + " = " + operand(statement.a) + ";";
+        return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Store:
         return operand(statement.a) + " = " + operand(statement.b) + ";";
       case IrOp::Call:
@@ -297,6 +382,16 @@ class Renderer {
         out += " }";
         return out;
       }
+      case IrOp::CondCompare:
+      case IrOp::CondCompareAdd:
+        // IrCondition::None is an unconditional compare (AArch64 cmn and cmp
+        // forms, which set the flags unconditionally).
+        return "/* flags = " + operand(statement.a) +
+               (statement.op == IrOp::CondCompare ? " - " : " + ") + operand(statement.b) +
+               (statement.condition == IrCondition::None
+                    ? std::string()
+                    : " when " + std::string(ir_condition_operator(statement.condition))) +
+               ", else nzcv " + operand(statement.c) + " */";
       case IrOp::Compare:
         return "/* flags = " + operand(statement.a) + " " +
                ir_condition_operator(statement.condition) + " " + operand(statement.b) + " */";
@@ -305,8 +400,92 @@ class Renderer {
       case IrOp::Unsupported:
         return "/* unsupported: " + statement.text + " */";
       case IrOp::CondAssign:
-        return "if (" + condition(statement, previous) + ") " + operand(statement.dest) + " = " +
+        return "if (" + condition(statement, previous) + ") " + destination(statement.dest) +
+               " = " + operand(statement.a) + ";";
+      case IrOp::FAdd:
+      case IrOp::FSub:
+      case IrOp::FMul:
+      case IrOp::FDiv: {
+        const char* symbol = statement.op == IrOp::FAdd   ? " + "
+                             : statement.op == IrOp::FSub ? " - "
+                             : statement.op == IrOp::FMul ? " * "
+                                                          : " / ";
+        return destination(statement.dest) + " = " + float_operand(statement.a, statement.width) +
+               symbol + float_operand(statement.b, statement.width) + "; /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
+      }
+      case IrOp::FSqrt:
+        return destination(statement.dest) + " = sqrt(" +
+               float_operand(statement.a, statement.width) + "); /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FNeg:
+        return destination(statement.dest) + " = -" + float_operand(statement.a, statement.width) +
+               "; /* " + (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FAbs:
+        return destination(statement.dest) + " = fabs(" +
+               float_operand(statement.a, statement.width) + "); /* " +
+               (statement.width == 4 ? "float" : "double") + " */";
+      case IrOp::FCompare:
+        return "flags = fcompare(" + float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ");";
+      case IrOp::IntToFloat:
+      case IrOp::UIntToFloat:
+        // An unsigned source keeps all of its bytes: the cast names the source's width.
+        return destination(statement.dest) + " = (" + (statement.width == 4 ? "float" : "double") +
+               ")" +
+               (statement.op == IrOp::UIntToFloat
+                    ? (statement.a.width == 8 ? "(unsigned long long)" : "(unsigned)")
+                    : "") +
                operand(statement.a) + ";";
+      case IrOp::FloatToInt:
+        return destination(statement.dest) + " = (int" + std::to_string(statement.width * 8) + ")" +
+               float_operand(statement.a, statement.a.width) + ";";
+      case IrOp::FloatExtend:
+        return destination(statement.dest) + " = (double)" + float_operand(statement.a, 4) + ";";
+      case IrOp::FloatTruncate:
+        return destination(statement.dest) + " = (float)" + float_operand(statement.a, 8) + ";";
+      case IrOp::FMulAdd:
+        return destination(statement.dest) + " = fma(" +
+               float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ", " +
+               float_operand(statement.c, statement.width) + ");";
+      case IrOp::FMulSub:
+        // c - a * b with one rounding: fma(-a, b, c) is the same operation, fused.
+        return destination(statement.dest) + " = fma(-" +
+               float_operand(statement.a, statement.width) + ", " +
+               float_operand(statement.b, statement.width) + ", " +
+               float_operand(statement.c, statement.width) + ");";
+      case IrOp::AddCarry:
+      case IrOp::AddCarryFlags:
+      case IrOp::SubBorrow: {
+        const bool add = statement.op != IrOp::SubBorrow;
+        return destination(statement.dest) + " = " + operand(statement.a) + (add ? " + " : " - ") +
+               operand(statement.b) + (add ? " + CF;" : " - CF;") +
+               (statement.op == IrOp::AddCarryFlags ? " /* sets NZCV */" : "");
+      }
+      case IrOp::MulHighUnsigned:
+      case IrOp::MulHighSigned:
+        return destination(statement.dest) + " = mulh" +
+               (statement.op == IrOp::MulHighSigned ? "s(" : "u(") + operand(statement.a) + ", " +
+               operand(statement.b) + ");";
+      case IrOp::DivUnsigned:
+      case IrOp::DivSigned:
+      case IrOp::RemUnsigned:
+      case IrOp::RemSigned: {
+        const bool quotient = statement.op == IrOp::DivUnsigned || statement.op == IrOp::DivSigned;
+        const bool is_signed = statement.op == IrOp::DivSigned || statement.op == IrOp::RemSigned;
+        return destination(statement.dest) + " = (" + operand(statement.a) + ":" +
+               operand(statement.b) + (is_signed ? " signed) " : " unsigned) ") +
+               (quotient ? "/ " : "% ") + operand(statement.c) + ";";
+      }
+      case IrOp::CountTrailingZeros:
+        return destination(statement.dest) + " = ctz(" + operand(statement.a) + ");";
+      case IrOp::CountLeadingZeros:
+        return destination(statement.dest) + " = clz(" + operand(statement.a) + ");";
+      case IrOp::PopCount:
+        return destination(statement.dest) + " = popcount(" + operand(statement.a) + ");";
+      case IrOp::ByteSwap:
+        return destination(statement.dest) + " = bswap(" + operand(statement.a) + ");";
     }
     return "";
   }
@@ -321,14 +500,48 @@ class Renderer {
   const IrFunction& function_;
 };
 
+/// A constant operand whose value has bits above the statement width, which the statement
+/// could not read at that width. Widths of 8 bytes or more have no such bits.
+bool constant_wider_than(const IrOperand& operand, std::uint8_t width) {
+  return operand.kind == IrOperandKind::Constant && width < 8 &&
+         (operand.constant >> (8U * width)) != 0;
+}
+
 }  // namespace
 
 namespace detail {
+
+/// True when a Compare or Test earlier in the block sets the flags, with no call
+/// or unsupported statement after it that could change them. The interpreter
+/// keeps the operand values the flag writer read, so later writes to those
+/// operands do not change the flags. An add or subtract with carry in between
+/// does not qualify: its carry out is not represented in the IR, so the carry
+/// the later statement reads would still be the earlier flag writer's.
+bool flags_written_in_block(const IrBlock& block, std::size_t index) {
+  for (std::size_t i = index; i-- > 0;) {
+    const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test ||
+        candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
+        candidate.op == IrOp::AddCarryFlags || candidate.op == IrOp::FCompare) {
+      return true;
+    }
+    if (candidate.op == IrOp::Call || candidate.op == IrOp::Unsupported ||
+        ((candidate.op == IrOp::AddCarry || candidate.op == IrOp::SubBorrow) &&
+         candidate.writes_flags)) {
+      return false;  // flags may have changed in a way the IR does not show
+    }
+  }
+  return false;
+}
 
 const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
   std::vector<std::string> written;
   for (std::size_t i = index; i-- > 0;) {
     const IrStatement& candidate = block.statements[i];
+    if (candidate.op == IrOp::CondCompare || candidate.op == IrOp::CondCompareAdd ||
+        candidate.op == IrOp::AddCarryFlags || candidate.op == IrOp::FCompare) {
+      return nullptr;  // its flags are not the comparison of two integer operands
+    }
     if (candidate.op == IrOp::Compare || candidate.op == IrOp::Test) {
       for (const IrOperand* operand : {&candidate.a, &candidate.b}) {
         const std::string families[] = {internal::register_family(operand->reg),
@@ -412,6 +625,42 @@ const char* ir_op_name(IrOp op) noexcept {
       return "cond_branch";
     case IrOp::Switch:
       return "switch";
+    case IrOp::CondCompare:
+      return "cond_compare";
+    case IrOp::CondCompareAdd:
+      return "cond_compare_add";
+    case IrOp::AddCarryFlags:
+      return "add_carry_flags";
+    case IrOp::FAdd:
+      return "f_add";
+    case IrOp::FSub:
+      return "f_sub";
+    case IrOp::FMul:
+      return "f_mul";
+    case IrOp::FDiv:
+      return "f_div";
+    case IrOp::FSqrt:
+      return "f_sqrt";
+    case IrOp::FNeg:
+      return "f_neg";
+    case IrOp::FAbs:
+      return "f_abs";
+    case IrOp::FCompare:
+      return "f_compare";
+    case IrOp::IntToFloat:
+      return "int_to_float";
+    case IrOp::UIntToFloat:
+      return "uint_to_float";
+    case IrOp::FloatToInt:
+      return "float_to_int";
+    case IrOp::FloatExtend:
+      return "float_extend";
+    case IrOp::FloatTruncate:
+      return "float_truncate";
+    case IrOp::FMulAdd:
+      return "fused_multiply_add";
+    case IrOp::FMulSub:
+      return "fused_multiply_subtract";
     case IrOp::Compare:
       return "compare";
     case IrOp::Test:
@@ -420,6 +669,30 @@ const char* ir_op_name(IrOp op) noexcept {
       return "unsupported";
     case IrOp::CondAssign:
       return "cond_assign";
+    case IrOp::AddCarry:
+      return "add_carry";
+    case IrOp::SubBorrow:
+      return "sub_borrow";
+    case IrOp::MulHighUnsigned:
+      return "mul_high_unsigned";
+    case IrOp::MulHighSigned:
+      return "mul_high_signed";
+    case IrOp::DivUnsigned:
+      return "div_unsigned";
+    case IrOp::DivSigned:
+      return "div_signed";
+    case IrOp::RemUnsigned:
+      return "rem_unsigned";
+    case IrOp::RemSigned:
+      return "rem_signed";
+    case IrOp::CountTrailingZeros:
+      return "count_trailing_zeros";
+    case IrOp::CountLeadingZeros:
+      return "count_leading_zeros";
+    case IrOp::PopCount:
+      return "popcount";
+    case IrOp::ByteSwap:
+      return "byte_swap";
   }
   return "unknown";
 }
@@ -464,6 +737,10 @@ const char* ir_condition_name(IrCondition condition) noexcept {
       return "carry";
     case IrCondition::NoCarry:
       return "no_carry";
+    case IrCondition::Parity:
+      return "parity";
+    case IrCondition::NoParity:
+      return "no_parity";
   }
   return "none";
 }
@@ -500,6 +777,8 @@ const char* ir_condition_operator(IrCondition condition) noexcept {
     case IrCondition::NoOverflow:
     case IrCondition::Carry:
     case IrCondition::NoCarry:
+    case IrCondition::Parity:
+    case IrCondition::NoParity:
     case IrCondition::None:
       return "?";
   }
@@ -554,7 +833,8 @@ Result<bool> verify_ir(const IrFunction& function) {
       return fail("ir.empty_block", "block has no statements");
     }
     bool seen_terminator = false;
-    for (const IrStatement& statement : block.statements) {
+    for (std::size_t index = 0; index < block.statements.size(); ++index) {
+      const IrStatement& statement = block.statements[index];
       if (seen_terminator) {
         return fail("ir.dead_statements_after_terminator",
                     "block contains statements after terminator");
@@ -585,9 +865,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         return std::nullopt;
       };
 
-      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b};
-      const char* roles[] = {"dest", "a", "b"};
-      for (std::size_t i = 0; i < 3; ++i) {
+      const IrOperand* operands[] = {&statement.dest, &statement.a, &statement.b, &statement.c};
+      const char* roles[] = {"dest", "a", "b", "c"};
+      for (std::size_t i = 0; i < 4; ++i) {
         if (auto problem = check_operand(*operands[i], roles[i]); problem.has_value()) {
           return make_error<bool>(Status::InternalError, problem->code, problem->message,
                                   problem->offset);
@@ -634,6 +914,162 @@ Result<bool> verify_ir(const IrFunction& function) {
                statement.a.width != statement.dest.width)) {
             return fail("ir.type_width_mismatch",
                         "conditional assign source and destination widths must match");
+          }
+          break;
+        case IrOp::MulHighUnsigned:
+        case IrOp::MulHighSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block) {
+            return fail("ir.malformed_mul_high",
+                        "high multiply needs a register destination and two sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              ((statement.b.kind == IrOperandKind::Register ||
+                statement.b.kind == IrOperandKind::Memory) &&
+               statement.b.width != statement.dest.width) ||
+              constant_wider_than(statement.a, statement.width) ||
+              constant_wider_than(statement.b, statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "high multiply operand widths must match statement width");
+          }
+          break;
+        case IrOp::DivUnsigned:
+        case IrOp::DivSigned:
+        case IrOp::RemUnsigned:
+        case IrOp::RemSigned:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.c.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block ||
+              statement.c.kind == IrOperandKind::Block) {
+            return fail("ir.malformed_divide",
+                        "divide needs a register destination and a 2-part dividend and divisor");
+          }
+          // Register and memory divisors must have the statement width, since the evaluator reads
+          // them at it. A constant source must fit that width, so no bits are dropped unnoticed.
+          if (statement.dest.width != statement.width || statement.a.width != statement.width ||
+              statement.b.width != statement.width ||
+              ((statement.c.kind == IrOperandKind::Register ||
+                statement.c.kind == IrOperandKind::Memory) &&
+               statement.c.width != statement.width) ||
+              constant_wider_than(statement.a, statement.width) ||
+              constant_wider_than(statement.b, statement.width) ||
+              constant_wider_than(statement.c, statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "divide operand widths must match statement width");
+          }
+          break;
+        case IrOp::CountTrailingZeros:
+        case IrOp::CountLeadingZeros:
+        case IrOp::PopCount:
+        case IrOp::ByteSwap:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.a.kind == IrOperandKind::Block) {
+            return fail("ir.malformed_bit_op",
+                        "bit operation needs a register destination and a value source");
+          }
+          if (statement.dest.width != statement.width || statement.a.width != statement.width) {
+            return fail("ir.type_width_mismatch",
+                        "bit operation operand widths must match statement width");
+          }
+          break;
+        case IrOp::FAdd:
+        case IrOp::FSub:
+        case IrOp::FMul:
+        case IrOp::FDiv:
+        case IrOp::FSqrt:
+        case IrOp::FNeg:
+        case IrOp::FAbs:
+        case IrOp::FCompare: {
+          // Floating-point operands are read at the statement's width, so an
+          // integer operand of another width is rejected here.
+          const auto float_width = [](std::uint8_t w) { return w == 4 || w == 8; };
+          const auto operand_ok = [&statement](const IrOperand& o) {
+            return (o.kind == IrOperandKind::Register || o.kind == IrOperandKind::Constant) &&
+                   o.width == statement.width;
+          };
+          const bool binary = statement.op != IrOp::FSqrt && statement.op != IrOp::FNeg &&
+                              statement.op != IrOp::FAbs;
+          if (!float_width(statement.width) || !operand_ok(statement.a) ||
+              (binary && !operand_ok(statement.b)) ||
+              (statement.op != IrOp::FCompare &&
+               (statement.dest.kind != IrOperandKind::Register ||
+                (statement.dest.width != 0 && statement.dest.width != statement.width)))) {
+            return fail("ir.malformed_float",
+                        "floating-point operands and destination must have the statement's width "
+                        "(4 or 8)");
+          }
+          break;
+        }
+        case IrOp::FMulAdd:
+        case IrOp::FMulSub: {
+          // Three float operands of the statement width, and a float destination.
+          const auto operand_ok = [&statement](const IrOperand& o) {
+            return (o.kind == IrOperandKind::Register || o.kind == IrOperandKind::Constant) &&
+                   o.width == statement.width;
+          };
+          if (!(statement.width == 4 || statement.width == 8) || !operand_ok(statement.a) ||
+              !operand_ok(statement.b) || !operand_ok(statement.c) ||
+              statement.dest.kind != IrOperandKind::Register ||
+              (statement.dest.width != 0 && statement.dest.width != statement.width)) {
+            return fail("ir.malformed_float",
+                        "fused multiply-add operands and destination must have the statement's "
+                        "width (4 or 8)");
+          }
+          break;
+        }
+        case IrOp::IntToFloat:
+        case IrOp::UIntToFloat:
+        case IrOp::FloatToInt:
+        case IrOp::FloatExtend:
+        case IrOp::FloatTruncate: {
+          // The source width is the width of a's values; the statement width is the
+          // width of the result.
+          const bool source_ok = (statement.a.kind == IrOperandKind::Register ||
+                                  statement.a.kind == IrOperandKind::Constant) &&
+                                 (statement.a.width == 4 || statement.a.width == 8);
+          bool shape_ok = true;
+          if (statement.op == IrOp::FloatExtend) {
+            shape_ok = statement.width == 8 && statement.a.width == 4;
+          } else if (statement.op == IrOp::FloatTruncate) {
+            shape_ok = statement.width == 4 && statement.a.width == 8;
+          }
+          if (!source_ok || !shape_ok || !(statement.width == 4 || statement.width == 8) ||
+              statement.dest.kind != IrOperandKind::Register ||
+              (statement.dest.width != 0 && statement.dest.width != statement.width)) {
+            return fail("ir.malformed_float_conversion",
+                        "conversion widths: a float is 4 or 8 bytes and an integer 4 or 8");
+          }
+          break;
+        }
+        case IrOp::AddCarry:
+        case IrOp::AddCarryFlags:
+        case IrOp::SubBorrow:
+          if (statement.dest.kind != IrOperandKind::Register ||
+              statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.a.kind == IrOperandKind::Block ||
+              statement.b.kind == IrOperandKind::Block) {
+            return fail(
+                "ir.malformed_carry",
+                "add or subtract with carry needs a register destination and two value sources");
+          }
+          if (statement.dest.width != statement.width ||
+              statement.a.width != statement.dest.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.dest.width) ||
+              (statement.b.kind == IrOperandKind::Constant &&
+               statement.b.width > statement.dest.width)) {
+            return fail("ir.type_width_mismatch",
+                        "add or subtract with carry operand widths must match statement width");
+          }
+          // The carry must come from a flag writer earlier in this block; otherwise
+          // it is not known.
+          if (!detail::flags_written_in_block(block, index)) {
+            return fail("ir.carry_without_flags",
+                        "add or subtract with carry has no flag writer earlier in its block");
           }
           break;
         case IrOp::Add:
@@ -747,6 +1183,22 @@ Result<bool> verify_ir(const IrFunction& function) {
           }
           if (statement.a.kind != IrOperandKind::Block) {
             return fail("ir.malformed_switch", "switch needs a default block target");
+          }
+          break;
+        case IrOp::CondCompare:
+        case IrOp::CondCompareAdd:
+          if (statement.a.kind == IrOperandKind::None || statement.b.kind == IrOperandKind::None ||
+              statement.c.kind != IrOperandKind::Constant || statement.c.constant > 15) {
+            return fail("ir.malformed_cond_compare",
+                        "conditional compare needs two operands and an NZCV value 0-15");
+          }
+          if (statement.a.width != statement.width ||
+              (statement.b.kind == IrOperandKind::Register &&
+               statement.b.width != statement.width) ||
+              (statement.b.kind == IrOperandKind::Constant &&
+               statement.b.width > statement.width)) {
+            return fail("ir.type_width_mismatch",
+                        "conditional compare operand widths must match statement width");
           }
           break;
         case IrOp::Compare:
@@ -934,6 +1386,9 @@ Result<bool> verify_ir(const IrFunction& function) {
         if (auto diag = check_use(stmt.b); diag.has_value()) {
           return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
         }
+        if (auto diag = check_use(stmt.c); diag.has_value()) {
+          return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
+        }
         if (stmt.op == IrOp::Switch) {
           if (auto diag = check_use(stmt.dest); diag.has_value()) {
             return make_error<bool>(diag->status, diag->code, diag->message, diag->offset);
@@ -973,6 +1428,11 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   }
 
   for (const IrPointerStruct& recovered : function.pointer_structs) {
+    if (recovered.applied) {
+      append_line("// note: " + recovered.parameter + " points to struct " + recovered.type_name +
+                  " from the applied prototype");
+      continue;
+    }
     append_line("// note: struct " + recovered.type_name + " inferred from accesses through " +
                 recovered.parameter + "; only accessed fields are known");
     append_line("struct " + recovered.type_name + " {");
@@ -987,7 +1447,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   }
 
   std::string signature;
-  signature += function.return_width != 0 ? width_type(function.return_width) : "void";
+  signature += function.return_width != 0
+                   ? value_type(function.return_width, function.return_floating_point)
+                   : "void";
   signature += " ";
   signature += function.name.empty() ? std::string("sub") : function.name;
   signature += "(";
@@ -1004,10 +1466,13 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
           recovered = &candidate;
         }
       }
-      if (recovered != nullptr) {
+      if (!function.parameters[index].pointee_struct.empty()) {
+        signature += "struct " + function.parameters[index].pointee_struct + " *";
+      } else if (recovered != nullptr) {
         signature += "struct " + recovered->type_name + " *";
       } else {
-        signature += width_type(function.parameters[index].width);
+        signature +=
+            value_type(function.parameters[index].width, function.parameters[index].floating_point);
         signature += " ";
       }
       signature += function.parameters[index].name;
@@ -1121,7 +1586,7 @@ void recover_pointer_structs(IrFunction& function) {
           return;
         }
       }
-      fields.push_back(IrStructField{offset, operand.width});
+      fields.push_back(IrStructField{offset, operand.width, std::string()});
     };
     for (const IrBlock& block : function.blocks) {
       for (std::size_t i = 0; i < block.statements.size(); ++i) {
@@ -1133,6 +1598,7 @@ void recover_pointer_structs(IrFunction& function) {
         visit(statement.dest);
         visit(statement.a);
         visit(statement.b);
+        visit(statement.c);
         // The writing statement itself may still read the old value; any
         // access after it goes through the new value.
         if (straight_line && i > first_write && touched) {
@@ -1219,6 +1685,7 @@ void recover_stack_variables(IrFunction& function) {
       inspect_operand(stmt.dest);
       inspect_operand(stmt.a);
       inspect_operand(stmt.b);
+      inspect_operand(stmt.c);
     }
   }
 
@@ -1239,6 +1706,25 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   recover_pointer_structs(function);
   if (options.after_pass) {
     options.after_pass("recover_pointer_structs", function);
+  }
+  // The statement passes run after the signature is inferred, so the parameters do not
+  // change when a read of an argument register is removed.
+  internal::propagate_copies(function);
+  if (options.after_pass) {
+    options.after_pass("propagate_copies", function);
+  }
+  internal::remove_dead_temporaries(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_temporaries", function);
+  }
+  internal::remove_dead_register_writes(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_register_writes", function);
+  }
+  // The register writes removed above can leave temporaries with no reader.
+  internal::remove_dead_temporaries(function);
+  if (options.after_pass) {
+    options.after_pass("remove_dead_temporaries", function);
   }
 }
 

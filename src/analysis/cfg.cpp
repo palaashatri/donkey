@@ -1,6 +1,7 @@
 #include "donkey/analysis/cfg.h"
 
 #include <algorithm>
+#include <array>
 #include <cstdio>
 #include <map>
 #include <optional>
@@ -28,6 +29,36 @@ bool terminates_flow(InstructionClass classification) {
          classification == InstructionClass::ConditionalJump ||
          classification == InstructionClass::Return ||
          classification == InstructionClass::Interrupt;
+}
+
+/// Whether a MIPS branch, call or return runs its delay slot (the instruction after it) first. The
+/// slot is part of the same block as the transfer. Other architectures have no delay slots.
+bool has_delay_slot(Architecture architecture, const Instruction& instruction) {
+  return (architecture == Architecture::Mips32 || architecture == Architecture::Mips64) &&
+         (instruction.classification == InstructionClass::Call ||
+          instruction.classification == InstructionClass::Jump ||
+          instruction.classification == InstructionClass::ConditionalJump ||
+          instruction.classification == InstructionClass::Return);
+}
+
+/// The MIPS branch-likely forms (`beql`, `bnel`, `bc1tl`, `bltzall`). Their slot runs only when the
+/// branch is taken, which the traversal does not model, so such a branch makes the graph partial.
+/// `bal`, `bltzal` and `bgezal` link but are not likely forms.
+bool is_branch_likely(const std::string& mnemonic) {
+  return mnemonic.size() > 2 && mnemonic.front() == 'b' && mnemonic.back() == 'l' &&
+         mnemonic != "bal" && mnemonic != "bltzal" && mnemonic != "bgezal";
+}
+
+/// Records a partial reason once per code, however many places hit it.
+void note_once(ControlFlowGraph& graph, const char* code, const std::string& message,
+               std::uint64_t address) {
+  graph.partial = true;
+  for (const Diagnostic& diagnostic : graph.diagnostics) {
+    if (diagnostic.code == code) {
+      return;
+    }
+  }
+  graph.diagnostics.push_back(Diagnostic::make(Status::Partial, code, message, address));
 }
 
 // ---- jump tables -----------------------------------------------------------
@@ -62,9 +93,57 @@ std::uint64_t width_mask(std::uint8_t width) {
   return width >= 8 ? ~0ULL : ((1ULL << (width * 8U)) - 1U);
 }
 
+/// Reads `size` bytes at `address` from a file-backed, non-writable section.
+/// Table bytes are trusted only from there: a writable table could change at
+/// run time, and memory the file does not hold cannot be read.
+std::optional<std::uint64_t> read_table_entry(const BinaryImage& image,
+                                              std::span<const std::byte> file,
+                                              std::uint64_t address, std::size_t size) {
+  for (const Section& section : image.sections) {
+    if (!section.has_file_data || section.writable || address < section.address ||
+        address - section.address >= section.file_size ||
+        section.file_size - (address - section.address) < size) {
+      continue;
+    }
+    const std::uint64_t offset = section.file_offset + (address - section.address);
+    if (offset > file.size() || file.size() - offset < size) {
+      return std::nullopt;
+    }
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < size; ++i) {
+      const auto byte = static_cast<std::uint64_t>(file[static_cast<std::size_t>(offset + i)]);
+      // Entries use the image's byte order, as the load that reads them does: the
+      // lowest address holds the most significant byte when the image is big-endian.
+      const std::size_t significance = image.endian == Endian::Big ? size - 1 - i : i;
+      value |= byte << (8U * significance);
+    }
+    return value;
+  }
+  return std::nullopt;
+}
+
+/// Sign-extends the low `bytes` bytes of `value` to 64 bits.
+std::uint64_t sign_extend_bytes(std::uint64_t value, std::size_t bytes) {
+  if (bytes == 0 || bytes >= 8) {
+    return value;
+  }
+  const std::uint64_t sign = 1ULL << (bytes * 8U - 1U);
+  value &= width_mask(static_cast<std::uint8_t>(bytes));
+  return (value ^ sign) - sign;
+}
+
 bool same_memory(const MemoryOperand& a, const MemoryOperand& b) {
   return x86_family(a.base) == x86_family(b.base) && x86_family(a.index) == x86_family(b.index) &&
          a.scale == b.scale && a.displacement == b.displacement;
+}
+
+/// Instructions whose only register result is their first operand. Only these
+/// may leave that operand unknown: `xchg` or `cmpxchg` also write another
+/// register, so with an unknown input they must stop the slice.
+bool writes_only_first_operand(const std::string& m) {
+  return m == "mov" || m == "movabs" || m == "movzx" || m == "movsx" || m == "movsxd" ||
+         m == "lea" || m == "add" || m == "sub" || m == "and" || m == "or" || m == "xor" ||
+         m == "shl" || m == "sal" || m == "shr" || m == "sar" || m == "imul";
 }
 
 /// Concrete evaluation of the straight-line code between a jump table's
@@ -118,13 +197,19 @@ class TableSlice {
     const Operand& dest = ops[0];
     const bool writes_selector = guard_selector_ && selector_.kind == OperandKind::Register &&
                                  x86_family(dest.reg) == x86_family(selector_.reg);
+    // A destination written from a value the slice does not know (an unrelated
+    // register, or memory it cannot read) is unknown from here on. Only a jump
+    // that needs it fails; the selector itself must never change.
     if (m == "lea") {
+      if (writes_selector) {
+        return false;
+      }
       auto address = address_of(ops[1], instruction);
-      return !writes_selector && address && write_register(dest.reg, dest.size, *address);
+      return address ? write_register(dest.reg, dest.size, *address) : forget_register(dest.reg);
     }
     auto source = value_of(ops[1], instruction);
     if (!source) {
-      return false;
+      return !writes_selector && writes_only_first_operand(m) && forget_register(dest.reg);
     }
     std::uint64_t result = 0;
     if (m == "mov" || m == "movabs") {
@@ -136,7 +221,7 @@ class TableSlice {
     } else {
       auto current = read_register(dest.reg, dest.size);
       if (!current) {
-        return false;
+        return !writes_selector && writes_only_first_operand(m) && forget_register(dest.reg);
       }
       if (m == "add") {
         result = *current + *source;
@@ -189,6 +274,12 @@ class TableSlice {
     }
     const unsigned shift = (name.size() == 2 && name[1] == 'h') ? 8U : 0U;
     return (it->second >> shift) & width_mask(width == 0 ? 8 : width);
+  }
+
+  /// The register now holds a value the slice does not know.
+  bool forget_register(const std::string& name) {
+    registers_.erase(x86_family(name));
+    return true;
   }
 
   bool write_register(const std::string& name, std::uint8_t width, std::uint64_t value) {
@@ -258,27 +349,8 @@ class TableSlice {
     return std::nullopt;
   }
 
-  /// Table bytes come only from file-backed, non-writable sections: a
-  /// writable table could be changed at run time.
   std::optional<std::uint64_t> read_image(std::uint64_t address, std::size_t size) const {
-    for (const Section& section : image_.sections) {
-      if (!section.has_file_data || section.writable || address < section.address ||
-          address - section.address >= section.file_size ||
-          section.file_size - (address - section.address) < size) {
-        continue;
-      }
-      const std::uint64_t offset = section.file_offset + (address - section.address);
-      if (offset > file_.size() || file_.size() - offset < size) {
-        return std::nullopt;
-      }
-      std::uint64_t value = 0;
-      for (std::size_t i = 0; i < size; ++i) {
-        value |= static_cast<std::uint64_t>(file_[static_cast<std::size_t>(offset + i)])
-                 << (8U * i);
-      }
-      return value;
-    }
-    return std::nullopt;
+    return read_table_entry(image_, file_, address, size);
   }
 
   const BinaryImage& image_;
@@ -306,13 +378,393 @@ bool flags_writer(const std::string& m) {
          m == "sar" || m == "imul" || m == "sal";
 }
 
+// ---- AArch64 jump tables ---------------------------------------------------
+
+struct Aarch64Register {
+  int index = -1;  ///< 0..30, or -1 for the zero register
+  std::uint8_t width = 8;
+};
+
+std::optional<Aarch64Register> parse_aarch64_register(const std::string& name) {
+  if (name == "xzr") {
+    return Aarch64Register{-1, 8};
+  }
+  if (name == "wzr") {
+    return Aarch64Register{-1, 4};
+  }
+  if (name.size() < 2 || (name[0] != 'x' && name[0] != 'w')) {
+    return std::nullopt;
+  }
+  int number = 0;
+  for (std::size_t i = 1; i < name.size(); ++i) {
+    if (name[i] < '0' || name[i] > '9') {
+      return std::nullopt;
+    }
+    number = number * 10 + (name[i] - '0');
+    if (number > 30) {
+      return std::nullopt;
+    }
+  }
+  return Aarch64Register{number, static_cast<std::uint8_t>(name[0] == 'x' ? 8 : 4)};
+}
+
+/// A register operand with no shift or extension applied to it.
+bool is_plain_register(const Operand& operand) {
+  return operand.kind == OperandKind::Register && operand.shift == ShiftKind::None &&
+         operand.extend == ExtendKind::None;
+}
+
+/// Concrete evaluation of the AArch64 straight-line code between a jump
+/// table's bounds check and its `br`, for one selector value. Only what GCC
+/// and Clang emit for table dispatch is understood: `mov`, `adr`, `adrp`, `add`
+/// with an immediate or an extended and shifted register, and loads from a
+/// register offset. `nop` is understood too: a linker that relaxes the
+/// `adrp`/`add` pair that forms a table address (LLD does) writes a `nop` for
+/// the `adrp` and an `adr` for the `add`. Anything else stops the evaluation.
+class Aarch64TableSlice {
+ public:
+  Aarch64TableSlice(const BinaryImage& image, std::span<const std::byte> file, unsigned selector,
+                    std::uint64_t value)
+      : image_(image), file_(file) {
+    registers_[selector] = value;
+  }
+
+  bool step(const Instruction& instruction) {
+    const std::string& m = instruction.mnemonic;
+    const auto& ops = instruction.structured_operands;
+    if (m == "nop" && ops.empty()) {
+      return true;  // changes no register
+    }
+    if (m == "mov" && ops.size() == 2 && is_plain_register(ops[0]) &&
+        (is_plain_register(ops[1]) ||
+         (ops[1].kind == OperandKind::Immediate && ops[1].shift == ShiftKind::None))) {
+      auto value = value_of(ops[1]);
+      return value.has_value() ? write(ops[0].reg, *value) : forget(ops[0].reg);
+    }
+    if ((m == "adr" || m == "adrp") && ops.size() == 2 && is_plain_register(ops[0]) &&
+        ops[1].kind == OperandKind::Immediate && ops[1].shift == ShiftKind::None) {
+      const auto dest = parse_aarch64_register(ops[0].reg);
+      return dest.has_value() && dest->width == 8 &&
+             write(ops[0].reg, static_cast<std::uint64_t>(ops[1].immediate));
+    }
+    if (m == "add" && ops.size() == 3 && is_plain_register(ops[0]) &&
+        ops[1].kind == OperandKind::Register) {
+      const auto base = read(ops[1].reg);
+      std::optional<std::uint64_t> addend;
+      if (ops[2].kind == OperandKind::Immediate && ops[2].shift == ShiftKind::None &&
+          ops[2].extend == ExtendKind::None) {
+        addend = static_cast<std::uint64_t>(ops[2].immediate);
+      } else if (ops[2].kind == OperandKind::Register) {
+        addend = apply_extend(read(ops[2].reg), ops[2]);
+      }
+      return base.has_value() && addend.has_value() ? write(ops[0].reg, *base + *addend)
+                                                    : forget(ops[0].reg);
+    }
+    if (ops.size() == 2 && is_plain_register(ops[0]) && ops[1].kind == OperandKind::Memory) {
+      return load(m, ops[0], ops[1]);
+    }
+    return false;
+  }
+
+  /// The address the jump goes to: the value of its register.
+  std::optional<std::uint64_t> jump_target(const Instruction& jump) const {
+    const auto& ops = jump.structured_operands;
+    if (ops.size() != 1 || ops[0].kind != OperandKind::Register) {
+      return std::nullopt;
+    }
+    return read(ops[0].reg);
+  }
+
+ private:
+  /// The register operand's value after its AArch64 extension and then its
+  /// shift. The extension and shift amount are read from the operand, which
+  /// is where the decoder reports them.
+  static std::optional<std::uint64_t> apply_extend(std::optional<std::uint64_t> value,
+                                                   const Operand& operand) {
+    if (!value.has_value()) {
+      return std::nullopt;
+    }
+    std::uint64_t v = *value;
+    switch (operand.extend) {
+      case ExtendKind::None:
+      case ExtendKind::Uxtx:
+      case ExtendKind::Sxtx:
+        break;
+      case ExtendKind::Uxtb:
+        v &= 0xffULL;
+        break;
+      case ExtendKind::Uxth:
+        v &= 0xffffULL;
+        break;
+      case ExtendKind::Uxtw:
+        v &= 0xffffffffULL;
+        break;
+      case ExtendKind::Sxtb:
+        v = sign_extend_bytes(v, 1);
+        break;
+      case ExtendKind::Sxth:
+        v = sign_extend_bytes(v, 2);
+        break;
+      case ExtendKind::Sxtw:
+        v = sign_extend_bytes(v, 4);
+        break;
+    }
+    unsigned amount = 0;
+    if (operand.extend != ExtendKind::None || operand.shift == ShiftKind::Lsl) {
+      amount = operand.shift_amount;
+    } else if (operand.shift != ShiftKind::None) {
+      return std::nullopt;  // lsr, asr or ror of a table offset is not dispatch code
+    }
+    if (amount > 63) {
+      return std::nullopt;
+    }
+    return v << amount;
+  }
+
+  std::optional<std::uint64_t> value_of(const Operand& operand) const {
+    if (operand.kind == OperandKind::Register) {
+      return read(operand.reg);
+    }
+    if (operand.kind == OperandKind::Immediate) {
+      return static_cast<std::uint64_t>(operand.immediate);
+    }
+    return std::nullopt;
+  }
+
+  std::optional<std::uint64_t> read(const std::string& name) const {
+    const auto reg = parse_aarch64_register(name);
+    if (!reg.has_value()) {
+      return std::nullopt;
+    }
+    if (reg->index < 0) {
+      return 0;
+    }
+    const auto& value = registers_[static_cast<std::size_t>(reg->index)];
+    if (!value.has_value()) {
+      return std::nullopt;  // a value from before the slice
+    }
+    return reg->width == 4 ? (*value & 0xffffffffULL) : *value;
+  }
+
+  /// The register now holds a value the slice does not know.
+  bool forget(const std::string& name) {
+    const auto reg = parse_aarch64_register(name);
+    if (!reg.has_value()) {
+      return false;
+    }
+    if (reg->index >= 0) {
+      registers_[static_cast<std::size_t>(reg->index)].reset();
+    }
+    return true;
+  }
+
+  bool write(const std::string& name, std::uint64_t value) {
+    const auto reg = parse_aarch64_register(name);
+    if (!reg.has_value()) {
+      return false;
+    }
+    if (reg->index < 0) {
+      return true;  // a discarded result
+    }
+    // A 32-bit write zeroes the upper half, as the architecture does.
+    registers_[static_cast<std::size_t>(reg->index)] =
+        reg->width == 4 ? (value & 0xffffffffULL) : value;
+    return true;
+  }
+
+  /// The address a load reads: `[xN, #imm]`, or `[xN, wM, uxtw #s]` and the
+  /// like. Empty when the base or the index is not known.
+  std::optional<std::uint64_t> load_address(const MemoryOperand& mem, const Operand& source) const {
+    const auto base = read(mem.base);
+    if (!base.has_value()) {
+      return std::nullopt;
+    }
+    if (mem.index.empty()) {
+      return *base + static_cast<std::uint64_t>(mem.displacement);
+    }
+    const auto index_reg = parse_aarch64_register(mem.index);
+    // A 32-bit index register needs an extension, as the architecture requires.
+    if (!index_reg.has_value() || (index_reg->width == 4 && source.extend == ExtendKind::None) ||
+        mem.displacement != 0) {
+      return std::nullopt;
+    }
+    const auto offset = apply_extend(read(mem.index), source);
+    if (!offset.has_value()) {
+      return std::nullopt;
+    }
+    return *base + *offset;
+  }
+
+  /// `ldrb`, `ldrh`, `ldr`, and the signed `ldrsb`, `ldrsh`, `ldrsw`, from
+  /// `[xN, offset]` or `[xN, wM, uxtw #s]` and the like.
+  bool load(const std::string& m, const Operand& dest, const Operand& source) {
+    const MemoryOperand& mem = source.memory;
+    const auto dest_reg = parse_aarch64_register(dest.reg);
+    if (!dest_reg.has_value() || mem.writeback || mem.base.empty()) {
+      return false;
+    }
+    const auto base_reg = parse_aarch64_register(mem.base);
+    if (!base_reg.has_value() || base_reg->width != 8) {
+      return false;
+    }
+    std::size_t bytes = 0;
+    bool is_signed = false;
+    if (m == "ldrb") {
+      bytes = 1;
+    } else if (m == "ldrh") {
+      bytes = 2;
+    } else if (m == "ldrsb") {
+      bytes = 1;
+      is_signed = true;
+    } else if (m == "ldrsh") {
+      bytes = 2;
+      is_signed = true;
+    } else if (m == "ldrsw") {
+      bytes = 4;
+      is_signed = true;
+      if (dest_reg->width != 8) {
+        return false;
+      }
+    } else if (m == "ldr") {
+      bytes = dest_reg->width;
+    } else {
+      return false;
+    }
+    const auto address = load_address(mem, source);
+    const auto raw =
+        address.has_value() ? read_table_entry(image_, file_, *address, bytes) : std::nullopt;
+    if (!raw.has_value()) {
+      return forget(dest.reg);  // an address or contents the slice does not know
+    }
+    const std::uint64_t value = is_signed ? sign_extend_bytes(*raw, bytes) : *raw;
+    return write(dest.reg, value);
+  }
+
+  const BinaryImage& image_;
+  std::span<const std::byte> file_;
+  std::array<std::optional<std::uint64_t>, 31> registers_{};
+};
+
+/// Recover the jump table behind the AArch64 `br` at `run.back()`. The bounds
+/// check is the conditional branch nearest before it on the path, and the
+/// `cmp` must be the instruction immediately before that branch. The path
+/// either falls through the branch into the table (Clang: `b.hi default`) or
+/// takes the branch into it (GCC: `b.ls table`); in both cases the path must
+/// follow the in-range side. Any other shape is left unresolved.
+std::optional<JumpTable> resolve_aarch64_jump_table(
+    const BinaryImage& image, std::span<const std::byte> file,
+    std::span<const Instruction> instructions, const std::vector<std::uint32_t>& run,
+    const std::unordered_map<std::uint64_t, std::uint32_t>& index_by_address) {
+  if (run.size() < 2) {
+    return std::nullopt;
+  }
+  const Instruction& jump = instructions[run.back()];
+  if (jump.mnemonic != "br" || jump.structured_operands.size() != 1 ||
+      jump.structured_operands[0].kind != OperandKind::Register) {
+    return std::nullopt;
+  }
+  std::size_t check = run.size();
+  for (std::size_t i = run.size() - 1; i-- > 0;) {
+    const Instruction& candidate = instructions[run[i]];
+    if (candidate.classification == InstructionClass::ConditionalJump) {
+      check = i;
+      break;
+    }
+    if (candidate.classification != InstructionClass::Other) {
+      return std::nullopt;
+    }
+  }
+  if (check == run.size() || check == 0) {
+    return std::nullopt;
+  }
+  const Instruction& branch = instructions[run[check]];
+  const Instruction& cmp = instructions[run[check - 1]];
+  if (cmp.mnemonic != "cmp" || cmp.address + cmp.length != branch.address ||
+      cmp.structured_operands.size() != 2 || !is_plain_register(cmp.structured_operands[0]) ||
+      cmp.structured_operands[1].kind != OperandKind::Immediate ||
+      cmp.structured_operands[1].shift != ShiftKind::None ||
+      cmp.structured_operands[1].extend != ExtendKind::None) {
+    return std::nullopt;
+  }
+  const auto selector = parse_aarch64_register(cmp.structured_operands[0].reg);
+  const std::int64_t bound = cmp.structured_operands[1].immediate;
+  if (!selector.has_value() || selector->index < 0 || !branch.direct_target.has_value() ||
+      bound < 0 || bound > 4095) {
+    return std::nullopt;
+  }
+  const std::uint64_t fallthrough = branch.address + branch.length;
+  const std::uint64_t taken = *branch.direct_target;
+  if (taken == fallthrough) {
+    return std::nullopt;
+  }
+  const Instruction& next = instructions[run[check + 1]];
+  bool followed_taken = false;
+  if (next.address == taken) {
+    followed_taken = true;
+  } else if (next.address != fallthrough) {
+    return std::nullopt;
+  }
+  // The compare is unsigned. `hi` and `ls` are in range for selector <= bound;
+  // `hs` and `lo` for selector < bound. Table code must follow that side.
+  const auto k = static_cast<std::uint64_t>(bound);
+  bool in_range_taken = false;
+  std::uint64_t count = 0;
+  if (branch.mnemonic == "b.hi") {
+    count = k + 1;
+  } else if (branch.mnemonic == "b.hs" || branch.mnemonic == "b.cs") {
+    count = k;
+  } else if (branch.mnemonic == "b.ls") {
+    in_range_taken = true;
+    count = k + 1;
+  } else if (branch.mnemonic == "b.lo" || branch.mnemonic == "b.cc") {
+    in_range_taken = true;
+    count = k;
+  } else {
+    return std::nullopt;
+  }
+  if (followed_taken != in_range_taken || count == 0 || count > kMaxJumpTableEntries) {
+    return std::nullopt;
+  }
+
+  JumpTable table;
+  table.jump_address = jump.address;
+  table.check_address = cmp.address;
+  table.default_target = followed_taken ? fallthrough : taken;
+  table.selector = cmp.structured_operands[0];
+  for (std::uint64_t value = 0; value < count; ++value) {
+    Aarch64TableSlice slice(image, file, static_cast<unsigned>(selector->index), value);
+    for (std::size_t i = check + 1; i + 1 < run.size(); ++i) {
+      const Instruction& step = instructions[run[i]];
+      if (step.classification != InstructionClass::Other || !slice.step(step)) {
+        return std::nullopt;
+      }
+    }
+    const auto target = slice.jump_target(jump);
+    if (!target.has_value()) {
+      return std::nullopt;
+    }
+    const Section* section = image.section_for_va(*target);
+    if (section == nullptr || !section->executable || !index_by_address.contains(*target)) {
+      return std::nullopt;  // one bad entry: the whole table is unproven
+    }
+    table.targets.push_back(*target);
+  }
+  return table;
+}
+
 /// Recover the jump table behind the indirect jump `run.back()`, where `run`
 /// is the straight-line path the traversal followed to reach it.
 std::optional<JumpTable> resolve_jump_table(
     const BinaryImage& image, std::span<const std::byte> file,
     std::span<const Instruction> instructions, const std::vector<std::uint32_t>& run,
     const std::unordered_map<std::uint64_t, std::uint32_t>& index_by_address) {
-  if (file.empty() || run.size() < 3 ||
+  if (file.empty()) {
+    return std::nullopt;
+  }
+  if (image.architecture == Architecture::AArch64) {
+    return resolve_aarch64_jump_table(image, file, instructions, run, index_by_address);
+  }
+  if (run.size() < 3 ||
       (image.architecture != Architecture::X86_64 && image.architecture != Architecture::X86)) {
     return std::nullopt;
   }
@@ -336,6 +788,11 @@ std::optional<JumpTable> resolve_jump_table(
     return std::nullopt;
   }
   const Instruction& branch = instructions[run[check]];
+  // The dispatch continues on the in-range side, which for `ja` is the fall-through.
+  if (check + 1 >= run.size() ||
+      instructions[run[check + 1]].address != branch.address + branch.length) {
+    return std::nullopt;
+  }
   std::size_t compare = check;
   for (std::size_t i = check; i-- > 0;) {
     const Instruction& candidate = instructions[run[i]];
@@ -497,6 +954,11 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
     std::unordered_set<std::uint64_t> visited;
     std::vector<std::uint64_t> worklist;
     std::vector<std::uint64_t> reached;
+    // For a block entered through a conditional branch's taken edge: the last
+    // two instructions of the path that reached that branch (its predecessor
+    // and the branch). The compare feeding a jump table's bounds check is that
+    // predecessor, so a table entered this way can still be recognised.
+    std::unordered_map<std::uint64_t, std::vector<std::uint32_t>> entered_by;
     worklist.push_back(function.address);
 
     bool indirect = false;
@@ -512,6 +974,9 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       std::uint64_t address = worklist.back();
       worklist.pop_back();
       std::vector<std::uint32_t> run;  // straight-line path, for jump tables
+      if (const auto context = entered_by.find(address); context != entered_by.end()) {
+        run = context->second;
+      }
       while (true) {
         const auto found = index_by_address.find(address);
         if (found == index_by_address.end()) {
@@ -533,7 +998,35 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         }
 
         const Instruction& instruction = instructions[found->second];
-        const std::uint64_t next = address + instruction.length;
+        std::uint64_t next = address + instruction.length;
+        if (has_delay_slot(image.architecture, instruction)) {
+          // The slot runs before the transfer, so it is part of this block, and the path after a
+          // conditional branch or a call starts after it.
+          const auto slot = index_by_address.find(next);
+          if (slot == index_by_address.end() || visited.contains(next)) {
+            indirect = true;  // the slot is not a decoded instruction of this path
+            break;
+          }
+          if (decoded >= decoded_limit) {
+            truncated = true;
+            break;
+          }
+          const Instruction& delay = instructions[slot->second];
+          if (is_branch_likely(instruction.mnemonic)) {
+            note_once(graph, "analysis.mips_branch_likely",
+                      "a MIPS branch-likely form runs its delay slot only when taken; not modelled",
+                      address);
+          }
+          if (has_delay_slot(image.architecture, delay)) {
+            note_once(graph, "analysis.delay_slot_transfer",
+                      "a control transfer sits in a delay slot; the path is not followed", next);
+          }
+          visited.insert(next);
+          reached.push_back(next);
+          ++decoded;
+          run.push_back(slot->second);
+          next += delay.length;
+        }
         switch (instruction.classification) {
           case InstructionClass::Call:
             if (instruction.direct_target.has_value()) {
@@ -558,6 +1051,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             break;
           case InstructionClass::ConditionalJump:
             if (instruction.direct_target.has_value()) {
+              const std::size_t keep = std::min<std::size_t>(2, run.size());
+              entered_by.emplace(instruction.direct_target.value(),
+                                 std::vector<std::uint32_t>(
+                                     run.end() - static_cast<std::ptrdiff_t>(keep), run.end()));
               worklist.push_back(instruction.direct_target.value());
             } else {
               indirect = true;
@@ -612,14 +1109,30 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           }
         }
       }
+      std::uint64_t after = address + instruction.length;
+      if (has_delay_slot(image.architecture, instruction)) {
+        if (const auto slot = index_by_address.find(after); slot != index_by_address.end()) {
+          after += instructions[slot->second].length;
+        }
+      }
       if (instruction.classification != InstructionClass::Return &&
-          instruction.classification != InstructionClass::Interrupt &&
-          visited.contains(address + instruction.length)) {
-        leaders.push_back(address + instruction.length);
+          instruction.classification != InstructionClass::Interrupt && visited.contains(after)) {
+        leaders.push_back(after);
       }
     }
     std::sort(leaders.begin(), leaders.end());
     leaders.erase(std::unique(leaders.begin(), leaders.end()), leaders.end());
+    // A delay slot must stay in its branch's block. A branch target that is a slot would split it,
+    // so that layout is reported rather than modelled.
+    for (const std::uint64_t address : reached) {
+      const Instruction& instruction = instructions[index_by_address[address]];
+      const std::uint64_t slot = address + instruction.length;
+      if (has_delay_slot(image.architecture, instruction) &&
+          std::binary_search(leaders.begin(), leaders.end(), slot)) {
+        note_once(graph, "analysis.delay_slot_target",
+                  "a branch target is a delay slot; the block layout is not modelled there", slot);
+      }
+    }
 
     std::unordered_map<std::uint64_t, std::size_t> block_by_address;
     std::uint64_t previous_end = 0;
@@ -638,7 +1151,19 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         block_by_address.emplace(address, graph.blocks.size());
         graph.blocks.push_back(block);
         if (graph.blocks.size() > kMaxBlocks) {
+          // A partial result says why: the block bound is a resource limit, not a decoding failure.
+          // The reason is recorded once, however many seeds reach the bound.
           graph.partial = true;
+          const bool reported = std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(),
+                                            [](const Diagnostic& diagnostic) {
+                                              return diagnostic.code == "analysis.block_limit";
+                                            });
+          if (!reported) {
+            graph.diagnostics.push_back(
+                Diagnostic::make(Status::ResourceLimit, "analysis.block_limit",
+                                 "control-flow graph stopped at the block limit; blocks beyond it "
+                                 "are not reported"));
+          }
           break;
         }
       }
@@ -682,8 +1207,21 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       if (block.instruction_count == 0) {
         continue;
       }
-      const Instruction& last = instructions[block.first_instruction + block.instruction_count - 1];
-      const std::uint64_t fallthrough = last.address + last.length;
+      // A MIPS block ends with its branch's delay slot: the branch is then the terminator, and the
+      // fall-through starts after the slot.
+      const Instruction& last_instruction =
+          instructions[block.first_instruction + block.instruction_count - 1];
+      const Instruction* terminator = &last_instruction;
+      if (block.instruction_count >= 2) {
+        const Instruction& before =
+            instructions[block.first_instruction + block.instruction_count - 2];
+        if (has_delay_slot(image.architecture, before) &&
+            before.address + before.length == last_instruction.address) {
+          terminator = &before;
+        }
+      }
+      const Instruction& last = *terminator;
+      const std::uint64_t fallthrough = last_instruction.address + last_instruction.length;
       switch (last.classification) {
         case InstructionClass::Jump:
           if (last.direct_target.has_value()) {

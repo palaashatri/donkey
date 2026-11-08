@@ -1,0 +1,37 @@
+name: benchmark
+
+# Manual only (G16-T1): the scale benchmark is not run on pull requests. It builds donkey-cli with
+# the headless Linux preset and analyses generated programs of four sizes. See docs/BENCHMARKS.md.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scale:
+    name: scale benchmark (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake and Ninja
+        run: python -m pip install --upgrade cmake ninja
+      - name: Configure and build donkey-cli
+        run: |
+          cmake --preset headless-linux
+          cmake --build --preset headless-linux --parallel --target donkey-cli
+      - name: Scale benchmark (generated programs)
+        run: >
+          python3 tools/bench/scale_benchmark.py
+          --cli build/headless-linux/apps/donkey-cli/donkey-cli
+          --work bench-work
+          --sizes 2000 10000 20000 40000
+          --json bench-results.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: scale-benchmark
+          path: bench-results.json

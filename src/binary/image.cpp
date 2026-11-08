@@ -8,6 +8,8 @@
 #include <iterator>
 #include <tuple>
 
+#include "donkey/binary/records.h"
+#include "donkey/binary/relocate.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/sha256.h"
 #include "parsers.h"
@@ -68,8 +70,13 @@ unsigned default_bits_for_architecture(Architecture architecture) noexcept {
     case Architecture::AArch64:
     case Architecture::RiscV64:
       return 64;
+    case Architecture::Mips64:
+    case Architecture::Ppc64:
+      return 64;
     case Architecture::X86:
     case Architecture::Arm:
+    case Architecture::Mips32:
+    case Architecture::Ppc32:
       return 32;
     case Architecture::Unknown:
       return 0;
@@ -149,6 +156,14 @@ const char* architecture_name(Architecture architecture) noexcept {
       return "aarch64";
     case Architecture::RiscV64:
       return "riscv64";
+    case Architecture::Mips32:
+      return "mips32";
+    case Architecture::Ppc32:
+      return "ppc32";
+    case Architecture::Mips64:
+      return "mips64";
+    case Architecture::Ppc64:
+      return "ppc64";
   }
   return "unknown";
 }
@@ -168,6 +183,18 @@ std::optional<Architecture> parse_architecture(std::string_view name) noexcept {
   }
   if (name == "riscv64") {
     return Architecture::RiscV64;
+  }
+  if (name == "mips32") {
+    return Architecture::Mips32;
+  }
+  if (name == "ppc32") {
+    return Architecture::Ppc32;
+  }
+  if (name == "mips64") {
+    return Architecture::Mips64;
+  }
+  if (name == "ppc64") {
+    return Architecture::Ppc64;
   }
   return std::nullopt;
 }
@@ -447,9 +474,42 @@ Result<LoadedBinary> load_binary(const std::string& path, const LoadOptions& opt
     return error(Status::Cancelled, "io.cancelled", "file loading was cancelled");
   }
 
+  // Intel HEX and S-record files are decoded into one flat image at their lowest address,
+  // which is analysed as raw bytes. A malformed record is an error, not raw bytes.
+  if (!options.force_raw) {
+    const RecordFormat records = detect_record_format(data.span());
+    if (records != RecordFormat::None) {
+      auto decoded = decode_records(data.span(), records, options.max_file_bytes);
+      if (!decoded) {
+        return decoded.diagnostic();
+      }
+      LoadOptions flat = options;
+      flat.force_raw = true;
+      flat.raw_base_address = decoded.value().base;
+      flat.has_raw_entry_point = decoded.value().has_entry_point;
+      flat.raw_entry_point = decoded.value().entry_point;
+      data = ByteBuffer(std::move(decoded.value().bytes));
+      auto flat_image = parse_binary(data.span(), path, flat);
+      if (!flat_image) {
+        return flat_image.diagnostic();
+      }
+      flat_image.value().format_detail = record_format_name(records);
+      return LoadedBinary{std::move(flat_image.value()), std::move(data)};
+    }
+  }
+
   auto image = parse_binary(data.span(), path, options);
   if (!image) {
     return image.diagnostic();
+  }
+  // An ELF object is laid out and relocated. Its analysed bytes are a patched copy, so
+  // the buffer that the image's file offsets refer to is replaced with that copy.
+  if (image.value().format == BinaryFormat::Elf && is_relocatable_elf(data.span())) {
+    auto linked = link_relocatable_object(data.span(), image.value());
+    if (!linked) {
+      return linked.diagnostic();
+    }
+    data = ByteBuffer(std::move(linked.value()));
   }
   return LoadedBinary{std::move(image.value()), std::move(data)};
 }
@@ -460,6 +520,19 @@ Result<BinaryImage> load_binary_file(const std::string& path, const LoadOptions&
     return loaded.diagnostic();
   }
   return std::move(loaded.value().image);
+}
+
+std::optional<FileLocation> file_location_of(const BinaryImage& image,
+                                             std::uint64_t address) noexcept {
+  for (const Section& section : image.sections) {
+    if (!section.has_file_data || section.file_size == 0 || address < section.address ||
+        address - section.address >= section.file_size) {
+      continue;
+    }
+    const std::uint64_t within = address - section.address;
+    return FileLocation{section.file_offset + within, section.file_size - within};
+  }
+  return std::nullopt;
 }
 
 }  // namespace donkey

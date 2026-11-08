@@ -21,6 +21,7 @@ constexpr const char* kHexWindow = "Hex";
 constexpr const char* kStringsWindow = "Strings";
 constexpr const char* kXrefsWindow = "Xrefs";
 constexpr const char* kBookmarksWindow = "Bookmarks";
+constexpr const char* kDataWindow = "Data";
 constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
@@ -108,6 +109,29 @@ void Workspace::draw(bool& quit) {
     } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_Semicolon, false) &&
                state_.selected_address != 0 && session_.document()) {
       open_annotation_editor(AnnotationKind::Comment, state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_C, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      session_.set_annotation(AnnotationKind::CodeStart, state_.selected_address, "code");
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_D, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      // D makes one byte of data. Shift+D opens the data editor, for an array ("<size>:<count>")
+      // or a string ("string:<bytes>") (G12-T2).
+      if (ImGui::GetIO().KeyShift) {
+        open_annotation_editor(AnnotationKind::DataRange, state_.selected_address);
+      } else {
+        session_.set_annotation(AnnotationKind::DataRange, state_.selected_address, "1:1");
+      }
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_A, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      // A defines the NUL-terminated string at the address as data (G12-T2).
+      session_.define_string(state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_W, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      // W defines the NUL-terminated UTF-16LE string at the address as data (G12-T2).
+      session_.define_string16(state_.selected_address);
+    } else if (!cmd_or_ctrl && !alt && ImGui::IsKeyPressed(ImGuiKey_U, false) &&
+               state_.selected_address != 0 && session_.document()) {
+      session_.undefine(state_.selected_address);
     }
   }
 
@@ -285,6 +309,8 @@ void Workspace::draw(bool& quit) {
       kind_label = "Comment at";
     } else if (state_.annotation_kind == AnnotationKind::Bookmark) {
       kind_label = "Bookmark at";
+    } else if (state_.annotation_kind == AnnotationKind::DataRange) {
+      kind_label = "Data at (<size>:<count> or string:<bytes>)";
     }
     ImGui::Text("%s %s", kind_label, components::format_address(state_.annotation_address).c_str());
     ImGui::SetNextItemWidth(520.0f);
@@ -437,6 +463,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kStringsWindow, nullptr, &show_strings_);
     ImGui::MenuItem(kXrefsWindow, nullptr, &show_xrefs_);
     ImGui::MenuItem(kBookmarksWindow, nullptr, &show_bookmarks_);
+    ImGui::MenuItem(kDataWindow, nullptr, &show_data_);
     ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::Separator();
@@ -574,6 +601,9 @@ void Workspace::open_annotation_editor(AnnotationKind kind, std::uint64_t addres
     existing = kind == AnnotationKind::Comment ? annotations->comment_at(address)
                                                : annotations->rename_at(address);
   }
+  if (kind == AnnotationKind::DataRange && annotations) {
+    existing = annotations->data_range_at(address);
+  }
   if (existing != nullptr) {
     std::snprintf(state_.annotation_buffer, sizeof(state_.annotation_buffer), "%s",
                   existing->c_str());
@@ -601,6 +631,7 @@ void Workspace::build_default_layout(ImGuiID dockspace_id) {
   ImGui::DockBuilderDockWindow(kStringsWindow, bottom);
   ImGui::DockBuilderDockWindow(kXrefsWindow, bottom);
   ImGui::DockBuilderDockWindow(kBookmarksWindow, bottom);
+  ImGui::DockBuilderDockWindow(kDataWindow, bottom);
   ImGui::DockBuilderDockWindow(kDebuggerWindow, bottom);
   ImGui::DockBuilderDockWindow(kSectionsWindow, left);
   ImGui::DockBuilderDockWindow(kFunctionsWindow, left_bottom);
@@ -618,24 +649,32 @@ void Workspace::draw_panels() {
   state_.annotations = annotations.get();
 
   if (document && document.get() != last_document_) {
-    last_document_ = document.get();
     const BinaryImage& image = document->loaded.image;
-    std::uint64_t initial = 0;
-    if (image.has_entry_point() && image.va_to_file_offset(image.entry_point)) {
-      initial = image.entry_point;
-    } else {
-      for (const Section& section : image.sections) {
-        if (section.address != 0 && section.has_file_data &&
-            image.va_to_file_offset(section.address)) {
-          initial = section.address;
-          break;
+    // A re-analysis after an edit publishes a new document of the same file. Keep the
+    // selection then, so the next key press still acts on the address the user chose.
+    const bool same_file = !last_image_path_.empty() && last_image_path_ == image.path;
+    last_document_ = document.get();
+    last_image_path_ = image.path;
+    const bool keep_selection =
+        same_file && image.section_for_va(state_.selected_address) != nullptr;
+    if (!keep_selection) {
+      std::uint64_t initial = 0;
+      if (image.has_entry_point() && image.va_to_file_offset(image.entry_point)) {
+        initial = image.entry_point;
+      } else {
+        for (const Section& section : image.sections) {
+          if (section.address != 0 && section.has_file_data &&
+              image.va_to_file_offset(section.address)) {
+            initial = section.address;
+            break;
+          }
         }
       }
-    }
-    state_.selected_address = initial;
-    state_.selected_section.clear();
-    if (const Section* section = image.section_for_va(initial); section != nullptr) {
-      state_.selected_section = section->name;
+      state_.selected_address = initial;
+      state_.selected_section.clear();
+      if (const Section* section = image.section_for_va(initial); section != nullptr) {
+        state_.selected_section = section->name;
+      }
     }
   }
 
@@ -724,6 +763,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kBookmarksWindow, &show_bookmarks_, panel_flags());
     if (document) {
       views::bookmarks(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_data_) {
+    ImGui::Begin(kDataWindow, &show_data_, panel_flags());
+    if (document) {
+      views::data_ranges(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

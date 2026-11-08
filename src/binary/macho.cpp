@@ -16,6 +16,7 @@ constexpr std::uint32_t kLcSegment64 = 0x19;
 constexpr std::uint32_t kLcSymtab = 0x2;
 constexpr std::uint32_t kLcUnixThread = 0x5;
 constexpr std::uint32_t kLcMain = 0x80000028;
+constexpr std::uint32_t kLcUuid = 0x1b;
 constexpr std::uint64_t kMaxLoadCommands = 4096;
 constexpr std::uint64_t kMaxSections = 65536;
 constexpr std::uint64_t kMaxSymbols = 1'000'000;
@@ -252,6 +253,24 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
         }
         image.sections.push_back(std::move(parsed_section));
       }
+    } else if (command.value() == kLcUuid) {
+      // struct uuid_command { cmd, cmdsize, uuid_t uuid[16] }: the 16 bytes follow the header.
+      if (size.value() < 24) {
+        return macho_error(Status::InvalidInput, "macho.short_uuid_command", "LC_UUID is too small",
+                           command_offset);
+      }
+      auto uuid = reader.slice(command_offset + 8, 16);
+      if (!uuid) {
+        return uuid.diagnostic();
+      }
+      static constexpr char kHex[] = "0123456789abcdef";
+      std::string text;
+      for (const std::byte value : uuid.value()) {
+        const auto byte = std::to_integer<unsigned>(value);
+        text += kHex[byte >> 4U];
+        text += kHex[byte & 0xFU];
+      }
+      image.uuid = std::move(text);
     } else if (command.value() == kLcMain) {
       if (size.value() < 16) {
         return macho_error(Status::InvalidInput, "macho.short_main_command", "LC_MAIN is too small",

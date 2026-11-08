@@ -16,11 +16,18 @@
 #include "donkey/debug/controller.h"
 #include "donkey/debug/debug.h"
 #include "donkey/ir/ir.h"
+#include "donkey/ir/local_names.h"
 #include "donkey/patch/patch.h"
 #include "imgui.h"
 #include "session.h"
 
 namespace donkey::ui {
+
+/// A function to lift, with the user's names for its locals (G12-T3).
+struct LiftRequest {
+  Function function;
+  std::vector<UserLocalName> locals;
+};
 
 struct AsyncDecompileState {
   AsyncDecompileState() = default;
@@ -32,9 +39,9 @@ struct AsyncDecompileState {
   /// Lift the function the user is looking at (Visible priority; a newer
   /// request supersedes a queued older one). Served from the cache when the
   /// same function of the same document was already lifted.
-  void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, Function target);
+  void request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc, LiftRequest target);
   /// Lift functions the user is likely to open next (Background priority).
-  void prefetch(const std::shared_ptr<const Document>& doc, std::vector<Function> targets);
+  void prefetch(const std::shared_ptr<const Document>& doc, std::vector<LiftRequest> targets);
 
   struct Output {
     std::string status;
@@ -54,8 +61,8 @@ struct AsyncDecompileState {
   std::string ready_text;
   std::vector<PseudocodeLine> ready_lines;
 
-  /// Results for one document, keyed by "address:name" (renames change the
-  /// printed name, so they are separate entries).
+  /// Results for one document, keyed by "address:name|local names" (renames and local names change
+  /// the printed text, so they are separate entries).
   const Document* cache_document = nullptr;
   std::unordered_map<std::string, Output> cache;
 
@@ -276,6 +283,9 @@ class Workspace {
 
   Session& session_;
   const Document* last_document_ = nullptr;
+  /// The file the last shown document was made from. A new document of the same file keeps the
+  /// selection; see draw_panels.
+  std::string last_image_path_;
   UiState state_;
   bool layout_initialized_ = false;
   bool show_overview_ = true;
@@ -288,6 +298,7 @@ class Workspace {
   bool show_strings_ = true;
   bool show_xrefs_ = true;
   bool show_bookmarks_ = true;
+  bool show_data_ = true;
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_about_ = false;

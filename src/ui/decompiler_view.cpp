@@ -2,9 +2,11 @@
 #include <cstdint>
 #include <string>
 #include <thread>
+#include <vector>
 
 #include "components.h"
 #include "donkey/ir/lift.h"
+#include "donkey/ir/local_names.h"
 #include "imgui.h"
 #include "views.h"
 
@@ -12,7 +14,8 @@ namespace donkey::ui {
 
 namespace {
 
-AsyncDecompileState::Output lift_and_format(const Document& document, const Function& target) {
+AsyncDecompileState::Output lift_and_format(const Document& document, const Function& target,
+                                            const std::vector<UserLocalName>& locals) {
   AsyncDecompileState::Output out;
   auto lifted = lift_function(document.loaded.image, document.analysis, target);
   if (!lifted) {
@@ -20,6 +23,14 @@ AsyncDecompileState::Output lift_and_format(const Document& document, const Func
     out.code = lifted.diagnostic().code;
     out.text = lifted.diagnostic().message;
     return out;
+  }
+  if (!locals.empty()) {
+    // A refused set is not applied at all: the function keeps its unnamed locals, and the
+    // refusal code is shown beside the pseudocode.
+    auto applied = apply_user_local_names(lifted.value(), locals);
+    if (!applied) {
+      out.code = applied.diagnostic().code;
+    }
   }
   auto text = format_pseudocode_lines(lifted.value());
   if (!text) {
@@ -34,8 +45,17 @@ AsyncDecompileState::Output lift_and_format(const Document& document, const Func
   return out;
 }
 
-std::string cache_key(const Function& target) {
-  return std::to_string(target.address) + ":" + target.name;
+std::string local_names_key(const std::vector<UserLocalName>& locals) {
+  std::string key;
+  for (const UserLocalName& local : locals) {
+    key += local.variable + "=" + local.name + ";";
+  }
+  return key;
+}
+
+/// The identity of one lifted text: the printed function name and the user's local names.
+std::string cache_key(const Function& target, const std::vector<UserLocalName>& locals) {
+  return std::to_string(target.address) + ":" + target.name + "|" + local_names_key(locals);
 }
 
 }  // namespace
@@ -50,48 +70,49 @@ void AsyncDecompileState::reset_cache_for(const Document* document) {
 }
 
 void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const Document> doc,
-                                       Function target) {
+                                       LiftRequest request) {
   if (!doc) {
     return;
   }
+  const std::string key = cache_key(request.function, request.locals);
   {
     std::lock_guard<std::mutex> lock(mutex);
     current_generation = gen;
     ready = false;
     reset_cache_for(doc.get());
-    const auto hit = cache.find(cache_key(target));
+    const auto hit = cache.find(key);
     if (hit != cache.end()) {
       ready_status = hit->second.status;
       ready_code = hit->second.code;
       ready_text = hit->second.text;
       ready_lines = hit->second.lines;
-      ready_address = target.address;
-      ready_name = target.name;
+      ready_address = request.function.address;
+      ready_name = key;
       ready = true;
       return;
     }
   }
   scheduler.submit(
       JobPriority::Visible,
-      [this, gen, doc, target](const CancellationToken& token) {
+      [this, gen, doc, request, key](const CancellationToken& token) {
         {
           std::lock_guard<std::mutex> lock(mutex);
           if (current_generation != gen || token.is_cancelled()) {
             return;  // superseded before the CPU-heavy part
           }
         }
-        Output out = lift_and_format(*doc, target);
+        Output out = lift_and_format(*doc, request.function, request.locals);
         std::lock_guard<std::mutex> lock(mutex);
         if (cache_document == doc.get()) {
-          cache[cache_key(target)] = out;
+          cache[key] = out;
         }
         if (current_generation == gen) {
           ready_status = std::move(out.status);
           ready_code = std::move(out.code);
           ready_text = std::move(out.text);
           ready_lines = std::move(out.lines);
-          ready_address = target.address;
-          ready_name = target.name;
+          ready_address = request.function.address;
+          ready_name = key;
           ready = true;
         }
       },
@@ -99,12 +120,12 @@ void AsyncDecompileState::request_lift(std::uint64_t gen, std::shared_ptr<const 
 }
 
 void AsyncDecompileState::prefetch(const std::shared_ptr<const Document>& doc,
-                                   std::vector<Function> targets) {
+                                   std::vector<LiftRequest> targets) {
   if (!doc) {
     return;
   }
-  for (Function& target : targets) {
-    const std::string key = cache_key(target);
+  for (LiftRequest& target : targets) {
+    const std::string key = cache_key(target.function, target.locals);
     {
       std::lock_guard<std::mutex> lock(mutex);
       reset_cache_for(doc.get());
@@ -118,7 +139,7 @@ void AsyncDecompileState::prefetch(const std::shared_ptr<const Document>& doc,
           if (token.is_cancelled()) {
             return;
           }
-          Output out = lift_and_format(*doc, target);
+          Output out = lift_and_format(*doc, target.function, target.locals);
           std::lock_guard<std::mutex> lock(mutex);
           if (cache_document == doc.get() && !token.is_cancelled()) {
             cache.emplace(key, std::move(out));
@@ -153,17 +174,36 @@ const Function* selected_function(const Document& document, std::uint64_t addres
   return &analysis.functions.front();
 }
 
+/// The user's names for the locals of the function at `address`, in key order.
+std::vector<UserLocalName> local_names_of(const Annotations* annotations, std::uint64_t address) {
+  std::vector<UserLocalName> names;
+  if (annotations == nullptr) {
+    return names;
+  }
+  for (auto it = annotations->local_names.lower_bound({address, std::string()});
+       it != annotations->local_names.end() && it->first.first == address; ++it) {
+    names.push_back(UserLocalName{it->first.second, it->second});
+  }
+  return names;
+}
+
 /// Lifts and formats one function asynchronously off the render thread, caching
 /// the result in the shared UI state. The render thread never executes CPU-heavy
 /// lifting synchronously.
 void refresh(UiState& state, const Document& document, const Function& function) {
   const std::string* renamed =
       state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
-  const std::string name = renamed != nullptr ? *renamed : function.name;
+  Function target = function;
+  if (renamed != nullptr) {
+    target.name = *renamed;
+  }
+  const std::vector<UserLocalName> locals = local_names_of(state.annotations, function.address);
+  // What is shown is identified by the printed name and the local names, as the cache key is.
+  const std::string identity = cache_key(target, locals);
 
   // 1. If currently showing this exact function and not in progress, nothing to do.
   if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
-      state.pseudocode_function == name && !state.pseudocode_in_progress) {
+      state.pseudocode_function == identity && !state.pseudocode_in_progress) {
     return;
   }
 
@@ -171,13 +211,13 @@ void refresh(UiState& state, const Document& document, const Function& function)
   if (state.async_decompile) {
     std::lock_guard<std::mutex> lock(state.async_decompile->mutex);
     if (state.async_decompile->ready && state.async_decompile->ready_address == function.address &&
-        state.async_decompile->ready_name == name && state.pseudocode_document == &document) {
+        state.async_decompile->ready_name == identity && state.pseudocode_document == &document) {
       state.pseudocode_status = std::move(state.async_decompile->ready_status);
       state.pseudocode_code = std::move(state.async_decompile->ready_code);
       state.pseudocode_text = std::move(state.async_decompile->ready_text);
       state.pseudocode_lines = std::move(state.async_decompile->ready_lines);
       state.pseudocode_address = function.address;
-      state.pseudocode_function = name;
+      state.pseudocode_function = identity;
       state.pseudocode_in_progress = false;
       state.async_decompile->ready = false;
       return;
@@ -186,14 +226,14 @@ void refresh(UiState& state, const Document& document, const Function& function)
 
   // 3. If already in progress for this exact function, wait for it to complete.
   if (state.pseudocode_document == &document && state.pseudocode_address == function.address &&
-      state.pseudocode_function == name && state.pseudocode_in_progress) {
+      state.pseudocode_function == identity && state.pseudocode_in_progress) {
     return;
   }
 
   // 4. Otherwise, initiate asynchronous lift off the UI render thread.
   state.pseudocode_document = &document;
   state.pseudocode_address = function.address;
-  state.pseudocode_function = name;
+  state.pseudocode_function = identity;
   state.pseudocode_status = "Lifting";
   state.pseudocode_code.clear();
   state.pseudocode_text = "Lifting in background...";
@@ -204,37 +244,35 @@ void refresh(UiState& state, const Document& document, const Function& function)
     state.async_decompile = std::make_shared<AsyncDecompileState>();
   }
 
-  Function target = function;
-  if (renamed != nullptr) {
-    target.name = *renamed;
-  }
-
   std::uint64_t gen = 0;
   {
     std::lock_guard<std::mutex> lock(state.async_decompile->mutex);
     gen = ++state.async_decompile->current_generation;
   }
 
-  state.async_decompile->request_lift(gen, state.pseudocode_document_owner, std::move(target));
+  state.async_decompile->request_lift(gen, state.pseudocode_document_owner,
+                                      LiftRequest{std::move(target), locals});
 
   // Callees are the likeliest next stop; lift a few in the background.
   constexpr std::size_t kPrefetch = 4;
-  std::vector<Function> next;
+  std::vector<LiftRequest> next;
   for (const CallGraphEdge& edge : document.analysis.call_graph.callees_of(function.address)) {
     if (next.size() >= kPrefetch) {
       break;
     }
     for (const Function& candidate : document.analysis.functions) {
       if (candidate.address == edge.callee &&
-          std::none_of(next.begin(), next.end(),
-                       [&](const Function& f) { return f.address == candidate.address; })) {
+          std::none_of(next.begin(), next.end(), [&](const LiftRequest& request) {
+            return request.function.address == candidate.address;
+          })) {
         Function callee = candidate;
         if (state.annotations != nullptr) {
           if (const std::string* rename = state.annotations->rename_at(candidate.address)) {
             callee.name = *rename;
           }
         }
-        next.push_back(std::move(callee));
+        next.push_back(
+            LiftRequest{std::move(callee), local_names_of(state.annotations, candidate.address)});
         break;
       }
     }
@@ -266,6 +304,10 @@ void decompiler(const Document& document, UiState& state) {
   }
   ImGui::SameLine();
   ImGui::TextDisabled("verified IR only; no string-formatted or model-generated code");
+  if (state.pseudocode_code.rfind("ir.local_name_", 0) == 0) {
+    ImGui::TextDisabled("Local names refused (%s); showing the unnamed pseudocode.",
+                        state.pseudocode_code.c_str());
+  }
   // The debug-info prototype is shown beside, not inside, the pseudocode:
   // the pseudocode stays the engine's canonical output (same as the CLI).
   if (document.debug_info) {

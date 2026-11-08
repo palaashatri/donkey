@@ -1,9 +1,14 @@
 #include "session.h"
 
 #include "donkey/core/thread_priority.h"
+#include "donkey/ir/local_names.h"
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
+#include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -20,8 +25,12 @@ AnalysisOptions analysis_options() {
   return options;
 }
 
-std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& rows) {
+std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& rows,
+                                              const std::vector<LocalName>& local_names) {
   auto annotations = std::make_shared<Annotations>();
+  for (const LocalName& local : local_names) {
+    annotations->local_names[{local.function_address, local.variable}] = local.name;
+  }
   for (const Annotation& annotation : rows) {
     switch (annotation.kind) {
       case AnnotationKind::Rename:
@@ -36,15 +45,104 @@ std::shared_ptr<Annotations> annotations_from(const std::vector<Annotation>& row
       case AnnotationKind::FunctionStart:
         annotations->functions[annotation.address] = annotation.text;
         break;
+      case AnnotationKind::CodeStart:
+        annotations->code_starts[annotation.address] = annotation.text;
+        break;
+      case AnnotationKind::DataRange:
+        annotations->data_ranges[annotation.address] = annotation.text;
+        break;
     }
   }
   return annotations;
 }
 
+/// The map that holds annotations of `kind`.
+std::unordered_map<std::uint64_t, std::string>& annotation_map(Annotations& annotations,
+                                                               AnnotationKind kind) {
+  switch (kind) {
+    case AnnotationKind::Rename:
+      return annotations.renames;
+    case AnnotationKind::Comment:
+      return annotations.comments;
+    case AnnotationKind::Bookmark:
+      return annotations.bookmarks;
+    case AnnotationKind::FunctionStart:
+      return annotations.functions;
+    case AnnotationKind::CodeStart:
+      return annotations.code_starts;
+    case AnnotationKind::DataRange:
+      return annotations.data_ranges;
+  }
+  return annotations.renames;
+}
+
+/// Whether `text` is acceptable for `kind`: a code start must say "code", and a data range
+/// must parse. An invalid edit is ignored, as the project would refuse to store it.
+bool text_valid_for(AnnotationKind kind, const std::string& text) {
+  if (kind == AnnotationKind::CodeStart) {
+    return text == "code";
+  }
+  if (kind == AnnotationKind::DataRange) {
+    std::uint64_t element_size = 0;
+    std::uint64_t count = 0;
+    StringEncoding encoding = StringEncoding::None;
+    return parse_data_extent(text, element_size, count, encoding);
+  }
+  return true;
+}
+
+/// A string is searched for only this far, so defining one never scans the whole file.
+constexpr std::uint64_t kMaxStringScan = 4096;
+
+/// The byte length of the NUL-terminated string at `address`, terminator included, or nothing when
+/// the address is not in file-backed data or no terminator is found within the scan.
+std::optional<std::uint64_t> string_bytes_at(const LoadedBinary& loaded, std::uint64_t address) {
+  const std::span<const std::byte> file = loaded.data.span();
+  const std::optional<FileLocation> location = file_location_of(loaded.image, address);
+  if (!location || location->offset >= file.size()) {
+    return std::nullopt;
+  }
+  const std::uint64_t available =
+      std::min({kMaxStringScan, location->remaining, file.size() - location->offset});
+  for (std::uint64_t i = 0; i < available; ++i) {
+    if (std::to_integer<unsigned>(file[location->offset + i]) == 0) {
+      return i + 1;
+    }
+  }
+  return std::nullopt;
+}
+
+/// The byte length of the UTF-16LE string at `address`, its two-byte terminator included, or
+/// nothing when the address is not in file-backed data or no terminator unit is found within the
+/// scan. The units are read from the address as they are; the address need not be aligned.
+std::optional<std::uint64_t> utf16_bytes_at(const LoadedBinary& loaded, std::uint64_t address) {
+  const std::span<const std::byte> file = loaded.data.span();
+  const std::optional<FileLocation> location = file_location_of(loaded.image, address);
+  if (!location || location->offset >= file.size()) {
+    return std::nullopt;
+  }
+  const std::uint64_t available =
+      std::min({kMaxStringScan, location->remaining, file.size() - location->offset});
+  for (std::uint64_t i = 0; i + 1 < available; i += 2) {
+    if (std::to_integer<unsigned>(file[location->offset + i]) == 0 &&
+        std::to_integer<unsigned>(file[location->offset + i + 1]) == 0) {
+      return i + 2;
+    }
+  }
+  return std::nullopt;
+}
+
 std::vector<Annotation> rows_from(const Annotations& annotations) {
   std::vector<Annotation> rows;
   rows.reserve(annotations.renames.size() + annotations.comments.size() +
-               annotations.bookmarks.size() + annotations.functions.size());
+               annotations.bookmarks.size() + annotations.functions.size() +
+               annotations.code_starts.size() + annotations.data_ranges.size());
+  for (const auto& [address, text] : annotations.code_starts) {
+    rows.push_back(Annotation{AnnotationKind::CodeStart, address, text});
+  }
+  for (const auto& [address, text] : annotations.data_ranges) {
+    rows.push_back(Annotation{AnnotationKind::DataRange, address, text});
+  }
   for (const auto& [address, text] : annotations.renames) {
     rows.push_back(Annotation{AnnotationKind::Rename, address, text});
   }
@@ -60,9 +158,31 @@ std::vector<Annotation> rows_from(const Annotations& annotations) {
   return rows;
 }
 
+std::vector<LocalName> local_names_from(const Annotations& annotations) {
+  std::vector<LocalName> rows;
+  rows.reserve(annotations.local_names.size());
+  for (const auto& [key, name] : annotations.local_names) {
+    rows.push_back(LocalName{key.first, key.second, name});
+  }
+  return rows;
+}
+
 /// Analysis options with the user's function-boundary edits applied.
 AnalysisOptions analysis_options_for(const Annotations& annotations) {
   AnalysisOptions options = analysis_options();
+  for (const auto& [address, text] : annotations.code_starts) {
+    if (text == "code") {
+      options.user_code_starts.push_back(address);
+    }
+  }
+  for (const auto& [address, text] : annotations.data_ranges) {
+    std::uint64_t element_size = 0;
+    std::uint64_t count = 0;
+    StringEncoding encoding = StringEncoding::None;
+    if (parse_data_extent(text, element_size, count, encoding)) {
+      options.user_data_ranges.push_back(UserDataRange{address, element_size, count});
+    }
+  }
   for (const auto& [address, action] : annotations.functions) {
     if (action == "define") {
       options.user_function_starts.push_back(address);
@@ -333,6 +453,7 @@ void Session::open_project(const std::string& path) {
     std::string image_path;
     std::int64_t image_id = 0;
     std::vector<Annotation> stored;
+    std::vector<LocalName> stored_local_names;
     std::string failure;
     std::string failure_status;
     {
@@ -364,6 +485,14 @@ void Session::open_project(const std::string& path) {
             failure_status = "Failed to read annotations";
           } else {
             stored = std::move(annotations.value());
+            auto local_names = project.value().local_names(image_id);
+            if (!local_names) {
+              failure =
+                  local_names.diagnostic().message + " [" + local_names.diagnostic().code + "]";
+              failure_status = "Failed to read local names";
+            } else {
+              stored_local_names = std::move(local_names.value());
+            }
           }
         }
       }
@@ -392,7 +521,7 @@ void Session::open_project(const std::string& path) {
            "Failed to load project image");
       return;
     }
-    auto annotations = annotations_from(stored);
+    auto annotations = annotations_from(stored, stored_local_names);
     AnalysisOptions options = analysis_options_for(*annotations);
     options.cancellation_token = token;
     auto analysis = analyze(loaded.value().image, loaded.value().data, options);
@@ -480,7 +609,11 @@ void Session::save_project(const std::string& path) {
           failure = image_id.diagnostic().message + " [" + image_id.diagnostic().code + "]";
         } else {
           const std::vector<Annotation> rows = rows_from(*annotations);
+          const std::vector<LocalName> names = local_names_from(*annotations);
           auto replaced = project.value().replace_annotations(image_id.value(), rows);
+          if (replaced) {
+            replaced = project.value().replace_local_names(image_id.value(), names);
+          }
           if (!replaced) {
             failure = replaced.diagnostic().message + " [" + replaced.diagnostic().code + "]";
           } else {
@@ -675,6 +808,7 @@ void Session::restore_project(const std::string& backup_path) {
     std::string image_path;
     std::int64_t image_id = 0;
     std::vector<Annotation> stored;
+    std::vector<LocalName> stored_local_names;
     std::string failure;
     {
       auto project = Project::open(target_path);
@@ -695,12 +829,19 @@ void Session::restore_project(const std::string& backup_path) {
             failure = annotations.diagnostic().message + " [" + annotations.diagnostic().code + "]";
           } else {
             stored = std::move(annotations.value());
+            auto local_names = project.value().local_names(image_id);
+            if (!local_names) {
+              failure =
+                  local_names.diagnostic().message + " [" + local_names.diagnostic().code + "]";
+            } else {
+              stored_local_names = std::move(local_names.value());
+            }
           }
         }
       }
     }
 
-    auto annotations = annotations_from(stored);
+    auto annotations = annotations_from(stored, stored_local_names);
 
     {
       // A newer operation started after the commit owns the workspace; it
@@ -906,22 +1047,35 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
     if (const auto* s = annotations_->function_edit_at(address)) {
       old_text = *s;
     }
+  } else if (kind == AnnotationKind::CodeStart) {
+    if (const auto* s = annotations_->code_start_at(address)) {
+      old_text = *s;
+    }
+  } else if (kind == AnnotationKind::DataRange) {
+    if (const auto* s = annotations_->data_range_at(address)) {
+      old_text = *s;
+    }
   }
 
+  if (!text.empty() && !text_valid_for(kind, text)) {
+    return;
+  }
   if (old_text == text) {
     return;
   }
 
   if (record_undo) {
-    undo_stack_.push_back(AnnotationEdit{kind, address, old_text, text});
+    AnnotationEdit edit;
+    edit.kind = kind;
+    edit.address = address;
+    edit.old_text = old_text;
+    edit.new_text = text;
+    undo_stack_.push_back(std::move(edit));
     redo_stack_.clear();
   }
 
   auto next = std::make_shared<Annotations>(*annotations_);
-  auto& target = kind == AnnotationKind::Rename     ? next->renames
-                 : kind == AnnotationKind::Comment  ? next->comments
-                 : kind == AnnotationKind::Bookmark ? next->bookmarks
-                                                    : next->functions;
+  auto& target = annotation_map(*next, kind);
   if (text.empty()) {
     target.erase(address);
   } else {
@@ -929,6 +1083,51 @@ void Session::apply_annotation_edit_locked(AnnotationKind kind, std::uint64_t ad
   }
   annotations_ = std::move(next);
   dirty_ = true;
+}
+
+void Session::apply_local_name_edit_locked(std::uint64_t function_address,
+                                           const std::string& variable, const std::string& text,
+                                           bool record_undo) {
+  const std::string* current = annotations_->local_name_at(function_address, variable);
+  const std::string old_text = current != nullptr ? *current : std::string();
+  if (old_text == text) {
+    return;
+  }
+
+  if (record_undo) {
+    AnnotationEdit edit;
+    edit.address = function_address;
+    edit.old_text = old_text;
+    edit.new_text = text;
+    edit.local = true;
+    edit.variable = variable;
+    undo_stack_.push_back(std::move(edit));
+    redo_stack_.clear();
+  }
+
+  auto next = std::make_shared<Annotations>(*annotations_);
+  const auto key = std::make_pair(function_address, variable);
+  if (text.empty()) {
+    next->local_names.erase(key);
+  } else {
+    next->local_names[key] = text;
+  }
+  annotations_ = std::move(next);
+  dirty_ = true;
+}
+
+void Session::set_local_name(std::uint64_t function_address, const std::string& variable,
+                             const std::string& name) {
+  const bool key_ok = local_variable_key_valid(variable);
+  const bool name_ok = name.empty() || user_local_name_usable(name);
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (!key_ok || !name_ok) {
+    error_ =
+        "a local name must be a C identifier that is not a keyword, at most 128 bytes, and "
+        "its key must be arg:<index> or frame:<base register>:<offset>";
+    return;
+  }
+  apply_local_name_edit_locked(function_address, variable, name, true);
 }
 
 void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const std::string& text) {
@@ -939,14 +1138,61 @@ void Session::set_annotation(AnnotationKind kind, std::uint64_t address, const s
   after_annotation_change(kind);
 }
 
+void Session::define_string(std::uint64_t address) {
+  const auto doc = document();
+  const std::optional<std::uint64_t> bytes =
+      doc ? string_bytes_at(doc->loaded, address) : std::nullopt;
+  if (!bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_ = "no NUL-terminated string within 4096 bytes of file data at this address";
+    return;
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_string_range_text(*bytes));
+}
+
+void Session::define_string16(std::uint64_t address) {
+  const auto doc = document();
+  const std::optional<std::uint64_t> bytes =
+      doc ? utf16_bytes_at(doc->loaded, address) : std::nullopt;
+  if (!bytes) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    error_ = "no NUL-terminated UTF-16 string within 4096 bytes of file data at this address";
+    return;
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_utf16_range_text(*bytes));
+}
+
+void Session::undefine(std::uint64_t address) {
+  const auto current = annotations();
+  if (current != nullptr && current->data_range_at(address) != nullptr) {
+    set_annotation(AnnotationKind::DataRange, address, "");
+    return;
+  }
+  if (current != nullptr && current->code_start_at(address) != nullptr) {
+    set_annotation(AnnotationKind::CodeStart, address, "");
+    return;
+  }
+  std::uint64_t length = 1;
+  if (const auto analyzed = document()) {
+    for (const Instruction& instruction : analyzed->analysis.instructions) {
+      if (instruction.address == address) {
+        length = std::max<std::uint64_t>(1, instruction.length);
+        break;
+      }
+    }
+  }
+  set_annotation(AnnotationKind::DataRange, address, format_data_range_text(0, length));
+}
+
 void Session::set_function_edit(std::uint64_t address, const std::string& action) {
   set_annotation(AnnotationKind::FunctionStart, address, action);
 }
 
 void Session::after_annotation_change(AnnotationKind kind) {
-  // Function boundaries change the analysis; every other annotation is
-  // display-only.
-  if (kind == AnnotationKind::FunctionStart) {
+  // Function boundaries, code starts and data ranges change the analysis; every
+  // other annotation is display-only.
+  if (kind == AnnotationKind::FunctionStart || kind == AnnotationKind::CodeStart ||
+      kind == AnnotationKind::DataRange) {
     reanalyze();
   }
 }
@@ -1037,6 +1283,11 @@ bool Session::undo() {
   }
   AnnotationEdit edit = std::move(undo_stack_.back());
   undo_stack_.pop_back();
+  if (edit.local) {
+    apply_local_name_edit_locked(edit.address, edit.variable, edit.old_text, false);
+    redo_stack_.push_back(std::move(edit));
+    return true;
+  }
   apply_annotation_edit_locked(edit.kind, edit.address, edit.old_text, false);
   const AnnotationKind kind = edit.kind;
   redo_stack_.push_back(std::move(edit));
@@ -1052,6 +1303,11 @@ bool Session::redo() {
   }
   AnnotationEdit edit = std::move(redo_stack_.back());
   redo_stack_.pop_back();
+  if (edit.local) {
+    apply_local_name_edit_locked(edit.address, edit.variable, edit.new_text, false);
+    undo_stack_.push_back(std::move(edit));
+    return true;
+  }
   apply_annotation_edit_locked(edit.kind, edit.address, edit.new_text, false);
   const AnnotationKind kind = edit.kind;
   undo_stack_.push_back(std::move(edit));

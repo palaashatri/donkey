@@ -41,6 +41,13 @@ DEBUGGEE_EXPORT DEBUGGEE_NOINLINE void donkey_debuggee_tick(void) {
 
 typedef int (*donkey_answer_fn)(int);
 
+/* A struct that the program defines and uses, so every compiler emits its DWARF type. */
+struct donkey_pair {
+  int first;
+  long second;
+};
+struct donkey_pair donkey_pair_value = {1, 2};
+
 /* Runtime address of donkey_module_answer once the module is loaded. */
 DEBUGGEE_EXPORT volatile uint64_t donkey_debuggee_module_function = 0;
 
@@ -120,4 +127,17 @@ DEBUGGEE_EXPORT int main(int argc, char** argv) {
     donkey_debuggee_tick();
   }
   return donkey_debuggee_counter == 3 ? 42 : donkey_debuggee_counter;
+}
+
+/* A struct that an exported function uses, so every compiler emits its type. The types test checks
+   that the DWARF size of each struct matches the size computed from its members, and it needs at
+   least one struct to check. Clang emits a struct's type only when code uses it. */
+struct donkey_debuggee_record {
+  char tag;
+  int value;
+  double scale;
+};
+
+DEBUGGEE_EXPORT double donkey_debuggee_record_scale(const struct donkey_debuggee_record* record) {
+  return record->value * record->scale + record->tag;
 }

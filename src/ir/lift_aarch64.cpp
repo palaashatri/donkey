@@ -1,9 +1,13 @@
 #include "lift_internal.h"
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
+#include <initializer_list>
+#include <iterator>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
@@ -22,6 +26,9 @@ bool all_digits(const std::string& text) {
 }
 
 std::uint8_t register_width(const std::string& name) {
+  if (internal::scalar_fp_width(name) != 0) {
+    return internal::scalar_fp_width(name);
+  }
   if (name == "sp" || name == "fp" || name == "lr" || name == "pc" || name == "xzr") {
     return kPointerWidth;
   }
@@ -110,6 +117,15 @@ IrCondition trailing_condition(const std::string& operands) {
   return branch_condition("b." + code);
 }
 
+/// The scalar floating-point mnemonics lift_scalar_fp models. fcsel is in the select
+/// lowering. fcvtzu and the negated fused forms are not modelled.
+bool is_scalar_fp_mnemonic(const std::string& mnemonic) {
+  static const char* const kNames[] = {"fmov",  "fadd",  "fsub",   "fmul",  "fdiv", "fsqrt",
+                                       "fneg",  "fabs",  "fmadd",  "fmsub", "fcmp", "fcmpe",
+                                       "scvtf", "ucvtf", "fcvtzs", "fcvt",  "movi"};
+  return std::find(std::begin(kNames), std::end(kNames), mnemonic) != std::end(kNames);
+}
+
 /// Instructions that write NZCV. The lifter models the flags of cmp, tst,
 /// subs and ands exactly; any other writer leaves them unknown.
 bool sets_flags(const std::string& mnemonic) {
@@ -160,6 +176,19 @@ struct Lifter {
   void mark_partial(std::string text) {
     out.notes.push_back(std::move(text));
     out.partial = true;
+  }
+
+  /// A rounded result depends on FPCR's rounding mode, which the caller may set, and this lifter
+  /// does not model FPCR. The function is Partial, with the assumption written in its notes once.
+  void mark_rounding_dependent() {
+    static const std::string kNote =
+        "floating-point results assume the FPCR rounding mode is round to nearest; a caller may "
+        "set another mode, which is not modelled";
+    if (std::find(out.notes.begin(), out.notes.end(), kNote) == out.notes.end()) {
+      mark_partial(kNote);
+    } else {
+      out.partial = true;
+    }
   }
 
   void push(IrBlock& block, IrStatement statement) {
@@ -536,6 +565,20 @@ struct Lifter {
         push(block, std::move(statement));
         return;
       }
+      if (mnemonic == "cmn") {
+        // cmn is adds into the zero register: the flags of a + b, set unconditionally.
+        modelled_flags = true;
+        IrStatement statement;
+        statement.op = IrOp::CondCompareAdd;
+        statement.a = to_ir_operand(operands[0], kPointerWidth);
+        statement.b = source;
+        statement.c = IrOperand::constant_value(0, 1);
+        statement.condition = IrCondition::None;
+        statement.width = statement.a.width;
+        statement.source_address = instruction.address;
+        push(block, std::move(statement));
+        return;
+      }
       if (mnemonic == "tst") {
         modelled_flags = true;
         IrStatement statement;
@@ -620,6 +663,20 @@ struct Lifter {
       return;
     }
 
+    // adds sets the flags of a + b, unconditionally, from the operands before the
+    // destination is written.
+    if (mnemonic == "adds") {
+      modelled_flags = true;
+      IrStatement flags;
+      flags.op = IrOp::CondCompareAdd;
+      flags.a = left;
+      flags.b = right;
+      flags.c = IrOperand::constant_value(0, 1);
+      flags.condition = IrCondition::None;
+      flags.width = width;
+      flags.source_address = instruction.address;
+      push(block, std::move(flags));
+    }
     // subs and ands set NZCV exactly as cmp and tst of the same operands.
     // The Compare/Test reads the operands before the destination is written.
     if (mnemonic == "subs" || mnemonic == "ands") {
@@ -646,6 +703,171 @@ struct Lifter {
 
   /// csel/csinc/csinv/csneg and their aliases cset, csetm, cinc, cinv, cneg:
   /// dest = condition ? a : f(b). Exact only when the block's flags are.
+  /// Scalar floating-point instructions on the s and d registers. A float is its bits
+  /// in the IR, so moves and selects do not depend on the type. Returns false when the
+  /// form is not modelled; the caller then marks the instruction Unsupported.
+  bool lift_scalar_fp(IrBlock& block, const Instruction& instruction) {
+    const std::string& m = instruction.mnemonic;
+    const std::vector<Operand>& ops = instruction.structured_operands;
+    const auto is_fp = [](const Operand& o) {
+      return o.kind == OperandKind::Register && internal::scalar_fp_width(o.reg) != 0;
+    };
+    const auto is_gp = [](const Operand& o) {
+      return o.kind == OperandKind::Register && internal::scalar_fp_width(o.reg) == 0 &&
+             (register_width(o.reg) == 4 || register_width(o.reg) == 8);
+    };
+    const auto width_of_fp = [](const Operand& o) { return internal::scalar_fp_width(o.reg); };
+    const auto reg = [](const Operand& o, std::uint8_t width) {
+      return IrOperand::register_ref(o.reg, width);
+    };
+    const auto emit = [&](IrOp op, IrOperand dest, IrOperand a, IrOperand b, IrOperand c,
+                          std::uint8_t width) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = std::move(dest);
+      statement.a = std::move(a);
+      statement.b = std::move(b);
+      statement.c = std::move(c);
+      statement.width = width;
+      statement.float_model = IrFloatModel::AArch64;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    const auto all_fp = [&](std::initializer_list<std::size_t> indices, std::uint8_t width) {
+      for (const std::size_t index : indices) {
+        if (index >= ops.size() || !is_fp(ops[index]) || width_of_fp(ops[index]) != width) {
+          return false;
+        }
+      }
+      return true;
+    };
+
+    if (m == "movi" && ops.size() == 2 && is_fp(ops[0]) && ops[1].kind == OperandKind::Immediate &&
+        ops[1].immediate == 0) {
+      // movi d0, #0 clears the scalar register, as a zeroing idiom does.
+      const std::uint8_t width = width_of_fp(ops[0]);
+      emit(IrOp::Assign, reg(ops[0], width), IrOperand::constant_value(0, width), IrOperand::none(),
+           IrOperand::none(), width);
+      return true;
+    }
+    if (m == "fmov" && ops.size() == 2) {
+      if (is_fp(ops[0])) {
+        const std::uint8_t width = width_of_fp(ops[0]);
+        if (ops[1].kind == OperandKind::Immediate) {
+          // The immediate is the bits of the double it encodes. A single is that
+          // value rounded, which is exact for every value fmov can encode.
+          const double value = std::bit_cast<double>(static_cast<std::uint64_t>(ops[1].immediate));
+          const std::uint64_t bits = width == 8
+                                         ? std::bit_cast<std::uint64_t>(value)
+                                         : std::bit_cast<std::uint32_t>(static_cast<float>(value));
+          emit(IrOp::Assign, reg(ops[0], width), IrOperand::constant_value(bits, width),
+               IrOperand::none(), IrOperand::none(), width);
+          return true;
+        }
+        const bool same_fp = is_fp(ops[1]) && width_of_fp(ops[1]) == width;
+        const bool from_gp = is_gp(ops[1]) && register_width(ops[1].reg) == width;
+        if (!same_fp && !from_gp) {
+          return false;
+        }
+        emit(IrOp::Assign, reg(ops[0], width), reg(ops[1], width), IrOperand::none(),
+             IrOperand::none(), width);
+        return true;
+      }
+      if (is_gp(ops[0]) && is_fp(ops[1]) && register_width(ops[0].reg) == width_of_fp(ops[1])) {
+        const std::uint8_t width = register_width(ops[0].reg);
+        emit(IrOp::Assign, reg(ops[0], width), reg(ops[1], width), IrOperand::none(),
+             IrOperand::none(), width);
+        return true;
+      }
+      return false;
+    }
+
+    static const char* const kBinary[] = {"fadd", "fsub", "fmul", "fdiv"};
+    if (std::find(std::begin(kBinary), std::end(kBinary), m) != std::end(kBinary) &&
+        ops.size() == 3 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1, 2}, width)) {
+        return false;
+      }
+      const IrOp op = m == "fadd"   ? IrOp::FAdd
+                      : m == "fsub" ? IrOp::FSub
+                      : m == "fmul" ? IrOp::FMul
+                                    : IrOp::FDiv;
+      mark_rounding_dependent();
+      emit(op, reg(ops[0], width), reg(ops[1], width), reg(ops[2], width), IrOperand::none(),
+           width);
+      return true;
+    }
+    if ((m == "fsqrt" || m == "fneg" || m == "fabs") && ops.size() == 2 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1}, width)) {
+        return false;
+      }
+      const IrOp op = m == "fsqrt" ? IrOp::FSqrt : m == "fneg" ? IrOp::FNeg : IrOp::FAbs;
+      if (m == "fsqrt") {
+        mark_rounding_dependent();
+      }
+      emit(op, reg(ops[0], width), reg(ops[1], width), IrOperand::none(), IrOperand::none(), width);
+      return true;
+    }
+    if ((m == "fmadd" || m == "fmsub") && ops.size() == 4 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      if (!all_fp({0, 1, 2, 3}, width)) {
+        return false;
+      }
+      // Dd = Da + Dn * Dm (fmadd) or Da - Dn * Dm (fmsub), rounded once.
+      mark_rounding_dependent();
+      emit(m == "fmadd" ? IrOp::FMulAdd : IrOp::FMulSub, reg(ops[0], width), reg(ops[1], width),
+           reg(ops[2], width), reg(ops[3], width), width);
+      return true;
+    }
+    if ((m == "fcmp" || m == "fcmpe") && ops.size() == 2 && is_fp(ops[0])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      IrOperand other;
+      if (is_fp(ops[1]) && width_of_fp(ops[1]) == width) {
+        other = reg(ops[1], width);
+      } else if (ops[1].kind == OperandKind::Immediate && ops[1].immediate == 0) {
+        other = IrOperand::constant_value(0, width);  // fcmp with #0.0
+      } else {
+        return false;
+      }
+      emit(IrOp::FCompare, IrOperand::none(), reg(ops[0], width), other, IrOperand::none(), width);
+      modelled_flags = true;  // NZCV as fcmp sets them
+      return true;
+    }
+    if ((m == "scvtf" || m == "ucvtf") && ops.size() == 2 && is_fp(ops[0]) && is_gp(ops[1])) {
+      const std::uint8_t width = width_of_fp(ops[0]);
+      const std::uint8_t integer = register_width(ops[1].reg);
+      mark_rounding_dependent();
+      emit(m == "scvtf" ? IrOp::IntToFloat : IrOp::UIntToFloat, reg(ops[0], width),
+           reg(ops[1], integer), IrOperand::none(), IrOperand::none(), width);
+      return true;
+    }
+    if (m == "fcvtzs" && ops.size() == 2 && is_gp(ops[0]) && is_fp(ops[1])) {
+      const std::uint8_t integer = register_width(ops[0].reg);
+      const std::uint8_t width = width_of_fp(ops[1]);
+      emit(IrOp::FloatToInt, reg(ops[0], integer), reg(ops[1], width), IrOperand::none(),
+           IrOperand::none(), integer);
+      return true;
+    }
+    if (m == "fcvt" && ops.size() == 2 && is_fp(ops[0]) && is_fp(ops[1])) {
+      const std::uint8_t to = width_of_fp(ops[0]);
+      const std::uint8_t from = width_of_fp(ops[1]);
+      if (to == 8 && from == 4) {
+        emit(IrOp::FloatExtend, reg(ops[0], 8), reg(ops[1], 4), IrOperand::none(),
+             IrOperand::none(), 8);
+        return true;
+      }
+      if (to == 4 && from == 8) {
+        mark_rounding_dependent();  // narrowing rounds; widening is exact
+        emit(IrOp::FloatTruncate, reg(ops[0], 4), reg(ops[1], 8), IrOperand::none(),
+             IrOperand::none(), 4);
+        return true;
+      }
+    }
+    return false;
+  }
+
   void lift_conditional_select(IrBlock& block, const Instruction& instruction) {
     const std::vector<Operand>& operands = instruction.structured_operands;
     const std::string& mnemonic = instruction.mnemonic;
@@ -674,17 +896,18 @@ struct Lifter {
     IrOperand base;
     IrOp transform = IrOp::Assign;
     bool invert_input = false;  // cinc/cinv/cneg: transform applies to the taken value
-    if (mnemonic == "csel" || mnemonic == "csinc" || mnemonic == "csinv" || mnemonic == "csneg") {
+    if (mnemonic == "csel" || mnemonic == "fcsel" || mnemonic == "csinc" || mnemonic == "csinv" ||
+        mnemonic == "csneg") {
       if (operands.size() < 3) {
         unsupported(block, instruction);
         return;
       }
       taken = operand_at(1);
       base = operand_at(2);
-      transform = mnemonic == "csel"    ? IrOp::Assign
-                  : mnemonic == "csinc" ? IrOp::Add
-                  : mnemonic == "csinv" ? IrOp::Xor
-                                        : IrOp::Sub;
+      transform = mnemonic == "csel" || mnemonic == "fcsel" ? IrOp::Assign
+                  : mnemonic == "csinc"                     ? IrOp::Add
+                  : mnemonic == "csinv"                     ? IrOp::Xor
+                                                            : IrOp::Sub;
     } else if (mnemonic == "cset" || mnemonic == "csetm") {
       taken = IrOperand::constant_value(mnemonic == "cset" ? 1 : width_mask(width), width);
       base = IrOperand::constant_value(0, width);
@@ -892,6 +1115,560 @@ struct Lifter {
       push(block, std::move(combine));
       return;
     }
+    unsupported(block, instruction);
+  }
+
+  /// umull, smull, umaddl, smaddl, umsubl, smsubl, umnegl and smnegl: a 32-bit
+  /// product widened to 64 bits, which is added to or subtracted from Xa, or
+  /// negated. Each W source is zero- or sign-extended to 64 bits first, so the
+  /// 64-bit product is exact (|product| < 2^63 for signed sources) and its low
+  /// 64 bits are the architectural result.
+  void lift_widening_multiply(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    enum class Combine { None, Add, Sub, Negate };
+    Combine combine = Combine::None;
+    if (mnemonic == "umaddl" || mnemonic == "smaddl") {
+      combine = Combine::Add;
+    } else if (mnemonic == "umsubl" || mnemonic == "smsubl") {
+      combine = Combine::Sub;
+    } else if (mnemonic == "umnegl" || mnemonic == "smnegl") {
+      combine = Combine::Negate;
+    } else if (mnemonic != "umull" && mnemonic != "smull") {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::size_t expected = combine == Combine::Add || combine == Combine::Sub ? 4 : 3;
+    if (operands.size() != expected || operands[0].kind != OperandKind::Register ||
+        register_width(operands[0].reg) != kPointerWidth ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        register_width(operands[1].reg) != 4 || register_width(operands[2].reg) != 4 ||
+        (expected == 4 && (operands[3].kind != OperandKind::Register ||
+                           register_width(operands[3].reg) != kPointerWidth))) {
+      unsupported(block, instruction);
+      return;
+    }
+    if (operands[0].reg == "xzr") {
+      // The result is discarded and no flags are written, so there is nothing to lift.
+      return;
+    }
+    const bool sign = mnemonic[0] == 's';
+    auto widen = [&](const Operand& source, std::uint32_t id) {
+      IrStatement extend;
+      extend.op = sign ? IrOp::SignExtend : IrOp::ZeroExtend;
+      extend.dest = temp_operand(id, kPointerWidth);
+      extend.a = to_ir_operand(source, 4);
+      extend.a.width = 4;
+      extend.width = kPointerWidth;
+      extend.source_address = instruction.address;
+      push(block, std::move(extend));
+    };
+    const std::uint32_t left = temporary_id();
+    const std::uint32_t right = temporary_id();
+    widen(operands[1], left);
+    widen(operands[2], right);
+
+    IrStatement product;
+    product.op = IrOp::Mul;
+    product.dest = combine == Combine::None ? to_ir_operand(operands[0], kPointerWidth)
+                                            : temp_operand(temporary_id(), kPointerWidth);
+    product.a = temp_operand(left, kPointerWidth);
+    product.b = temp_operand(right, kPointerWidth);
+    product.width = kPointerWidth;
+    product.source_address = instruction.address;
+    const IrOperand product_value = product.dest;
+    push(block, std::move(product));
+    if (combine == Combine::None) {
+      return;
+    }
+
+    IrStatement combined;
+    combined.dest = to_ir_operand(operands[0], kPointerWidth);
+    combined.width = kPointerWidth;
+    combined.source_address = instruction.address;
+    if (combine == Combine::Add) {
+      combined.op = IrOp::Add;
+      combined.a = to_ir_operand(operands[3], kPointerWidth);
+      combined.b = product_value;
+    } else if (combine == Combine::Sub) {
+      combined.op = IrOp::Sub;
+      combined.a = to_ir_operand(operands[3], kPointerWidth);
+      combined.b = product_value;
+    } else {
+      combined.op = IrOp::Sub;
+      combined.a = IrOperand::constant_value(0, kPointerWidth);
+      combined.b = product_value;
+    }
+    push(block, std::move(combined));
+  }
+
+  /// The cmp or tst whose flags are still current at the end of `previous`, a block
+  /// that falls through into the next one. Scanning back from its end, the first
+  /// instruction that sets flags must be a cmp or tst of registers and immediates
+  /// with no shift. Nothing after it may set flags, write a register it reads, or
+  /// write back an address. Returns its index in analysis.instructions.
+  std::optional<std::uint32_t> carried_flag_writer(const BasicBlock& previous) const {
+    const std::uint32_t first = previous.first_instruction;
+    const std::uint32_t end = previous.first_instruction + previous.instruction_count;
+    if (previous.instruction_count == 0 || end > analysis.instructions.size()) {
+      return std::nullopt;
+    }
+    std::optional<std::uint32_t> writer;
+    for (std::uint32_t i = end; i-- > first;) {
+      const Instruction& candidate = analysis.instructions[i];
+      if (candidate.classification == InstructionClass::ConditionalJump) {
+        continue;  // reads the flags and writes none; it can only end the block
+      }
+      if (candidate.classification != InstructionClass::Other) {
+        return std::nullopt;
+      }
+      if (sets_flags(candidate.mnemonic)) {
+        writer = i;
+        break;
+      }
+    }
+    if (!writer) {
+      return std::nullopt;
+    }
+    const Instruction& compare = analysis.instructions[*writer];
+    if ((compare.mnemonic != "cmp" && compare.mnemonic != "tst") ||
+        compare.structured_operands.size() != 2) {
+      return std::nullopt;
+    }
+    std::vector<std::string> read;
+    for (const Operand& operand : compare.structured_operands) {
+      if (operand.kind == OperandKind::Register && operand.shift == ShiftKind::None &&
+          operand.extend == ExtendKind::None) {
+        read.push_back(internal::register_family(operand.reg));
+      } else if (operand.kind != OperandKind::Immediate || operand.shift != ShiftKind::None) {
+        return std::nullopt;
+      }
+    }
+    const auto reads = [&read](const std::string& family) {
+      return std::find(read.begin(), read.end(), family) != read.end();
+    };
+    for (std::uint32_t i = *writer + 1; i < end; ++i) {
+      const Instruction& later = analysis.instructions[i];
+      if (later.classification == InstructionClass::ConditionalJump && i + 1 == end) {
+        continue;  // the block's terminator
+      }
+      if (later.classification != InstructionClass::Other || sets_flags(later.mnemonic)) {
+        return std::nullopt;
+      }
+      const bool store = later.mnemonic.rfind("st", 0) == 0;
+      for (const Operand& operand : later.structured_operands) {
+        if (operand.kind == OperandKind::Memory && operand.memory.writeback) {
+          return std::nullopt;
+        }
+        if (!store && operand.kind == OperandKind::Register &&
+            reads(internal::register_family(operand.reg))) {
+          return std::nullopt;
+        }
+      }
+    }
+    return writer;
+  }
+
+  /// True when `block` has no predecessor but `previous`, the block just before it
+  /// in address order, which reaches it by falling through: either `previous` does
+  /// not end in a branch, or it ends in a conditional branch whose not-taken edge is
+  /// `block`. An unresolved indirect branch in the function could reach any block,
+  /// so it rules this out. Calls and jumps from elsewhere count as predecessors.
+  bool single_fallthrough_predecessor(const BasicBlock& previous, const BasicBlock& block) const {
+    if (function.estimated) {
+      return false;
+    }
+    const Instruction& last =
+        analysis.instructions[previous.first_instruction + previous.instruction_count - 1];
+    std::size_t predecessors = 0;
+    bool from_previous = false;
+    for (const CfgEdge& edge : analysis.cfg.edges) {
+      if (edge.to != block.address) {
+        continue;
+      }
+      ++predecessors;
+      if (edge.from == last.address && edge.kind == CfgEdgeKind::ConditionalFalse) {
+        from_previous = true;
+      }
+    }
+    if (last.classification == InstructionClass::Other) {
+      ++predecessors;  // a fall-through has no CFG edge
+      from_previous = true;
+    } else if (last.classification != InstructionClass::ConditionalJump) {
+      return false;
+    }
+    return from_previous && predecessors == 1;
+  }
+
+  /// adc, sbc, adcs and sbcs. adc is a + b + C, and sbc is a - b - borrow, with the
+  /// borrow the inverse of C. The carry comes from the flags before, so they must be
+  /// exact. adc and sbc without S do not write NZCV, so every carry reader in the block
+  /// reads the same carry. adcs and sbcs set NZCV from the addition (C is the carry out,
+  /// V the signed overflow), which the IR states exactly. sbcs is the addition of
+  /// NOT(b), as the architecture defines it.
+  void lift_add_with_carry(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    const bool sets_nzcv = mnemonic == "adcs" || mnemonic == "sbcs";
+    const bool discard =
+        operands.size() == 3 && (operands[0].reg == "xzr" || operands[0].reg == "wzr");
+    if (!flags_exact || operands.size() != 3 || operands[0].kind != OperandKind::Register ||
+        operands[1].kind != OperandKind::Register || operands[2].kind != OperandKind::Register ||
+        (discard && !sets_nzcv)) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    if (width == 0 || register_width(operands[1].reg) != width ||
+        register_width(operands[2].reg) != width) {
+      unsupported(block, instruction);
+      return;
+    }
+    IrOperand addend = to_ir_operand(operands[2], width);
+    if (mnemonic == "sbcs") {
+      // sbcs: a + NOT(b) + C, as the architecture defines it.
+      const std::uint32_t inverted = temporary_id();
+      IrStatement invert;
+      invert.op = IrOp::Xor;
+      invert.dest = temp_operand(inverted, width);
+      invert.a = addend;
+      invert.b = IrOperand::constant_value(width_mask(width), width);
+      invert.width = width;
+      invert.source_address = instruction.address;
+      push(block, std::move(invert));
+      addend = temp_operand(inverted, width);
+    }
+    IrStatement statement;
+    if (mnemonic == "sbc") {
+      statement.op = IrOp::SubBorrow;
+    } else if (sets_nzcv) {
+      statement.op = IrOp::AddCarryFlags;
+    } else {
+      statement.op = IrOp::AddCarry;
+    }
+    statement.dest =
+        discard ? temp_operand(temporary_id(), width) : to_ir_operand(operands[0], width);
+    statement.a = to_ir_operand(operands[1], width);
+    statement.b = addend;
+    statement.width = width;
+    statement.source_address = instruction.address;
+    statement.writes_flags = false;
+    push(block, std::move(statement));
+    if (sets_nzcv) {
+      modelled_flags = true;  // the flags after are NZCV of this addition
+    }
+  }
+
+  /// ccmp and ccmn. If the condition holds over the current flags, NZCV becomes
+  /// the flags of a compare (ccmp: a - b) or an addition (ccmn: a + b); otherwise
+  /// NZCV becomes the immediate #nzcv. The condition is read from the flags before,
+  /// so they must be exact: when they are not, the instruction is Unsupported.
+  void lift_conditional_compare(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const IrCondition condition = trailing_condition(instruction.operands);
+    if (!flags_exact || condition == IrCondition::None || operands.size() < 3 ||
+        operands[0].kind != OperandKind::Register || register_width(operands[0].reg) == 0 ||
+        (operands[1].kind != OperandKind::Register && operands[1].kind != OperandKind::Immediate) ||
+        operands[2].kind != OperandKind::Immediate) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    IrStatement statement;
+    statement.op = instruction.mnemonic == "ccmn" ? IrOp::CondCompareAdd : IrOp::CondCompare;
+    statement.a = to_ir_operand(operands[0], kPointerWidth);
+    statement.b = to_ir_operand(operands[1], width);
+    statement.c =
+        IrOperand::constant_value(static_cast<std::uint64_t>(operands[2].immediate) & 0xFU, 1);
+    statement.condition = condition;
+    statement.width = width;
+    statement.source_address = instruction.address;
+    push(block, std::move(statement));
+    modelled_flags = true;
+  }
+
+  /// udiv, sdiv, umulh, smulh, clz, cls, rbit, rev, rev16, rev32, extr, bfi and
+  /// bfxil. AArch64 division by zero yields 0 and never faults, and INT_MIN / -1
+  /// yields INT_MIN, while the IR divide faults in both cases. So the divisor is
+  /// replaced by one where the IR would fault, and the result is then selected by
+  /// 0/1 coefficients computed arithmetically. No flags are written, so the guard
+  /// does not disturb the NZCV state the block's later instructions read.
+  void lift_bit_and_division(IrBlock& block, const Instruction& instruction) {
+    const std::vector<Operand>& operands = instruction.structured_operands;
+    const std::string& mnemonic = instruction.mnemonic;
+    if (operands.empty() || operands[0].kind != OperandKind::Register) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint8_t width = register_width(operands[0].reg);
+    if (width != 4 && width != 8) {
+      unsupported(block, instruction);
+      return;
+    }
+    const std::uint64_t bits = static_cast<std::uint64_t>(width) * 8U;
+    const std::uint64_t all_ones = width == 8 ? ~0ULL : 0xFFFF'FFFFULL;
+    const auto constant = [&](std::uint64_t value) {
+      return IrOperand::constant_value(value & all_ones, width);
+    };
+    const auto fresh = [&]() { return temp_operand(temporary_id(), width); };
+    const auto emit = [&](IrOp op, const IrOperand& dest, const IrOperand& a, const IrOperand& b,
+                          const IrOperand& c) {
+      IrStatement statement;
+      statement.op = op;
+      statement.dest = dest;
+      statement.a = a;
+      statement.b = b;
+      statement.c = c;
+      statement.width = width;
+      statement.source_address = instruction.address;
+      push(block, std::move(statement));
+    };
+    const IrOperand none = IrOperand::none();
+    if (operands[0].kind == OperandKind::Register &&
+        (operands[0].reg == "xzr" || operands[0].reg == "wzr")) {
+      // The result is discarded, and none of these instructions sets flags or
+      // has another effect, so there is nothing to lift.
+      return;
+    }
+    const IrOperand destination = to_ir_operand(operands[0], width);
+    const auto is_register = [&](std::size_t index) {
+      return index < operands.size() && operands[index].kind == OperandKind::Register;
+    };
+    const auto is_immediate = [&](std::size_t index) {
+      return index < operands.size() && operands[index].kind == OperandKind::Immediate;
+    };
+
+    if (mnemonic == "udiv" || mnemonic == "sdiv") {
+      if (operands.size() != 3 || !is_register(1) || !is_register(2)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const IrOperand m = to_ir_operand(operands[2], width);
+      // nz = 1 when m != 0: the top bit of m | -m is set exactly when m is non-zero.
+      const IrOperand negm = fresh();
+      emit(IrOp::Sub, negm, constant(0), m, none);
+      const IrOperand orm = fresh();
+      emit(IrOp::Or, orm, m, negm, none);
+      const IrOperand nz = fresh();
+      emit(IrOp::Shr, nz, orm, constant(bits - 1), none);
+      // zero_flag = 1 when m == 0, where the result is 0.
+      const IrOperand zero_flag = fresh();
+      emit(IrOp::Sub, zero_flag, constant(1), nz, none);
+      if (mnemonic == "udiv") {
+        // The divisor is m, or 1 when m == 0 (the quotient is then n, and it is
+        // multiplied by nz = 0).
+        const IrOperand safe = fresh();
+        emit(IrOp::Add, safe, m, zero_flag, none);
+        const IrOperand quotient = fresh();
+        emit(IrOp::DivUnsigned, quotient, constant(0), n, safe);
+        emit(IrOp::Mul, destination, quotient, nz, none);
+        return;
+      }
+      // is_minus_one = 1 when m == -1, where the result is -n. m + 1 == 0 exactly then.
+      const IrOperand m1 = fresh();
+      emit(IrOp::Add, m1, m, constant(1), none);
+      const IrOperand negm1 = fresh();
+      emit(IrOp::Sub, negm1, constant(0), m1, none);
+      const IrOperand orm1 = fresh();
+      emit(IrOp::Or, orm1, m1, negm1, none);
+      const IrOperand nz1 = fresh();
+      emit(IrOp::Shr, nz1, orm1, constant(bits - 1), none);
+      const IrOperand is_minus_one = fresh();
+      emit(IrOp::Sub, is_minus_one, constant(1), nz1, none);
+      // The divisor is 1 where m is 0 or -1: m + zero_flag + 2 * is_minus_one.
+      const IrOperand twice = fresh();
+      emit(IrOp::Add, twice, is_minus_one, is_minus_one, none);
+      const IrOperand shifted = fresh();
+      emit(IrOp::Add, shifted, m, zero_flag, none);
+      const IrOperand safe = fresh();
+      emit(IrOp::Add, safe, shifted, twice, none);
+      // The dividend is n sign-extended to 2 * width bits.
+      const IrOperand high = fresh();
+      emit(IrOp::Sar, high, n, constant(bits - 1), none);
+      const IrOperand quotient = fresh();
+      emit(IrOp::DivSigned, quotient, high, n, safe);
+      // Quotient coefficient: nz - is_minus_one, which is 1 for a normal divisor.
+      const IrOperand quotient_coefficient = fresh();
+      emit(IrOp::Sub, quotient_coefficient, nz, is_minus_one, none);
+      const IrOperand negn = fresh();
+      emit(IrOp::Sub, negn, constant(0), n, none);
+      const IrOperand from_quotient = fresh();
+      emit(IrOp::Mul, from_quotient, quotient, quotient_coefficient, none);
+      const IrOperand from_negation = fresh();
+      emit(IrOp::Mul, from_negation, negn, is_minus_one, none);
+      emit(IrOp::Add, destination, from_quotient, from_negation, none);
+      return;
+    }
+
+    if (mnemonic == "umulh" || mnemonic == "smulh") {
+      if (width != 8 || operands.size() != 3 || !is_register(1) || !is_register(2)) {
+        unsupported(block, instruction);  // only the 64-bit forms exist
+        return;
+      }
+      emit(mnemonic == "umulh" ? IrOp::MulHighUnsigned : IrOp::MulHighSigned, destination,
+           to_ir_operand(operands[1], width), to_ir_operand(operands[2], width), none);
+      return;
+    }
+
+    if (mnemonic == "clz" || mnemonic == "cls") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      if (mnemonic == "clz") {
+        emit(IrOp::CountLeadingZeros, destination, n, none, none);
+        return;
+      }
+      // cls counts the leading bits equal to the sign bit: clz(n ^ sign) - 1.
+      const IrOperand sign = fresh();
+      emit(IrOp::Sar, sign, n, constant(bits - 1), none);
+      const IrOperand differs = fresh();
+      emit(IrOp::Xor, differs, n, sign, none);
+      const IrOperand count = fresh();
+      emit(IrOp::CountLeadingZeros, count, differs, none, none);
+      emit(IrOp::Sub, destination, count, constant(1), none);
+      return;
+    }
+
+    if (mnemonic == "rbit") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      // Swap adjacent groups of 1, 2, 4, ... bits. mask selects the bit positions
+      // whose index has the group bit clear.
+      IrOperand value = to_ir_operand(operands[1], width);
+      for (std::uint64_t group = 1; group < bits; group <<= 1) {
+        std::uint64_t mask = 0;
+        for (std::uint64_t index = 0; index < bits; ++index) {
+          if ((index & group) == 0) {
+            mask |= 1ULL << index;
+          }
+        }
+        const IrOperand low = fresh();
+        emit(IrOp::And, low, value, constant(mask), none);
+        const IrOperand low_up = fresh();
+        emit(IrOp::Shl, low_up, low, constant(group), none);
+        const IrOperand high = fresh();
+        emit(IrOp::Shr, high, value, constant(group), none);
+        const IrOperand high_down = fresh();
+        emit(IrOp::And, high_down, high, constant(mask), none);
+        const IrOperand swapped = fresh();
+        emit(IrOp::Or, swapped, low_up, high_down, none);
+        value = swapped;
+      }
+      emit(IrOp::Assign, destination, value, none, none);
+      return;
+    }
+
+    if (mnemonic == "rev") {
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      emit(IrOp::ByteSwap, destination, to_ir_operand(operands[1], width), none, none);
+      return;
+    }
+
+    if (mnemonic == "rev16") {
+      // Swap the bytes of each 16-bit half.
+      if (operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const std::uint64_t mask = 0x00FF'00FF'00FF'00FFULL;
+      const IrOperand low = fresh();
+      emit(IrOp::And, low, n, constant(mask), none);
+      const IrOperand low_up = fresh();
+      emit(IrOp::Shl, low_up, low, constant(8), none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shr, high, n, constant(8), none);
+      const IrOperand high_down = fresh();
+      emit(IrOp::And, high_down, high, constant(mask), none);
+      emit(IrOp::Or, destination, low_up, high_down, none);
+      return;
+    }
+
+    if (mnemonic == "rev32") {
+      // Swap the bytes of each 32-bit half: the full byte swap with its halves exchanged.
+      if (width != 8 || operands.size() != 2 || !is_register(1)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand swapped = fresh();
+      emit(IrOp::ByteSwap, swapped, to_ir_operand(operands[1], width), none, none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shl, high, swapped, constant(32), none);
+      const IrOperand low = fresh();
+      emit(IrOp::Shr, low, swapped, constant(32), none);
+      emit(IrOp::Or, destination, high, low, none);
+      return;
+    }
+
+    if (mnemonic == "extr") {
+      // extr Rd, Rn, Rm, #lsb: the low width bits of (Rn:Rm) >> lsb.
+      if (operands.size() != 4 || !is_register(1) || !is_register(2) || !is_immediate(3)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t lsb = static_cast<std::uint64_t>(operands[3].immediate);
+      if (lsb >= bits) {
+        unsupported(block, instruction);
+        return;
+      }
+      const IrOperand n = to_ir_operand(operands[1], width);
+      const IrOperand m = to_ir_operand(operands[2], width);
+      if (lsb == 0) {
+        emit(IrOp::Assign, destination, m, none, none);
+        return;
+      }
+      const IrOperand low = fresh();
+      emit(IrOp::Shr, low, m, constant(lsb), none);
+      const IrOperand high = fresh();
+      emit(IrOp::Shl, high, n, constant(bits - lsb), none);
+      emit(IrOp::Or, destination, low, high, none);
+      return;
+    }
+
+    if (mnemonic == "bfi" || mnemonic == "bfxil") {
+      // bfi Rd, Rn, #lsb, #width: insert the low width bits of Rn at lsb.
+      // bfxil Rd, Rn, #lsb, #width: copy the bits [lsb, lsb + width) of Rn to the low end.
+      if (operands.size() != 4 || !is_register(1) || !is_immediate(2) || !is_immediate(3)) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t lsb = static_cast<std::uint64_t>(operands[2].immediate);
+      const std::uint64_t field_width = static_cast<std::uint64_t>(operands[3].immediate);
+      if (field_width == 0 || lsb >= bits || lsb + field_width > bits) {
+        unsupported(block, instruction);
+        return;
+      }
+      const std::uint64_t field = field_width >= 64 ? ~0ULL : (1ULL << field_width) - 1;
+      const IrOperand n = to_ir_operand(operands[1], width);
+      if (mnemonic == "bfi") {
+        const std::uint64_t placed = (field << lsb) & all_ones;
+        const IrOperand kept = fresh();
+        emit(IrOp::And, kept, destination, constant(~placed), none);
+        const IrOperand shifted = fresh();
+        emit(IrOp::Shl, shifted, n, constant(lsb), none);
+        const IrOperand inserted = fresh();
+        emit(IrOp::And, inserted, shifted, constant(placed), none);
+        emit(IrOp::Or, destination, kept, inserted, none);
+        return;
+      }
+      const IrOperand kept = fresh();
+      emit(IrOp::And, kept, destination, constant(~field), none);
+      const IrOperand shifted = fresh();
+      emit(IrOp::Shr, shifted, n, constant(lsb), none);
+      const IrOperand extracted = fresh();
+      emit(IrOp::And, extracted, shifted, constant(field), none);
+      emit(IrOp::Or, destination, kept, extracted, none);
+      return;
+    }
+
     unsupported(block, instruction);
   }
 
@@ -1197,6 +1974,52 @@ struct Lifter {
   }
 };
 
+/// The synthetic register that holds a jump table's selector from its compare
+/// to its jump. Not an architectural name, so it cannot collide with one.
+constexpr const char* kJumpSelectorRegister = "jump_selector";
+
+/// A jump table the analysis recovered (G03-T3), lowered as the x86 lifter
+/// lowers one: a switch over the selector copy, with one case per table entry.
+/// Returns false, with a note, when the cases are not all blocks of this
+/// function; the jump then stays a tail call.
+bool lift_jump_table_switch(Lifter& lifter, IrBlock& out_block, const AnalysisResult& analysis,
+                            const JumpTable& table, std::uint64_t jump_address) {
+  const bool check_found = std::any_of(
+      analysis.instructions.begin(), analysis.instructions.end(),
+      [&](const Instruction& candidate) { return candidate.address == table.check_address; });
+  std::vector<IrSwitchCase> cases;
+  for (std::size_t value = 0; check_found && value < table.targets.size(); ++value) {
+    const auto block_it = lifter.block_by_address.find(table.targets[value]);
+    if (block_it == lifter.block_by_address.end()) {
+      break;
+    }
+    cases.push_back(IrSwitchCase{value, block_it->second});
+  }
+  IrOperand selector;
+  if (check_found && cases.size() == table.targets.size() && !cases.empty()) {
+    selector = IrOperand::register_ref(kJumpSelectorRegister, register_width(table.selector.reg));
+  }
+  if (selector.kind == IrOperandKind::None) {
+    lifter.mark_partial("jump table cases lie outside this function");
+    return false;
+  }
+  IrStatement sw;
+  sw.op = IrOp::Switch;
+  sw.source_address = jump_address;
+  sw.width = kPointerWidth;
+  sw.dest = selector;
+  sw.switch_cases = std::move(cases);
+  // Out-of-range selectors were sent elsewhere by the bounds check before this
+  // jump, so the default is unreachable here when it is not a block of this
+  // function.
+  const auto fallback = lifter.block_by_address.find(table.default_target);
+  sw.a = IrOperand::block_ref(fallback != lifter.block_by_address.end()
+                                  ? fallback->second
+                                  : sw.switch_cases.front().target_block);
+  lifter.push(out_block, std::move(sw));
+  return true;
+}
+
 }  // namespace
 
 Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& analysis,
@@ -1228,15 +2051,32 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
   lifter.out.address = function.address;
   lifter.out.name = function.name.empty() ? "sub" : function.name;
   lifter.out.partial = function.estimated;
-  lifter.out.notes.push_back(
-      "AArch64 subset; register aliases are not canonicalised and locals are not recovered");
+  lifter.out.notes.push_back("AArch64 subset; locals are not recovered");
 
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
-    // Flags are modelled within a block only; a branch on flags set in a
-    // predecessor stays Partial.
+    // The flags exact at the end of the previous block carry into this one when this
+    // block has no other predecessor: the cmp or tst that set them is repeated here,
+    // from the same operands, before anything else in the block.
+    const bool entering = lifter.flags_exact;
     lifter.flags_exact = false;
+    const std::uint32_t block_index = lifter.block_by_address.at(block->address);
+    if (block_index > 0 && entering && lifter.out.blocks.size() == block_index) {
+      const BasicBlock& previous = *lifter.blocks[block_index - 1];
+      if (previous.end_address == block->address) {
+        const auto writer = lifter.carried_flag_writer(previous);
+        if (writer && lifter.single_fallthrough_predecessor(previous, *block)) {
+          lifter.modelled_flags = false;
+          lifter.lift_arithmetic(out_block, analysis.instructions[*writer]);
+          bool unsupported_statement = false;
+          for (const IrStatement& statement : out_block.statements) {
+            unsupported_statement = unsupported_statement || statement.op == IrOp::Unsupported;
+          }
+          lifter.flags_exact = lifter.modelled_flags && !unsupported_statement;
+        }
+      }
+    }
 
     for (std::uint32_t i = 0; i < block->instruction_count; ++i) {
       const std::size_t index = static_cast<std::size_t>(block->first_instruction) + i;
@@ -1248,6 +2088,23 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       const std::string& mnemonic = instruction.mnemonic;
 
       if (instruction.classification == InstructionClass::ConditionalJump) {
+        // A jump table behind this branch switches on the value the compare
+        // tested. Its table code may overwrite that register (GCC keeps the
+        // table base in x0), so the value is copied here, after the compare
+        // and before the branch.
+        for (const JumpTable& table : analysis.cfg.jump_tables) {
+          // The recogniser only accepts a compare directly before the branch,
+          // and AArch64 instructions are four bytes.
+          if (table.check_address + 4 == instruction.address) {
+            IrStatement copy;
+            copy.op = IrOp::Assign;
+            copy.source_address = instruction.address;
+            copy.width = register_width(table.selector.reg);
+            copy.dest = IrOperand::register_ref(kJumpSelectorRegister, copy.width);
+            copy.a = lifter.to_ir_operand(table.selector, copy.width);
+            lifter.push(out_block, std::move(copy));
+          }
+        }
         IrCondition condition = branch_condition(mnemonic);
         if (mnemonic == "cbz" || mnemonic == "cbnz") {
           // cbz/cbnz test a register, not the flags: exact.
@@ -1285,6 +2142,18 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
 
       if (instruction.classification == InstructionClass::Jump) {
+        const JumpTable* table = nullptr;
+        if (!instruction.direct_target.has_value()) {
+          for (const JumpTable& candidate : analysis.cfg.jump_tables) {
+            if (candidate.jump_address == instruction.address) {
+              table = &candidate;
+            }
+          }
+        }
+        if (table != nullptr &&
+            lift_jump_table_switch(lifter, out_block, analysis, *table, instruction.address)) {
+          continue;
+        }
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
@@ -1329,7 +2198,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           statement.a = IrOperand::constant_value(0, kPointerWidth);
         }
         lifter.push(out_block, std::move(statement));
-        lifter.note("call arguments and return values follow no modelled ABI");
+        // The callee's effects on registers, memory and NZCV are not modelled.
+        lifter.mark_partial("outgoing call arguments and return values follow no modelled ABI");
         lifter.flags_exact = false;  // the callee may change NZCV
         continue;
       }
@@ -1345,23 +2215,40 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
 
       lifter.modelled_flags = false;
+      const std::size_t statements_before = out_block.statements.size();
       if (mnemonic == "mov" || mnemonic == "movz" || mnemonic == "movn" || mnemonic == "movk") {
         lifter.lift_move(out_block, instruction);
       } else if (mnemonic == "add" || mnemonic == "adds" || mnemonic == "sub" ||
                  mnemonic == "subs" || mnemonic == "and" || mnemonic == "ands" ||
                  mnemonic == "orr" || mnemonic == "eor" || mnemonic == "cmp" || mnemonic == "tst" ||
                  mnemonic == "neg" || mnemonic == "negs" || mnemonic == "lsl" ||
-                 mnemonic == "lsr" || mnemonic == "asr" || mnemonic == "mvn") {
+                 mnemonic == "lsr" || mnemonic == "asr" || mnemonic == "mvn" || mnemonic == "cmn") {
         lifter.lift_arithmetic(out_block, instruction);
       } else if (mnemonic == "ror" || mnemonic == "ubfiz" || mnemonic == "sbfiz" ||
                  mnemonic == "ubfx" || mnemonic == "sbfx") {
         lifter.lift_bitfield(out_block, instruction);
-      } else if (mnemonic == "csel" || mnemonic == "csinc" || mnemonic == "csinv" ||
-                 mnemonic == "csneg" || mnemonic == "cset" || mnemonic == "csetm" ||
-                 mnemonic == "cinc" || mnemonic == "cinv" || mnemonic == "cneg") {
+      } else if (mnemonic == "csel" || mnemonic == "fcsel" || mnemonic == "csinc" ||
+                 mnemonic == "csinv" || mnemonic == "csneg" || mnemonic == "cset" ||
+                 mnemonic == "csetm" || mnemonic == "cinc" || mnemonic == "cinv" ||
+                 mnemonic == "cneg") {
         lifter.lift_conditional_select(out_block, instruction);
       } else if (mnemonic == "mul" || mnemonic == "madd" || mnemonic == "msub") {
         lifter.lift_multiply(out_block, instruction);
+      } else if (mnemonic == "umull" || mnemonic == "smull" || mnemonic == "umaddl" ||
+                 mnemonic == "smaddl" || mnemonic == "umsubl" || mnemonic == "smsubl" ||
+                 mnemonic == "umnegl" || mnemonic == "smnegl") {
+        lifter.lift_widening_multiply(out_block, instruction);
+      } else if (mnemonic == "adc" || mnemonic == "sbc" || mnemonic == "adcs" ||
+                 mnemonic == "sbcs") {
+        lifter.lift_add_with_carry(out_block, instruction);
+      } else if (mnemonic == "ccmp" || mnemonic == "ccmn") {
+        lifter.lift_conditional_compare(out_block, instruction);
+      } else if (mnemonic == "udiv" || mnemonic == "sdiv" || mnemonic == "umulh" ||
+                 mnemonic == "smulh" || mnemonic == "clz" || mnemonic == "cls" ||
+                 mnemonic == "rbit" || mnemonic == "rev" || mnemonic == "rev16" ||
+                 mnemonic == "rev32" || mnemonic == "extr" || mnemonic == "bfi" ||
+                 mnemonic == "bfxil") {
+        lifter.lift_bit_and_division(out_block, instruction);
       } else if (mnemonic == "sxtb" || mnemonic == "sxth" || mnemonic == "sxtw" ||
                  mnemonic == "uxtb" || mnemonic == "uxth" || mnemonic == "uxtw") {
         lifter.lift_extend(out_block, instruction);
@@ -1376,11 +2263,22 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         lifter.lift_load_store(out_block, instruction);
       } else if (mnemonic == "nop" || mnemonic == "bti" || mnemonic == "hint") {
         // No semantic effect in the IR.
+      } else if (is_scalar_fp_mnemonic(mnemonic)) {
+        if (!lifter.lift_scalar_fp(out_block, instruction)) {
+          lifter.unsupported(out_block, instruction);
+        }
       } else {
         lifter.unsupported(out_block, instruction);
       }
       if (sets_flags(mnemonic)) {
         lifter.flags_exact = lifter.modelled_flags;
+      }
+      // An unsupported statement may have written the flags, so no later flag reader
+      // is exact. This also keeps an adc from reading a carry through an unsupported one.
+      for (std::size_t s = statements_before; s < out_block.statements.size(); ++s) {
+        if (out_block.statements[s].op == IrOp::Unsupported) {
+          lifter.flags_exact = false;
+        }
       }
       if (lifter.limit_reached()) {
         lifter.mark_partial("statement limit reached");
@@ -1390,6 +2288,7 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
 
     if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
                                          out_block.statements.back().op != IrOp::CondBranch &&
+                                         out_block.statements.back().op != IrOp::Switch &&
                                          out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {

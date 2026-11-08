@@ -37,7 +37,7 @@ const char* elf_type_name(std::uint16_t type) noexcept {
   }
 }
 
-Architecture machine_to_architecture(std::uint16_t machine) noexcept {
+Architecture machine_to_architecture(std::uint16_t machine, bool is_64) noexcept {
   switch (machine) {
     case 3:
       return Architecture::X86;
@@ -49,6 +49,12 @@ Architecture machine_to_architecture(std::uint16_t machine) noexcept {
       return Architecture::AArch64;
     case 243:
       return Architecture::RiscV64;
+    case 8:
+      return is_64 ? Architecture::Mips64 : Architecture::Mips32;  // EM_MIPS, by class
+    case 20:
+      return Architecture::Ppc32;  // EM_PPC
+    case 21:
+      return Architecture::Ppc64;  // EM_PPC64
     default:
       return Architecture::Unknown;
   }
@@ -146,7 +152,20 @@ Result<void> parse_elf(ByteReader reader, BinaryImage& image) {
                      "unsupported ELF header version", 20);
   }
 
-  image.architecture = machine_to_architecture(machine.value());
+  image.architecture = machine_to_architecture(machine.value(), is_64);
+  // MIPS16 and microMIPS code is not decoded by the MIPS backend: an image that uses either is left
+  // Unknown, and the reason is recorded (G13), instead of being read as MIPS32.
+  if (machine.value() == 8) {
+    const auto flags = read32(is_64 ? 48 : 36);
+    constexpr std::uint32_t kEfMipsArchAseM16 = 0x00000004;
+    constexpr std::uint32_t kEfMipsMicroMips = 0x02000000;
+    if (flags && (flags.value() & (kEfMipsArchAseM16 | kEfMipsMicroMips)) != 0) {
+      image.architecture = Architecture::Unknown;
+      image.diagnostics.push_back(Diagnostic::make(Status::Unsupported, "elf.mips_isa_extension",
+                                                   "MIPS16 or microMIPS code is not decoded",
+                                                   is_64 ? 48 : 36));
+    }
+  }
   image.entry_point = entry.value();
   image.format_detail = std::string(elf_type_name(type.value())) + (is_64 ? " ELF64" : " ELF32");
 

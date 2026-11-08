@@ -18,7 +18,18 @@
 namespace donkey {
 
 enum class BinaryFormat : std::uint8_t { Unknown = 0, Raw, Elf, Pe, MachO };
-enum class Architecture : std::uint8_t { Unknown = 0, X86, X86_64, Arm, AArch64, RiscV64 };
+enum class Architecture : std::uint8_t {
+  Unknown = 0,
+  X86,
+  X86_64,
+  Arm,
+  AArch64,
+  RiscV64,
+  Mips32,
+  Ppc32,
+  Mips64,
+  Ppc64
+};
 
 enum class SymbolKind : std::uint8_t {
   Unknown = 0,
@@ -33,6 +44,7 @@ enum class SymbolKind : std::uint8_t {
 enum class SymbolBinding : std::uint8_t { Unknown = 0, Local, Global, Weak };
 
 const char* format_name(BinaryFormat format) noexcept;
+
 const char* architecture_name(Architecture architecture) noexcept;
 std::optional<Architecture> parse_architecture(std::string_view name) noexcept;
 const char* symbol_kind_name(SymbolKind kind) noexcept;
@@ -94,6 +106,9 @@ struct BinaryImage {
   std::uint64_t file_size = 0;
   std::string sha256;
   std::string format_detail;
+  /// The Mach-O LC_UUID as 32 lowercase hex digits, which a .dSYM file must share. Empty when the
+  /// image has none (every other format).
+  std::string uuid;
 
   std::vector<Segment> segments;
   std::vector<Section> sections;
@@ -117,6 +132,15 @@ struct BinaryImage {
   void add_diagnostic(Status status, std::string code, std::string message,
                       std::optional<std::uint64_t> offset = std::nullopt);
 };
+
+/// Where the byte at virtual `address` is in the file: its offset, and how many bytes of the same
+/// file-backed section follow it. Nothing when no file-backed section holds the address.
+struct FileLocation {
+  std::uint64_t offset = 0;
+  std::uint64_t remaining = 0;
+};
+[[nodiscard]] std::optional<FileLocation> file_location_of(const BinaryImage& image,
+                                                           std::uint64_t address) noexcept;
 
 struct LoadOptions {
   /// Guard against accidental multi-gigabyte allocations on hostile input.

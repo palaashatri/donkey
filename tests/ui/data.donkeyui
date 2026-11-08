@@ -1,0 +1,27 @@
+# G12-T2: A defines the NUL-terminated string at the selected address as data, Shift+D opens the
+# data editor for an array ("<size>:<count>"), and undo removes each. The debuggee's .interp holds
+# "/lib64/ld-linux-x86-64.so.2" at 0x318, with its terminator, so the string is 28 bytes. Opens
+# nothing itself: the test passes the debuggee on the command line.
+wait_idle
+frames 5
+assert_no_error
+
+key g
+assert_focus Go to
+text 0x318
+key enter
+assert_selected 0x318
+
+key a
+assert_annotation data 0x318 string:28
+key shortcut+z
+assert_annotation data 0x318 -
+
+key shift+d
+assert_focus Annotate
+text 4:4
+key enter
+assert_annotation data 0x318 4:4
+key shortcut+z
+assert_annotation data 0x318 -
+assert_no_error

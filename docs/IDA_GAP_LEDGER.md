@@ -151,25 +151,74 @@ P0 is the most important, P3 the least.
 
 | ID | Gap | IDA Pro | Donkey today | P | Status |
 |---|---|---|---|---|---|
-| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | Unsupported: any FP instruction makes the function Partial | P0 | TODO |
-| G02 | x86 integer gaps | Full integer semantics | No `adc`/`sbb`, double-width `mul`/`div`, `bt`/`bsf`/`popcnt`/`bswap`; flags do not cross blocks | P0 | TODO |
-| G03 | AArch64 integer gaps | Full | No `ccmp`/`ccmn`, `udiv`/`sdiv`, `umulh`/`smulh`, `clz`/`rbit`/`rev`, jump tables | P0 | TODO |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register-level output (`w8 = ...`), no copy propagation, no `for` loops, register aliases not merged | P0 | IN PROGRESS (G04-T0 DONE; T1-T4 TODO) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | DWARF types read-only; struct layouts inferred behind pointer arguments only; no editing | P0 | TODO |
-| G06 | PDB (Windows debug info) | Full | Not read | P1 | TODO |
-| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Not read; compressed sections reported Unsupported | P1 | TODO |
+| G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
+| G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
+| G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; no corpus loop prints as `for` yet: O0 keeps counters in stack slots, and O2 and O3 rotate loops into guarded do-while forms); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` form for register counters is unit-tested, no corpus loop is `for` yet) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
+| G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
+| G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
-| G10 | C++ (demangling, RTTI, vtables) | Full | No demangler; no RTTI/vtable recovery | P1 | TODO |
-| G11 | Scripting and automation | IDAPython, IDC, plugin SDK | C ABI plugins, `donkey-cli --json`; no scripting API | P1 | TODO |
-| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Rename, comment, bookmark, function boundaries | P1 | TODO |
-| G13 | Processor coverage | Dozens of ISAs | x86, x86-64 and AArch64 only; no 32-bit ARM, RISC-V, MIPS or PPC decoder | P2 | TODO |
-| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Linux x86-64/AArch64 and Windows x64 local only | P2 | TODO |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | ELF/PE/Mach-O/raw images, one at a time | P2 | TODO |
-| G16 | Scale on real large binaries | Decades of tuning | Synthetic 1 GiB test; no real-world benchmark | P2 | TODO |
-| G17 | UI breadth | Many views, search kinds, command palette | Core views; text search in lists | P3 | TODO |
-| G18 | Signed releases | Signed installers | Ad-hoc signed `.app`, unsigned `.exe` | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate |
-| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED (research needed; see G19) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
+| G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
+| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
+| G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
+| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
+| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
+| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
+| G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
+| G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
+
+### Status at the end of this session
+
+Completed and merged or on the integration branch (see the table for each gap's status):
+
+- G02 (T1 to T4), G03 (T1 to T4), G11 (T1 to T3), G12-T1, G13 A32, RV64GC, MIPS32 and PPC32
+  decoding.
+- G01-T3 with the AArch64 rounding rule, G01-T2 with the x86 rule, the G04-T3 loop structuring
+  docs, and the G05-T1 review fixes.
+- Since then, on the designated branch: G07-T2 (a `.dSYM` found by LC_UUID and `debuginfo
+  --debug-file`, checked on Linux with LLVM's output), G06-T3 (PDB struct fields, pointers,
+  arrays and procedures, mapped into the type store), G15-T3 (Windows minidumps), and G13 MIPS
+  delay slots in the CFG for ordinary branches, calls and returns.
+
+Still open, in ledger order:
+
+- G04-T3: the for form in the corpus, and the verification of break and continue in the corpus.
+  The O0 and O2 loops are not printed as `for` yet; see the status above.
+- G05-T3 step 3 and G05-T4: the type editing UI and undo.
+- G06: C++ class layouts (base classes, virtual tables, methods). Enumerators are done.
+- G10-T1 to T4: MSVC RTTI and call-site resolution, and the GUI
+  demangled-name and class-hierarchy panel.
+- G08 SIMD lifting and G09 library identification: not started.
+- G12-T2 inline listing rows; G12-T3 local types and the GUI rename gesture: not done. G12-T3 local
+  names exist headless, in the CLI and through the session API (with undo); the decompiler shows
+  them, but no GUI gesture sets them yet.
+- G13: Thumb, lifting for A32, RV64, MIPS and PowerPC, CFG checks, the MIPS branch-likely forms,
+  and VLE detection. Not done. MIPS16 and microMIPS images are refused, and 64-bit MIPS and PowerPC
+  decode, both with evidence in the decoder tests.
+- G14-T1 to T4: remote debugging, FreeBSD, macOS, Windows on Arm, GUI watchpoints and AArch64
+  DBGWVR. The lldb-server oracle is available for T1.
+- G15-T1 remaining TLS forms (`-mtls-dialect=trad`: the AArch64 GD and LD sequences, whose
+  relaxation does not fit the original instructions), G15-T2 multi-image projects. G15-T3 is done
+  for the formats it names; a minidump written by Windows has not been checked.
+- G16-T2 incremental re-analysis and a real-world corpus.
+- G17 UI breadth: not started.
+- G19 accessibility: blocked on owner decisions (see its section).
+- G18: excluded (signing certificates).
+- G16-T2: incremental re-analysis and a real-world corpus.
+- G17: UI breadth (more views, search kinds, command palette).
+- G01: verification with Apple Clang and on CI runners.
+
+Blocked, not in this goal's scope or not closeable here:
+
+- G18 needs the owner's Apple Developer ID and a Windows code-signing certificate.
+- G19 needs owner decisions: the AccessKit waiver, the first platform, and the minimum bar.
+- The session branch and the chain of stacked PRs both implemented some of the same work.
+  The integration branch reconciles them; `main` is updated only after CI is green.
+
 
 ---
 
@@ -237,6 +286,36 @@ interpreter.
   - Never use `float` arithmetic on the host for double operations.
   - Never compare NaN with `==`.
   - Do not enable `-ffast-math` anywhere.
+- **Status:** DONE for the IR (G01-T1), on x86-64 natively and AArch64 under
+  qemu-aarch64. No lifter emits these operations yet, so FP functions stay
+  Partial until G01-T2 and G01-T3. Added: `FAdd`, `FSub`, `FMul`, `FDiv`,
+  `FSqrt`, `FNeg`, `FAbs`, `FCompare`, `IntToFloat`, `UIntToFloat`,
+  `FloatToInt` (truncates), `FloatExtend` and `FloatTruncate`, with the width
+  of the statement as the float width (4 or 8). `IrFloatModel` on the statement
+  picks the architecture's rules: the default NaN of an invalid operation
+  (x86 negative `0xfff8…`, AArch64 positive `0x7ff8…`), the integer a
+  conversion gives for a NaN or an out-of-range value (x86 the minimum, AArch64
+  0 and saturation), and the flags a comparison sets (x86 ZF/PF/CF with
+  unordered setting all three; AArch64 NZCV with unordered 0011). NaN operands
+  are returned quieted, the first one when both are NaN. The expected bits come
+  from running the same operations natively (x86-64 SSE) and under qemu-aarch64,
+  not from host arithmetic on the test side; the two models differ exactly where
+  the two hosts do.
+  Deviations from the plan, all deliberate: (1) the IR stays untyped. A
+  float statement carries its width and the model, and the verifier checks
+  widths, so an integer operand of another width is rejected, but an 8-byte
+  integer fed to a double operation is not detected. Typed operands are a later
+  change if the decompiler needs them. (2) The x86 `jp`/`jnp` conditions were
+  added as `Parity`/`NoParity`, and the integer compare reports PF from the
+  low byte of its result, as x86 does; AArch64 never asks for parity. (3) Only
+  double-precision compares were checked against native execution; the single
+  compare uses the same code but is not measured. (4) `fuzz_ir` was not built
+  or run here.
+  Evidence: `Ir.FloatArithmeticMatchesIeee` (26 double and single cases, both
+  models), `Ir.FloatToIntIndefiniteOnX86AndSaturatesOnAArch64`,
+  `Ir.FCompareUnorderedSetsFlags`, `Ir.VerifierRejectsMixedIntFloatOperands`,
+  `Ir.FloatConstantsPrintAsExactHexadecimalFloats`. Flipping the default-NaN
+  model fails `Ir.FloatArithmeticMatchesIeee`, so it is checked.
 
 **G01-T2 x86 SSE scalar lifting** [oracle] (depends: G01-T1)
 
@@ -259,6 +338,10 @@ interpreter.
   2. Model an XMM register as its low lane only. Any instruction that reads
      or writes the upper lanes is Unsupported (Partial), so a function with
      one is Partial too.
+     *Superseded in G01 (clang):* the high 64-bit lane is now a second register
+     (`xmm0_hi`) for `movaps`/`movapd`, the packed logical operations, the zeroing
+     idioms and memory loads. Other instructions that touch the upper lanes are
+     still Unsupported.
   3. In the ABI, float and double arguments go in xmm0-7 on System V and
      xmm0-3 on Win64, where they share positions with integer arguments. The
      return value is in xmm0. Add `IrCallingConvention` support in
@@ -281,6 +364,14 @@ interpreter.
   - `cvtsi2sd` with a 32-bit source sign-extends.
   - Flags after `ucomisd`: ZF=PF=CF=1 when unordered, which is why compilers
     emit `jp` checks. Map `jp`/`jnp`.
+- **Status:** DONE for x86-64 scalar SSE, with a conservative rule. Scalar arithmetic and
+  integer-to-float conversions depend on the MXCSR rounding mode, which the caller may set, so
+  each such function is Partial with that assumption in its notes. GCC at -O0 in this build: 6 of 26
+  Complete, none wrong. Clang 18.1 at -O0: 6 of 26 Complete, none wrong (the figures and the rule are in
+  `docs/SUPPORT_MATRIX.md`). The clang count needed the high 64-bit lane of an XMM register modelled
+  (see step 2 below), `cmpltsd` lowered as a masked select, and float compares carried across blocks
+  with a memory operand. Other packed and SSE forms stay Partial. Argument and return registers follow
+  the XMM registers that the function reads and writes.
 
 **G01-T3 AArch64 FP lifting** [oracle] (depends: G01-T1)
 
@@ -312,6 +403,14 @@ interpreter.
   - `fmadd` rounds once; `a*b+c` in two IR ops rounds twice and is WRONG.
   - Apple's ABI passes variadic FP arguments differently. The corpus has no
     variadic functions; keep it that way.
+- **Status:** IN PROGRESS. The scalar forms are lifted and checked under qemu-aarch64
+  with GCC 13.3 at -O0: 26 of 26 Complete, none wrong, on 48 vectors each. The IR op
+  is `FMulAdd`, with `FMulSub` for `fmsub`; the NaN and invalid-product rules were
+  checked against qemu. Not lifted: `fcvtzu` (no unsigned float-to-integer IR op),
+  `fnmadd` and `fnmsub`, and vector forms. Not done, and required by "done when": the
+  Apple Clang measurement, and the corpus on the `ubuntu-24.04-arm` and `macos-15`
+  runners. Until those exist this stays IN PROGRESS. The counts are in
+  `docs/SUPPORT_MATRIX.md`.
 
 ### G02 x86 integer gaps [oracle]
 
@@ -335,6 +434,35 @@ interpreter.
   from the Intel SDM definitions.
 - **Done when:** the `adc` Partial on Clang -O2 (`docs/SUPPORT_MATRIX.md`)
   becomes Complete and verified.
+- **Status:** DONE. Evidence: `Ir.X86AddWithCarryMatchesHardwareFlags`,
+  `Ir.X86SubWithBorrowMatchesHardwareFlags`,
+  `Ir.X86AddOfARegisterToItselfCarriesFromTheOriginalValue`,
+  `Ir.X86SubOfARegisterFromItselfKeepsTheOriginalForSignedBranches`,
+  `Ir.X86AddFollowedByACarryBranchIsExact`, `Ir.AddCarryMatchesHardwareFlags`,
+  `Ir.SubBorrowMatchesHardwareFlags`,
+  `Ir.VerifierRejectsCarryWithoutAFlagWriterInItsBlock`, and the corpus
+  functions `c_add128_hi`, `c_sub128_hi`, `c_add_wraps` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`. On Clang 18.1
+  x86-64 those three are Complete and verified at O0, O2 and O3, so the
+  `adc` Partial on Clang -O2 is gone. Also fixed in this task: `sub x, x`
+  followed by a signed branch compared against the overwritten register; an
+  `add`/`sub` whose memory source is addressed by its own destination
+  (`add rdi, [rdi]; setb`), which now copies the source before the write
+  (`Ir.X86AddFromAMemoryOperandAddressedByItsDestinationCarriesFromTheLoadedValue`);
+  a register `xchg` between a flag writer and its consumer, which now passes the
+  flags through (`Ir.X86CarryReachesAnAdcAcrossARegisterExchange`); an
+  unsupported memory `xchg`, which now drops the flag state
+  (`Ir.X86CarryIsNotReadAcrossAnUnsupportedExchange`); and the verifier
+  rejects a second carry op that would read a carry out the IR does not
+  represent (`Ir.VerifierRejectsACarryChainWhoseFirstCarryOutIsNotModelled`),
+  a block operand (`Ir.VerifierRejectsACarryWithABlockOperand`), and a
+  constant wider than the destination (`Ir.VerifierRejectsACarryConstantWiderThanItsDestination`).
+- **Deviations from the steps above:** the carry is read from the flag state
+  of the last `Compare`/`Test` in the block, as `CondAssign` already does,
+  rather than from a separate operand. The carry out of `adc`/`sbb` is not
+  modelled, so `adc; adc` chains are Partial. `xchg reg, reg` and a memory
+  source for `adc`/`sbb` are lifted. AArch64 `adc`/`sbc`/`cmn` are not lifted;
+  that is G03-T4.
 
 **G02-T2 Double-width multiply and divide** (depends: none)
 
@@ -351,6 +479,23 @@ interpreter.
      division by a constant (compilers emit multiply-high).
 - **Done when:** the new functions are Complete and verified on GCC and Clang
   at O0/O2/O3.
+- **Status:** DONE (stacked on G02-T1; see the PR for its base). Evidence:
+  `Ir.X86MulAndImulReturnTheHighHalfOfTheProduct`,
+  `Ir.X86DivAndIdivReturnTheQuotientAndTheRemainder`,
+  `Ir.X86DivideFaultsWhereTheHardwareDivideErrors`,
+  `Ir.X86ThirtyTwoBitDivideUsesEdxAndEax`,
+  `Ir.VerifierRejectsDivideWithoutItsDivisor`,
+  `Ir.VerifierRejectsADivisorTemporaryThatIsNeverDefined`,
+  `Ir.X86DivisorInAnArgumentRegisterIsAnInputOfTheSignature`, and the corpus functions
+  `c_mulhi_u64`, `c_mulhi_s64`, `c_udiv32`, `c_urem32`, `c_sdiv32`,
+  `c_srem32`, `c_udiv64`, `c_urem64`, `c_sdiv64`, `c_srem64`, `c_div10` in
+  `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
+- **Deviations from the steps above:** division needs three operands, so
+  `IrStatement` gained a third operand `c` (the divisor). The dividend is the
+  pair `a` (high) and `b` (low). The 8- and 16-bit forms are Unsupported. The
+  flags after `mul`/`div` are not modelled. The signed corpus functions guard
+  `INT_MIN / -1` and division by zero, because the native code traps there;
+  the interpreter reports `ir.eval_fault` for both instead of returning 0.
 
 **G02-T3 Bit operations**
 
@@ -364,6 +509,24 @@ interpreter.
      `ByteSwap`.
 - **Done when:** `c_popcount` is Complete and verified on -O3 builds with
   `-mpopcnt`. Add a corpus variant built with `-march=x86-64-v2`.
+- **Status:** IN PROGRESS. Done: `popcnt`, `tzcnt`, `lzcnt`, `bswap` (32 and
+  64 bit) and `bt` with a register or immediate index (the IR ops
+  `CountTrailingZeros`, `CountLeadingZeros`, `PopCount` and `ByteSwap`).
+  Evidence: `Ir.X86PopcntTzcntLzcntAndBswapMatchTheInstructions`,
+  `Ir.X86BitTestCarriesTheSelectedBit`, and the corpus functions
+  `c_popcount64`, `c_ctz64_guarded`, `c_clz64_guarded`, `c_bswap32`,
+  `c_bswap64`, `c_bit_test`. Also fixed: a function containing a direct call
+  was reported Complete. It is now Partial, which changed the expected status
+  of `_start` in two CLI tests (`cli.decompile_elf_json`,
+  `cli.decompile_elf_i386`) from Complete to Partial. Since then: `bts`, `btr`
+  and `btc` with a register destination (`Ir.X86BitTestAndSetResetAndComplementWriteTheBit`,
+  `Ir.X86BitTestAndSetCarriesTheBitBeforeTheWrite`); `movbe` with a register
+  and a memory operand (`Ir.X86MovbeLoadsAndStoresTheBytesReversed`); and the
+  `-march=x86-64-v2` corpus variant, where `c_popcount` is Complete and verified
+  at O3 with `popcnt`. Still not done, so the task stays IN PROGRESS: `bsf`/`bsr`
+  (needs a zero-flag state, or G02-T4 for the guarded form in `c_clz64_guarded`).
+  Memory forms of `bt`, `bts`, `btr` and `btc` are Unsupported by design (the bit
+  can lie outside the operand).
 
 **G02-T4 Flags across blocks**
 
@@ -396,6 +559,19 @@ interpreter.
      `lift_conditional_select` code first.
 - **Done when:** `c_both` and `c_collatz_steps` are Complete and verified at
   -O2 on GCC aarch64 and Apple Clang. Locally, use qemu (section 7).
+- **Status:** DONE on GCC 13.3 under qemu-aarch64. Added the IR ops
+  `CondCompare` (ccmp) and `CondCompareAdd` (ccmn). The interpreter holds an
+  explicit NZCV value after them, and conditions read that value with AArch64
+  meanings. A compare or test clears it. `ccmp`/`ccmn` are lifted only when the
+  flags before are exact. Otherwise they are Unsupported, so the function is
+  Partial. Evidence: `Ir.AArch64ConditionalCompareUsesTheCompareOnlyWhenItsConditionHolds`,
+  `Ir.AArch64ConditionalCompareSetsTheImmediateNzcvWhenItsConditionFails`,
+  `Ir.AArch64ConditionalCompareNegatedSetsTheFlagsOfTheSum`,
+  `Ir.AArch64ConditionalCompareWithoutExactFlagsIsPartial`,
+  `Ir.VerifierRejectsAConditionalCompareWithAnOutOfRangeNzcv`. Corpus under
+  qemu-aarch64, 59 functions: `c_both` and `c_collatz_steps` are Complete and
+  verified at O0, O2 and O3, and no result is WRONG. Not done: Apple Clang was
+  not run locally (CI's macOS corpus job covers it).
 
 **G03-T2 Division, high multiply, bit manipulation**
 
@@ -407,6 +583,29 @@ interpreter.
   - The interpreter must branch on architecture for these.
 - **Done when:** the corpus division functions from G02-T2 are Complete and
   verified on aarch64.
+- **Note (added by G02-T2):** the IR ops `MulHighUnsigned`, `MulHighSigned`,
+  `DivUnsigned`, `DivSigned`, `RemUnsigned` and `RemSigned` exist, with the
+  divisor as the third operand `c`. They fault on a zero divisor or a quotient
+  overflow, so AArch64 `udiv`/`sdiv` must guard the zero case in the IR (a
+  compare and a conditional select to zero) to match AArch64's result. Do not
+  lower them to the faulting op unguarded.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Done: `udiv` and `sdiv` with the AArch64 results for
+  zero divisors and `INT_MIN / -1`, `umulh` and `smulh`, `clz`, `cls`, `rbit`,
+  `rev`, `rev16`, `rev32`, `extr`, `bfi` and `bfxil`. The guard is arithmetic,
+  not a compare: a compare would write the NZCV state that later instructions in
+  the block read. Evidence: `Ir.AArch64DivisionMatchesTheArchitectureAtTheEdges`,
+  `Ir.AArch64HighMultiplyIsTheUpperHalf`,
+  `Ir.AArch64CountAndReverseInstructionsMatchTheArchitecture`,
+  `Ir.AArch64ExtractAndBitfieldInsertMatchTheArchitecture`. The corpus under
+  qemu-aarch64 (GCC 13.3): `c_udiv32`, `c_urem32`, `c_udiv64`, `c_urem64`,
+  `c_div10`, `c_mulhi_u64` and `c_mulhi_s64` are Complete and verified at O0,
+  O2 and O3. Since G03-T4 added `cmn`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and
+  `c_srem64` are Complete and verified too, on both compilers. The widening
+  multiplies are done as well: `umull`, `smull`, `umaddl`, `smaddl`, `umsubl`,
+  `smsubl`, `umnegl` and `smnegl`, each 32-bit source extended to 64 bits before
+  the multiply. Evidence: `Ir.AArch64WideningMultiplyUsesTheLow32BitsOfEachSource`.
+  On Clang 18.1, `c_sum_to` (which uses `umull`) is Complete at O2 and O3 now.
+  The corpus has no WRONG result on any tree.
 
 **G03-T3 AArch64 jump tables**
 
@@ -427,6 +626,76 @@ interpreter.
   AArch64 instead of skipping.
 - **Done when:** that test passes on `ubuntu-24.04-arm` and `macos-15`, and
   `c_switch_dense` is Complete and verified.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64. Not yet run
+  on `ubuntu-24.04-arm` or `macos-15` (CI is the check for those two). GCC and
+  Clang do not give `c_switch_dense` a code jump table on AArch64 (at -O0 it is
+  a compare chain, at -O2 a lookup of constants), so the recovery test uses the
+  fixture `tests/corpus/jump_table.c` (`jt_dispatch16`). `c_switch_dense` is
+  Complete and verified at O0, O2 and O3. Recognised: GCC's form (`b.ls` into
+  the table, byte offsets with `add ... sxtb #2`) and Clang's form (`b.hi`
+  falling into the table, `uxtb ... lsl #2`); any other shape stays unresolved.
+  The switch reads a copy of the compared register taken after the compare,
+  since GCC's table code overwrites `x0`. The CFG keeps the last two path
+  entries for a block entered through a conditional's taken edge, so the
+  compare is in view. In the x86 slice, an unrelated computation with an
+  unknown input now leaves its destination unknown instead of failing; only a
+  jump that needs that value fails. Evidence: `Cfg.AArch64GccShapedJumpTableIsRecovered`,
+  `Cfg.AArch64ClangShapedJumpTableIsRecovered`,
+  `Cfg.AArch64TableOnTheOutOfRangeSideIsNotRecovered`,
+  `Cfg.AArch64TableEntryOutsideTheCodeIsNotRecovered`,
+  `DecompilerCorpus.JumpTableIsRecoveredWithEvidence`,
+  `DecompilerCorpus.JumpTableFixtureAgreesWithTheCompiledCode`. The corpus
+  counts did not change on any tree. Not done: a function whose cold block lies
+  below its entry is rejected by the verifier (see `docs/SUPPORT_MATRIX.md`).
+
+**G03-T4 AArch64 carry chain** (depends: G02-T1; added when G02-T1 landed)
+
+- **Goal:** lift AArch64 `adc`, `adcs`, `sbc`, `sbcs`, `adds`, `subs`, `cmn`
+  and `cmp` (`cmn` is `adds` into the zero register), with C and V from the
+  existing NZCV model. The IR already has `AddCarry` and `SubBorrow`
+  (G02-T1), and `condition_holds(Carry)` already gives AArch64 C.
+- **Files:** `src/ir/lift_aarch64.cpp`, the corpus is unchanged.
+- **Done when:** `c_add128_hi`, `c_sub128_hi` and `c_add_wraps` are Complete
+  and verified on GCC aarch64 at O0, O2 and O3 under qemu. Record the
+  counts in `docs/SUPPORT_MATRIX.md`.
+- **Status:** DONE on GCC 13.3 and Clang 18.1 under qemu-aarch64 (see the
+  follow-up below for `adcs`/`sbcs`). Lifted: `adds` (flags of
+  a + b, with an unconditional `CondCompareAdd`), `cmn` (the same, into the zero
+  register), and `adc`/`sbc` (`AddCarry`/`SubBorrow`, which read the carry from
+  the flags before). The unconditional form is `IrCondition::None` in
+  `CondCompare`/`CondCompareAdd`. Lifting `adc`/`sbc` needs exact flags, and a
+  AArch64 `adc`/`sbc` without S do not write NZCV, so every carry reader in a block reads the
+  same carry. On x86 the carry out of `adc`/`sbb` is not modelled, so a second carry reader in a
+  block is Partial. `adcs`/`sbcs` set NZCV from the addition and are modelled. Also fixed in this task: an unsupported
+  statement now clears the exact-flags state, so a later `adc` cannot read a
+  carry through it. Evidence: `Ir.AArch64CarryChainAddsThenAdcUsesTheSumsCarry`,
+  `Ir.AArch64SubtractWithBorrowUsesTheCompareBorrow`,
+  `Ir.AArch64CmnAgainstMinusOneSetsTheZeroFlag`,
+  `Ir.AArch64AddsSetsTheZeroFlagOfTheSum`,
+  `Ir.AArch64CarryWithoutAFlagWriterIsPartial`,
+  `Ir.AArch64SecondCarryReaderIsPartial`, `Ir.AArch64AddsWithCarryIsPartial`.
+  Corpus under qemu-aarch64, 59 functions: `c_add128_hi`, `c_sub128_hi`,
+  `c_add_wraps`, `c_sdiv32`, `c_srem32`, `c_sdiv64` and `c_srem64` are Complete
+  and verified at O0, O2 and O3, and no result is WRONG. Not done: SIMD
+  (`movi`, `dup`, `fmov`, `ldr d`) and `c_switch_sparse` remain Partial.
+- **Follow-up (adcs, sbcs, cross-block flags):** `adcs` and `sbcs` are lifted
+  with the IR op `AddCarryFlags`: dest = a + b + C, and NZCV is the flags of the
+  addition (C the carry out, V the signed overflow). `sbcs` is the same op on
+  NOT(b), as the architecture defines it. The flags after them are exact, so a
+  second carry reader can follow. The expected values in
+  `Ir.AArch64AdcsAndSbcsSetNzcvLikeTheAddition` are ground truth from running
+  the instructions under qemu-aarch64; the earlier test that asserted adcs is
+  Unsupported was replaced, because the limitation it recorded is what this
+  removes. Also: a `cmp` or `tst` whose flags are still current at the end of a
+  block that falls through into a block with one predecessor is repeated at the
+  start of that block (`Ir.AArch64FlagsFromSinglePredecessorAreExact`; the
+  negative cases are `Ir.AArch64FlagsRewrittenAfterTheCompareStayPartial` and
+  `Ir.AArch64FlagsFromAddsDoNotCarryAcrossBlocks`). This is what makes
+  `c_switch_sparse` Complete and verified on GCC at O0, O2 and O3. Corpus under
+  qemu-aarch64, 59 functions: GCC O0 58/59, O2 58/59 (was 57), O3 52/59 (was
+  51); Clang O0 56/59, O2 53/59, O3 53/59 (unchanged). No result is WRONG on any
+  tree. All 30 `Ir.AArch64*` tests pass natively, and the AArch64 corpus, IR
+  and CFG tests (125) pass under qemu on both cross trees.
 
 ### G04 Decompiler readability
 
@@ -469,6 +738,20 @@ for Partial functions.
 - **Done when:** the note "register aliases are not canonicalised" is removed
   from both lifters, and G04-T0 passes.
 
+- **Status:** DONE. Every register operand is its family, so `eax`, `ax`, `al`,
+  `rax`, and `w8`/`x8` are one variable. A 4-byte write zero-extends (the rule the
+  interpreter already applied, so it stays a width of 4 on the family). A 1- or
+  2-byte write, and a write to `ah`, is an explicit merge with the other bytes of the
+  family, and a read of `ah` is a shift. A conditional write keeps the old value
+  when its condition fails, and a 32-bit `cmov` zero-extends either way, as the
+  hardware does. The note "register aliases are not canonicalised" is gone from both
+  lifters. Evidence: `Ir.X86NarrowWritesMergeIntoTheFamily`,
+  `Ir.X86DoubleWordWritesZeroExtend`,
+  `Ir.X86ConditionalMoveOfADoubleWordZeroExtendsEvenWhenItFails` (the last checked on
+  hardware), and the corpus outcome report is identical to the one before the change.
+  `DecompilerCorpus.EveryPassPreservesSemantics` passes. The pseudocode now shows
+  narrow reads of a family with their width, as in `(u8)rax`.
+
 **G04-T2 SSA, copy and constant propagation, dead code elimination**
 
 - **Steps:**
@@ -480,6 +763,22 @@ for Partial functions.
   4. Leave SSA by merging non-interfering variables.
 - **Done when:** G04-T0 passes, and the median pseudocode line count across
   the corpus drops. Record before/after in the PR.
+- **Status:** DONE with deviations. Implemented: copy propagation of register
+  copies and constants within a block (`propagate_copies`), removal of temporaries
+  nothing reads (`remove_dead_temporaries`), and removal of pure register writes whose
+  value no later statement reads, with liveness over the blocks
+  (`remove_dead_register_writes`). Calls, loads, stores, unsupported statements, and the
+  registers that a return or the caller relies on (stack, frame, callee-saved, and
+  return registers) are never removed. Not done, from the steps above: SSA (steps 1
+  and 4) and memory forwarding across stores (step 2). The "done when" measure is the
+  total of the pseudocode statement lines over the corpus, not the median: the median
+  over 59 functions did not move at every level (AArch64 O2 and O3 stayed at 6), so the
+  test asserts on the total. Totals, before to after: x86-64 O0
+  1111 to 1026, O2 517 to 474, O3 707 to 664, O3-x86-64-v2 702 to 658; AArch64 (GCC)
+  O0 1112 to 1058, O2 520 to 516, O3 737 to 733. Evidence:
+  `DecompilerCorpus.EveryPassPreservesSemantics` (every pass checked on the corpus
+  vectors), `DecompilerCorpus.StatementPassesShortenThePseudocode`, native ctest, and
+  the AArch64 corpus under qemu-aarch64.
 
 **G04-T3 Loop and condition recovery**
 
@@ -490,6 +789,27 @@ for Partial functions.
   3. Simplify `!(a < b)` → `a >= b`, integer-only. Floating-point negation is
      not an inverse because of NaN; never do it for floats.
 - **Done when:** G04-T0 passes and the corpus loop functions print a `for`.
+- **Status:** PARTIAL. Done: a loop whose body is a single block that repeats
+  itself (the header ends in the test that repeats it) is recognised, and a branch to
+  the next block is a fall-through, so a function with an early return now prints
+  `if (...) { return ...; } else { ... do { ... } while (...); ... }` instead of labelled
+  blocks. The `c_sum_array` corpus function (x86-64 O2) is the example. Not done: the
+  `for` form. A bottom-tested loop is printed as `do { } while`, which is exact. Turning
+  it into `for (init; cond; step)` would move the step in front of the test, and that is
+  only equal when the loop is entered with the test true, which needs a proof from the
+  entry guard.
+  Step 2 is done for `break`. A branch from a loop body to the loop's exit prints
+  `break;`, and the body's exit is the one the loop's own test leaves to, with the blocks
+  the header dominates below it included (so a `break` block that no path back to the
+  header passes through still belongs to the loop). Before this, such a branch printed
+  nothing and the loop repeated, which is wrong. A `break` inside a switch is not printed:
+  the function falls back to labels. `continue` was already emitted for branches to the
+  header. Evidence: `Ir.BranchToTheLoopExitInsideTheBodyIsBreak` (fails without the change),
+  `Ir.LeavingTheLoopFromInsideASwitchIsNotStructured` (the switch guard; disabling it makes
+  the test fail), and the full native suite (409 of 409).
+  Step 3 for integers was already done: the complement table prints `!(a < b)` as
+  `a >= b`, and floating-point compares do not take that path. Evidence:
+  `Ir.NegatedIntegerComparisonIsWrittenAsItsComplement`.
 
 **G04-T4 Names and locals from DWARF**
 
@@ -498,6 +818,25 @@ for Partial functions.
   `src/binary/dwarf.cpp` and `include/donkey/binary/debug_info.h`. Names are
   display-only; user renames (G12) always win.
 - **Done when:** a test on the `-g` debuggee shows the real parameter names.
+- **Status:** PARTIAL. Done: a function's parameters that arrive in registers take the
+  names of the debug information's parameters, in order. `apply_debug_parameter_names`
+  (`include/donkey/ir/debug_names.h`, `src/ir/debug_names.cpp`) applies them only when the
+  counts match, every debug parameter is a scalar of the size and class of the register the
+  function reads, and the names are distinct C identifiers; a structure or array passed by
+  value is refused, because it cannot be matched by position. It renames the parameters and
+  the pointer structures that refer to them, and it changes no type or statement. Evidence:
+  `DecompilerCorpus.ParameterNamesComeFromTheDebugInformation`, which shows `u32 value` for
+  `donkey_module_answer` in the `-g -O0` module fixture, and a refusal case. Done (CLI): the
+  frame slots are named too; see `apply_debug_stack_names`. Not done: optimised code, nested blocks. At `-O0` the argument is stored to a frame slot (`*(u32 *)(rsp - 0x4) = rdi`), and
+  the slot keeps its address form. The reader records `DW_OP_fbreg` locations of the direct
+  children of a subprogram whose frame base is `DW_OP_call_frame_cfa`, as
+  `DebugFunction::stack_slots` (`DebugStackSlot`: name, type, CFA offset, parameter flag,
+  line). Evidence: `DebugInfo.StackSlotsGiveCfaOffsetsOfParametersAndLocals` on
+  `tests/fixtures/debuggee/locals.c` (`donkey_locals_sum`: -36, -40, -24, -20). Not done:
+  the decompiler does not yet map a CFA offset to the `rbp - n` address the frame uses, so
+  the frame-local names are not shown, and nested lexical blocks are not read. The
+  decompiler also spells integer types by width (`u32`), not by their C names; the name is
+  the debug information's and the type spelling is the decompiler's.
 
 ### G05 Type system and user types
 
@@ -529,6 +868,24 @@ for Partial functions.
   - `Types.SizeAndAlignmentFollowTheAbi`
 - **Done when:** the tests pass; old projects open; the size and alignment of
   every DWARF struct in the debuggee match DWARF's `DW_AT_byte_size`.
+- **Status:** PARTIAL. Done: the type model and the store. `TypeTable` (in
+  `include/donkey/project/types.h`) holds kinds (void, integer, float, pointer, array,
+  struct, union, enum, typedef, function) with provenance; `validate` checks every
+  reference, rejects a type that contains itself by value (`type.contains_itself`), checks
+  ABI sizes, aligned member offsets and the padded struct or union size, and
+  `size_of`/`alignment_of` follow the same rules. The project stores the table in schema
+  v5 (`types`, `type_fields`, `type_enumerators`, `type_applications`), with a migration
+  from v4 and the older schemas (`replace_types`, `types`, `set_type_application`,
+  `type_applications`). `types_from_debug_info` maps the DWARF types of a debuggee; it
+  needs `DW_AT_encoding` for base types, which the reader now records. Evidence:
+  `Types.RoundTripThroughTheProject`, `Types.MigratesFromSchemaV4`,
+  `Types.RejectsCyclesWithoutPointer`, `Types.SizeAndAlignmentFollowTheAbi`, and
+  `Types.DwarfStructsMatchTheirByteSize`, which checks every struct and union of the
+  debuggee against its `DW_AT_byte_size`. Not done: step 4's automatic attachment (the
+  DWARF types are not written to the project on import; the caller passes them to
+  `replace_types`). The `C` declaration parser is G05-T2. Bit-fields are not
+  recovered from DWARF (the reader does not record their bit offsets), and enumerator
+  values are not recorded either. Those are DWARF reader gaps, not type-store gaps.
 
 **G05-T2 C declaration parser**
 
@@ -541,6 +898,19 @@ for Partial functions.
 - **Tests:** `Types.ParsesCDeclarations`, `Types.ParserErrorsAreLocated`
   (line and column), and a fuzz target `fuzz_cdecl`.
 - **Done when:** the tests pass and the fuzz target runs 60 s clean.
+- **Status:** DONE on Linux x86-64. `parse_c_declarations`
+  (`include/donkey/project/cdecl.h`, `src/project/cdecl.cpp`) parses the subset into
+  `TypeDefinition`s with ABI layout (natural alignment, padded size, `long` and `char`
+  signedness from `CDeclarationOptions`), refuses input over 1 MiB and nesting over 64
+  with `cdecl.*` codes, and reports `line L, column C:` for every syntax error. The result
+  goes through `TypeTable::validate` before it is returned, so an array too large for 64
+  bits is refused with `cdecl.invalid_type`. Evidence: `Types.ParsesCDeclarations` and
+  `Types.ParserErrorsAreLocated`, all seven `Types.*` tests, and the headless ctest suite
+  pass on Linux x86-64 with `-Werror`. `fuzz_cdecl` (clang 18, libFuzzer, ASan and UBSan)
+  ran 679,144 inputs in 61 s with no finding. Not supported: bit-fields, function
+  pointers and other parenthesised declarators, expressions other than integer constants,
+  variables, K&R definitions, octal literals, preprocessor lines and C++. Residual: the
+  macOS and Windows CI legs have not run this yet.
 
 **G05-T3 Apply types and propagate in the decompiler** [oracle-checked]
 
@@ -551,6 +921,21 @@ for Partial functions.
   4. The printer uses the field names.
 - **Done when:** G04-T0 still passes (types never change semantics), and a
   test applies `struct corpus_point *` to `c_point_sum` and prints `p->z`.
+- **Status:** PARTIAL. Done: steps 1, 2 and 4, and the done-when test. `apply_prototype`
+  (`include/donkey/ir/prototype.h`, `src/ir/prototype.cpp`) takes an `IrPrototype` (return
+  width, parameters with width, class and an optional pointee structure with named members)
+  and changes names and types only. It refuses a prototype whose arity, widths, classes or
+  return width differ from the inferred signature, and a pointee whose members do not match
+  every access the function makes through that parameter (offset and width). A refusal
+  leaves the function unchanged. The printer shows `(struct corpus_point *p)` and `p->z`,
+  and no inferred `a0_fields` block. Evidence: `DecompilerCorpus.AppliedPrototypeNamesStructFields`
+  (the value of `c_point_sum` on a concrete `corpus_point` is the same before and after
+  the prototype, 120), `DecompilerCorpus.AppliedPrototypeThatContradictsTheFunctionIsRefused`,
+  and the full headless ctest suite (415 of 415) and the Release `DecompilerCorpus.*`, `Ir.*`
+  and `Types.*` suites (166 of 166), on Linux x86-64. Not done: step 3, types flowing
+  forward through copies and loads, so a value loaded from a typed field is not typed. The
+  conversion from a `TypeTable` to an `IrPrototype` is written by the caller (the test does
+  it); the CLI and UI that would do it are G05-T4.
 
 **G05-T4 UI and CLI**
 
@@ -565,6 +950,16 @@ for Partial functions.
 - **Tests:** CLI tests in `tests/CMakeLists.txt`, and a UI script
   `tests/ui/types.donkeyui` that applies a type with the keyboard and
   asserts the pseudocode.
+- **Status:** PARTIAL. Done: step 1. `donkey-cli project type add|list|apply` exist and
+  are tested in `tests/CMakeLists.txt` (`cli.project_type_*`, seven tests, repeatable).
+  `add` parses a header with the G05-T2 parser, merges the declarations into the project's
+  type table and reports a parse error with its line and column; `list` prints the types
+  (text or `--json`); `apply` stores a type for an address, as a prototype when the type is
+  a function and as a data slot otherwise. Not done: the decompiler does not yet read the
+  stored applications, so `apply` changes no output (the conversion from a `TypeTable` to
+  the `IrPrototype` of G05-T3 is still written by hand, in the test). Not done: step 2 (the
+  Types panel, the editor with parse errors, "Set type…", the shared components) and step 3
+  (undo and redo), and the UI script `tests/ui/types.donkeyui`.
 
 ### G06 PDB
 
@@ -619,7 +1014,7 @@ own code.
      in `cmake/`. Update `THIRD_PARTY_NOTICES` and the SBOM.
   2. Decompress SHF_COMPRESSED sections (`Elf64_Chdr`, ELFCOMPRESS_ZLIB) with
      an output cap of 256 MiB per section.
-  3. ZSTD sections stay Unsupported unless zstd (BSD) is also added.
+  3. ZSTD sections are decoded by an own RFC 8878 decoder (done, see G07 status).
 - **Tests:** build the debuggee with `-gz=zlib` in `tests/CMakeLists.txt`,
   then `DebugInfo.CompressedSectionsAreRead`.
 
@@ -634,6 +1029,14 @@ own code.
   3. A mismatch is a diagnostic, never silently used.
 - **Tests:** on macOS CI, build the debuggee and run `dsymutil`. On Linux,
   use `objcopy --only-keep-debug` and `--add-gnu-debuglink`.
+  **Status:** the lookup, UUID check, `--debug-file` and the refusal of a
+  mismatched bundle are DONE on Linux (`SeparateDebug.DsymFindsTheBundleWhoseUuidMatches`,
+  `SeparateDebug.ADsymWithAnotherUuidIsRefused`, `SeparateDebug.AMachOExecutableWithoutItsBundleIsNotFound`,
+  `cli.debuginfo_dsym`, `cli.debuginfo_debug_file`, `cli.debuginfo_debug_file_mismatch`). The
+  fixture is `tests/fixtures/dsym`, made with `ld64.lld-18` and `llvm-dsymutil`. The same check
+  runs with Apple's `dsymutil` on macOS CI: the test module's dSYM is written by `dsymutil` in the
+  build, and `cli.debuginfo_json` reads it (macOS headless and macOS packages jobs of run
+  42373314116 and 42373314115 at 6c7505a).
 
 ### G08 SIMD (after G01)
 
@@ -693,7 +1096,34 @@ own code.
     `c++filt` output once, with provenance. Add a fuzz target.
 - **G10-T2 MSVC demangler.** Same approach, using the public MSVC name
   decoration documentation.
+  - **Status:** PARTIAL. Done: `demangle_msvc` (`src/binary/demangle_msvc.cpp`) for the
+    64-bit forms the corpus covers: `__cdecl` free functions and members with access,
+    `static` and `virtual`, cv-qualified `this`, constructors and destructors, the operator
+    codes, builtin, class and enum types, pointers, references and rvalue references, back
+    references, and `...`. Evidence: `DemangleMsvc.CorpusMatchesLlvmUndname` (87 names
+    equal to `llvm-undname`'s text, and 8 listed names rejected as `demangle.unsupported`),
+    and the malformed-name, unsupported-form and limit tests in
+    `tests/unit/demangle_msvc_test.cpp`. The fuzz target (`fuzz_demangle`) runs both
+    schemes; 2.3 million runs in 90 seconds with no finding. Not done: templates, arrays,
+    string literals, vftables, dynamic initialisers, function and member pointers, 32-bit
+    forms and the other calling conventions. Corpus provenance:
+    `tests/fixtures/msvc/PROVENANCE.md`.
 - **G10-T3 RTTI and vtables.**
+  - **Status:** PARTIAL. Done: `read_itanium_rtti` (`include/donkey/binary/rtti.h`,
+    `src/binary/rtti.cpp`) reads `_ZTI` typeinfo objects (class, single and multiple
+    inheritance, with their base lists) and `_ZTV` vtables split into groups by the
+    offset-to-top and typeinfo pairs of secondary subobjects. Pointers come from the file or,
+    for PIE, from `.rela.dyn`; symbol relocations and PLT stubs are named where the reader can.
+    Evidence: `Rtti.ReadsThePieHierarchyFromRelocations`,
+    `Rtti.ReadsTheNonPieHierarchyFromTheFile`, and
+    `Rtti.PiePointersComeFromTheRelocationTableNotTheFile` (zeroes every relocated pointer in a
+    copy, so only `.rela.dyn` can supply them; ignoring relocations fails it, checked by
+    mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
+    (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
+    `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
+    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
+    resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
+    hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
     pointer, function pointers), and MSVC RTTI Complete Object Locators.
   - Build a class hierarchy.
@@ -724,6 +1154,10 @@ out-of-process RPC. So scripting is RPC.
   requests and writes the results.
 - **Tests:** CTest cases that pipe requests into `serve` and match the
   responses; a fuzz target for the request parser.
+- **Status:** DONE (G11-T1 to T3). `serve` has the read methods, `decompile`, `annotations.list`,
+  and `rename`, `comment` and `type.apply` behind `--project` and `--allow-write`. Batch mode and the
+  Python client are in place. Tests: `cli.serve_session`, `cli.serve_project`, `cli.batch_script`,
+  `python.rpc_client`. Fuzz: `fuzz_rpc`. Protocol: `docs/RPC.md`.
 
 ### G12 Interactive edits
 
@@ -735,13 +1169,68 @@ out-of-process RPC. So scripting is RPC.
   - Undo and redo work, and they persist.
   - UI keys, using the shared components: `C` (code), `D` (data), `U`
     (undefine), `A` (string).
+  - **Status:** DONE (claude/funny-meitner-cpc7oc). `C` makes code, `D` makes one byte of
+    data, and `U` clears user code or data at the address, or declares an
+    instruction's bytes undefined. Each is one undo step, and the scripted test
+    `tests/ui/edits.donkeyui` passes under Xvfb with the full desktop suite
+    (580 of 580). Also `Session.UndefineDeclaresInstructionBytesUndefinedAndClearsThem`,
+    `Session.DataRangeRemovesCodeAndUndoRestoresIt`, `UserRanges.*` for the analysis,
+    and the v5 to v6 migration tested on `tests/fixtures/projects/schema-v5.db`
+    (`Project.MigratesSchemaV5AnnotationsToV6AndKeepsThem`). Text that does not fit
+    its kind is refused (`Project.StoresCodeStartsAndDataRangesAndRefusesOtherText`).
+    Deviations: `Undefined` is not a separate kind (undefining is a `data` range of
+    element size 0, `0:<count>`), and the undo history is in memory, as before; only
+    the resulting annotations are saved. The shell also keeps the selection when a
+    re-analysis publishes a new document of the same file. Before this it jumped to
+    the entry point after any boundary edit or undo.
+    `A` (strings) belongs to G12-T2.
 - **G12-T2 Arrays and strings at an address.**
+  - **Status:** PARTIAL on Linux (claude/funny-meitner-cpc7oc). `A` defines the NUL-terminated
+    string at the selected address as a data range of its bytes, terminator included
+    (`string:<bytes>`; it is read as an array of one-byte elements). `Shift+D` opens the data
+    editor for an array (`<size>:<count>`), or for any range text. The Data window lists every
+    range with its shape, the string and a preview, and Edit and Remove. Evidence: the scripted
+    test `tests/ui/data.donkeyui` (defines the 28-byte `.interp` string, types an array, and
+    undoes both), `Session.DefineStringDefinesTheTerminatedBytesAndRefusesOthers`,
+    `Project.ParsesAndStoresStringRangesAndRefusesBadStringText`. The string form needs no schema
+    change: the annotation kind is still `data`. UTF-16 (`W`, `string16:<bytes>`): a NUL-terminated
+    UTF-16LE string with its two-byte terminator, read as 2-byte elements. The Data window previews
+    it with `\uXXXX` escapes for non-ASCII units. Evidence: `Session.DefineString16DefinesTheTerminatedBytesAndRefusesOthers`,
+    the parse cases in `Project.ParsesAndStoresStringRangesAndRefusesBadStringText`, and the scripted
+    test `tests/ui/utf16.donkeyui` on `tests/fixtures/utf16`. Not done: the listing draws no data
+    rows, so a range shows in the Data window only; a decompiler that prints a string literal;
+    a UTF-16 preview for surrogate pairs (they show as two `\uXXXX` escapes).
 - **G12-T3 Rename and type locals in the decompiler.**
   - Stored per function and IR variable, keyed by stack offset or register
     and definition address. They survive re-analysis when the key still
     exists.
-- **Tests:** session tests for each kind; a UI script `tests/ui/edits.donkeyui`
-  covering keys, undo and persistence.
+  - **Status:** PARTIAL. Local names are stored per image and function in
+    schema v7 (`local_names`, `LocalName`), keyed `arg:<index>` for a parameter
+    and `frame:<base>:<offset>` for a frame slot. `apply_user_local_names`
+    applies them after the debug names, and a name wins over a debug name on
+    the same slot. A slot the function accesses gets a local even when the
+    decompiler recovered none, and a key that names nothing leaves a note.
+    `donkey-cli project local-name` and `local-names` set and list them, and
+    `decompile --project` shows them. A name that the decompiler refuses
+    (a C keyword, a collision) fails the command.
+    The desktop session has `Session::set_local_name`, which refuses a keyword,
+    a non-identifier or a malformed key and otherwise marks the project dirty
+    and makes one undo step. Save writes the names with `replace_local_names`,
+    and open and restore read them back. The decompiler view applies the
+    function's names when it lifts, and its cache key includes them, so a change
+    shows at once. A refused set is not applied, and the view shows the refusal
+    code. Not done: the GUI gesture that sets a name; the definition address in
+    the key, so two lifetimes of one slot share a name; register locals
+    (`var_N`); local types; `serve` methods; `tests/ui/edits.donkeyui`.
+  - **Tests:** `Project.MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations`,
+    `Project.StoresLocalNamesAndRefusesBadKeysAndNames`,
+    `Project.ReplacesEveryLocalNameAtOnceAndKeepsThePreviousSetWhenRefused`,
+    `LocalNames.*` (`tests/unit/local_names_test.cpp`), `cli.local_names`
+    (`cmake/checks/check_local_names.cmake`, fixture `tests/fixtures/names`),
+    `Session.LocalNamesSetUndoRedoAndRefuseBadEdits` and
+    `Session.LocalNamesSaveAndReopenWithTheProject`. Not covered by a test: the
+    decompiler view's rendering of the names (it compiles and is covered only
+    by the applier tests); the UI script is still to add.
 
 ### G13 Processor coverage
 
@@ -754,11 +1243,41 @@ Each ISA, in order: decoder → CFG → lifter → corpus under qemu-user (secti
     skipped in `src/binary/elf.cpp`; keep them as mode hints instead).
   - Lift the integer subset, conditional execution, and IT blocks in Thumb.
   - Corpus: `arm-linux-gnueabihf-gcc` plus qemu-arm.
+  - **Status:** IN PROGRESS (claude/funny-meitner-cpc7oc). A32 is decoded,
+    little-endian only (`DecodeIsa.ArmA32MatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.ArmA32ConditionalBranchesAreConditionalWithTheirTargets`,
+    `DecodeIsa.BigEndianArmAndRiscVAreRefusedByName`). Not done: Thumb mode and
+    mapping symbols, lifting, the CFG check and the qemu-arm corpus.
 - **G13-T2 RISC-V 64.** Requires Capstone 6 or a pinned newer Capstone:
   **[owner decision]** on upgrading Capstone. RV64GC integer subset, with
   the compressed instructions.
-- **G13-T3 MIPS32/64 and PPC32/64.** Decoder and CFG first (delay slots for
-  MIPS); lifting later.
+  - **Status:** IN PROGRESS (claude/funny-meitner-cpc7oc). RV64GC is decoded
+    and matches llvm-objdump on the test image, compressed included
+    (`DecodeIsa.RiscV64MatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.RiscV64BranchTargetsAreAbsoluteAndJalrHasNone`). The pinned
+    Capstone is 5.0.9, which has the RISC-V backend, so decoding did not wait
+    for the Capstone 6 decision. Not done: lifting, the CFG check and the
+    qemu-user corpus.
+- **G13-T3 MIPS32 and PPC32 (64-bit deferred).** Decoder and CFG first (delay
+  slots for MIPS); lifting later.
+  - **Status:** IN PROGRESS (claude/funny-meitner-cpc7oc). MIPS32 (both byte
+    orders) and PPC32 (both byte orders) decode and match llvm-objdump on their
+    test images (`DecodeIsa.MipsLittleEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.MipsBigEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.PowerPc32BigEndianMatchesTheListingOfEveryInstruction`,
+    `DecodeIsa.PowerPc32LittleEndianMatchesTheListingOfEveryInstruction`).
+    Capstone's group flags miss some transfers (`jal`, `jr $ra`, `bl`, `blr`),
+    so those are classified from the mnemonic and the PowerPC link bit
+    (`DecodeIsa.MipsBranchesHaveTheirClassesAndTargets`,
+    `DecodeIsa.PowerPc32BranchesHaveTheirClassesAndTargets`). 64-bit MIPS and
+    PPC are refused as Unknown
+    (`DecodeIsa.SixtyFourBitMipsAndPowerPcAreNotDecodedAsThirtyTwoBit`). Not
+    done: microMIPS/MIPS16 and VLE detection, lifting, the CFG check against
+    a second disassembler, and the qemu corpus. The delay slots are DONE for
+    ordinary branches, calls and returns: the slot stays in its branch's block
+    and the fall-through starts after it (`DecodeIsa.MipsDelaySlotsStayWithTheirBranchesInTheGraph`).
+    Branch-likely forms run their slot only when taken, which is not modelled, so
+    that graph is Partial (`analysis.mips_branch_likely`).
 
 ### G14 Debugger coverage
 
@@ -794,12 +1313,53 @@ platform; do not write new, weaker ones.
 - **G15-T1 ELF relocatable objects and static archives.** Apply relocations
   for x86-64 and AArch64 (the common types; the rest → Partial), and list the
   `.a` members.
+  - **Status:** PARTIAL. Done: static archives are listed. `read_archive`
+    (`include/donkey/binary/archive.h`, `src/binary/archive.cpp`) reads the System V and GNU
+    names (the `//` table and `/<offset>`), the BSD `#1/<length>` names and the symbol
+    tables, with bounded member counts, names and offsets, and returns a partial index
+    at the first malformed header. `donkey-cli archive list <file> [--json]` prints the
+    members. Evidence: a GNU `ar` archive (`tests/fixtures/archives/libcheck.a`) lists the
+    same object members as `ar t` (`cli.archive_list_gnu`); eleven `Archive.*` unit tests
+    cover the BSD form, padding, truncation, the member limit and sanitizing; `fuzz_archive`
+    ran 4.2 million inputs in 60 s under ASan and UBSan with no finding. The archive
+    members are not yet opened as binaries.
+  - **Status (relocations):** PARTIAL. Done: an ELF relocatable object (`ET_REL`) is laid
+    out from `kObjectBase` (0x1000), its allocated sections are copied and patched, and its
+    symbols take their layout addresses (`link_relocatable_object`,
+    `include/donkey/binary/relocate.h`, called from `load_binary`). Applied: x86-64 `64`,
+    `PC32`, `PLT32`, `32` and `32S`; AArch64 `ABS64`, `CALL26`, `JUMP26` and `PREL32`.
+    A relocation that cannot be applied is a diagnostic and sets `partial`. A call or
+    data reference to a symbol the object does not define is `elf.relocation_unresolved`:
+    the second object is needed for it, which is G15-T2. Evidence: `Relocate.*` (x86-64,
+    built with GCC) and `RelocateAArch64.*` (built with clang for AArch64): the data
+    pointer holds its target's address, a call reaches its callee, and the unresolved
+    call is reported. `fuzz_binary` runs both objects as seeds (60 s and 45 s, no
+    finding). Not done: GOT-based relocations (`GOTPCREL`), the TLS types, the AArch64
+    page and `LO12` forms (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols, and
+    the relocations of non-allocated sections (debug information).
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.
+  - **Status:** PARTIAL. Done: Intel HEX and Motorola S-records (`decode_records`,
+    `include/donkey/binary/records.h`, `src/binary/records.cpp`). A file whose first line is
+    a record is decoded into one flat image at its lowest address, with 0xFF in the gaps,
+    and analysed as a raw image; the start address becomes the entry point. A malformed
+    record is an error that names its line, never a raw load. Evidence: eight `Records.*`
+    unit tests (both formats, checksums, unknown types, records after the end, the size
+    limit, detection, and a file loaded through `load_binary`), and `fuzz_records` ran 3.7
+    million inputs in 46 s under ASan and UBSan with no finding. The ELF core reader
+    (`read_elf_core`) gives the threads and file mappings, and the memory is the PT_LOAD
+    segments. **Done:** Windows minidumps (`read_minidump`, `read_minidump_memory`, `minidump.h`):
+    the architecture, exception, threads with x86-64 registers, modules with UTF-16 names,
+    and the memory ranges, read by address. Evidence: six `MinidumpReader.*` unit tests on a
+    dump made by `tests/fixtures/minidump/make_sample_minidump.py` (which follows Microsoft's
+    documented layout, not Windows output), `cli.core_minidump`, and the new
+    `fuzz/fuzz_minidump.cpp` harness, which compiles with clang (run not yet done). Not done:
+    a dump written by Windows has not been checked; other architectures keep their threads
+    without registers; the architecture for a raw record image is still supplied by the caller.
 
 ### G16 Scale
 

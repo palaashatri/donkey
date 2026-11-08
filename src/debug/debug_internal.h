@@ -81,6 +81,13 @@ class LocalDebugAdapter : public DebugAdapter {
   [[nodiscard]] Result<bool> step_out() override;
   [[nodiscard]] Result<Breakpoint> set_breakpoint(std::uint64_t address) override;
   [[nodiscard]] Result<bool> remove_breakpoint(std::uint64_t id_or_address) override;
+// Hardware watchpoints exist only in the Linux backend (native_linux.cpp, x86-64). Elsewhere the
+// base DebugAdapter answers debug.watchpoints_unsupported.
+#if defined(__linux__) && defined(__x86_64__)
+  [[nodiscard]] Result<Watchpoint> set_watchpoint(std::uint64_t address, std::uint8_t length,
+                                                  WatchKind kind) override;
+  [[nodiscard]] Result<bool> remove_watchpoint(std::uint64_t id) override;
+#endif
   [[nodiscard]] Result<std::vector<std::byte>> read_memory(std::uint64_t address,
                                                            std::size_t size) override;
   [[nodiscard]] Result<std::size_t> write_memory(std::uint64_t address,

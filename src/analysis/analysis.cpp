@@ -1,6 +1,8 @@
 #include "donkey/analysis/analysis.h"
 
 #include <algorithm>
+#include <iterator>
+#include <limits>
 #include <optional>
 #include <set>
 #include <tuple>
@@ -38,6 +40,79 @@ std::string synthetic_function_name(std::uint64_t address) {
     }
   }
   return out;
+}
+
+/// Disjoint, sorted [start, end) byte ranges covering every user data range (G12-T1). Ranges
+/// that overlap or touch are merged, and a range whose end would pass the top of the address
+/// space is ignored.
+using ByteRanges = std::vector<std::pair<std::uint64_t, std::uint64_t>>;
+
+ByteRanges merged_user_data(const std::vector<UserDataRange>& ranges) {
+  ByteRanges spans;
+  for (const UserDataRange& range : ranges) {
+    const std::uint64_t length = range.byte_length();
+    if (length == 0 || range.address > std::numeric_limits<std::uint64_t>::max() - length) {
+      continue;
+    }
+    spans.emplace_back(range.address, range.address + length);
+  }
+  std::sort(spans.begin(), spans.end());
+  ByteRanges merged;
+  for (const auto& [start, end] : spans) {
+    if (!merged.empty() && start <= merged.back().second) {
+      merged.back().second = std::max(merged.back().second, end);
+    } else {
+      merged.emplace_back(start, end);
+    }
+  }
+  return merged;
+}
+
+bool in_user_data(const ByteRanges& user_data, std::uint64_t address) {
+  const auto after = std::upper_bound(
+      user_data.begin(), user_data.end(), address,
+      [](std::uint64_t value, const std::pair<std::uint64_t, std::uint64_t>& span) {
+        return value < span.first;
+      });
+  if (after == user_data.begin()) {
+    return false;
+  }
+  return address < std::prev(after)->second;
+}
+
+/// One part of an executable section that the sweep decodes: `size` bytes at `address`, which
+/// are at `file_offset` in the file.
+struct CodePiece {
+  std::uint64_t address = 0;
+  std::uint64_t file_offset = 0;
+  std::uint64_t size = 0;
+};
+
+/// The parts of `section` outside every user data range, in address order. An empty result
+/// means the whole section is user data.
+std::vector<CodePiece> code_pieces(const Section& section, const ByteRanges& user_data) {
+  const std::uint64_t section_start = section.address;
+  const std::uint64_t section_end =
+      section.file_size > std::numeric_limits<std::uint64_t>::max() - section_start
+          ? std::numeric_limits<std::uint64_t>::max()
+          : section_start + section.file_size;
+  std::vector<CodePiece> pieces;
+  std::uint64_t cursor = section_start;
+  const auto emit = [&](std::uint64_t start, std::uint64_t end) {
+    if (start < end) {
+      pieces.push_back(
+          CodePiece{start, section.file_offset + (start - section_start), end - start});
+    }
+  };
+  for (const auto& [start, end] : user_data) {
+    if (end <= section_start || start >= section_end) {
+      continue;
+    }
+    emit(cursor, std::max(cursor, std::min(start, section_end)));
+    cursor = std::max(cursor, std::min(end, section_end));
+  }
+  emit(cursor, section_end);
+  return pieces;
 }
 
 void fold_aarch64_data_references(std::vector<Instruction>& instructions) {
@@ -285,6 +360,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
                                       "analysis was cancelled");
   }
 
+  const ByteRanges user_data = merged_user_data(options.user_data_ranges);
   std::optional<Decoder> decoder;
   auto created = Decoder::create(image.architecture, image.endian);
   if (created) {
@@ -315,61 +391,68 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
                              "executable section is not backed by the file", section.file_offset));
         continue;
       }
-      auto bytes = file.subspan(static_cast<std::size_t>(section.file_offset),
-                                static_cast<std::size_t>(section.file_size));
-      const std::size_t remaining = options.max_instructions - decoded;
-      auto stream = decoder->decode(bytes, section.address, remaining);
-      if (!stream) {
-        result.partial = true;
-        result.diagnostics.push_back(stream.diagnostic());
-        continue;
-      }
-
-      if (image.architecture == Architecture::AArch64) {
-        fold_aarch64_data_references(stream.value().instructions);
-      }
-
-      decoded += stream.value().instructions.size();
-      for (const Instruction& instruction : stream.value().instructions) {
-        if (instruction.direct_target.has_value()) {
-          XrefKind kind = XrefKind::Jump;
-          if (instruction.classification == InstructionClass::Call) {
-            kind = XrefKind::Call;
-          }
-          const std::tuple<std::uint64_t, std::uint64_t, std::uint8_t> key{
-              instruction.address, instruction.direct_target.value(),
-              static_cast<std::uint8_t>(kind)};
-          if (seen_xrefs.insert(key).second) {
-            result.xrefs.push_back(
-                Xref{instruction.address, instruction.direct_target.value(), kind});
-          }
+      // The section is decoded in the parts the user did not declare as data (G12-T1). A part
+      // is decoded from its own address, so the instructions keep their true addresses.
+      for (const CodePiece& piece : code_pieces(section, user_data)) {
+        if (decoded >= options.max_instructions) {
+          break;
         }
-        for (const std::uint64_t reference : instruction.data_references) {
-          const std::tuple<std::uint64_t, std::uint64_t, std::uint8_t> key{
-              instruction.address, reference, static_cast<std::uint8_t>(XrefKind::Data)};
-          if (seen_xrefs.insert(key).second) {
-            result.xrefs.push_back(Xref{instruction.address, reference, XrefKind::Data});
-          }
+        auto bytes = file.subspan(static_cast<std::size_t>(piece.file_offset),
+                                  static_cast<std::size_t>(piece.size));
+        const std::size_t remaining = options.max_instructions - decoded;
+        auto stream = decoder->decode(bytes, piece.address, remaining);
+        if (!stream) {
+          result.partial = true;
+          result.diagnostics.push_back(stream.diagnostic());
+          continue;
         }
-        result.instructions.push_back(instruction);
-      }
-      if (stream.value().invalid_bytes != 0) {
-        // Data in code or encodings the decoder does not know: skipped, so
-        // the code after them is still decoded, but the sweep is Partial.
-        result.partial = true;
-        result.diagnostics.push_back(Diagnostic::make(
-            Status::Partial, "analysis.undecodable_bytes",
-            std::to_string(stream.value().invalid_bytes) + " undecodable byte(s) skipped in '" +
-                section.name + "'",
-            section.file_offset + (stream.value().first_invalid_address - section.address)));
-      }
-      if (stream.value().truncated) {
-        result.partial = true;
-        result.diagnostics.push_back(Diagnostic::make(
-            Status::Partial,
-            stream.value().stop_reason.empty() ? "analysis.decode_stopped"
-                                               : stream.value().stop_reason,
-            "disassembly stopped inside section '" + section.name + "'", section.file_offset));
+
+        if (image.architecture == Architecture::AArch64) {
+          fold_aarch64_data_references(stream.value().instructions);
+        }
+
+        decoded += stream.value().instructions.size();
+        for (const Instruction& instruction : stream.value().instructions) {
+          if (instruction.direct_target.has_value()) {
+            XrefKind kind = XrefKind::Jump;
+            if (instruction.classification == InstructionClass::Call) {
+              kind = XrefKind::Call;
+            }
+            const std::tuple<std::uint64_t, std::uint64_t, std::uint8_t> key{
+                instruction.address, instruction.direct_target.value(),
+                static_cast<std::uint8_t>(kind)};
+            if (seen_xrefs.insert(key).second) {
+              result.xrefs.push_back(
+                  Xref{instruction.address, instruction.direct_target.value(), kind});
+            }
+          }
+          for (const std::uint64_t reference : instruction.data_references) {
+            const std::tuple<std::uint64_t, std::uint64_t, std::uint8_t> key{
+                instruction.address, reference, static_cast<std::uint8_t>(XrefKind::Data)};
+            if (seen_xrefs.insert(key).second) {
+              result.xrefs.push_back(Xref{instruction.address, reference, XrefKind::Data});
+            }
+          }
+          result.instructions.push_back(instruction);
+        }
+        if (stream.value().invalid_bytes != 0) {
+          // Data in code or encodings the decoder does not know: skipped, so
+          // the code after them is still decoded, but the sweep is Partial.
+          result.partial = true;
+          result.diagnostics.push_back(Diagnostic::make(
+              Status::Partial, "analysis.undecodable_bytes",
+              std::to_string(stream.value().invalid_bytes) + " undecodable byte(s) skipped in '" +
+                  section.name + "'",
+              section.file_offset + (stream.value().first_invalid_address - section.address)));
+        }
+        if (stream.value().truncated) {
+          result.partial = true;
+          result.diagnostics.push_back(Diagnostic::make(
+              Status::Partial,
+              stream.value().stop_reason.empty() ? "analysis.decode_stopped"
+                                                 : stream.value().stop_reason,
+              "disassembly stopped inside section '" + section.name + "'", section.file_offset));
+        }
       }
     }
   }
@@ -411,10 +494,20 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       user_defined.insert(address);
     }
   }
+  for (const std::uint64_t address : options.user_code_starts) {
+    if (executable_contains(image, address)) {
+      seeds.insert(address);
+      user_defined.insert(address);
+    }
+  }
   for (const std::uint64_t address : options.removed_function_starts) {
     if (user_defined.count(address) == 0) {
       seeds.erase(address);
     }
+  }
+  // A user data range is data, so no start inside one survives, whoever proposed it.
+  for (auto it = seeds.begin(); it != seeds.end();) {
+    it = in_user_data(user_data, *it) ? seeds.erase(it) : std::next(it);
   }
 
   for (const std::uint64_t address : seeds) {

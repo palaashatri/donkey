@@ -1,5 +1,14 @@
 include(GoogleTest)
 
+# The package presets link the shipped executables with a static libstdc++ (DONKEY_STATIC_RUNTIME,
+# set in the top-level CMakeLists). The test targets here link it dynamically. A static libstdc++
+# adds its own typeinfo objects, and its __cxa_pure_virtual is not in the dynamic symbols, so the
+# RTTI reader names the pure-virtual slots differently and reports classes the fixture does not
+# define. donkey-cli, which the tests run, keeps the static runtime.
+if(DONKEY_STATIC_RUNTIME AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set_property(DIRECTORY PROPERTY LINK_OPTIONS)
+endif()
+
 add_library(test_plugin_valid MODULE fixtures/plugins/valid_plugin.c)
 target_include_directories(test_plugin_valid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../include)
 
@@ -40,12 +49,34 @@ if(NOT MSVC)
 endif()
 # The dynamic-module fixture `debuggee load` opens at run time.
 add_library(donkey_test_module SHARED fixtures/debuggee/module.c)
+# Itanium RTTI fixtures (G10-T3): the same source as a PIE and as a non-PIE executable, so
+# the reader is checked on both relocation models. The symbols are kept (no stripping).
+if(NOT MSVC)
+  add_executable(donkey_test_hierarchy fixtures/rtti/hierarchy.cpp)
+  target_compile_options(donkey_test_hierarchy PRIVATE -O0 -g0 -fPIE)
+  target_link_options(donkey_test_hierarchy PRIVATE -pie)
+  add_executable(donkey_test_hierarchy_nopie fixtures/rtti/hierarchy.cpp)
+  target_compile_options(donkey_test_hierarchy_nopie PRIVATE -O0 -g0 -fno-pie)
+  target_link_options(donkey_test_hierarchy_nopie PRIVATE -no-pie)
+endif()
+if(NOT MSVC)
+  # Stack parameters and locals for the frame-slot debug names (G04-T4). The attributes are GCC/Clang.
+  add_library(donkey_test_locals SHARED fixtures/debuggee/locals.c)
+  target_compile_options(donkey_test_locals PRIVATE -O0 -g -fno-omit-frame-pointer -fcf-protection=none)
+endif()
 if(MSVC)
   target_compile_options(donkey_test_debuggee PRIVATE /Od /Oy-)
   target_compile_options(donkey_test_module PRIVATE /Od /Oy-)
 else()
   target_compile_options(donkey_test_debuggee PRIVATE -O0 -g -fno-omit-frame-pointer)
   target_compile_options(donkey_test_module PRIVATE -O0 -g -fno-omit-frame-pointer)
+endif()
+# On macOS the linker leaves the DWARF of an image in its object files. dsymutil gathers it into a
+# .dSYM bundle, which the debug-name tests read; the image itself has no .debug_info section.
+if(APPLE)
+  add_custom_command(TARGET donkey_test_module POST_BUILD
+                     COMMAND dsymutil $<TARGET_FILE:donkey_test_module>
+                     VERBATIM)
 endif()
 target_link_libraries(donkey_test_debuggee PRIVATE ${CMAKE_DL_LIBS} Threads::Threads)
 # Functions described by DW_AT_ranges (GCC hot/cold splitting at -O2).
@@ -65,17 +96,72 @@ foreach(level O0 O2 O3)
   list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_${level})
 endforeach()
 
+# The same source for x86-64-v2 (which adds POPCNT and SSE4.2) at -O3, so that the
+# instructions of a newer baseline are measured too. The flag is x86 only.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+  add_library(donkey_corpus_O3_v2 SHARED corpus/corpus.c)
+  target_compile_options(donkey_corpus_O3_v2 PRIVATE -O3 -march=x86-64-v2 -fno-stack-protector)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_O3_v2)
+endif()
+
+# A dense switch that compilers lower to a code jump table (G03-T3). Kept out
+# of corpus.c so that the corpus function counts do not change.
+add_library(donkey_jump_table_O2 SHARED corpus/jump_table.c)
+if(NOT MSVC)
+  target_compile_options(donkey_jump_table_O2 PRIVATE -O2 -fno-stack-protector)
+endif()
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU")
+  # GCC can move the default path into a .cold part that is laid out below the
+  # entry. The lifter keeps blocks in address order (a conditional branch falls
+  # through to the next block), so such a function is rejected by the verifier.
+  # That limitation is recorded in the support matrix; this fixture keeps the
+  # switch in one part so that it measures the jump table.
+  target_compile_options(donkey_jump_table_O2 PRIVATE -fno-reorder-blocks-and-partition)
+endif()
+list(APPEND DONKEY_CORPUS_LIBRARIES donkey_jump_table_O2)
+
+# Scalar floating-point code (G01-T2 and G01-T3) on x86-64 and AArch64: each host
+# builds its own machine code from the same source. Math errno is off so that sqrt
+# is one instruction and no libm call remains.
+if(NOT MSVC AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64|aarch64|arm64|ARM64)$")
+  add_library(donkey_corpus_fp_O0 SHARED corpus/corpus_fp.c)
+  target_compile_options(donkey_corpus_fp_O0 PRIVATE -O0 -fno-stack-protector -fno-math-errno
+                         -ffp-contract=off)
+  list(APPEND DONKEY_CORPUS_LIBRARIES donkey_corpus_fp_O0)
+endif()
+
 add_executable(donkey_unit_tests
   unit/acceptance_test.cpp
+  unit/archive_test.cpp
+  unit/relocate_test.cpp
+  unit/relocate_aarch64_test.cpp
+  unit/demangle_test.cpp
+  unit/demangle_msvc_test.cpp
+  unit/rtti_test.cpp
+  unit/core_test.cpp
+  unit/relocate_tls_test.cpp
+  unit/inflate_test.cpp
+  unit/zstd_test.cpp
+  unit/debug_compressed_test.cpp
+  unit/debug_separate_test.cpp
+  unit/pdb_test.cpp
+  unit/minidump_test.cpp
+  unit/relocate_got_test.cpp
+  unit/relocate_common_test.cpp
+  unit/records_test.cpp
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
+  unit/decode_isa_test.cpp
+  unit/user_ranges_test.cpp
   unit/foundation_test.cpp
+  unit/json_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
+  unit/local_names_test.cpp
   unit/large_file_test.cpp
   unit/native_debug_test.cpp
   unit/patch_test.cpp
@@ -95,15 +181,25 @@ target_compile_definitions(donkey_unit_tests PRIVATE
   TEST_PLUGIN_NON_TERMINATED_PATH="$<TARGET_FILE:test_plugin_non_terminated>"
   DONKEY_TEST_DEBUGGEE_PATH="$<TARGET_FILE:donkey_test_debuggee>"
   DONKEY_TEST_MODULE_PATH="$<TARGET_FILE:donkey_test_module>"
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_PATH="$<TARGET_FILE:donkey_test_hierarchy>">
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_HIERARCHY_NOPIE_PATH="$<TARGET_FILE:donkey_test_hierarchy_nopie>">
+  $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_TEST_LOCALS_PATH="$<TARGET_FILE:donkey_test_locals>">
   $<$<NOT:$<BOOL:${MSVC}>>:DONKEY_RANGES_FIXTURE_PATH="$<TARGET_FILE:donkey_ranges_fixture>">
   DONKEY_CORPUS_O0_PATH="$<TARGET_FILE:donkey_corpus_O0>"
   DONKEY_CORPUS_O2_PATH="$<TARGET_FILE:donkey_corpus_O2>"
   DONKEY_CORPUS_O3_PATH="$<TARGET_FILE:donkey_corpus_O3>"
+  $<$<TARGET_EXISTS:donkey_corpus_O3_v2>:DONKEY_CORPUS_O3_V2_PATH="$<TARGET_FILE:donkey_corpus_O3_v2>">
+  DONKEY_JUMP_TABLE_O2_PATH="$<TARGET_FILE:donkey_jump_table_O2>"
+  $<$<TARGET_EXISTS:donkey_corpus_fp_O0>:DONKEY_CORPUS_FP_O0_PATH="$<TARGET_FILE:donkey_corpus_fp_O0>">
   DONKEY_CORPUS_REPORT="${CMAKE_CURRENT_BINARY_DIR}/decompiler-corpus-report.json"
   DONKEY_CORPUS_COMPILER="${CMAKE_C_COMPILER_ID} ${CMAKE_C_COMPILER_VERSION} ${CMAKE_SYSTEM_PROCESSOR}"
 )
 if(NOT MSVC)
   add_dependencies(donkey_unit_tests donkey_ranges_fixture)
+endif()
+if(NOT MSVC)
+  add_dependencies(donkey_unit_tests donkey_test_hierarchy donkey_test_hierarchy_nopie)
+  add_dependencies(donkey_unit_tests donkey_test_locals)
 endif()
 add_dependencies(donkey_unit_tests donkey_demo donkey_test_debuggee donkey_test_module ${DONKEY_CORPUS_LIBRARIES} test_plugin_valid test_plugin_bad_abi test_plugin_crash test_plugin_hang test_plugin_ctor_crash test_plugin_non_terminated)
 donkey_apply_warnings(donkey_unit_tests)
@@ -130,6 +226,53 @@ if(CMAKE_BUILD_TYPE STREQUAL "Release")
   set_tests_properties(large.load_and_analyse_1gib PROPERTIES TIMEOUT 600 LABELS large)
 endif()
 
+add_test(NAME cli.serve_session
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve.cmake)
+set_tests_properties(cli.serve_session PROPERTIES TIMEOUT 300)
+add_test(NAME cli.serve_project
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_serve_project.cmake)
+set_tests_properties(cli.serve_project PROPERTIES TIMEOUT 300)
+add_test(NAME cli.batch_script
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_batch.cmake)
+set_tests_properties(cli.batch_script PROPERTIES TIMEOUT 300)
+# G12-T3: local names saved in a project are shown by the decompiler, a keyword name is refused,
+# and a key that names nothing leaves a note.
+add_test(NAME cli.local_names
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DFIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/names/add_three
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/check_local_names.cmake)
+set_tests_properties(cli.local_names PROPERTIES TIMEOUT 300)
+
+# The optional Python client (G11-T2) is tested with pytest when Python and pytest are installed.
+# The core build never depends on it, so the test is not registered without them.
+find_package(Python3 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  execute_process(COMMAND "${Python3_EXECUTABLE}" -c "import pytest"
+                  RESULT_VARIABLE donkey_pytest_status
+                  OUTPUT_QUIET ERROR_QUIET)
+  if(donkey_pytest_status EQUAL 0)
+    add_test(NAME python.rpc_client
+             COMMAND ${Python3_EXECUTABLE} -m pytest -p no:cacheprovider -q
+                     ${PROJECT_SOURCE_DIR}/bindings/python/tests)
+    set_tests_properties(python.rpc_client PROPERTIES
+      ENVIRONMENT "DONKEY_CLI=$<TARGET_FILE:donkey-cli>;PYTHONDONTWRITEBYTECODE=1"
+      TIMEOUT 300)
+  endif()
+endif()
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
 set_tests_properties(cli.callgraph_json PROPERTIES
@@ -146,8 +289,9 @@ set_tests_properties(deps.checker_rejects_ui_link PROPERTIES WILL_FAIL TRUE)
 
 add_test(NAME cli.debuginfo_json
          COMMAND donkey-cli debuginfo $<TARGET_FILE:donkey_test_module> --json)
-if(APPLE OR MSVC)
-  # No DWARF in the executable with these toolchains: the command says so.
+if(MSVC)
+  # No DWARF with the MSVC toolchain: the command says so. On macOS the DWARF is read from the
+  # dSYM bundle that dsymutil writes beside the module (see above), so the test expects it.
   set_tests_properties(cli.debuginfo_json PROPERTIES WILL_FAIL TRUE)
 else()
   set_tests_properties(cli.debuginfo_json PROPERTIES
@@ -156,6 +300,27 @@ endif()
 add_test(NAME cli.debuginfo_reports_absence
          COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
 set_tests_properties(cli.debuginfo_reports_absence PROPERTIES WILL_FAIL TRUE)
+# G07-T2: the Mach-O executable's .dSYM is found by its UUID, and a file named with --debug-file is
+# used only when it matches the executable (the mismatch below must fail).
+add_test(NAME cli.debuginfo_dsym
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg)
+set_tests_properties(cli.debuginfo_dsym PROPERTIES
+  PASS_REGULAR_EXPRESSION "separate debug file: .*dbg\\.dSYM[/\\\\]Contents[/\\\\]Resources[/\\\\]DWARF[/\\\\]dbg")
+add_test(NAME cli.debuginfo_debug_file
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
+                 --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg.dSYM/Contents/Resources/DWARF/dbg)
+set_tests_properties(cli.debuginfo_debug_file PROPERTIES
+  PASS_REGULAR_EXPRESSION "DWARF 4-4, 1 compile units")
+add_test(NAME cli.debuginfo_debug_file_mismatch
+         COMMAND donkey-cli debuginfo ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg
+                 --debug-file ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)
+set_tests_properties(cli.debuginfo_debug_file_mismatch PROPERTIES WILL_FAIL TRUE)
+# G15-T3: a Windows minidump is recognised by its signature and summarised: the architecture, the
+# exception and the threads it records.
+add_test(NAME cli.core_minidump
+         COMMAND donkey-cli core ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/minidump/sample.dmp)
+set_tests_properties(cli.core_minidump PROPERTIES
+  PASS_REGULAR_EXPRESSION "minidump: x86-64.*exception 0xc0000005 in thread 4660.*thread 4660")
 
 add_test(NAME sbom.valid
   COMMAND ${CMAKE_COMMAND} -DSBOM=${PROJECT_BINARY_DIR}/donkey.spdx.json
@@ -185,6 +350,23 @@ add_test(NAME cli.info_elf_json
          COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.info_elf_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\": 1.*\"format\": \"ELF\"")
+
+# A C++ export keeps its raw name and gains its demangled form, in both outputs (G10-T4).
+add_test(NAME cli.info_demangles_itanium_exports
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/cpp-exports-x86_64.so)
+set_tests_properties(cli.info_demangles_itanium_exports PROPERTIES
+  PASS_REGULAR_EXPRESSION "export   _ZN6shapes4areaERKNS_3BoxEi +0x[0-9a-f]+  \\[shapes::area\\(shapes::Box const&, int\\)\\]")
+add_test(NAME cli.info_demangles_itanium_exports_json
+         COMMAND donkey-cli info ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/cpp-exports-x86_64.so --json)
+set_tests_properties(cli.info_demangles_itanium_exports_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"_ZN6shapes4areaERKNS_3BoxEi\", \"demangled\": \"shapes::area\\(shapes::Box const&, int\\)\"")
+
+# The core command lists the thread and the mappings of an ELF core (G15-T3), with the values
+# gdb reads from the same core.
+add_test(NAME cli.core_lists_the_thread
+         COMMAND donkey-cli core ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/core/sleeper.core)
+set_tests_properties(cli.core_lists_the_thread PROPERTIES
+  PASS_REGULAR_EXPRESSION "core of sleeper: 1 thread, 5 mappings\nthread 8251  signal 0  pc 0x4112f4")
 
 if(NOT WIN32)
   add_test(NAME cli.info_isolated_json
@@ -298,24 +480,38 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   set(DONKEY_UI_CONFIG_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-config)
   file(MAKE_DIRECTORY ${DONKEY_UI_REPORT_DIR})
   function(donkey_ui_script name)
-    cmake_parse_arguments(ARG "" "CONFIG;RENDERER" "" ${ARGN})
+    # FILE opens a file other than the debuggee (a fixture under tests/fixtures).
+    cmake_parse_arguments(ARG "" "CONFIG;RENDERER;FILE" "" ${ARGN})
     if(NOT ARG_CONFIG)
       set(ARG_CONFIG ${name})
     endif()
     if(NOT ARG_RENDERER)
       set(ARG_RENDERER software)
     endif()
+    if(ARG_FILE)
+      set(ARG_OPEN ${ARG_FILE})
+    else()
+      set(ARG_OPEN $<TARGET_FILE:donkey_test_debuggee>)
+    endif()
     add_test(NAME ui.script_${name}
              COMMAND donkey --renderer ${ARG_RENDERER}
                      --config-dir ${DONKEY_UI_CONFIG_DIR}/${ARG_CONFIG}
                      --ui-script ${CMAKE_CURRENT_SOURCE_DIR}/ui/${name}.donkeyui
                      --ui-report ${DONKEY_UI_REPORT_DIR}/${name}.json
-                     $<TARGET_FILE:donkey_test_debuggee>)
+                     ${ARG_OPEN})
     set_tests_properties(ui.script_${name} PROPERTIES
       TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
       FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
   endfunction()
   donkey_ui_script(keyboard_ime)
+  donkey_ui_script(edits)
+  # The data script expects the x86-64 Linux debuggee's interpreter path at a fixed offset (0x318),
+  # so it runs only where that debuggee is built. Other hosts build a different interpreter path or
+  # no .interp at all.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(data)
+  endif()
+  donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)
   donkey_ui_script(display_dpi_device)
@@ -367,8 +563,9 @@ set_tests_properties(cli.cfg_elf_json PROPERTIES
 
 add_test(NAME cli.decompile_elf_json
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
+# _start contains a direct call, whose effects are not modelled, so it is Partial.
 set_tests_properties(cli.decompile_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Complete\".*u64 _start")
+  PASS_REGULAR_EXPRESSION "\"name\": \"_start\".*\"status\": \"Partial\".*u64 _start")
 
 add_test(NAME cli.decompile_elf_function_filter
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
@@ -390,7 +587,7 @@ add_test(NAME cli.decompile_elf_i386
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
 set_tests_properties(cli.decompile_elf_i386 PROPERTIES
   PASS_REGULAR_EXPRESSION
-    "\"name\": \"_start\".*\"status\": \"Complete\".*u32 _start\\(void\\).*esp = esp - 0x4")
+    "\"name\": \"_start\".*\"status\": \"Partial\".*u32 _start\\(void\\).*esp = esp - 0x4")
 
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
@@ -402,12 +599,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 4.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 7.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 4.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 7.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
@@ -438,11 +635,56 @@ set_tests_properties(cli.project_rejects_unknown_subcommand PROPERTIES WILL_FAIL
 
 set(DONKEY_CLI_ANN_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-annotations.db")
 
+# C types in a project (G05-T4): add a header, list the types, apply one to an address.
+set(DONKEY_CLI_TYPES_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-types.db")
+# --clear does not empty the type table, so the database is removed first: a second
+# run of the suite must start from the same state as the first.
+add_test(NAME cli.project_type_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPES_DB}
+                 ${DONKEY_CLI_TYPES_DB}-shm ${DONKEY_CLI_TYPES_DB}-wal)
+add_test(NAME cli.project_type_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --clear --json)
+set_tests_properties(cli.project_type_save PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema\": 7.*\"integrity\": true"
+  DEPENDS cli.project_type_reset)
+
+add_test(NAME cli.project_type_add
+         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
+set_tests_properties(cli.project_type_add PROPERTIES
+  PASS_REGULAR_EXPRESSION "Added [1-9][0-9]* types from"
+  DEPENDS cli.project_type_save)
+
+add_test(NAME cli.project_type_list_json
+         COMMAND donkey-cli project type list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_list_json PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"kind\": \"struct\".*\"name\": \"point\".*\"size\": 8.*\"kind\": \"function\".*\"name\": \"point_sum\""
+  DEPENDS cli.project_type_add)
+
+add_test(NAME cli.project_type_apply_data
+         COMMAND donkey-cli project type apply ${DONKEY_CLI_TYPES_DB} 1 0x400100 point)
+set_tests_properties(cli.project_type_apply_data PROPERTIES
+  PASS_REGULAR_EXPRESSION "Applied point to 0x400100 in image 1"
+  DEPENDS cli.project_type_add)
+
+add_test(NAME cli.project_type_apply_prototype
+         COMMAND donkey-cli project type apply ${DONKEY_CLI_TYPES_DB} 1 0x400200 point_sum --json)
+set_tests_properties(cli.project_type_apply_prototype PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"applied_as\": \"prototype\""
+  DEPENDS cli.project_type_apply_data)
+
+add_test(NAME cli.project_type_rejects_bad_header
+         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bad.h)
+set_tests_properties(cli.project_type_rejects_bad_header PROPERTIES WILL_FAIL TRUE
+  DEPENDS cli.project_type_add)
+
 add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 4.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 7.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -493,14 +735,14 @@ add_test(NAME cli.project_backup_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_backup_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 4"
+  PASS_REGULAR_EXPRESSION "\"schema\": 7"
   DEPENDS cli.project_annotations_after_clear)
 
 add_test(NAME cli.project_backup_json
          COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
                  --json)
 set_tests_properties(cli.project_backup_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 4.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 7.*\"integrity\": true"
   DEPENDS cli.project_backup_save)
 
 add_test(NAME cli.project_backup_refuses_overwrite
@@ -517,7 +759,7 @@ set_tests_properties(cli.project_backup_force PROPERTIES
 add_test(NAME cli.project_restore_json
          COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
 set_tests_properties(cli.project_restore_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 4.*\"integrity\": true.*\"images\": 1"
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 7.*\"integrity\": true.*\"images\": 1"
   DEPENDS cli.project_backup_force)
 
 add_test(NAME cli.project_restore_rejects_non_database
@@ -548,6 +790,21 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
                    --break donkey_debuggee_tick --run --json)
   set_tests_properties(cli.debug_native_run_json PROPERTIES
     PASS_REGULAR_EXPRESSION "\"adapter\": \"native\".*\"stop_reason\": \"Entrypoint\".*\"stops\": \\[.*\"Breakpoint\".*donkey_debuggee_tick.*\"Breakpoint\".*\"Breakpoint\".*\"exit_code\": 42")
+  # Hardware watchpoints from the command line (G14-T5): the debuggee writes its counter once per
+  # tick, so the watch stops three times, then the program exits with its own code.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    add_test(NAME cli.debug_native_watch_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --watch donkey_debuggee_counter --run --json)
+    set_tests_properties(cli.debug_native_watch_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"Watchpoint\".*\"Watchpoint\".*\"exit_code\": 42")
+  endif()
+  # The simulation adapter has no watchpoints, and the command says so rather than pretending.
+  add_test(NAME cli.debug_mock_watch_is_unsupported
+           COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                   --mock --watch _start)
+  set_tests_properties(cli.debug_mock_watch_is_unsupported PROPERTIES
+    PASS_REGULAR_EXPRESSION "debug\\.watchpoints_unsupported")
 else()
   add_test(NAME cli.debug_native_unsupported
            COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>)
@@ -644,3 +901,13 @@ foreach(_donkey_test IN LISTS _donkey_all_tests)
     set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_cli_project_db)
   endif()
 endforeach()
+
+# Static archives (G15-T1): a real GNU ar archive lists the members that `ar t` lists.
+add_test(NAME cli.archive_list_gnu
+         COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/archives/libcheck.a --json)
+set_tests_properties(cli.archive_list_gnu PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"a_function_with_a_rather_long_name.o\".*\"name\": \"other.o\"")
+
+add_test(NAME cli.archive_rejects_a_non_archive
+         COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
+set_tests_properties(cli.archive_rejects_a_non_archive PROPERTIES WILL_FAIL TRUE)

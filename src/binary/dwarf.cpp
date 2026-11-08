@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <map>
 #include <optional>
 #include <set>
@@ -14,7 +15,10 @@
 #include <tuple>
 #include <unordered_map>
 
+#include "donkey/binary/byte_reader.h"
 #include "donkey/binary/debug_info.h"
+#include "donkey/binary/inflate.h"
+#include "donkey/binary/zstd.h"
 
 namespace donkey {
 namespace {
@@ -45,6 +49,7 @@ constexpr std::uint16_t kTagRvalueReferenceType = 0x42;
 
 constexpr std::uint16_t kAtLocation = 0x02;
 constexpr std::uint16_t kAtName = 0x03;
+constexpr std::uint16_t kAtFrameBase = 0x40;
 constexpr std::uint16_t kAtByteSize = 0x0b;
 constexpr std::uint16_t kAtStmtList = 0x10;
 constexpr std::uint16_t kAtLowPc = 0x11;
@@ -55,6 +60,7 @@ constexpr std::uint16_t kAtAbstractOrigin = 0x31;
 constexpr std::uint16_t kAtCount = 0x37;
 constexpr std::uint16_t kAtDataMemberLocation = 0x38;
 constexpr std::uint16_t kAtDeclFile = 0x3a;
+constexpr std::uint16_t kAtEncoding = 0x3e;
 constexpr std::uint16_t kAtDeclLine = 0x3b;
 constexpr std::uint16_t kAtDeclaration = 0x3c;
 constexpr std::uint16_t kAtRanges = 0x55;
@@ -567,6 +573,19 @@ class Reader {
            form == kFormUdata || form == kFormSdata || form == kFormImplicitConst;
   }
 
+  /// DW_OP_fbreg with its signed offset, the whole location expression.
+  std::optional<std::int64_t> fbreg_offset(const Value& v) const {
+    if (v.block.empty()) {
+      return std::nullopt;
+    }
+    Cursor c(v.block, s_.big_endian);
+    if (c.u8() != 0x91) {  // DW_OP_fbreg
+      return std::nullopt;
+    }
+    const std::int64_t offset = c.sleb();
+    return c.ok() && c.at_end() ? std::optional<std::int64_t>(offset) : std::nullopt;
+  }
+
   /// DW_OP_addr / DW_OP_addrx at the start of a location expression.
   std::optional<std::uint64_t> static_location(const Value& v, const Unit& unit) const {
     if (v.block.empty()) {
@@ -704,10 +723,18 @@ class Reader {
     std::optional<Value> high_pc;
     std::uint64_t type = 0;
     std::uint64_t byte_size = 0;
+    std::uint8_t encoding = 0;
     std::uint64_t count = 0;
+    bool has_count = false;  ///< DW_AT_count was given (it may be zero)
     std::optional<std::int64_t> upper_bound;
     std::uint64_t member_offset = 0;
     std::optional<std::uint64_t> location;
+    /// DW_OP_fbreg: the offset from the frame base, for a variable kept in the frame.
+    std::optional<std::int64_t> frame_offset;
+    /// DW_AT_frame_base is DW_OP_call_frame_cfa (the subprogram's frame offsets are from the CFA).
+    bool frame_base_cfa = false;
+    /// DW_AT_frame_base is DW_OP_reg6 (rbp, as Clang emits at -O0): the offsets are from rbp.
+    bool frame_base_rbp = false;
     std::uint64_t specification = 0;
     std::uint64_t abstract_origin = 0;
     std::uint64_t decl_file = 0;
@@ -717,6 +744,28 @@ class Reader {
     bool declaration = false;
     bool has_ranges = false;  // DW_AT_ranges: code in range lists, not low_pc/high_pc
   };
+
+  /// Records a parameter or local of the subprogram at `parent` that the frame holds at a
+  /// DW_OP_fbreg offset, when that subprogram's frame base is the CFA.
+  void add_stack_slot(std::uint64_t parent, const Entry& e, bool is_parameter) {
+    if (!e.frame_offset.has_value() || cfa_subprograms_.count(parent) == 0) {
+      return;
+    }
+    const auto it = function_index_.find(parent);
+    if (it == function_index_.end()) {
+      return;
+    }
+    DebugStackSlot slot;
+    slot.name = e.name;
+    slot.type = e.type;
+    // rbp is the CFA minus 16 after the standard `push rbp; mov rbp, rsp` prologue, so an
+    // offset from rbp is 16 less than the same offset from the CFA. Only functions whose frame
+    // base is rbp are adjusted; a frame base of rbp is a claim about the prologue, not checked.
+    slot.cfa_offset = *e.frame_offset - (rbp_subprograms_.count(parent) != 0 ? 16 : 0);
+    slot.is_parameter = is_parameter;
+    slot.line = e.decl_line;
+    out_.functions[it->second].stack_slots.push_back(std::move(slot));
+  }
 
   bool read_unit(Cursor& info) {
     Unit unit;
@@ -908,9 +957,15 @@ class Reader {
           e.byte_size = v.u;
         }
         break;
+      case kAtEncoding:
+        if (is_constant_form(v.form)) {
+          e.encoding = static_cast<std::uint8_t>(v.u);
+        }
+        break;
       case kAtCount:
         if (is_constant_form(v.form)) {
           e.count = v.u;
+          e.has_count = true;
         }
         break;
       case kAtUpperBound:
@@ -932,6 +987,15 @@ class Reader {
         break;
       case kAtLocation:
         e.location = static_location(v, unit);
+        e.frame_offset = fbreg_offset(v);
+        break;
+      case kAtFrameBase:
+        if (v.block.size() == 1 &&
+            static_cast<std::uint8_t>(v.block[0]) == 0x9c) {  // DW_OP_call_frame_cfa
+          e.frame_base_cfa = true;
+        } else if (v.block.size() == 1 && static_cast<std::uint8_t>(v.block[0]) == 0x56) {
+          e.frame_base_rbp = true;  // DW_OP_reg6
+        }
         break;
       case kAtSpecification:
         if (v.is_ref) {
@@ -1029,6 +1093,12 @@ class Reader {
         f.line = e.decl_line;
         f.provenance = provenance(e, unit);
         function_index_[e.offset] = out_.functions.size();
+        if (e.frame_base_rbp) {
+          rbp_subprograms_.insert(e.offset);
+        }
+        if (e.frame_base_cfa || e.frame_base_rbp) {
+          cfa_subprograms_.insert(e.offset);
+        }
         out_.functions.push_back(std::move(f));
         return;
       }
@@ -1038,6 +1108,7 @@ class Reader {
             out_.functions[it->second].parameters.push_back(DebugParameter{e.name, e.type});
             pending_parameters_.emplace_back(
                 it->second, out_.functions[it->second].parameters.size() - 1, e.offset);
+            add_stack_slot(parent, e, /*is_parameter=*/true);
           }
         } else if (parent_tag == kTagSubroutineType) {
           if (auto it = out_.types.find(parent); it != out_.types.end()) {
@@ -1063,6 +1134,8 @@ class Reader {
           var.provenance = provenance(e, unit);
           variable_links_.emplace_back(out_.variables.size(), e.specification);
           out_.variables.push_back(std::move(var));
+        } else if (!e.declaration && parent_tag == kTagSubprogram) {
+          add_stack_slot(parent, e, /*is_parameter=*/false);
         }
         return;
       case kTagMember:
@@ -1074,10 +1147,16 @@ class Reader {
         if (auto it = out_.types.find(parent); it != out_.types.end() &&
                                                it->second.kind == DebugTypeKind::Array &&
                                                it->second.element_count == 0) {
-          if (e.count != 0) {
+          // A bound of zero (DW_AT_count 0, or DW_AT_upper_bound -1) is a zero-length array; only
+          // a subrange with neither attribute is unbounded, which makes a flexible array member.
+          if (e.has_count) {
             it->second.element_count = e.count;
-          } else if (e.upper_bound.has_value() && *e.upper_bound >= 0) {
-            it->second.element_count = static_cast<std::uint64_t>(*e.upper_bound) + 1;
+          } else if (e.upper_bound.has_value()) {
+            if (*e.upper_bound >= 0) {
+              it->second.element_count = static_cast<std::uint64_t>(*e.upper_bound) + 1;
+            }
+          } else {
+            it->second.bound_known = false;
           }
         }
         return;
@@ -1141,6 +1220,17 @@ class Reader {
     type.kind = kind;
     type.name = e.name;
     type.byte_size = e.byte_size;
+    // DW_AT_byte_size is optional on a pointer or reference, and llvm-mingw leaves it out. Such a
+    // pointer is as wide as the addresses of its unit.
+    if ((kind == DebugTypeKind::Pointer || kind == DebugTypeKind::Reference) &&
+        type.byte_size == 0) {
+      type.byte_size = unit.address_size;
+    }
+    // An eight-byte scalar in a 32-bit unit is aligned to four (the System V i386 rule).
+    if (kind == DebugTypeKind::Base && type.byte_size == 8 && unit.address_size == 4) {
+      type.alignment = 4;
+    }
+    type.encoding = e.encoding;
     type.target = e.type;
     type.provenance = provenance(e, unit);
     out_.types.emplace(e.offset, std::move(type));
@@ -1251,6 +1341,9 @@ class Reader {
   std::map<std::uint64_t, std::uint64_t> die_types_;
   std::map<std::uint64_t, std::pair<std::string, std::uint32_t>> sources_;
   std::unordered_map<std::uint64_t, std::size_t> function_index_;
+  /// Subprograms whose frame base is DW_OP_call_frame_cfa, by DIE offset.
+  std::set<std::uint64_t> cfa_subprograms_;
+  std::set<std::uint64_t> rbp_subprograms_;  // the subset whose frame base is rbp
   std::vector<std::tuple<std::size_t, std::size_t, std::uint64_t>> pending_parameters_;
   std::vector<std::pair<std::size_t, std::uint64_t>> variable_links_;
 };
@@ -1385,6 +1478,10 @@ const DebugFunction* DebugInfo::function_at(std::uint64_t address) const {
 
 Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std::byte> data,
                                   const DebugInfoOptions& options) {
+  // Decompressed sections are kept here. A deque never moves its elements, so the spans
+  // handed out for earlier sections stay valid.
+  std::deque<std::vector<std::byte>> decompressed;
+  std::optional<Diagnostic> decompression_error;
   auto bytes_of = [&](const Section* section) -> std::optional<Bytes> {
     if (section == nullptr) {
       return Bytes{};
@@ -1393,8 +1490,51 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
         section->file_size > data.size() - section->file_offset) {
       return std::nullopt;
     }
-    return data.subspan(static_cast<std::size_t>(section->file_offset),
-                        static_cast<std::size_t>(section->file_size));
+    const Bytes raw = data.subspan(static_cast<std::size_t>(section->file_offset),
+                                   static_cast<std::size_t>(section->file_size));
+    if (!section->compressed) {
+      return raw;
+    }
+    // SHF_COMPRESSED: an Elf64_Chdr (type, size, alignment) then the stream. zlib
+    // (ELFCOMPRESS_ZLIB = 1) and Zstandard (ELFCOMPRESS_ZSTD = 2) are read; the declared size must
+    // match the stream's output.
+    const std::size_t header = image.is_64_bit() ? 24U : 12U;
+    if (raw.size() < header) {
+      decompression_error =
+          Diagnostic::make(Status::InvalidInput, "dwarf.compressed_header",
+                           "a compressed section has no compression header", section->file_offset);
+      return std::nullopt;
+    }
+    const ByteReader chdr(raw.first(header));
+    const auto type = chdr.u32(0, image.endian);
+    std::uint64_t size = 0;
+    if (image.is_64_bit()) {
+      if (auto declared = chdr.u64(8, image.endian)) {
+        size = declared.value();
+      }
+    } else if (auto declared = chdr.u32(4, image.endian)) {
+      size = declared.value();
+    }
+    if (!type || (type.value() != 1 && type.value() != 2)) {
+      decompression_error = Diagnostic::make(
+          Status::Unsupported, "dwarf.compression_type",
+          "only zlib and zstd compressed debug sections are read", section->file_offset);
+      return std::nullopt;
+    }
+    auto inflated = type.value() == 1 ? inflate_zlib(raw.subspan(header))
+                                      : zstd_decompress(raw.subspan(header));
+    if (!inflated) {
+      decompression_error = inflated.diagnostic();
+      return std::nullopt;
+    }
+    if (inflated.value().size() != size) {
+      decompression_error =
+          Diagnostic::make(Status::InvalidInput, "dwarf.compressed_size",
+                           "a compressed section is not its declared size", section->file_offset);
+      return std::nullopt;
+    }
+    decompressed.push_back(std::move(inflated.value()));
+    return std::span<const std::byte>(decompressed.back());
   };
   const Section* info = find_section(image, ".debug_info", "__debug_info");
   if (info == nullptr) {
@@ -1410,19 +1550,15 @@ Result<DebugInfo> read_debug_info(const BinaryImage& image, std::span<const std:
       find_section(image, ".debug_addr", "__debug_addr"),
       find_section(image, ".debug_line", "__debug_line"),
   };
-  for (const Section* section : named) {
-    if (section != nullptr && section->compressed) {
-      return make_error<DebugInfo>(Status::Unsupported, "dwarf.compressed",
-                                   "compressed debug sections (SHF_COMPRESSED) are not supported "
-                                   "yet; decompress with objcopy --decompress-debug-sections");
-    }
-  }
   Sections sections;
   sections.big_endian = image.endian == Endian::Big;
   Bytes* targets[] = {&sections.info,        &sections.abbrev, &sections.str, &sections.line_str,
                       &sections.str_offsets, &sections.addr,   &sections.line};
   for (std::size_t i = 0; i < std::size(named); ++i) {
     auto bytes = bytes_of(named[i]);
+    if (!bytes.has_value() && decompression_error) {
+      return Result<DebugInfo>(*decompression_error);
+    }
     if (!bytes.has_value()) {
       return make_error<DebugInfo>(Status::InvalidInput, "dwarf.section_out_of_bounds",
                                    "a debug section lies outside the file");

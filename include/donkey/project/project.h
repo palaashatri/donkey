@@ -10,29 +10,90 @@
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/core/result.h"
+#include "donkey/project/types.h"
 
 namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 4;
+constexpr int kProjectSchemaVersion = 7;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
 /// FunctionStart records a user edit of function boundaries at `address`:
 /// text "define" adds a function start, "remove" deletes a discovered one.
+/// CodeStart (G12-T1) makes `address` a code start; its text must be "code".
+/// DataRange (G12-T1) makes the bytes at `address` data, not code; its text is
+/// "<element size>:<count>" (see parse_data_range_text). Element size 0 is undefined
+/// bytes, so a range of size 0 is how the user undefines code that analysis found.
 enum class AnnotationKind : std::uint8_t {
   Rename = 0,
   Comment = 1,
   Bookmark = 2,
-  FunctionStart = 3
+  FunctionStart = 3,
+  CodeStart = 4,
+  DataRange = 5
 };
 const char* annotation_kind_name(AnnotationKind kind) noexcept;
+
+/// Largest byte length one DataRange may cover (element size times count, or count when the
+/// element size is 0). A larger range is refused, so a single annotation cannot make the
+/// analysis skip an unbounded part of the binary by accident.
+inline constexpr std::uint64_t kMaxDataRangeBytes = 16ULL * 1024ULL * 1024ULL;
+
+/// Parses a DataRange text "<element size>:<count>". The element size must be 0, 1, 2, 4 or
+/// 8, the count at least 1, and the byte length within kMaxDataRangeBytes. Returns false on
+/// any other text, so the caller reports the annotation as invalid rather than guessing.
+[[nodiscard]] bool parse_data_range_text(const std::string& text, std::uint64_t& element_size,
+                                         std::uint64_t& count) noexcept;
+/// The canonical DataRange text for an element size and count.
+[[nodiscard]] std::string format_data_range_text(std::uint64_t element_size, std::uint64_t count);
+
+/// How the bytes of a data range are read as text (G12-T2). `None` is an array of its element size.
+enum class StringEncoding : std::uint8_t { None = 0, Bytes = 1, Utf16Le = 2 };
+
+/// Parses every DataRange form: "<element size>:<count>" as above; "string:<bytes>", a
+/// NUL-terminated string of that many bytes including the terminator, read as an array of one-byte
+/// elements
+/// (`Bytes`, element size 1, count bytes); or "string16:<bytes>", a NUL-terminated UTF-16LE string
+/// of that many bytes including its two-byte terminator (`Utf16Le`, element size 2, count bytes /
+/// 2). The byte length is within kMaxDataRangeBytes, the bytes are at least 1 (2 for UTF-16, which
+/// must be even).
+[[nodiscard]] bool parse_data_extent(const std::string& text, std::uint64_t& element_size,
+                                     std::uint64_t& count, StringEncoding& encoding) noexcept;
+/// The canonical DataRange text for a string of `bytes` bytes, terminator included.
+[[nodiscard]] std::string format_string_range_text(std::uint64_t bytes);
+/// The canonical DataRange text for a UTF-16LE string of `bytes` bytes, terminator included.
+[[nodiscard]] std::string format_utf16_range_text(std::uint64_t bytes);
 
 struct Annotation {
   AnnotationKind kind = AnnotationKind::Rename;
   std::uint64_t address = 0;
   std::string text;
+};
+
+/// A user name for one local of one function (G12-T3). `variable` is the local's key in the
+/// function's IR: "arg:<index>" for a parameter, or "frame:<base register>:<offset>" for a frame
+/// slot, where the offset is signed decimal. The key is checked for shape here. Whether it still
+/// names a local after re-analysis is decided when the name is applied, so a name whose key no
+/// longer exists is kept but has no effect.
+struct LocalName {
+  std::uint64_t function_address = 0;
+  std::string variable;
+  std::string name;
+};
+
+/// True when `variable` has the shape of a local key (see LocalName).
+[[nodiscard]] bool local_variable_key_valid(const std::string& variable) noexcept;
+
+/// Where a type is applied (G05-T3 uses these): a function prototype at its entry, or a
+/// data slot (a stack slot or a global) at its address.
+enum class TypeApplicationKind : std::uint8_t { FunctionPrototype = 0, DataSlot = 1 };
+
+struct TypeApplication {
+  TypeApplicationKind kind = TypeApplicationKind::FunctionPrototype;
+  std::uint64_t address = 0;
+  TypeId type_id{};
 };
 
 struct ProjectImage {
@@ -105,6 +166,36 @@ class Project {
   /// the desktop shell to flush its in-memory annotation snapshot.
   [[nodiscard]] Result<void> replace_annotations(std::int64_t image_id,
                                                  const std::vector<Annotation>& annotations);
+
+  /// Set or replace the user name of one local of the function at `function_address` (G12-T3).
+  /// Empty text clears the name. The key must have the shape of a LocalName variable, and the
+  /// name must be a C identifier of at most 128 bytes.
+  [[nodiscard]] Result<void> set_local_name(std::int64_t image_id, std::uint64_t function_address,
+                                            const std::string& variable, const std::string& name);
+
+  /// Every user local name for one image, ordered by function address then key.
+  [[nodiscard]] Result<std::vector<LocalName>> local_names(std::int64_t image_id) const;
+
+  /// Replace every user local name of one image in a single transaction, as replace_annotations
+  /// does for annotations. The (function address, key) pairs must be distinct: a repeated pair is
+  /// refused and the previous names stay in place. A name is checked as set_local_name checks it.
+  [[nodiscard]] Result<void> replace_local_names(std::int64_t image_id,
+                                                 const std::vector<LocalName>& names);
+
+  /// Every type in the project's type store (G05-T1), validated as a whole.
+  [[nodiscard]] Result<TypeTable> types() const;
+
+  /// Replace the whole type store in one transaction. The table is validated first; an
+  /// invalid table is refused and nothing changes. A type removed from the table takes
+  /// its applications with it.
+  [[nodiscard]] Result<void> replace_types(const TypeTable& table);
+
+  /// Type applications for one image, ordered by address.
+  [[nodiscard]] Result<std::vector<TypeApplication>> type_applications(std::int64_t image_id) const;
+
+  /// Apply a type to an address of an image. A type id of zero removes the application.
+  [[nodiscard]] Result<void> set_type_application(std::int64_t image_id, TypeApplicationKind kind,
+                                                  std::uint64_t address, TypeId type_id);
 
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;
