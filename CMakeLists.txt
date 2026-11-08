@@ -78,6 +78,7 @@ add_library(donkey_binary STATIC
   src/binary/demangle.cpp
   src/binary/demangle_msvc.cpp
   src/binary/rtti.cpp
+  src/binary/link.cpp
   src/binary/core.cpp
   src/binary/minidump.cpp
   src/binary/inflate.cpp

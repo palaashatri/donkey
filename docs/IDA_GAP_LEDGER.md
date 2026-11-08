@@ -1340,6 +1340,16 @@ platform; do not write new, weaker ones.
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
+  - **Status:** PARTIAL. Done: `resolve_imports` (`include/donkey/binary/link.h`,
+    `src/binary/link.cpp`) binds each import of an image to the first other image, in link
+    order, that exports the name and is one of the libraries the importer names: DT_NEEDED for
+    ELF (matched against the provider's DT_SONAME or file name), the DLL named by a PE import
+    (matched by file name). Unbound imports are counted. Evidence: five `Link.*` unit tests on
+    three fixtures in `tests/fixtures/link/`; the library rule is checked by mutation (removing
+    it fails the two tests that depend on it). Not done: cross-image references (a call through
+    a bound import, with the provider's address as its target); the result is not yet in
+    `donkey-cli` or in the project; PE imports are matched by DLL name only, not by ordinal or
+    forwarded exports.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.

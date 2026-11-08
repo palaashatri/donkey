@@ -138,6 +138,7 @@ add_executable(donkey_unit_tests
   unit/demangle_test.cpp
   unit/demangle_msvc_test.cpp
   unit/rtti_test.cpp
+  unit/link_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
