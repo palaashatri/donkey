@@ -230,6 +230,8 @@ compare, because GCC's table code overwrites `x0`.
 | Software breakpoints, stepping, memory and registers | yes (ptrace) | yes (ptrace) | yes (Win32 debug API) | Unsupported |
 | Hardware watchpoints (`set_watchpoint`, library API) | yes: up to four write or read-or-write watches of 1, 2, 4 or 8 bytes (DR0-DR3, DR7), set while stopped | not implemented (DBGWVR) | not implemented | Unsupported |
 | Hardware watchpoints in the CLI (`donkey-cli debug launch --watch`) | yes (`cli.debug_native_watch_json`) | not implemented | not implemented | Unsupported |
+| Conditional hardware watchpoints (`set_conditional_watchpoint`, `--watch-if`) | yes: a hit stops only where `<operand> <op> <value>` holds, evaluated after the access; a passed-over hit is not counted (`NativeDebug.ConditionalWatchpoint*`, `cli.debug_native_watch_if_json`). Not done: more than one comparison, a condition on a register of another thread | not implemented | not implemented | Unsupported |
+| Conditional software breakpoints (`set_conditional_breakpoint`, `--break-if`) | yes (`NativeDebug.Conditional*`) | yes (`NativeDebug.Conditional*` ran on `ubuntu-24.04-arm` in CI, run 42468469673) | not implemented | Unsupported |
 | Hardware watchpoints in the GUI | not yet | not yet | not yet | not yet |
 
 ## Automation

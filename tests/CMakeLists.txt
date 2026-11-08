@@ -805,6 +805,14 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
                      --watch donkey_debuggee_counter --run --json)
     set_tests_properties(cli.debug_native_watch_json PROPERTIES
       PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"Watchpoint\".*\"Watchpoint\".*\"exit_code\": 42")
+    # A conditional watch (G14-T5): the counter is written with 1, 2 and 3, and the condition stops
+    # the target only where it equals 2. Exactly one watch stop, then the program exits with 42.
+    add_test(NAME cli.debug_native_watch_if_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --watch-if donkey_debuggee_counter "*donkey_debuggee_counter == 2" --run --json)
+    set_tests_properties(cli.debug_native_watch_if_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"exit_code\": 42"
+      FAIL_REGULAR_EXPRESSION "\"Watchpoint\".*\"Watchpoint\"")
   endif()
   # The simulation adapter has no watchpoints, and the command says so rather than pretending.
   add_test(NAME cli.debug_mock_watch_is_unsupported

@@ -87,6 +87,9 @@ class LocalDebugAdapter : public DebugAdapter {
   [[nodiscard]] Result<Watchpoint> set_watchpoint(std::uint64_t address, std::uint8_t length,
                                                   WatchKind kind) override;
   [[nodiscard]] Result<bool> remove_watchpoint(std::uint64_t id) override;
+  [[nodiscard]] Result<Watchpoint> set_conditional_watchpoint(
+      std::uint64_t address, std::uint8_t length, WatchKind kind,
+      const std::string& condition) override;
 #endif
 #if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
   [[nodiscard]] Result<Breakpoint> set_conditional_breakpoint(

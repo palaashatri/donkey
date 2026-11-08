@@ -619,6 +619,61 @@ TEST(NativeDebug, HardwareWatchpointStopsAfterEachWriteToACounter) {
   EXPECT_EQ(exited.value().exit_code, 42);  // three ticks of one: the counter is 3
 }
 
+// A conditional watchpoint stops only at the writes where its condition holds (G14-T5). The counter
+// takes the values 1, 2 and 3. With the condition `counter == 2`, the write of 1 is passed over
+// without a stop, the write of 2 stops the target with the counter at 2, and removing the watch
+// lets the program run to its exit: a stop at 1 or 3 would show up as the wrong value or reason.
+TEST(NativeDebug, ConditionalWatchpointStopsOnlyWhereItsConditionHolds) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const auto& translator = adapter->address_translator();
+  const std::uint64_t counter =
+      translator.static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  char address_text[32];
+  std::snprintf(address_text, sizeof(address_text), "*0x%llx == 2",
+                static_cast<unsigned long long>(counter));
+  const std::string condition = address_text;
+
+  auto watch =
+      adapter->set_conditional_watchpoint(counter, 4, donkey::debug::WatchKind::Write, condition);
+  ASSERT_TRUE(watch.has_value()) << watch.diagnostic().code << ": " << watch.diagnostic().message;
+  EXPECT_EQ(watch.value().condition, condition);
+
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto event = adapter->wait_for_event(10000);
+  ASSERT_TRUE(event.has_value());
+  ASSERT_EQ(event.value().reason, StopReason::Watchpoint) << event.value().description;
+  EXPECT_EQ(read_int(*adapter, counter), 2);
+  EXPECT_NE(event.value().description.find("watchpoint " + std::to_string(watch.value().id)),
+            std::string::npos)
+      << event.value().description;
+
+  ASSERT_TRUE(adapter->remove_watchpoint(watch.value().id).has_value());
+  ASSERT_TRUE(adapter->resume().has_value());
+  auto exited = adapter->wait_for_event(10000);
+  ASSERT_TRUE(exited.has_value());
+  EXPECT_EQ(exited.value().reason, StopReason::Exited) << exited.value().description;
+  EXPECT_EQ(exited.value().exit_code, 42);
+}
+
+// A condition is checked when the watch is set: one that does not parse, or names a register the
+// host does not have, is refused, and no debug register is used for it.
+TEST(NativeDebug, ConditionalWatchpointRefusesABadConditionBeforeAnySlotIsUsed) {
+  REQUIRE_NATIVE();
+  auto adapter = launch_at_entry();
+  const std::uint64_t counter =
+      adapter->address_translator().static_to_runtime(static_symbol("donkey_debuggee_counter"));
+  auto malformed = adapter->set_conditional_watchpoint(counter, 4, donkey::debug::WatchKind::Write,
+                                                       "counter ~ 2");
+  EXPECT_FALSE(malformed.has_value());
+  auto no_register = adapter->set_conditional_watchpoint(
+      counter, 4, donkey::debug::WatchKind::Write, "nosuchregister == 1");
+  EXPECT_FALSE(no_register.has_value());
+  // Both refusals left the slot free: an unconditional watch still fits.
+  auto plain = adapter->set_watchpoint(counter, 4, donkey::debug::WatchKind::Write);
+  EXPECT_TRUE(plain.has_value()) << plain.diagnostic().code;
+}
+
 // A request that cannot be honoured is refused with its reason before any debug register is
 // written, and only four watches fit.
 TEST(NativeDebug, HardwareWatchpointRequestsAreCheckedBeforeAnySlotIsUsed) {

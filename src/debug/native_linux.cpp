@@ -232,6 +232,12 @@ struct LocalDebugAdapter::Impl {
   static constexpr std::size_t kWatchSlots = 4;
   std::vector<Watchpoint> watches;
   std::uint64_t next_watch_id = 1;
+  /// What a trap with a watch bit set means: the first hit whose condition holds stops the target
+  /// (`stop`), and a trap whose hits all have false conditions is passed over (`passed`).
+  struct WatchOutcome {
+    std::optional<StopInfo> stop;
+    bool passed = false;
+  };
 
 #if defined(__x86_64__)
   static std::uintptr_t debugreg_offset(int index) {
@@ -281,14 +287,52 @@ struct LocalDebugAdapter::Impl {
     return poke_debugreg(thread, 7, dr7) && poke_debugreg(thread, 6, 0);
   }
 
-  /// The watch whose DR6 bit is set, if the thread stopped on one. Clears DR6 after reading it.
-  std::optional<StopInfo> watch_stop(pid_t thread, std::uint64_t pc) {
+  /// Whether a watch's condition holds at this access. An unconditional watch always does. A
+  /// condition that cannot be evaluated also does, and `error` says why, so that the stop is never
+  /// silent. The condition is read from its text, which was checked when the watch was set.
+  bool watch_holds(const Watchpoint& watch, const NativeRegs& regs, bool have_regs,
+                   std::string& error) const {
+    if (watch.condition.empty()) {
+      return true;
+    }
+    auto parsed = debug::parse_break_condition(watch.condition);
+    if (!parsed) {
+      error = "its condition could not be read: " + parsed.diagnostic().message;
+      return true;
+    }
+    if (!have_regs) {
+      error = "its condition could not be evaluated: the registers could not be read";
+      return true;
+    }
+    const std::optional<std::uint64_t> operand = condition_operand(parsed.value(), regs);
+    if (!operand) {
+      if (parsed.value().memory) {
+        char address_text[32];
+        std::snprintf(address_text, sizeof(address_text), "0x%llx",
+                      static_cast<unsigned long long>(parsed.value().address));
+        error = std::string("its condition could not be evaluated: the word at ") + address_text +
+                " could not be read";
+      } else {
+        error = "its condition could not be evaluated: no register named `" +
+                parsed.value().register_name + "`";
+      }
+      return true;
+    }
+    return condition_holds(parsed.value(), *operand);
+  }
+
+  /// Sorts a trap on `thread` with watch bits set in DR6, and clears DR6. The first hit whose
+  /// condition holds is counted and reported. When there are hits and none of their conditions
+  /// holds, the trap is passed over: no hit is counted and nothing is reported.
+  WatchOutcome watch_outcome(pid_t thread, std::uint64_t pc, const NativeRegs& regs,
+                             bool have_regs) {
+    WatchOutcome outcome;
     if (watches.empty()) {
-      return std::nullopt;
+      return outcome;
     }
     unsigned long status = 0;
     if (!peek_debugreg(thread, 6, status) || (status & 0xfUL) == 0) {
-      return std::nullopt;
+      return outcome;
     }
     poke_debugreg(thread, 6, 0);
     for (std::size_t slot = 0; slot < watches.size() && slot < kWatchSlots; ++slot) {
@@ -296,6 +340,10 @@ struct LocalDebugAdapter::Impl {
         continue;
       }
       Watchpoint& watch = watches[slot];
+      std::string error;
+      if (!watch_holds(watch, regs, have_regs, error)) {
+        continue;
+      }
       ++watch.hit_count;
       char address_text[32];
       std::snprintf(address_text, sizeof(address_text), "0x%llx",
@@ -304,14 +352,19 @@ struct LocalDebugAdapter::Impl {
           "watchpoint " + std::to_string(watch.id) +
           " hit: " + (watch.kind == WatchKind::Write ? "write" : "read or write") + " of " +
           std::to_string(watch.length) + " bytes at " + address_text;
-      return StopInfo{StopReason::Watchpoint, static_cast<std::uint64_t>(thread), pc,
-                      std::move(description), 0};
+      if (!error.empty()) {
+        description += " (" + error + ")";
+      }
+      outcome.stop = StopInfo{StopReason::Watchpoint, static_cast<std::uint64_t>(thread), pc,
+                              std::move(description), 0};
+      return outcome;
     }
-    return std::nullopt;
+    outcome.passed = true;
+    return outcome;
   }
 #else
   bool arm_thread(pid_t) const { return true; }
-  std::optional<StopInfo> watch_stop(pid_t, std::uint64_t) { return std::nullopt; }
+  WatchOutcome watch_outcome(pid_t, std::uint64_t, const NativeRegs&, bool) { return {}; }
 #endif
 
   /// Arms every stopped thread. Called only while the target is stopped.
@@ -859,9 +912,17 @@ struct LocalDebugAdapter::Impl {
     std::uint64_t at = have_regs ? reg_pc(regs) : 0;
 
     if (sig == SIGTRAP) {
-      if (std::optional<StopInfo> watch = watch_stop(static_cast<pid_t>(tid), at)) {
+      const WatchOutcome watch = watch_outcome(static_cast<pid_t>(tid), at, regs, have_regs);
+      if (watch.stop) {
         drop_internal_breakpoints();
-        stop = *watch;
+        stop = *watch.stop;
+        return;
+      }
+      if (watch.passed && !was_stepping) {
+        // Every hit's condition is false. A watch trap follows the store, so nothing needs to be
+        // stepped off: the target runs on. A user single step that also hit a watch falls through
+        // and is reported as the step it is.
+        after = After::Resume;
         return;
       }
       if (was_silent) {
@@ -1954,6 +2015,36 @@ Result<Watchpoint> LocalDebugAdapter::set_watchpoint(std::uint64_t address, std:
                                   "the kernel refused the debug registers for that address");
   }
   return watch;
+}
+
+Result<Watchpoint> LocalDebugAdapter::set_conditional_watchpoint(std::uint64_t address,
+                                                                 std::uint8_t length,
+                                                                 WatchKind kind,
+                                                                 const std::string& condition) {
+  Impl& d = *impl_;
+  auto parsed = debug::parse_break_condition(condition);
+  if (!parsed) {
+    return Result<Watchpoint>(parsed.diagnostic());
+  }
+  if (!parsed.value().memory && !is_host_register(parsed.value().register_name)) {
+    return make_error<Watchpoint>(
+        Status::InvalidInput, "debug.condition_register",
+        "this host has no register named `" + parsed.value().register_name + "`");
+  }
+  // set_watchpoint checks the request and takes a debug register. Only then is the condition
+  // recorded, so a refused request leaves no slot in use.
+  auto created = set_watchpoint(address, length, kind);
+  if (!created) {
+    return created;
+  }
+  for (Watchpoint& watch : d.watches) {
+    if (watch.id == created.value().id) {
+      watch.condition = condition;
+      return watch;
+    }
+  }
+  return make_error<Watchpoint>(Status::InternalError, "debug.watch_lost",
+                                "the new watchpoint was not recorded");
 }
 
 Result<bool> LocalDebugAdapter::remove_watchpoint(std::uint64_t id) {

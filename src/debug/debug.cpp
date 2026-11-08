@@ -185,6 +185,14 @@ Result<bool> DebugAdapter::remove_watchpoint(std::uint64_t /*id*/) {
                           "hardware watchpoints are not implemented on this host or adapter");
 }
 
+Result<Watchpoint> DebugAdapter::set_conditional_watchpoint(std::uint64_t /*address*/,
+                                                            std::uint8_t /*length*/,
+                                                            WatchKind /*kind*/,
+                                                            const std::string& /*condition*/) {
+  return make_error<Watchpoint>(Status::Unsupported, "debug.watchpoints_unsupported",
+                                "hardware watchpoints are not implemented on this host or adapter");
+}
+
 Result<Breakpoint> DebugAdapter::set_conditional_breakpoint(std::uint64_t /*address*/,
                                                             const std::string& /*condition*/) {
   return make_error<Breakpoint>(Status::Unsupported, "debug.conditions_unsupported",

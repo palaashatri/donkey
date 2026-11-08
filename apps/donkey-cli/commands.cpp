@@ -810,7 +810,7 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project restore <database> <backup> [--json]\n"
       "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
       "SYMBOL|ADDR CONDITION]... [--watch "
-      "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
+      "SYMBOL|ADDR[:LEN][:rw]]... [--watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION]... [--run]"
       " [--mock] [--json]\n"
       "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
       "<hex>] --output <out> [--force] [--json]\n"
@@ -2609,6 +2609,37 @@ std::string condition_text(const debug::BreakCondition& condition, std::uint64_t
   return operand + " " + debug::condition_op_text(condition.op) + " " + hex(condition.value);
 }
 
+/// A watch as the command line gives it: TARGET[:LENGTH][:rw]. The target's address is the part
+/// before the first colon, its size in bytes is 1, 2, 4 or 8 (default 4), and the access is write
+/// (default), or read-or-write with `rw`. Returns the problem, or an empty string when the spec is
+/// well formed.
+std::string split_watch_spec(std::string_view spec, std::string& target, std::uint64_t& length,
+                             debug::WatchKind& kind) {
+  const std::string text(spec);
+  const auto first = text.find(':');
+  target = text.substr(0, first);
+  length = 4;
+  kind = debug::WatchKind::Write;
+  if (first == std::string::npos) {
+    return {};
+  }
+  const std::string rest = text.substr(first + 1);
+  const auto second = rest.find(':');
+  std::uint64_t parsed = 0;
+  if (!parse_u64(rest.substr(0, second), parsed) ||
+      (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+    return "a watch's length must be 1, 2, 4 or 8 bytes";
+  }
+  length = parsed;
+  if (second != std::string::npos) {
+    if (rest.substr(second + 1) != "rw") {
+      return "a watch's access must be rw (the default is write)";
+    }
+    kind = debug::WatchKind::ReadWrite;
+  }
+  return {};
+}
+
 bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out) {
   if (parse_u64(spec, out)) {
     return true;
@@ -2644,7 +2675,8 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
   std::vector<std::string> watch_specs;
-  std::vector<std::pair<std::string, std::string>> conditional_specs;  // location, condition
+  std::vector<std::pair<std::string, std::string>> conditional_specs;        // location, condition
+  std::vector<std::pair<std::string, std::string>> conditional_watch_specs;  // watch, condition
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -2661,6 +2693,13 @@ int command_debug(const std::vector<std::string_view>& arguments) {
         return usage_error("--break-if needs a location and a condition");
       }
       conditional_specs.emplace_back(std::string(spec), std::string(condition));
+    } else if (arg == "--watch-if") {
+      std::string_view spec;
+      std::string_view condition;
+      if (!take_value(arguments, i, spec) || !take_value(arguments, i, condition)) {
+        return usage_error("--watch-if needs a watch and a condition");
+      }
+      conditional_watch_specs.emplace_back(std::string(spec), std::string(condition));
     } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
@@ -2731,6 +2770,39 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     }
     pending_conditions.push_back(PendingCondition{address, parsed.value()});
   }
+  // A conditional watch is checked here, before the launch, like a conditional breakpoint.
+  struct PendingWatchCondition {
+    std::uint64_t static_address = 0;
+    std::uint64_t length = 4;
+    debug::WatchKind kind = debug::WatchKind::Write;
+    debug::BreakCondition condition;
+  };
+  std::vector<PendingWatchCondition> pending_watch_conditions;
+  for (const auto& [spec, text] : conditional_watch_specs) {
+    std::string target;
+    std::uint64_t length = 4;
+    auto kind = debug::WatchKind::Write;
+    const std::string problem = split_watch_spec(spec, target, length, kind);
+    if (!problem.empty()) {
+      return usage_error(problem.c_str());
+    }
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, target, address)) {
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_watch",
+                             "no symbol or address '" + target + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto resolved = resolve_condition_symbols(image, text);
+    if (!resolved) {
+      return fail(resolved.diagnostic());
+    }
+    auto parsed = debug::parse_break_condition(resolved.value());
+    if (!parsed) {
+      return fail(parsed.diagnostic());
+    }
+    pending_watch_conditions.push_back(
+        PendingWatchCondition{address, length, kind, parsed.value()});
+  }
 
   debug::LaunchConfig config;
   config.binary_path = binary_path;
@@ -2788,27 +2860,13 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   // access (default write; rw traps on reads and writes too). The debug registers take it only
   // while the target is stopped, which it is here.
   for (const std::string& spec : watch_specs) {
-    const auto first = spec.find(':');
-    const std::string target = spec.substr(0, first);
+    std::string target;
     std::uint64_t length = 4;
     auto kind = debug::WatchKind::Write;
-    if (first != std::string::npos) {
-      const std::string rest = spec.substr(first + 1);
-      const auto second = rest.find(':');
-      std::uint64_t parsed = 0;
-      if (!parse_u64(rest.substr(0, second), parsed) ||
-          (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
-        (void)adapter->terminate();
-        return usage_error("--watch length must be 1, 2, 4 or 8 bytes");
-      }
-      length = parsed;
-      if (second != std::string::npos) {
-        if (rest.substr(second + 1) != "rw") {
-          (void)adapter->terminate();
-          return usage_error("--watch access must be rw (the default is write)");
-        }
-        kind = debug::WatchKind::ReadWrite;
-      }
+    const std::string problem = split_watch_spec(spec, target, length, kind);
+    if (!problem.empty()) {
+      (void)adapter->terminate();
+      return usage_error(problem.c_str());
     }
     std::uint64_t address = 0;
     if (!resolve_breakpoint(image, target, address)) {
@@ -2819,6 +2877,21 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     }
     auto watch = adapter->set_watchpoint(translator.static_to_runtime(address),
                                          static_cast<std::uint8_t>(length), kind);
+    if (!watch) {
+      (void)adapter->terminate();
+      return fail(watch.diagnostic());
+    }
+  }
+  // A conditional watch was checked before the launch and is set now that the target is stopped.
+  // A memory operand's address is a file address in the condition, and the target sees it at its
+  // runtime address.
+  for (const PendingWatchCondition& pending : pending_watch_conditions) {
+    const std::uint64_t memory =
+        pending.condition.memory ? translator.static_to_runtime(pending.condition.address) : 0;
+    auto watch =
+        adapter->set_conditional_watchpoint(translator.static_to_runtime(pending.static_address),
+                                            static_cast<std::uint8_t>(pending.length), pending.kind,
+                                            condition_text(pending.condition, memory));
     if (!watch) {
       (void)adapter->terminate();
       return fail(watch.diagnostic());

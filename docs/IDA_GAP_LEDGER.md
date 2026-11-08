@@ -164,7 +164,7 @@ P0 is the most important, P3 the least.
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
-| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64 and conditional breakpoints on Linux (x86-64 and AArch64) in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
+| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64, with conditions, and conditional breakpoints on Linux (x86-64; AArch64 compiled, not run in this change), in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
@@ -1327,8 +1327,18 @@ platform; do not write new, weaker ones.
     `cli.debug_break_if_rejects_a_malformed_condition`. Mutations checked: never passing a trap
     fails two native tests; not reinserting the breakpoint after the silent step fails the
     counting test. The AArch64 path is compiled but not run: the test host is x86-64.
-    Not done: conditions on hardware watchpoints; conditions with more than one comparison; a
-    condition on a register of a thread other than the one that hit; remote debugging (T1);
+    Done on Linux x86-64: conditions on hardware watchpoints (`set_conditional_watchpoint`, and
+    `donkey-cli debug launch --watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION`). The condition is parsed
+    and its register checked when the watch is set, so a refused one takes no debug register. It is
+    evaluated after the access, so the stop reports the value written. A watch trap whose
+    conditions are all false is passed over: no hit is counted, nothing is reported, and the target
+    runs on. Evidence: `NativeDebug.ConditionalWatchpointStopsOnlyWhereItsConditionHolds` (the
+    counter is written 1, 2 and 3, and the target stops only at 2),
+    `NativeDebug.ConditionalWatchpointRefusesABadConditionBeforeAnySlotIsUsed`, and
+    `cli.debug_native_watch_if_json` (one watch stop, then exit 42). Mutation checked: disabling
+    the pass-over branch fails the stop test.
+    Not done: conditions with more than one comparison; a condition on a register of a thread
+    other than the one that hit; remote debugging (T1);
     FreeBSD, macOS and Windows on Arm (T2 to T4).
 
 ### G15 Loaders and multiple images
