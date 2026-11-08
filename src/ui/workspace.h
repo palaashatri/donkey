@@ -91,6 +91,45 @@ struct GalleryState {
 
 void draw_component_gallery(GalleryState& gallery);
 
+/// What the Search window looks for (G17): bytes, an immediate number, or a regular expression over
+/// the instruction text.
+enum class SearchKind : int { Bytes = 0, Immediate = 1, Text = 2 };
+
+/// One hit of a search, with the text it is shown with: the bytes at the address, or the instruction.
+struct SearchRow {
+  std::uint64_t address = 0;
+  std::string preview;
+};
+
+/// The Search window's searches (G17). A search runs on the scheduler, never on the render thread, and
+/// only the newest one is kept. The window reads the last finished result under `mutex`.
+struct AsyncSearchState {
+  AsyncSearchState() = default;
+  ~AsyncSearchState() = default;
+
+  AsyncSearchState(const AsyncSearchState&) = delete;
+  AsyncSearchState& operator=(const AsyncSearchState&) = delete;
+
+  /// Starts a search of `doc`. A search still running is cancelled, and its result is dropped.
+  void start(std::shared_ptr<const Document> doc, SearchKind kind, std::string query);
+  /// Blocks until no search is running. UI scripts use it; the window never does.
+  void wait();
+
+  // Render-thread inputs: the kind and the text typed in the window.
+  int kind_input = 0;
+  char query_input[256] = {};
+
+  std::mutex mutex;
+  std::uint64_t generation = 0;   // guarded by mutex
+  bool running = false;           // guarded by mutex
+  std::string error;              // guarded by mutex: "code: message" when the pattern is refused
+  std::string status;             // guarded by mutex
+  std::vector<SearchRow> rows;    // guarded by mutex
+
+  /// Declared last, so it is destroyed first: its workers stop before the members above go.
+  JobScheduler scheduler{1};
+};
+
 /// Selection and filter state shared by every panel. It is render-thread
 /// state only; the parsed document stays immutable.
 struct UiState {
@@ -127,6 +166,9 @@ struct UiState {
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded and executed asynchronously off the render thread.
   std::shared_ptr<const Document> pseudocode_document_owner;
+  /// The Search window's searches, and the document they read (set each frame it is shown).
+  std::shared_ptr<AsyncSearchState> search = std::make_shared<AsyncSearchState>();
+  std::shared_ptr<const Document> search_document_owner;
   const Document* pseudocode_document = nullptr;
   std::uint64_t pseudocode_address = 0;
   std::string pseudocode_function;
@@ -276,6 +318,16 @@ class Workspace {
 
   /// Resolve a "Go to" query: a hex address (0x optional) or a function,
   /// symbol or user-renamed name. Returns 0 when nothing matches.
+  /// Runs a search of the open document, as the Search window's button does (G17). The UI tests use it.
+  void run_search(SearchKind kind, const std::string& query);
+  /// Blocks until the search that is running has finished (UI scripts only).
+  void wait_search();
+  [[nodiscard]] std::size_t search_hit_count();
+  [[nodiscard]] bool search_has_hit(std::uint64_t address);
+  /// The shown text of a hit, or false when the address is not a hit.
+  [[nodiscard]] bool search_preview(std::uint64_t address, std::string& preview);
+  [[nodiscard]] std::string search_error();
+  [[nodiscard]] std::string search_status();
   /// The name a view shows for the function at `address` (G10-T4), or empty.
   [[nodiscard]] std::string function_name_shown(std::uint64_t address);
   /// Whether the command palette (Ctrl/Cmd+Shift+P) is open. The palette lists commands that the
@@ -321,6 +373,7 @@ class Workspace {
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
   bool show_classes_ = true;
+  bool show_search_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
   /// The command palette: opened by its shortcut, filtered by the text in its field, and closed

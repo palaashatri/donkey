@@ -111,6 +111,7 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/search.cpp
   src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
@@ -246,6 +247,7 @@ if(DONKEY_BUILD_UI)
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
+    src/ui/search_view.cpp
     src/ui/theme.cpp
     src/ui/ui_test.cpp
     src/ui/workspace.cpp

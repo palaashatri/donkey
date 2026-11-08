@@ -1,0 +1,39 @@
+# G17: the Search window finds bytes, immediate numbers and regular expressions over the instruction
+# text, in the open debuggee. "/lib64" is the .interp string at 0x318 (the only occurrence of those
+# bytes). Its eight bytes at 0x318 are the preview. Refused patterns are reported with their codes.
+wait_idle
+frames 5
+assert_no_error
+
+search_run BYTES 2f 6c 69 62 36 34
+wait_search
+assert_search_hits 1
+assert_search_hit 0x318
+assert_search_preview 0x318 2f 6c 69 62 36 34 2f 6c
+
+# A wildcard byte matches any value: the same single hit.
+search_run BYTES 2f 6c ?? 62 36 34
+wait_search
+assert_search_hits 1
+assert_search_hit 0x318
+
+search_run IMMEDIATE 8
+wait_search
+assert_search_some
+assert_search_hit 0x1004
+assert_search_preview 0x1004 sub rsp, 8
+
+search_run TEXT ^push 
+wait_search
+assert_search_some
+
+search_run BYTES zz
+wait_search
+assert_search_error search.pattern
+search_run TEXT (
+wait_search
+assert_search_error search.regex
+search_run IMMEDIATE x1
+wait_search
+assert_search_error search.value
+assert_no_error

@@ -28,6 +28,7 @@ constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
 constexpr const char* kClassesWindow = "Classes";
+constexpr const char* kSearchWindow = "Search";
 constexpr const char* kCommandPalette = "Command Palette";
 
 ImGuiWindowFlags panel_flags() {
@@ -482,6 +483,7 @@ std::vector<Workspace::PaletteEntry> Workspace::palette_entries() {
   show(kDebuggerWindow, &show_debugger_);
   show(kDiagnosticsWindow, &show_diagnostics_);
   show(kClassesWindow, &show_classes_);
+  show(kSearchWindow, &show_search_);
   return entries;
 }
 
@@ -678,6 +680,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::MenuItem(kClassesWindow, nullptr, &show_classes_);
+    ImGui::MenuItem(kSearchWindow, nullptr, &show_search_);
     ImGui::Separator();
     if (ImGui::MenuItem("Reset Layout")) {
       reset_layout();
@@ -759,6 +762,56 @@ void Workspace::debug_terminate_for_testing() {
 bool Workspace::debug_stopped_for_testing() const {
   return state_.debug_controller != nullptr &&
          state_.debug_controller->snapshot().state == debug::SessionState::Stopped;
+}
+
+void Workspace::run_search(SearchKind kind, const std::string& query) {
+  state_.search_document_owner = session_.document();
+  if (!state_.search_document_owner) {
+    return;
+  }
+  state_.search->kind_input = static_cast<int>(kind);
+  std::snprintf(state_.search->query_input, sizeof(state_.search->query_input), "%s", query.c_str());
+  state_.search->start(state_.search_document_owner, kind, query);
+}
+
+void Workspace::wait_search() {
+  state_.search->wait();
+}
+
+std::size_t Workspace::search_hit_count() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->rows.size();
+}
+
+bool Workspace::search_has_hit(std::uint64_t address) {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  for (const SearchRow& row : state_.search->rows) {
+    if (row.address == address) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Workspace::search_preview(std::uint64_t address, std::string& preview) {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  for (const SearchRow& row : state_.search->rows) {
+    if (row.address == address) {
+      preview = row.preview;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string Workspace::search_error() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->error;
+}
+
+std::string Workspace::search_status() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->status;
 }
 
 std::string Workspace::function_name_shown(std::uint64_t address) {
@@ -1015,6 +1068,16 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDiagnosticsWindow, &show_diagnostics_, panel_flags());
     if (document) {
       views::diagnostics(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_search_) {
+    ImGui::Begin(kSearchWindow, &show_search_, panel_flags());
+    if (document) {
+      state_.search_document_owner = document;
+      views::search(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

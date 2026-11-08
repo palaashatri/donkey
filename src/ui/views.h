@@ -25,5 +25,7 @@ void diagnostics(const Document& document, UiState& state);
 /// Itanium classes from the image's RTTI (G10-T3): name, kind, direct bases, vtable and slot
 /// count. Selecting a class navigates to its vtable, or its typeinfo when it has none (G10-T4).
 void classes(const Document& document, UiState& state);
+/// The Search window (G17): byte, immediate and regular expression searches of the open document.
+void search(const Document& document, UiState& state);
 
 }  // namespace donkey::ui::views

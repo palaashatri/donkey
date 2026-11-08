@@ -573,6 +573,74 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "search_run") {
+    // search_run BYTES|IMMEDIATE|TEXT QUERY: runs a search as the Search window's button does. QUERY
+    // is the rest of the line, so it may contain spaces (G17).
+    const std::size_t space = c.rest.find(' ');
+    const std::string kind_name = c.rest.substr(0, space);
+    const std::string query = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    SearchKind kind = SearchKind::Bytes;
+    if (kind_name == "BYTES") {
+      kind = SearchKind::Bytes;
+    } else if (kind_name == "IMMEDIATE") {
+      kind = SearchKind::Immediate;
+    } else if (kind_name == "TEXT") {
+      kind = SearchKind::Text;
+    } else {
+      fail(c, "search_run takes BYTES, IMMEDIATE or TEXT, not '" + kind_name + "'");
+      return true;
+    }
+    workspace.run_search(kind, query);
+    return true;
+  }
+  if (c.name == "wait_search") {
+    workspace.wait_search();
+    return true;
+  }
+  if (c.name == "assert_search_hits") {
+    // assert_search_hits N: the search found exactly N hits.
+    const auto want = static_cast<std::size_t>(number(0, -1.0));
+    const std::size_t got = workspace.search_hit_count();
+    if (got != want) {
+      fail(c, "the search found " + std::to_string(got) + " hits, wanted " + std::to_string(want) +
+                  " (" + workspace.search_status() + ")");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_some") {
+    if (workspace.search_hit_count() == 0) {
+      fail(c, "the search found no hits (" + workspace.search_status() + ")");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_hit") {
+    // assert_search_hit ADDRESS-OR-NAME: the search found a hit at that address.
+    const std::uint64_t address = workspace.resolve_location(arg(0));
+    if (address == 0 || !workspace.search_has_hit(address)) {
+      fail(c, "the search has no hit at " + arg(0));
+    }
+    return true;
+  }
+  if (c.name == "assert_search_preview") {
+    // assert_search_preview ADDRESS-OR-NAME TEXT: the hit at that address shows TEXT (the rest of the line).
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    std::string got;
+    if (address == 0 || !workspace.search_preview(address, got) || got != want) {
+      fail(c, "the hit at " + location + " shows '" + got + "', wanted '" + want + "'");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_error") {
+    // assert_search_error CODE: the search was refused with that diagnostic code.
+    const std::string error = workspace.search_error();
+    if (error.rfind(arg(0) + ":", 0) != 0) {
+      fail(c, "the search error is '" + error + "', wanted code " + arg(0));
+    }
+    return true;
+  }
   if (c.name == "assert_command_palette") {
     // assert_command_palette 0|1: the command palette is closed (0) or open (1) (G17-T1).
     const bool want = number(0, 1) != 0.0;
