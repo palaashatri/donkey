@@ -2658,6 +2658,26 @@ TEST(Ir, ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare) {
   EXPECT_EQ(statements[1].a.kind, donkey::IrOperandKind::Register);
 }
 
+TEST(Ir, StructuresCounterInMemoryAsFor) {
+  // mov dword [rbp - 8], 0; jmp test; body: add dword [rbp - 8], 1; test: cmp [rbp - 8], edi;
+  // jl body; mov eax, [rbp - 8]; ret. A compiler without optimisation keeps the counter in memory:
+  // the init is the store before the jump, and the step is the three statements that the add
+  // lifts to (load into a temporary, add, store) at the end of the body. The printed loop moves
+  // them into the header as one update.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x04, 0x83, 0x45,
+                               0xf8, 0x01, 0x39, 0x7d, 0xf8, 0x7c, 0xf7, 0x8b, 0x45, 0xf8, 0xc3},
+                              function));
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("for (*(u32 *)(rbp - 0x8) = 0x0; "), std::string::npos) << code;
+  EXPECT_NE(code.find("= *(u32 *)(rbp - 0x8) + 0x1)"), std::string::npos) << code;
+  // The update is printed once, in the header; the body keeps no copy of it.
+  EXPECT_EQ(code.find("+ 0x1;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
 TEST(Ir, X86ReturnIsDeterminedWhenOnePathWritesFourBytes) {
   // test rsi, rsi; je zero; mov rax, rdi; jmp done; zero: mov eax, 0; done: ret
   // The 4-byte write zero-extends into rax, so both paths define the returned register and the

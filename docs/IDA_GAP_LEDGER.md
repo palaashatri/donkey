@@ -154,7 +154,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; no corpus loop prints as `for` yet: O0 keeps counters in stack slots, and O2 and O3 rotate loops into guarded do-while forms); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` form for register counters is unit-tested, no corpus loop is `for` yet) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` for register and in-memory counters; O0 corpus loops print `for`, O2 and O3 guarded do-while loops do not) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
@@ -808,9 +808,14 @@ for Partial functions.
   `Ir.ACompareReadsTheMemoryOfALoadThatNothingElseReads`,
   `Ir.ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare`, and
   `DecompilerCorpus.EveryPassPreservesSemantics` with the two passes in its list. Still not
-  done, so the task stays PARTIAL: no corpus loop prints as `for`. The -O0 counters are stack
-  slots, which the `for` planner does not recognise (its init and step must be register
-  assignments, and the step is three statements), and the -O2 loops are guarded do-while loops.
+  done. A counted loop whose counter is in memory, the -O0 form, now prints as `for`: the
+  planner takes the init as a store or an assign, and the step as the three statements that
+  an add to memory lifts to (a load into a temporary, the add, a store), printed as one
+  update `M = M + c`. `c_sum_array` at -O0 prints `for (*(u32 *)(rsp - 0x8) = 0x0;
+  *(u32 *)(rbp - 0x8) < ...; *(u32 *)(rbp - 0x8) = *(u32 *)(rbp - 0x8) + 0x1)`. Evidence:
+  `Ir.StructuresCounterInMemoryAsFor`. The task stays PARTIAL: the -O2 loops are guarded
+  do-while loops and do not print as `for`. The printed form is checked by the construction
+  of the planner and by that test, not by the interpreter, which runs IR and not text.
   Step 2 is done for `break`. A branch from a loop body to the loop's exit prints
   `break;`, and the body's exit is the one the loop's own test leaves to, with the blocks
   the header dominates below it included (so a `break` block that no path back to the
