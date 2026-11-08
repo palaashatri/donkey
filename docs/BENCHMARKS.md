@@ -35,6 +35,11 @@ the real binary at 1,000,000 and 10,000,000 instructions (`real-binary`). The re
 the input from the Ubuntu archive at one exact package version, `libllvm18=1:18.1.3-1ubuntu1`, which
 apt verifies by signature, and it uploads the file's SHA-256 with the results.
 
+The job ran on the hosted `ubuntu-24.04` runner in run 42467464472 (branch
+`agent/binary/G15-T2-link-imports`, commit `c39a421`): the install, the Release build and both
+measurements succeeded, and the `scale-benchmark` and `real-binary-benchmark` artifacts were uploaded.
+The numbers in this document are from the local machine above, not from that runner.
+
 ## Machine of the recorded runs
 
 | | |

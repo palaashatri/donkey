@@ -1567,7 +1567,8 @@ platform; do not write new, weaker ones.
   - **Status:** PARTIAL. Done: `tools/bench/scale_benchmark.py --binary PATH` measures
     `donkey-cli analyze` on an existing binary, with its SHA-256, wall time and peak RSS. The manual
     workflow's `real-binary` job runs it on libLLVM.so.1 from the pinned package
-    `libllvm18=1:18.1.3-1ubuntu1` at 1M and 10M instructions (not run on the hosted runner yet). The
+    `libllvm18=1:18.1.3-1ubuntu1` at 1M and 10M instructions. It ran on the hosted runner (run
+    42467464472: both jobs succeeded and uploaded their artifacts). The
     local series, with the machine and the diagnostics, is in `docs/BENCHMARKS.md`. Every run is
     Partial, because each budget or the block bound stops it first. Two defects found by this
     benchmark were fixed: the block bound was exceeded (`Cfg.TheBlockBoundHoldsAcrossFunctions`),
