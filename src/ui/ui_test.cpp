@@ -573,6 +573,14 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_command_palette") {
+    // assert_command_palette 0|1: the command palette is closed (0) or open (1) (G17-T1).
+    const bool want = number(0, 1) != 0.0;
+    if (workspace.command_palette_open() != want) {
+      fail(c, std::string("the command palette is ") + (want ? "closed" : "open"));
+    }
+    return true;
+  }
   if (c.name == "assert_function_name") {
     // assert_function_name ADDRESS|NAME TEXT: the views show TEXT for that function (G10-T4).
     // TEXT is the rest of the line, so it may contain spaces.

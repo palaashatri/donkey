@@ -243,6 +243,8 @@ compare, because GCC's table code overwrites `x0`.
 
 ## UI
 
+Command palette (Ctrl/Cmd+Shift+P, G17-T1): the commands the menus run and a Show command per view, filtered by the words typed; a disabled command is listed but does not run. Checked by `ui.script_command_palette`. Not yet: search kinds, a cross-reference graph and the theme editor (G17).
+
 Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform
 whose package job runs them: keyboard-only navigation, IME commit and
 composition, focus changes, display-scale changes, display removal (where

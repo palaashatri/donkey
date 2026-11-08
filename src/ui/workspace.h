@@ -278,10 +278,23 @@ class Workspace {
   /// symbol or user-renamed name. Returns 0 when nothing matches.
   /// The name a view shows for the function at `address` (G10-T4), or empty.
   [[nodiscard]] std::string function_name_shown(std::uint64_t address);
+  /// Whether the command palette (Ctrl/Cmd+Shift+P) is open. The palette lists commands that the
+  /// menus also run, filters them by the words typed, and runs the chosen one (G17-T1).
+  [[nodiscard]] bool command_palette_open() const;
   [[nodiscard]] std::uint64_t resolve_location(const std::string& query) const;
 
  private:
+  /// One command the palette can run. A disabled command is listed but cannot be chosen.
+  struct PaletteEntry {
+    std::string label;
+    std::string shortcut;  ///< the menu shortcut, shown beside the label; may be empty
+    bool enabled = true;
+    std::function<void()> run;
+  };
+
   void draw_menu_bar(bool& quit);
+  void draw_command_palette();
+  [[nodiscard]] std::vector<PaletteEntry> palette_entries();
   void draw_dockspace();
   void draw_panels();
   void build_default_layout(ImGuiID dockspace_id);
@@ -310,6 +323,19 @@ class Workspace {
   bool show_classes_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
+  /// The command palette: opened by its shortcut, filtered by the text in its field, and closed
+  /// after a command is run. The command runs at the end of the frame, after the popups are drawn.
+  bool palette_request_ = false;
+  /// Whether the palette popup is open. Kept here, not asked of ImGui, because a UI script reads it
+  /// between frames, when ImGui has no current window to look a popup up in.
+  bool palette_open_ = false;
+  bool palette_focus_input_ = false;
+  char palette_buffer_[128] = {};
+  std::size_t palette_selected_ = 0;
+  std::function<void()> pending_command_;
+  /// A window to focus once it is shown: a palette "Show ..." command sets it, and the next frame
+  /// focuses the window, after draw_panels has shown it.
+  const char* focus_window_ = nullptr;
   char goto_buffer_[256] = {};
   std::string goto_error_;
   GalleryState gallery_;
