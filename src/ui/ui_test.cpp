@@ -593,6 +593,40 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     workspace.run_search(kind, query);
     return true;
   }
+  if (c.name == "symbols_filter") {
+    // symbols_filter TEXT: the Symbols window lists the symbols that match every word of TEXT (G17).
+    workspace.set_symbol_filter(c.rest);
+    return true;
+  }
+  if (c.name == "assert_symbol_rows") {
+    // assert_symbol_rows N: the Symbols window lists N symbols under the current filter.
+    const auto want = static_cast<std::size_t>(number(0, -1.0));
+    const std::size_t got = workspace.symbol_row_count();
+    if (got != want) {
+      fail(c, "the Symbols window lists " + std::to_string(got) + " symbols, wanted " +
+                  std::to_string(want));
+    }
+    return true;
+  }
+  if (c.name == "assert_symbol") {
+    // assert_symbol RAW KIND: the image has a symbol with that raw name, of that kind.
+    std::string kind;
+    if (!workspace.symbol_kind(arg(0), kind) || kind != arg(1)) {
+      fail(c, "symbol " + arg(0) + " is not a " + arg(1) + " (it is '" + kind + "')");
+    }
+    return true;
+  }
+  if (c.name == "assert_symbol_shown") {
+    // assert_symbol_shown RAW TEXT: the Symbols window shows TEXT for that raw symbol (G10-T4).
+    const std::size_t space = c.rest.find(' ');
+    const std::string raw = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    std::string got;
+    if (!workspace.symbol_shown(raw, got) || got != want) {
+      fail(c, "the Symbols window shows '" + got + "' for " + raw + ", wanted '" + want + "'");
+    }
+    return true;
+  }
   if (c.name == "wait_search") {
     workspace.wait_search();
     return true;

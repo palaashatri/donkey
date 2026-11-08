@@ -140,6 +140,8 @@ struct UiState {
   std::string string_filter;
   /// The Classes panel filter (G10-T4).
   std::string class_filter;
+  /// The Symbols window filter (G17).
+  std::string symbol_filter;
   /// Readable names of the symbols the views show (G10-T4), cached by raw name.
   std::unordered_map<std::string, std::string> readable_names;
   std::string xref_filter;
@@ -320,6 +322,12 @@ class Workspace {
   /// symbol or user-renamed name. Returns 0 when nothing matches.
   /// Runs a search of the open document, as the Search window's button does (G17). The UI tests use it.
   void run_search(SearchKind kind, const std::string& query);
+  /// The Symbols window: how many symbols it lists under the filter, and the readable name of the
+  /// first symbol with a raw name (UI scripts only; the window draws the same rows).
+  [[nodiscard]] std::size_t symbol_row_count();
+  [[nodiscard]] bool symbol_shown(const std::string& raw, std::string& shown);
+  void set_symbol_filter(const std::string& filter);
+  [[nodiscard]] bool symbol_kind(const std::string& raw, std::string& kind);
   /// Blocks until the search that is running has finished (UI scripts only).
   void wait_search();
   [[nodiscard]] std::size_t search_hit_count();
@@ -374,6 +382,7 @@ class Workspace {
   bool show_diagnostics_ = true;
   bool show_classes_ = true;
   bool show_search_ = true;
+  bool show_symbols_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
   /// The command palette: opened by its shortcut, filtered by the text in its field, and closed

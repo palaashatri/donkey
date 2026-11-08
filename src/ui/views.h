@@ -25,6 +25,12 @@ void diagnostics(const Document& document, UiState& state);
 /// Itanium classes from the image's RTTI (G10-T3): name, kind, direct bases, vtable and slot
 /// count. Selecting a class navigates to its vtable, or its typeinfo when it has none (G10-T4).
 void classes(const Document& document, UiState& state);
+/// The Symbols window (G17): the image's symbols, filtered by the words typed.
+void symbols(const Document& document, UiState& state);
+/// The symbol indices the Symbols window lists, in symbol order (the filter applied).
+[[nodiscard]] std::vector<std::size_t> symbol_listing(const Document& document, UiState& state);
+/// The readable name a symbol is shown with (G10-T4); the raw name is the tooltip.
+[[nodiscard]] std::string symbol_shown_name(UiState& state, const Symbol& symbol);
 /// The Search window (G17): byte, immediate and regular expression searches of the open document.
 void search(const Document& document, UiState& state);
 

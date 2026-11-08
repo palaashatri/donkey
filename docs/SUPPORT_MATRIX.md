@@ -245,7 +245,9 @@ compare, because GCC's table code overwrites `x0`.
 
 Command palette (Ctrl/Cmd+Shift+P, G17-T1): the commands the menus run and a Show command per view, filtered by the words typed; a disabled command is listed but does not run. Checked by `ui.script_command_palette`.
 
-Search window (G17-T2): byte patterns with `??` wildcards, an immediate number (decimal or 0x hex) and an ECMAScript regular expression over each instruction's "mnemonic operands" text. Searches run in the background, keep the newest result, cap the hits at 10,000 and can be cancelled. An immediate search reads every number in the operand text, so a displacement or an address can match as well. Checked by `search.*` (core) and `ui.script_search`. Not yet: the cross-reference graph and the theme editor (G17).
+Search window (G17-T2): byte patterns with `??` wildcards, an immediate number (decimal or 0x hex) and an ECMAScript regular expression over each instruction's "mnemonic operands" text. Searches run in the background, keep the newest result, cap the hits at 10,000 and can be cancelled. An immediate search reads every number in the operand text, so a displacement or an address can match as well. Checked by `search.*` (core) and `ui.script_search`.
+
+Symbols window (G17-T3): every symbol of the image with its kind, binding and size, the readable name of each (raw name as the tooltip), and a case-insensitive word filter. Checked by `ui.script_symbols`. Not yet: the theme editor and synchronised views (G17).
 
 Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform
 whose package job runs them: keyboard-only navigation, IME commit and

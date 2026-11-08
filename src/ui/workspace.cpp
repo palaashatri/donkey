@@ -29,6 +29,7 @@ constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
 constexpr const char* kClassesWindow = "Classes";
 constexpr const char* kSearchWindow = "Search";
+constexpr const char* kSymbolsWindow = "Symbols";
 constexpr const char* kCommandPalette = "Command Palette";
 
 ImGuiWindowFlags panel_flags() {
@@ -484,6 +485,7 @@ std::vector<Workspace::PaletteEntry> Workspace::palette_entries() {
   show(kDiagnosticsWindow, &show_diagnostics_);
   show(kClassesWindow, &show_classes_);
   show(kSearchWindow, &show_search_);
+  show(kSymbolsWindow, &show_symbols_);
   return entries;
 }
 
@@ -681,6 +683,7 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
     ImGui::MenuItem(kClassesWindow, nullptr, &show_classes_);
     ImGui::MenuItem(kSearchWindow, nullptr, &show_search_);
+    ImGui::MenuItem(kSymbolsWindow, nullptr, &show_symbols_);
     ImGui::Separator();
     if (ImGui::MenuItem("Reset Layout")) {
       reset_layout();
@@ -772,6 +775,43 @@ void Workspace::run_search(SearchKind kind, const std::string& query) {
   state_.search->kind_input = static_cast<int>(kind);
   std::snprintf(state_.search->query_input, sizeof(state_.search->query_input), "%s", query.c_str());
   state_.search->start(state_.search_document_owner, kind, query);
+}
+
+std::size_t Workspace::symbol_row_count() {
+  const auto document = session_.document();
+  return document ? views::symbol_listing(*document, state_).size() : 0;
+}
+
+bool Workspace::symbol_shown(const std::string& raw, std::string& shown) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  for (const Symbol& symbol : document->loaded.image.symbols) {
+    if (symbol.name == raw) {
+      shown = views::symbol_shown_name(state_, symbol);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Workspace::symbol_kind(const std::string& raw, std::string& kind) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  for (const Symbol& symbol : document->loaded.image.symbols) {
+    if (symbol.name == raw) {
+      kind = symbol_kind_name(symbol.kind);
+      return true;
+    }
+  }
+  return false;
+}
+
+void Workspace::set_symbol_filter(const std::string& filter) {
+  state_.symbol_filter = filter;
 }
 
 void Workspace::wait_search() {
@@ -1068,6 +1108,15 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDiagnosticsWindow, &show_diagnostics_, panel_flags());
     if (document) {
       views::diagnostics(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_symbols_) {
+    ImGui::Begin(kSymbolsWindow, &show_symbols_, panel_flags());
+    if (document) {
+      views::symbols(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }
