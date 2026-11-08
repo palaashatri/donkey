@@ -907,12 +907,15 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
   set_tests_properties(cli.debug_mock_watch_is_unsupported PROPERTIES
     PASS_REGULAR_EXPRESSION "debug\\.watchpoints_unsupported")
   # Conditional breakpoints from the command line (G14-T5): the condition holds at the third call
-  # only, so the program stops once there, and then runs to its own exit.
-  add_test(NAME cli.debug_native_condition_json
-           COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
-                   --break-if donkey_debuggee_tick "*donkey_debuggee_counter == 2" --run --json)
-  set_tests_properties(cli.debug_native_condition_json PROPERTIES
-    PASS_REGULAR_EXPRESSION "\\\"stops\\\": \\[.*\\\"reason\\\": \\\"Breakpoint\\\".*\\\"function\\\": \\\"donkey_debuggee_tick\\\".*\\\"exit_code\\\": 42")
+  # only, so the program stops once there, and then runs to its own exit. Only the Linux adapter
+  # implements conditions; the Windows adapter refuses them with debug.conditions_unsupported.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME cli.debug_native_condition_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --break-if donkey_debuggee_tick "*donkey_debuggee_counter == 2" --run --json)
+    set_tests_properties(cli.debug_native_condition_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\\\"stops\\\": \\[.*\\\"reason\\\": \\\"Breakpoint\\\".*\\\"function\\\": \\\"donkey_debuggee_tick\\\".*\\\"exit_code\\\": 42")
+  endif()
   # The simulation adapter has no conditional breakpoints, and the command says so.
   add_test(NAME cli.debug_mock_condition_is_unsupported
            COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64

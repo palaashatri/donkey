@@ -80,8 +80,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # Pinned to the version the tree is formatted with. An unpinned install follows PyPI, and
+      # later releases format some lines differently, so the check would fail without a source change.
       - name: Install clang-format
-        run: python -m pip install clang-format
+        run: python -m pip install clang-format==20.1.8
       - name: Check formatting
         run: |
           find include src apps tests -type f \( -name '*.h' -o -name '*.cpp' \) \

@@ -71,7 +71,7 @@ static_assert(sizeof(RegWord) == 8);
 
 struct RegisterSlot {
   const char* name;
-  RegWord NativeRegs::*field;
+  RegWord NativeRegs::* field;
 };
 
 #if defined(__x86_64__)
