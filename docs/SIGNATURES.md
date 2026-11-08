@@ -1,11 +1,12 @@
 # Library function signatures (G09)
 
-Status: **G09-T1 partial.** The format, the reader and writer, and the matcher are implemented and
-tested (`include/donkey/analysis/signatures.h`, `src/analysis/signatures.cpp`). Not yet: the generator
-that makes a set from a library (G09-T2, needs the relocatable-object support of G15-T1 for `.a`
-files) and any shipped signature set (G09-T3, which needs licence review of each library first).
-No signature set is shipped with Donkey, and nothing is named from signatures unless a user loads
-one.
+Status: **G09-T1 partial, G09-T2 partial.** The format, the reader and writer, and the matcher are
+implemented and tested (`include/donkey/analysis/signatures.h`, `src/analysis/signatures.cpp`). The
+generator (G09-T2, `include/donkey/analysis/signature_gen.h`, `src/analysis/signature_gen.cpp`,
+`donkey-cli sig make`) makes a set from x86-64 ELF relocatable objects and static archives. Not yet:
+shared objects, PE import libraries, an AArch64 generator, a CLI command that matches a set against a
+binary, and any shipped signature set (G09-T3, which needs licence review of each library first). No
+signature set is shipped with Donkey, and nothing is named from signatures unless a user loads one.
 
 ## The format: `donkey.signatures.v1`
 
@@ -65,6 +66,39 @@ different function.
 - **Unreadable functions are skipped**: a function whose bytes are outside the file, or whose length is
   zero, is not matched and is not reported.
 - A function with no matching signature gets no entry at all.
+
+## Generating a set (G09-T2)
+
+    donkey-cli sig make libfoo.a --lib foo --version 1.2 --license MIT --out foo.sig.json [--json]
+
+The input is an ELF relocatable object (`.o`, x86-64, 64-bit little-endian) or a static archive whose
+relocatable members are read one by one. The file is read as the compiler wrote it. It is not laid out
+or relocated, and nothing is run.
+
+- **Which functions:** the global and weak `FUNC` symbols that have a size and are in an executable
+  section. Local (`static`) functions are not named, because one name can be defined in several members.
+  An alias (two names for one body) gives two signatures with identical bytes, which the matcher reports
+  as ambiguous and names nothing.
+- **Wildcards:** each relocation in a function's section that patches bytes inside the function makes
+  a wildcard of the width its type patches (for example 4 bytes for `R_X86_64_PLT32`, 8 for
+  `R_X86_64_64`). Overlapping wildcards are merged.
+- **Skipped, with a note:** a function whose relocation has a type the generator does not know, whose
+  relocation runs past its end, whose section is compressed or has no bytes in the file, or whose
+  bytes lie outside the file. The skipped count and the notes say which, and at most 64 notes are kept.
+- **Refused:** the whole file, with a code, when it is not an ELF object or an archive
+  (`sig.input`), is another ELF type (`sig.not_relocatable`), is not x86-64 (`sig.machine`), or has a
+  header or table that lies outside the file (`sig.truncated`). A member of an archive that cannot be
+  read is skipped with a note instead, and the rest of the archive is still read.
+- **Licence and provenance:** the library, version and licence are required, and they become the
+  set's fields. The matcher reports them as the provenance of each match.
+
+Tests: `SignatureGen.*` (ten tests) and `cli.sig_make_*` (two) on a fixture library, `sig/gen/` (provenance in
+`tests/fixtures/sig/gen/PROVENANCE.md`). They check the names, the lengths against the object's own
+symbol sizes, the wildcard offsets against `readelf -r`, a match of the library's functions in a program
+that links it (with no other name), the refusals, and a function with an unknown relocation type.
+Mutations checked: ignoring the relocations fails three tests, including the linked-program match, and
+naming local functions fails two. `fuzz_sig_object` checks that every accepted set meets the format and
+reads back to the same text.
 
 ## Limits
 

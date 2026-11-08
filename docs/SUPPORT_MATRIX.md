@@ -232,6 +232,14 @@ compare, because GCC's table code overwrites `x0`.
 | Hardware watchpoints in the CLI (`donkey-cli debug launch --watch`) | yes (`cli.debug_native_watch_json`) | not implemented | not implemented | Unsupported |
 | Hardware watchpoints in the GUI | not yet | not yet | not yet | not yet |
 
+## Library function signatures (G09)
+
+| Capability | Status | Evidence |
+|---|---|---|
+| Generate a set from x86-64 ELF relocatable objects and static archives (`donkey-cli sig make`) | Done for global and weak functions with a size. Local functions, shared objects, PE import libraries and AArch64 are not read | `SignatureGen.*`, `cli.sig_make_*`, `fuzz_sig_object` |
+| Match a set against a binary (`identify_functions`) | Library API only: no CLI command matches a set yet | `Signatures.*`, `SignatureGen.AMatchInTheLinkedProgram*` |
+| Shipped signature sets | None. Nothing is named from signatures unless a user loads a set | — |
+
 ## Automation
 
 | Surface | Status | Notes |

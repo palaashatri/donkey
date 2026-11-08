@@ -159,7 +159,7 @@ P0 is the most important, P3 the least.
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
-| G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). No generator yet (T2) and no shipped sets (T3) | P1 | IN PROGRESS (T1 PARTIAL; T2, T3 TODO) |
+| G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). The generator for x86-64 ELF objects and static archives, `donkey-cli sig make` (T2, partial: no shared objects, PE import libraries or AArch64). No shipped sets (T3) | P1 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 TODO) |
 | G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
@@ -1072,6 +1072,18 @@ own code.
 - **G09-T2 Generator.** `donkey-cli sig make <archive.a|lib.so|.lib> --lib
   NAME --version V --out FILE`. Reads relocations to build the masks. Needs
   ELF relocatable support (G15-T1) for `.a`.
+  - **Status:** PARTIAL. Done: `generate_signatures` (`include/donkey/analysis/signature_gen.h`,
+    `src/analysis/signature_gen.cpp`) reads the raw bytes of x86-64 ELF relocatable objects and of the
+    relocatable members of static archives, without laying them out. The global and weak functions with a
+    size are named. Each relocation inside a function makes a wildcard of its width, and a function that
+    cannot be described exactly (an unknown relocation type, a relocation past its end, a compressed or
+    out-of-file section) is skipped with a note. `donkey-cli sig make` writes the set, with `--license`
+    required because the format requires it. Evidence: `SignatureGen.*` (ten tests, on
+    `tests/fixtures/sig/gen/`), whose match test links the library into `sig_static` and checks that the
+    four library functions are named and nothing else is; `cli.sig_make_writes_a_set_from_an_archive` and
+    `cli.sig_make_refuses_an_executable`; `fuzz_sig_object`. Mutations checked: ignoring relocations fails
+    three tests, and naming local functions fails two. Not done: shared objects (`.so`), PE import
+    libraries, an AArch64 generator, and the `--lib` name taken from the file itself.
 - **G09-T3 Signature sets.**
   - Generate sets only from libraries whose licence allows redistribution of
     derived data: musl (MIT), compiler-rt and libc++ (Apache-2.0 with LLVM
