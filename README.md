@@ -103,11 +103,3 @@ Donkey is a fast native workbench with an honest, tested decompiler subset. It i
 ## Licence
 
 MIT for Donkey's own code ([LICENSE](LICENSE)). Released binaries statically include Capstone (BSD-3-Clause and NCSA), SDL3 (zlib), Dear ImGui (MIT) and SQLite (public domain); their notices ship as [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES).
-
-## Planned SLOPOS, PARAMA and edge-device support
-
-donkey is an original project considered for SLOPOS's **optional first-party catalog**, not required in its minimal image. Linux/SLOPOS GUI support must be demonstrated through real desktop integration; **PARAMA remains a conditional native source-port goal** after its actual process, graphics, files, ABI and toolkit dependencies exist. This is a platform roadmap, not a build/compatibility claim.
-
-**Raspberry Pi Zero 2 W efficiency:** Architect lazy disassembly by on-demand pages/functions, bounded decoded instruction caches, streamed file reads and symbol enumeration, incremental CFG/index construction and deterministic eviction. Put heavy decompilation/debugger analyses into cancelable, memory-budgeted worker jobs, with accurate partial results and original binary unchanged. Idle should perform no full-binary scan, and analysis failure must not corrupt the project. Avoid needless editor/graphics heavyweight libraries.
-
-See [AGENTS.md](AGENTS.md#future-sloposparama-platforms-and-raspberry-pi-zero-2-w-efficiency) for measurable acceptance and restrictions. No actual Pi Zero 2 W or PARAMA acceptance has been performed.
