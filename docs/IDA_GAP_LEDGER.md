@@ -1480,9 +1480,17 @@ platform; do not write new, weaker ones.
     built with GCC) and `RelocateAArch64.*` (built with clang for AArch64): the data
     pointer holds its target's address, a call reaches its callee, and the unresolved
     call is reported. `fuzz_binary` runs both objects as seeds (60 s and 45 s, no
-    finding). Not done: GOT-based relocations (`GOTPCREL`), the TLS types, the AArch64
-    page and `LO12` forms (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols, and
-    the relocations of non-allocated sections (debug information).
+    finding).
+  - **Later additions:** the TLS relocations named in the G15-T1 task are done, x86-64
+    local-exec included. Also applied: GOT-based relocations
+    (`GOTPCREL`, `GOTPCRELX`, `REX_GOTPCRELX`), the AArch64 page and `LO12` forms
+    (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols placed in zero-filled `.bss`,
+    and TLS: x86-64 local-exec, initial-exec, global-dynamic and local-dynamic (relaxed as `ld`
+    does), and AArch64 local-exec, initial-exec and TLSDESC. Evidence: `RelocateTls.*`,
+    `RelocateGot.*`, `RelocateCommon.*` and `RelocateAArch64.*`. Not done, and recorded as
+    follow-ups: the classic AArch64 global- and local-dynamic sequences (`-mtls-dialect=trad`,
+    which need `__tls_get_addr`), and the relocations of non-allocated sections (debug
+    information), which the code leaves unapplied on purpose.
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
@@ -1548,9 +1556,10 @@ platform; do not write new, weaker ones.
     and the memory ranges, read by address. Evidence: six `MinidumpReader.*` unit tests on a
     dump made by `tests/fixtures/minidump/make_sample_minidump.py` (which follows Microsoft's
     documented layout, not Windows output), `cli.core_minidump`, and the new
-    `fuzz/fuzz_minidump.cpp` harness, which compiles with clang (run not yet done). Not done:
-    a dump written by Windows has not been checked; other architectures keep their threads
-    without registers; the architecture for a raw record image is still supplied by the caller.
+    `fuzz/fuzz_minidump.cpp` harness: 319,333 runs in 61 s under clang with ASan and UBSan,
+    no finding. Not done: a dump written by Windows has not been checked; other architectures
+    keep their threads without registers; the architecture for a raw record image is still
+    supplied by the caller.
 
 ### G16 Scale
 
