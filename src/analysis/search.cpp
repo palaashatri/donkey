@@ -12,7 +12,6 @@ namespace {
 
 constexpr std::size_t kCancelStride = 1U << 20U;  // bytes between cancellation checks
 constexpr std::size_t kInstructionStride = 4096;  // instructions between cancellation checks
-constexpr std::size_t kMaxPatternTokens = 256;
 
 struct PatternByte {
   bool wildcard = false;

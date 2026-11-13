@@ -979,7 +979,11 @@ for Partial functions.
   printer runs. A prototype applied to the -O0 `c_point_sum` prints `p->z` and keeps the
   value (`DecompilerCorpus.AppliedPrototypeReachesAnO0SpilledParameter`), and the forwarding
   is tested in `Ir.ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter` and
-  `Ir.ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore`. Not done: a value loaded from a
+  `Ir.ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore`. This holds on x86-64 only. On
+  AArch64 an unoptimised build reloads the parameter into `x0`, the register it arrived in, and
+  then overwrites `x0`, so the slot is the only home of the pointer and nothing is forwarded:
+  the member accesses stay untyped there (seen on the arm64 CI host; the corpus test asserts the
+  member names on x86-64 only). Not done: that AArch64 case; a value loaded from a
   typed pointer member keeps no type, so a pointer member of a structure is not followed to
   its pointee; and the forwarding does not cross a block boundary. The
   conversion from a `TypeTable` to an `IrPrototype` is written by the caller (the test does
