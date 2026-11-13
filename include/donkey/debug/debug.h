@@ -93,6 +93,9 @@ struct Watchpoint {
   std::uint8_t length = 0;  ///< 1, 2, 4 or 8
   WatchKind kind = WatchKind::Write;
   std::uint64_t hit_count = 0;
+  /// The condition as it was written (`<operand> <op> <value>`, see debug/condition.h), or empty
+  /// when the watch stops at every access. A hit whose condition is false is not counted.
+  std::string condition;
 };
 
 struct StopInfo {
@@ -180,6 +183,20 @@ class DebugAdapter {
   [[nodiscard]] virtual Result<Watchpoint> set_watchpoint(std::uint64_t address,
                                                           std::uint8_t length, WatchKind kind);
   [[nodiscard]] virtual Result<bool> remove_watchpoint(std::uint64_t id);
+  /// A hardware watchpoint that stops only at accesses where `condition` holds. The condition is
+  /// parsed and its register checked when the watch is set; a refused one uses no debug register.
+  /// The condition is evaluated after the access, the value the stop reports. The default refuses
+  /// with `Unsupported`, like set_watchpoint.
+  [[nodiscard]] virtual Result<Watchpoint> set_conditional_watchpoint(std::uint64_t address,
+                                                                      std::uint8_t length,
+                                                                      WatchKind kind,
+                                                                      const std::string& condition);
+  /// A software breakpoint that stops only at hits where `condition` holds (G14-T5). The condition
+  /// is written as `<operand> <op> <value>` (debug/condition.h) and is parsed when it is set: an
+  /// unparseable one, or one naming a register the host does not have, is refused and no breakpoint
+  /// is set. Addresses are runtime addresses. The default refuses with `Unsupported`.
+  [[nodiscard]] virtual Result<Breakpoint> set_conditional_breakpoint(std::uint64_t address,
+                                                                      const std::string& condition);
   [[nodiscard]] virtual Result<std::vector<std::byte>> read_memory(std::uint64_t address,
                                                                    std::size_t size) = 0;
   [[nodiscard]] virtual Result<std::size_t> write_memory(std::uint64_t address,
