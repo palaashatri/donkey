@@ -11,9 +11,9 @@
 
 namespace donkey::ui {
 
-/// The name to show for a raw symbol: the demangled form when the name is an Itanium (`_Z`) or MSVC
-/// (`?`) name that the demangler reads, and the raw name otherwise. A name the demangler refuses is
-/// shown raw, never guessed.
+/// The name to show for a raw symbol: the demangled form when the name is an Itanium (`_Z`, or
+/// `__Z` for a Mach-O symbol) or MSVC (`?`) name that the demangler reads, and the raw name
+/// otherwise. A name the demangler refuses is shown raw, never guessed.
 [[nodiscard]] std::string readable_name(std::string_view raw);
 
 /// `readable_name` through a cache keyed by the raw name. The cache is owned by the UI state, so it
