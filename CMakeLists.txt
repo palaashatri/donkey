@@ -111,6 +111,8 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/signatures.cpp
+  src/analysis/signature_gen.cpp
   src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
@@ -349,6 +351,16 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_cdecl PRIVATE cxx_std_20)
   target_compile_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_sig fuzz/fuzz_sig.cpp)
+  target_link_libraries(fuzz_sig PRIVATE donkey::analysis)
+  target_compile_features(fuzz_sig PRIVATE cxx_std_20)
+  target_compile_options(fuzz_sig PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_sig PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_sig_object fuzz/fuzz_sig_object.cpp)
+  target_link_libraries(fuzz_sig_object PRIVATE donkey::analysis)
+  target_compile_features(fuzz_sig_object PRIVATE cxx_std_20)
+  target_compile_options(fuzz_sig_object PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_sig_object PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
 
 # ---------------------------------------------------------------------------

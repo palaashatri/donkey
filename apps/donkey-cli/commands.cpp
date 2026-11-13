@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -15,6 +16,8 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/analysis/signature_gen.h"
+#include "donkey/analysis/signatures.h"
 #include "donkey/binary/archive.h"
 #include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
@@ -796,6 +799,7 @@ void print_usage(std::FILE* out) {
       "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] [--project "
       "DB]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
+      "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
       "  donkey-cli project save <database> <binary> [--json]\n"
       "  donkey-cli project info <database> [--json]\n"
@@ -2015,6 +2019,107 @@ std::string octal_mode(std::uint32_t mode) {
 }
 
 }  // namespace
+
+int command_sig(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty() || arguments[0] != "make") {
+    return usage_error("sig needs a subcommand: make");
+  }
+  std::string path;
+  std::string out;
+  donkey::SignatureGenOptions options;
+  bool json = false;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--lib" || arg == "--version" || arg == "--license" || arg == "--out") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("sig make: each of --lib, --version, --license and --out needs a value");
+      }
+      if (arg == "--lib") {
+        options.library = std::string(value);
+      } else if (arg == "--version") {
+        options.version = std::string(value);
+      } else if (arg == "--license") {
+        options.license = std::string(value);
+      } else {
+        out = std::string(value);
+      }
+    } else if (!arg.empty() && arg.front() == '-') {
+      return usage_error("unknown option for sig make");
+    } else if (path.empty()) {
+      path = std::string(arg);
+    } else {
+      return usage_error("sig make takes one object or archive file");
+    }
+  }
+  if (path.empty() || out.empty()) {
+    return usage_error("sig make needs an object or archive file and --out FILE");
+  }
+  // Objects and archives are read whole; the limit keeps a huge file from exhausting memory.
+  constexpr std::uintmax_t kMaxInputBytes = std::uintmax_t{1} << 30;
+  std::error_code size_error;
+  const std::uintmax_t size = std::filesystem::file_size(path, size_error);
+  if (size_error) {
+    return usage_error("cannot open the object or archive file");
+  }
+  if (size > kMaxInputBytes) {
+    return usage_error("the object or archive file is larger than 1 GiB");
+  }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return usage_error("cannot open the object or archive file");
+  }
+  std::vector<std::byte> bytes;
+  bytes.reserve(static_cast<std::size_t>(size));
+  std::vector<char> buffer(1 << 20);
+  while (file) {
+    file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = static_cast<std::size_t>(file.gcount());
+    for (std::size_t i = 0; i < count; ++i) {
+      bytes.push_back(static_cast<std::byte>(buffer[i]));
+    }
+  }
+
+  auto generated = donkey::generate_signatures(bytes, options);
+  if (!generated) {
+    return fail(generated.diagnostic());
+  }
+  const donkey::SignatureGenResult& result = generated.value();
+  std::ofstream written(out, std::ios::binary | std::ios::trunc);
+  if (!written) {
+    return fail(Diagnostic{Status::InvalidInput, "sig.write", "cannot write the signature file",
+                           std::nullopt});
+  }
+  written << donkey::write_signature_set(result.set) << '\n';
+  if (!written) {
+    return fail(Diagnostic{Status::InvalidInput, "sig.write", "cannot write the signature file",
+                           std::nullopt});
+  }
+  if (json) {
+    std::string text = "{\n";
+    text += "  \"library\": " + quote(result.set.library) + ",\n";
+    text += "  \"version\": " + quote(result.set.version) + ",\n";
+    text += "  \"signatures\": " + std::to_string(result.set.signatures.size()) + ",\n";
+    text += "  \"functions\": " + std::to_string(result.functions) + ",\n";
+    text += "  \"skipped\": " + std::to_string(result.skipped) + ",\n";
+    text += std::string("  \"partial\": ") + (result.partial ? "true" : "false") + ",\n";
+    text += "  \"out\": " + quote(out) + "\n}\n";
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    return kExitOk;
+  }
+  std::printf("wrote %zu signatures for %s %s to %s (%zu functions, %zu skipped)\n",
+              result.set.signatures.size(), result.set.library.c_str(), result.set.version.c_str(),
+              out.c_str(), result.functions, result.skipped);
+  for (const std::string& note : result.notes) {
+    std::printf("  note: %s\n", note.c_str());
+  }
+  if (result.partial) {
+    std::printf("  note: reading stopped early, so the set may be incomplete\n");
+  }
+  return kExitOk;
+}
 
 int command_archive(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {

@@ -138,6 +138,9 @@ add_executable(donkey_unit_tests
   unit/demangle_test.cpp
   unit/demangle_msvc_test.cpp
   unit/rtti_test.cpp
+  unit/signatures_test.cpp
+  unit/signature_gen_test.cpp
+  unit/signatures_musl_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
@@ -173,6 +176,7 @@ add_executable(donkey_unit_tests
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+  DONKEY_SIGNATURE_DIR="${PROJECT_SOURCE_DIR}/signatures"
   TEST_PLUGIN_VALID_PATH="$<TARGET_FILE:test_plugin_valid>"
   TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
   TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
@@ -911,3 +915,19 @@ set_tests_properties(cli.archive_list_gnu PROPERTIES
 add_test(NAME cli.archive_rejects_a_non_archive
          COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
 set_tests_properties(cli.archive_rejects_a_non_archive PROPERTIES WILL_FAIL TRUE)
+# Signature generation (G09-T2): the fixture archive gives five functions (four global, one static),
+# with no skips and no partial reading.
+add_test(NAME cli.sig_make_writes_a_set_from_an_archive
+         COMMAND donkey-cli sig make ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sig/gen/libsigfuncs.a
+                 --lib sigfuncs --version 1.0 --license MIT
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/sigfuncs.sig.json --json)
+set_tests_properties(cli.sig_make_writes_a_set_from_an_archive PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"signatures\": 5,.*\"functions\": 5,.*\"skipped\": 0,.*\"partial\": false")
+# An executable is not something to generate signatures from: the command exits with an error, and
+# the unit tests check that the error is sig.not_relocatable.
+add_test(NAME cli.sig_make_refuses_an_executable
+         COMMAND donkey-cli sig make ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sig/gen/sig_static
+                 --lib sigfuncs --version 1.0 --license MIT
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/refused.sig.json)
+set_tests_properties(cli.sig_make_refuses_an_executable PROPERTIES WILL_FAIL TRUE)
+
