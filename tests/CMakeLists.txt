@@ -524,12 +524,24 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   endif()
   donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
   donkey_ui_script(command_palette)
-  donkey_ui_script(search)
-  donkey_ui_script(xref_graph)
+  # The search and xref graph scripts assert the x86-64 Linux debuggee's fixed addresses and
+  # instruction text (the .interp at 0x318, "sub rsp, 8" at 0x1004, and the call graph counts), so
+  # they run only where that debuggee is built, as the data and strings scripts above do.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(search)
+    donkey_ui_script(xref_graph)
+  endif()
   # The Classes panel (G10-T4) lists the RTTI of the hierarchy fixture: the bases of each class
-  # are the ones the fixture declares. The fixture exists only where the RTTI test builds it.
-  if(TARGET donkey_test_hierarchy)
+  # are the ones the fixture declares. The fixture exists only where the RTTI test builds it, and
+  # only the ELF readers load Itanium RTTI, so PE and Mach-O hosts have nothing to list.
+  if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     AND TARGET donkey_test_hierarchy)
     donkey_ui_script(classes FILE $<TARGET_FILE:donkey_test_hierarchy>)
+  endif()
+  # readable_names and symbols assert the x86-64 Linux hierarchy fixture's addresses and loader
+  # symbol counts (90, 7 and 3), which the other hosts' builds of the fixture do not share.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
+     AND TARGET donkey_test_hierarchy)
     donkey_ui_script(readable_names FILE $<TARGET_FILE:donkey_test_hierarchy>)
     donkey_ui_script(symbols FILE $<TARGET_FILE:donkey_test_hierarchy>)
   endif()
