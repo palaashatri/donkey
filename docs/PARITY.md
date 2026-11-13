@@ -59,6 +59,9 @@ Rules for reference tools:
   G26.
 - A measure never depends on a proprietary file. Fixtures are redistributable, with provenance.
 
+**The measured baseline of Donkey on real binaries, with the commands and the reference tool used, is in
+[`AUDIT.md`](AUDIT.md). It is the "before" for every row that cites it.
+
 **The reference corpus (R1)** is defined by G20-T1: permissively licensed programs built in CI
 from pinned sources, at `-O0` and `-O2`, for x86-64 first and AArch64 second, each as an
 unstripped and a stripped binary. Thresholds are proposed in the ledger and fixed by the owner
@@ -67,7 +70,8 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 ## 3. Scorecard
 
 State on 2026-11-13, with the work integrated that day (ledger rows G09, G10, G12, G14, G15,
-G16 and G17). The IDA Pro and Ghidra columns are short
+G16 and G17). The measured baseline of the audit that began the Wave 1 work is in
+[`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 
@@ -76,9 +80,9 @@ detail. "Gaps" names the ledger entries that move the row.
 | 1 | Executable formats | ELF, PE, Mach-O and many more; loader SDK | ELF, PE, Mach-O, COFF, DEX, raw, Intel HEX, S-records, dyld shared cache and more | ELF, PE, Mach-O (32/64-bit, fat), raw; relocatable objects; archives listed; Intel HEX, S-records; ELF cores, Windows minidumps. Imports are bound across ELF images from the CLI; one image per project in the desktop app | Usable | G15, G30 |
 | 2 | Processors: disassembly | Dozens of processor families | Dozens, described in SLEIGH | Full pipeline for x86, x86-64, AArch64. Decode only for 32-bit ARM (A32), RV64GC, MIPS and PowerPC. No Thumb | Basic | G13, G26 |
 | 3 | Processors: decompilation | Hex-Rays decompilers for x86, x64, ARM, ARM64, PowerPC, MIPS, RISC-V, ARC | Every SLEIGH processor, through p-code | x86-64, x86-32 and AArch64, a verified subset | Basic | G13, G26 |
-| 4 | Analysis of stripped code | Function discovery from prologues, unwind data and heuristics; no-return, thunks, stack analysis | The same, as a pipeline of analyzers | Functions start at the entry point, exported symbols and call targets. x86 and AArch64 jump tables. No unwind tables, no no-return analysis, no prologue scan | Basic | G23, G24 |
+| 4 | Analysis of stripped code | Function discovery from prologues, unwind data and heuristics; no-return, thunks, stack analysis | The same, as a pipeline of analyzers | Functions start at the entry point, exported symbols and call targets. x86 and AArch64 jump tables. No unwind tables, no no-return analysis, no prologue scan. Baseline ([AUDIT.md](AUDIT.md)): function-start recall 85.8% on the stripped own CLI against its symbols (precision 100.0%); against `.eh_frame` entries 33.0% (`python3.12`) to 88.5% (`bash`), precision 98.9% to 100% | Basic | G23, G24 |
 | 5 | Decompiler: correctness | Not machine-checked | Not machine-checked | Every `Complete` result on the differential corpus is executed against the compiled code | Donkey's strength | G20 |
-| 6 | Decompiler: coverage of real code | Nearly every function | Nearly every function | Integer and scalar floating-point subset. A function that makes a call is `Partial`: call arguments and results are not modelled. No SIMD, no varargs | Basic | G20, G21, G01, G08 |
+| 6 | Decompiler: coverage of real code | Nearly every function | Nearly every function | Integer and scalar floating-point subset. A function that makes a call is `Partial`: call arguments and results are not modelled. No SIMD, no varargs. Baseline ([AUDIT.md](AUDIT.md)) on 1,893 sampled functions of seven system and own binaries: Complete 11.0%, Partial 58.1%, InvalidIR 25.8% (all `ir.unreachable_block`), Unsupported 4.7%, crash 0.3% | Basic | G20, G21, G01, G08 |
 | 7 | Decompiler: readability | Merged variables, `for` loops, simplified conditions | Similar | Register aliases merged, copy propagation, `do`/`while`, `break`, `continue`; `for` only for register counters; DWARF names at `-O0` | Basic | G04 |
 | 8 | Types | Type libraries for the major platforms; struct, enum and union editors; propagation | Data type archives, C parser, Data Type Manager; propagation | Type store, bounded C declaration parser, prototypes applied from the CLI, struct layouts behind pointer arguments. No type libraries, no editing UI | Basic | G05, G22 |
 | 9 | Debug information | DWARF, PDB | DWARF, PDB | DWARF 2-5; PDB 7.00 for C structs, enums, procedures and globals; separate debug files, `.dSYM` lookup, compressed DWARF. No C++ class layouts from PDB | Usable | G06 |
@@ -94,7 +98,7 @@ detail. "Gaps" names the ledger entries that move the row.
 | 19 | Diffing and version tracking | Lumina; third-party BinDiff and Diaphora | Version Tracking, Program Diff, BSim | None | None | G28 |
 | 20 | Collaboration | IDA Teams | Ghidra Server shared projects | Single-user SQLite projects with crash-safe backup and restore | None | G32 |
 | 21 | Managed code and other containers | Dalvik, .NET and more | DEX, Java class files and more | None | None | G30 |
-| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions and one real 123 MB library benchmarked. No incremental re-analysis | Basic | G16 |
+| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions and one real 123 MB library benchmarked. No incremental re-analysis. Baseline ([AUDIT.md](AUDIT.md)): the stripped 8.3 MB own CLI analyses in 1.27 s and 640 MiB peak RSS; `libc.so.6` (2.1 MB) in 0.94 s and 339 MiB; a sweep of 200 system binaries finished 200 of 200 | Basic | G16 |
 | 23 | Signed releases | Signed installers | Unsigned archive | Packages for four operating systems; ad-hoc signed `.app`, unsigned `.exe` | Blocked | G18 |
 | 24 | Accessibility | Platform accessibility APIs | Java accessibility | Keyboard-only use; no screen reader | Blocked | G19 |
 

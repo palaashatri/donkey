@@ -1657,7 +1657,9 @@ program. Nothing measures Donkey on whole programs, so the order of the
 decompiler work is a guess.
 
 **Donkey today.** The corpus in `tests/corpus/*.c` (see
-`docs/SUPPORT_MATRIX.md`). No whole-program measurement.
+`docs/SUPPORT_MATRIX.md`). No whole-program measurement in the ledger's own plan. Baseline
+(`main` at `1a92abf`, [`AUDIT.md`](AUDIT.md)): on 1,893 sampled functions, Complete 11.0%,
+Partial 58.1%, InvalidIR 25.8%, Unsupported 4.7%, crash 0.3%.
 
 **Tasks.**
 
@@ -1694,7 +1696,8 @@ Complete but not executed is not verified: report the two counts separately.
 **Donkey today.** `lift_call` in `src/ir/lift.cpp` and
 `src/ir/lift_aarch64.cpp` keeps only the target and marks the function
 Partial ("outgoing call arguments and return values follow no modelled ABI").
-So every function that makes a call is Partial.
+So every function that makes a call is Partial. Baseline ([`AUDIT.md`](AUDIT.md)): 1,009 of
+the 1,893 sampled functions carry that note.
 
 **Tasks.**
 
@@ -1756,7 +1759,9 @@ Generate from headers and record the header version.
 every function in a stripped binary. Exception tables give the `try` and
 `catch` regions. Both reference tools read them.
 
-**Donkey today.** Not read.
+**Donkey today.** Not read. Baseline ([`AUDIT.md`](AUDIT.md)): the FDE starts of `.eh_frame` are
+not used as seeds, so function-start recall against them is 33.0% (`python3.12`) to 88.5%
+(`bash`) on the audited system binaries.
 
 **Tasks.**
 
@@ -1783,6 +1788,9 @@ reference tools. Everything else works on what this step finds.
 **Donkey today.** `src/analysis/analysis.cpp` seeds functions from the entry
 point, exported function symbols and call targets. There is no prologue scan,
 no no-return analysis, no thunk classification and no stack-depth analysis.
+Baseline ([`AUDIT.md`](AUDIT.md)): function-start recall 85.8% on the stripped own CLI against
+its symbols (precision 100.0%); against `.eh_frame` entries, 68.0% on the stripped CLI, and
+33.0% to 88.5% on the system binaries, with precision 98.9% to 100%.
 
 **Tasks.**
 
