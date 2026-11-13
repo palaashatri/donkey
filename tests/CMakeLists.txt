@@ -635,6 +635,32 @@ set_tests_properties(cli.decompile_elf_i386 PROPERTIES
   PASS_REGULAR_EXPRESSION
     "\"name\": \"_start\".*\"status\": \"Partial\".*u32 _start\\(void\\).*esp = esp - 0x4")
 
+# G-audit Goal 2: a whole-binary decompile states its cap. tiny-elf-x86_64 has two functions.
+add_test(NAME cli.decompile_truncation_json
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --json --max-functions 1)
+set_tests_properties(cli.decompile_truncation_json PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"total_functions\": 2,.*\"shown_functions\": 1,.*\"truncated\": true")
+
+add_test(NAME cli.decompile_truncation_text
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --max-functions 1)
+set_tests_properties(cli.decompile_truncation_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions; raise the limit with --max-functions N")
+
+add_test(NAME cli.decompile_no_truncation_at_the_limit
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --json --max-functions 2)
+set_tests_properties(cli.decompile_no_truncation_at_the_limit PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"total_functions\": 2,.*\"shown_functions\": 2,.*\"truncated\": false")
+
+add_test(NAME cli.decompile_rejects_zero_max_functions
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --max-functions 0)
+set_tests_properties(cli.decompile_rejects_zero_max_functions PROPERTIES WILL_FAIL TRUE)
+
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
 # ---------------------------------------------------------------------------

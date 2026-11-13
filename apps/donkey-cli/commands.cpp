@@ -118,6 +118,9 @@ struct DisasmOptions {
   LoadOptions load_options;
 };
 
+/// The default cap of `decompile` without --function (see --max-functions).
+constexpr std::size_t kDefaultMaxDecompiledFunctions = 1000;
+
 struct AnalysisRequest {
   std::string path;
   bool json = false;
@@ -126,6 +129,8 @@ struct AnalysisRequest {
   std::size_t max_strings = 100000;
   std::size_t min_string_length = 4;
   std::size_t max_items = 1000;
+  /// Whole-binary decompile output is capped at this many functions; --max-functions raises it.
+  std::size_t max_functions = kDefaultMaxDecompiledFunctions;
   std::vector<std::uint64_t> function_starts;
   /// A project whose saved local names are applied to the decompiled output (G12-T3).
   std::string project_path;
@@ -800,8 +805,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli core <file> [--json]\n"
       "  donkey-cli debuginfo <binary> [--json] [--max-items N] [--debug-file PATH]\n"
       "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
-      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] [--project "
-      "DB]\n"
+      "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] "
+      "[--max-functions N] [--project DB]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       " [--json]\n"
@@ -1644,6 +1649,13 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         return usage_error("invalid --max-instructions value");
       }
       request.max_instructions = static_cast<std::size_t>(parsed);
+    } else if (argument == "--max-functions") {
+      std::string_view value;
+      std::uint64_t parsed = 0;
+      if (!take_value(arguments, i, value) || !parse_u64(value, parsed) || parsed == 0) {
+        return usage_error("--max-functions needs a positive value");
+      }
+      request.max_functions = static_cast<std::size_t>(parsed);
     } else if (argument == "--project") {
       std::string_view value;
       if (!take_value(arguments, i, value)) {
@@ -1777,10 +1789,17 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
     out += "  \"tool\": \"donkey-cli\",\n";
     out += "  \"tool_version\": " + quote(version()) + ",\n";
+    // The cap is stated, never silent: total_functions counts every function of the binary that
+    // this run selected, shown_functions the ones printed below.
+    const std::size_t shown = std::min(selected.size(), request.max_functions);
+    out += "  \"total_functions\": " + std::to_string(selected.size()) + ",\n";
+    out += "  \"shown_functions\": " + std::to_string(shown) + ",\n";
+    out += "  \"max_functions\": " + std::to_string(request.max_functions) + ",\n";
+    out += std::string("  \"truncated\": ") + (shown < selected.size() ? "true" : "false") + ",\n";
     out += "  \"functions\": [";
     std::size_t written = 0;
     for (const Function* function : selected) {
-      if (written >= request.max_items) {
+      if (written >= request.max_functions) {
         break;
       }
       auto lifted = lift_named(*function);
@@ -1825,8 +1844,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
+  const std::size_t text_shown = std::min(selected.size(), request.max_functions);
   bool first = true;
-  for (const Function* function : selected) {
+  for (std::size_t index = 0; index < text_shown; ++index) {
+    const Function* function = selected[index];
     if (!first) {
       std::printf("\n");
     }
@@ -1844,6 +1865,12 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       continue;
     }
     std::fwrite(text.value().data(), 1, text.value().size(), stdout);
+  }
+  if (text_shown < selected.size()) {
+    std::printf(
+        "\n// truncated: showing %zu of %zu functions; raise the limit with "
+        "--max-functions N\n",
+        text_shown, selected.size());
   }
   return kExitOk;
 }
