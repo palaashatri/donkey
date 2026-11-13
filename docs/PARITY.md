@@ -66,13 +66,14 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 
 ## 3. Scorecard
 
-State of `main` at commit `eb9fa61` (2026-11-09). The IDA Pro and Ghidra columns are short
+State on 2026-11-13, with the work integrated that day (ledger rows G09, G10, G12, G14, G15,
+G16 and G17). The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 
 | # | Area | IDA Pro | Ghidra | Donkey on `main` | Level | Gaps |
 |---|---|---|---|---|---|---|
-| 1 | Executable formats | ELF, PE, Mach-O and many more; loader SDK | ELF, PE, Mach-O, COFF, DEX, raw, Intel HEX, S-records, dyld shared cache and more | ELF, PE, Mach-O (32/64-bit, fat), raw; relocatable objects; archives listed; Intel HEX, S-records; ELF cores, Windows minidumps | Usable | G15, G30 |
+| 1 | Executable formats | ELF, PE, Mach-O and many more; loader SDK | ELF, PE, Mach-O, COFF, DEX, raw, Intel HEX, S-records, dyld shared cache and more | ELF, PE, Mach-O (32/64-bit, fat), raw; relocatable objects; archives listed; Intel HEX, S-records; ELF cores, Windows minidumps. Imports are bound across ELF images from the CLI; one image per project in the desktop app | Usable | G15, G30 |
 | 2 | Processors: disassembly | Dozens of processor families | Dozens, described in SLEIGH | Full pipeline for x86, x86-64, AArch64. Decode only for 32-bit ARM (A32), RV64GC, MIPS and PowerPC. No Thumb | Basic | G13, G26 |
 | 3 | Processors: decompilation | Hex-Rays decompilers for x86, x64, ARM, ARM64, PowerPC, MIPS, RISC-V, ARC | Every SLEIGH processor, through p-code | x86-64, x86-32 and AArch64, a verified subset | Basic | G13, G26 |
 | 4 | Analysis of stripped code | Function discovery from prologues, unwind data and heuristics; no-return, thunks, stack analysis | The same, as a pipeline of analyzers | Functions start at the entry point, exported symbols and call targets. x86 and AArch64 jump tables. No unwind tables, no no-return analysis, no prologue scan | Basic | G23, G24 |
@@ -81,19 +82,19 @@ detail. "Gaps" names the ledger entries that move the row.
 | 7 | Decompiler: readability | Merged variables, `for` loops, simplified conditions | Similar | Register aliases merged, copy propagation, `do`/`while`, `break`, `continue`; `for` only for register counters; DWARF names at `-O0` | Basic | G04 |
 | 8 | Types | Type libraries for the major platforms; struct, enum and union editors; propagation | Data type archives, C parser, Data Type Manager; propagation | Type store, bounded C declaration parser, prototypes applied from the CLI, struct layouts behind pointer arguments. No type libraries, no editing UI | Basic | G05, G22 |
 | 9 | Debug information | DWARF, PDB | DWARF, PDB | DWARF 2-5; PDB 7.00 for C structs, enums, procedures and globals; separate debug files, `.dSYM` lookup, compressed DWARF. No C++ class layouts from PDB | Usable | G06 |
-| 10 | Library function identification | FLIRT signatures, Lumina | Function ID, BSim | None | None | G09 |
-| 11 | C++ | Demangling, RTTI, vtables, exception handling | The same | Itanium and MSVC demanglers (both partial); Itanium RTTI and vtables for ELF, in the CLI. No call-site resolution, no exception tables | Basic | G10, G23 |
+| 10 | Library function identification | FLIRT signatures, Lumina | Function ID, BSim | A signature format, a matcher with naming rules, and a generator for x86-64 ELF objects and archives. One shipped set (musl 1.2.4): it names 34 of 67 known functions of a static musl program and none wrongly. Not wired into the desktop app | Basic | G09 |
+| 11 | C++ | Demangling, RTTI, vtables, exception handling | The same | Itanium and MSVC demanglers (both partial); Itanium RTTI and vtables for ELF and MSVC RTTI for x64 PE; readable names and a Classes window (Itanium classes of ELF images) in the desktop app. No call-site resolution, no exception tables | Basic | G10, G23 |
 | 12 | Other language runtimes | Objective-C metadata; Swift, Rust and Go support | Objective-C, Swift, Rust and Go support | None | None | G25 |
-| 13 | Debugger | Local and remote debuggers for Windows, Linux and macOS; GDB remote, WinDbg and others | GDB, LLDB and dbgeng connectors; recorded traces | Native on Linux x86-64 and AArch64 and on Windows x64. Hardware watchpoints on Linux x86-64 (library and CLI). No remote targets, no macOS, FreeBSD or Windows on Arm | Basic | G14 |
+| 13 | Debugger | Local and remote debuggers for Windows, Linux and macOS; GDB remote, WinDbg and others | GDB, LLDB and dbgeng connectors; recorded traces | Native on Linux x86-64 and AArch64 and on Windows x64. Hardware watchpoints on Linux x86-64 and conditional breakpoints on Linux (library and CLI). No remote targets, no macOS, FreeBSD or Windows on Arm | Basic | G14 |
 | 14 | Emulation | Appcall, Bochs, plugins | P-code emulator | The IR interpreter exists and is used only by the tests | None | G27 |
 | 15 | Scripting and API | IDAPython, IDC, C++ SDK | Java and Python scripts, headless analyzer | JSON-RPC server (read methods, decompile, rename, comment, apply type), batch mode, optional Python client, C ABI plugins. No scripts inside the desktop app | Basic | G31 |
-| 16 | Interactive editing | Make code and data, arrays, strings, structures; rename and retype anywhere | The same | Make code, data and undefine with undo; arrays and strings as data ranges; rename, comment, bookmark, function boundaries. No local types, no inline listing rows | Basic | G12 |
-| 17 | Desktop views | Many views and search kinds, command palette | Many views, configurable tools | Overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics | Basic | G17 |
+| 16 | Interactive editing | Make code and data, arrays, strings, structures; rename and retype anywhere | The same | Make code, data and undefine with undo; arrays and strings as data ranges, and a user-defined string prints as a literal in the decompiler; rename, comment, bookmark, function boundaries. No local types, no inline listing rows | Basic | G12 |
+| 17 | Desktop views | Many views and search kinds, command palette | Many views, configurable tools | Overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics; a command palette; search for bytes, immediates and regular expressions; symbols; a cross-reference graph; classes. No synchronised views | Basic | G17 |
 | 18 | Patching | Byte patches; assembling an instruction | Byte patches; instruction assembler | Byte patches with original-byte checks and export to a new file. No assembler | Usable (bytes) | G29 |
 | 19 | Diffing and version tracking | Lumina; third-party BinDiff and Diaphora | Version Tracking, Program Diff, BSim | None | None | G28 |
 | 20 | Collaboration | IDA Teams | Ghidra Server shared projects | Single-user SQLite projects with crash-safe backup and restore | None | G32 |
 | 21 | Managed code and other containers | Dalvik, .NET and more | DEX, Java class files and more | None | None | G30 |
-| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions benchmarked. No real-program corpus | Basic | G16 |
+| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions and one real 123 MB library benchmarked. No incremental re-analysis | Basic | G16 |
 | 23 | Signed releases | Signed installers | Unsigned archive | Packages for four operating systems; ad-hoc signed `.app`, unsigned `.exe` | Blocked | G18 |
 | 24 | Accessibility | Platform accessibility APIs | Java accessibility | Keyboard-only use; no screen reader | Blocked | G19 |
 
@@ -146,6 +147,6 @@ These are not for an agent to settle. Stop and report when a task needs one.
 - The PR that moves a row updates this scorecard, the ledger row, `SUPPORT_MATRIX.md` and
   `DESIGN.md` §17.2 together.
 - The "Donkey on `main`" column describes `main` only. Work on a branch does not count.
-- Update the commit and date at the top of section 3 whenever a row changes.
+- Update the date at the top of section 3 whenever a row changes.
 - If a reference tool gains a capability that matters, add a row and a ledger gap. Do not delete a
   row because it is hard.
