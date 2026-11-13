@@ -1953,9 +1953,10 @@ void resolve_return_registers(IrFunction& function, const ReturnRegisters& regs)
       }
       if (!found.found || found.unknown) {
         function.partial = true;
+        // Name the architecture's integer return register (rax, or x0 on AArch64).
         function.notes.push_back(
-            "the returned register is not determined by the definitions that reach the return; rax "
-            "is assumed");
+            "the returned register is not determined by the definitions that reach the return; " +
+            regs.integer_family + " is assumed");
       } else if (found.float_value) {
         statement.a = IrOperand::register_ref(float_return_name(regs, found.width), found.width);
       }

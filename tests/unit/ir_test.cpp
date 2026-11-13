@@ -4433,3 +4433,40 @@ TEST(Ir, RegisterWidthTableCoversEveryHighSixteenBitName) {
     EXPECT_TRUE(writes_full) << name;
   }
 }
+
+// Goal 3: the note names the architecture's integer return register. On AArch64 that is x0; it
+// used to say rax for every architecture.
+TEST(Ir, AArch64ReturnRegisterNoteNamesX0NotRax) {
+  // ret: nothing defines x0 on the way to the return, so the note is raised.
+  const auto data = aarch64_bytes({0xd65f03c0});
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  bool noted = false;
+  for (const std::string& note : lifted.value().notes) {
+    if (note.find("not determined by the definitions") != std::string::npos) {
+      noted = true;
+      EXPECT_NE(note.find("x0 is assumed"), std::string::npos) << note;
+      EXPECT_EQ(note.find("rax"), std::string::npos) << note;
+    }
+  }
+  EXPECT_TRUE(noted);
+}
+
+// The x86-64 note keeps naming rax.
+TEST(Ir, X86_64ReturnRegisterNoteNamesRax) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0xc3}, f));
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    if (note.find("not determined by the definitions") != std::string::npos) {
+      noted = true;
+      EXPECT_NE(note.find("rax is assumed"), std::string::npos) << note;
+    }
+  }
+  EXPECT_TRUE(noted);
+}
