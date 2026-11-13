@@ -141,6 +141,7 @@ add_executable(donkey_unit_tests
   unit/signatures_test.cpp
   unit/signature_gen_test.cpp
   unit/signatures_musl_test.cpp
+  unit/rtti_msvc_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp

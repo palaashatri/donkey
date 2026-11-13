@@ -70,6 +70,18 @@ struct RttiOptions {
                                                  std::span<const std::byte> data,
                                                  const RttiOptions& options = {});
 
+/// The MSVC C++ RTTI of an x64 PE image: complete object locators, type descriptors and class
+/// hierarchy descriptors (G10-T3). Names are the decorated class names read back. Slots are read
+/// while the entries point at code (the MSVC vftable has no count). Other images are refused.
+[[nodiscard]] Result<RttiInfo> read_msvc_rtti(const BinaryImage& image,
+                                              std::span<const std::byte> data,
+                                              const RttiOptions& options = {});
+
+/// The C++ RTTI of an image by its format: Itanium for ELF, MSVC for x64 PE. Anything else is
+/// refused with `rtti.unsupported_image`.
+[[nodiscard]] Result<RttiInfo> read_rtti(const BinaryImage& image, std::span<const std::byte> data,
+                                         const RttiOptions& options = {});
+
 /// The class whose typeinfo object is at `typeinfo_address`, or nullptr.
 [[nodiscard]] const RttiClass* find_rtti_class(const RttiInfo& info,
                                                std::uint64_t typeinfo_address) noexcept;
