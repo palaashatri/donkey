@@ -71,6 +71,19 @@ TEST(Demangle, RefusesWhatIsNotAnItaniumName) {
   EXPECT_TRUE(donkey::is_itanium_name("_Z3foov"));
 }
 
+TEST(Demangle, AcceptsTheMachOExtraUnderscore) {
+  // Mach-O writes C++ symbols with one more leading underscore than the ABI
+  // (`__ZN5ShapeD2Ev` for the Itanium `_ZN5ShapeD2Ev`).
+  const auto macho = donkey::demangle_itanium("__ZN5ShapeD2Ev");
+  ASSERT_TRUE(macho.has_value()) << macho.diagnostic().message;
+  EXPECT_EQ(macho.value(), "Shape::~Shape()");
+  EXPECT_TRUE(donkey::is_itanium_name("__Z3foov"));
+
+  // A C name with the Mach-O underscore is still not an Itanium name.
+  EXPECT_FALSE(donkey::is_itanium_name("_main"));
+  EXPECT_FALSE(donkey::is_itanium_name("__main"));
+}
+
 TEST(Demangle, LimitsAreEnforced) {
   const std::string long_name = "_Z" + std::string(5000, 'a');
   const auto too_long = donkey::demangle_itanium(long_name);

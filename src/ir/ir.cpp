@@ -118,7 +118,29 @@ std::string hex_float_literal(std::uint64_t bits, std::uint8_t width) {
 
 class Renderer {
  public:
-  explicit Renderer(const IrFunction& function) : function_(function) {}
+  explicit Renderer(const IrFunction& function,
+                    const std::map<std::uint64_t, std::string>* string_literals = nullptr)
+      : function_(function), string_literals_(string_literals) {}
+
+  /// The literal of a constant that is exactly a user-defined string's address, or null.
+  const std::string* string_literal_of_constant(const IrOperand& value) const {
+    if (string_literals_ == nullptr || value.kind != IrOperandKind::Constant) {
+      return nullptr;
+    }
+    const auto found = string_literals_->find(value.constant);
+    return found == string_literals_->end() ? nullptr : &found->second;
+  }
+
+  /// The literal for a `lea` source that is exactly a user-defined string's address, or null.
+  /// Only a memory operand with no base or index is an address constant.
+  const std::string* string_literal_for(const IrOperand& value) const {
+    if (string_literals_ == nullptr || value.kind != IrOperandKind::Memory || !value.reg.empty() ||
+        !value.index.empty()) {
+      return nullptr;
+    }
+    const auto found = string_literals_->find(value.constant);
+    return found == string_literals_->end() ? nullptr : &found->second;
+  }
 
   std::string address_expression(const IrOperand& value) const {
     std::string out;
@@ -286,6 +308,14 @@ class Renderer {
       case IrOp::Nop:
         return "";
       case IrOp::Assign:
+        // A pointer-sized constant that is exactly a user-defined string's address is that string
+        // (G12-T2): a `mov` of an absolute address, as a non-PIE build loads a string.
+        if (statement.a.kind == IrOperandKind::Constant &&
+            (statement.a.width == 4 || statement.a.width == 8)) {
+          if (const std::string* literal = string_literal_of_constant(statement.a)) {
+            return destination(statement.dest) + " = (u64)(" + *literal + ");";
+          }
+        }
         return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Add:
       case IrOp::Sub:
@@ -339,6 +369,9 @@ class Renderer {
                std::to_string(static_cast<unsigned>(statement.dest.width) * 8) + ")" +
                operand(statement.a) + ";";
       case IrOp::Lea:
+        if (const std::string* literal = string_literal_for(statement.a)) {
+          return destination(statement.dest) + " = (u64)(" + *literal + ");";
+        }
         return destination(statement.dest) + " = (u64)(" + address_expression(statement.a) + ");";
       case IrOp::Load:
         return destination(statement.dest) + " = " + operand(statement.a) + ";";
@@ -498,6 +531,7 @@ class Renderer {
 
  private:
   const IrFunction& function_;
+  const std::map<std::uint64_t, std::string>* string_literals_ = nullptr;
 };
 
 /// A constant operand whose value has bits above the statement width, which the statement
@@ -566,17 +600,20 @@ const IrStatement* flags_producer(const IrBlock& block, std::size_t index) {
 }
 
 std::string render_statement(const IrFunction& function, const IrStatement& statement,
-                             const IrStatement* previous) {
-  return Renderer(function).statement(statement, previous);
+                             const IrStatement* previous,
+                             const std::map<std::uint64_t, std::string>* string_literals) {
+  return Renderer(function, string_literals).statement(statement, previous);
 }
 
-std::string render_operand(const IrFunction& function, const IrOperand& operand) {
-  return Renderer(function).operand(operand);
+std::string render_operand(const IrFunction& function, const IrOperand& operand,
+                           const std::map<std::uint64_t, std::string>* string_literals) {
+  return Renderer(function, string_literals).operand(operand);
 }
 
 std::string render_condition(const IrFunction& function, const IrStatement& statement,
-                             const IrStatement* previous, bool negate) {
-  return Renderer(function).condition(statement, previous, negate);
+                             const IrStatement* previous, bool negate,
+                             const std::map<std::uint64_t, std::string>* string_literals) {
+  return Renderer(function, string_literals).condition(statement, previous, negate);
 }
 
 }  // namespace detail
@@ -1402,13 +1439,18 @@ Result<bool> verify_ir(const IrFunction& function) {
 }
 
 Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
+  return format_pseudocode_lines(function, PseudocodeOptions{});
+}
+
+Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
+                                           const PseudocodeOptions& options) {
   auto verified = verify_ir(function);
   if (!verified) {
     return make_error<Pseudocode>(verified.diagnostic().status, verified.diagnostic().code,
                                   verified.diagnostic().message, verified.diagnostic().offset);
   }
 
-  const Renderer renderer(function);
+  const Renderer renderer(function, &options.string_literals);
   Pseudocode out;
   auto append_line = [&](const std::string& line, std::uint64_t source_address = 0) {
     out.lines.push_back(PseudocodeLine{line, source_address});
@@ -1490,7 +1532,8 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
   // Prefer structured control flow. When the graph does not match a shape the
   // structurer models, fall back to labeled blocks with explicit `goto`; the
   // fallback is still verified IR, never guessed structure.
-  if (auto structured = detail::format_structured_body_lines(function); structured.has_value()) {
+  if (auto structured = detail::format_structured_body_lines(function, &options.string_literals);
+      structured.has_value()) {
     for (const auto& sline : structured.value()) {
       append_line(sline.text, sline.source_address);
     }
@@ -1518,7 +1561,12 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function) {
 }
 
 Result<std::string> format_pseudocode(const IrFunction& function) {
-  auto res = format_pseudocode_lines(function);
+  return format_pseudocode(function, PseudocodeOptions{});
+}
+
+Result<std::string> format_pseudocode(const IrFunction& function,
+                                      const PseudocodeOptions& options) {
+  auto res = format_pseudocode_lines(function, options);
   if (!res) {
     return make_error<std::string>(res.diagnostic().status, res.diagnostic().code,
                                    res.diagnostic().message, res.diagnostic().offset);
@@ -1698,20 +1746,101 @@ void recover_stack_variables(IrFunction& function) {
             });
 }
 
+namespace internal {
+
+void arrange_loop_tests(IrFunction& function) {
+  // A loop that a compiler lays out with its test at the bottom and a jump to the test on entry:
+  //   goto test;  body: ...; goto test;  test: if (c) goto body;  exit: ...
+  // becomes a while loop in block order, with the test first and its condition negated:
+  //   test: if (!c) goto exit;  body: ...; goto test;  exit: ...
+  // The two adjacent blocks are swapped and every reference is renumbered. The blocks run in the
+  // same order and the test reads the same flags, so the change is exact. Only this shape is
+  // changed: the body ends with an explicit branch to the test, the block before the body does
+  // not fall into it, and the test ends with a conditional branch back to the body whose
+  // condition has an exact complement.
+  std::vector<IrBlock>& blocks = function.blocks;
+  for (std::size_t test = 2; test + 1 < blocks.size(); ++test) {
+    const std::size_t body = test - 1;
+    const IrBlock& before = blocks[test - 2];
+    if (before.statements.empty()) {
+      continue;  // falls through into the body
+    }
+    const IrOp before_op = before.statements.back().op;
+    if (before_op != IrOp::Branch && before_op != IrOp::Switch && before_op != IrOp::Return) {
+      continue;  // a conditional branch or a fall-through would fall into the body
+    }
+    IrBlock& body_block = blocks[body];
+    if (body_block.statements.empty()) {
+      continue;
+    }
+    const IrStatement& enter = body_block.statements.back();
+    if (enter.op != IrOp::Branch || enter.a.kind != IrOperandKind::Block || enter.a.block != test) {
+      continue;
+    }
+    IrBlock& test_block = blocks[test];
+    if (test_block.statements.empty()) {
+      continue;
+    }
+    IrStatement& test_branch = test_block.statements.back();
+    if (test_branch.op != IrOp::CondBranch || test_branch.b.kind != IrOperandKind::Block ||
+        test_branch.b.block != body || test_branch.condition == IrCondition::None) {
+      continue;
+    }
+    const IrCondition* complement = complement_of(test_branch.condition);
+    if (complement == nullptr) {
+      continue;
+    }
+    // The test now jumps to the exit when its complement holds and falls through into the body.
+    test_branch.condition = *complement;
+    test_branch.b = IrOperand::block_ref(static_cast<std::uint32_t>(test + 1));
+    std::swap(blocks[body], blocks[test]);
+
+    const auto renumber = [body, test](std::uint32_t index) -> std::uint32_t {
+      if (index == body) {
+        return static_cast<std::uint32_t>(test);
+      }
+      if (index == test) {
+        return static_cast<std::uint32_t>(body);
+      }
+      return index;
+    };
+    for (IrBlock& block : blocks) {
+      for (IrStatement& statement : block.statements) {
+        for (IrOperand* operand : {&statement.dest, &statement.a, &statement.b, &statement.c}) {
+          if (operand->kind == IrOperandKind::Block) {
+            operand->block = renumber(operand->block);
+          }
+        }
+        for (IrSwitchCase& switch_case : statement.switch_cases) {
+          switch_case.target_block = renumber(switch_case.target_block);
+        }
+      }
+    }
+  }
+}
+
+}  // namespace internal
+
 void run_ir_passes(IrFunction& function, const PassOptions& options) {
   infer_signature(function, options.architecture, options.format);
   if (options.after_pass) {
     options.after_pass("infer_signature", function);
   }
-  recover_pointer_structs(function);
-  if (options.after_pass) {
-    options.after_pass("recover_pointer_structs", function);
-  }
   // The statement passes run after the signature is inferred, so the parameters do not
-  // change when a read of an argument register is removed.
+  // change when a read of an argument register is removed. A parameter that the code spills
+  // to the stack and reloads (an unoptimised build) is read through the copies that the slot
+  // forwarding and the copy propagation leave, so the accesses it makes are recovered below.
+  internal::forward_slot_copies(function);
+  if (options.after_pass) {
+    options.after_pass("forward_slot_copies", function);
+  }
   internal::propagate_copies(function);
   if (options.after_pass) {
     options.after_pass("propagate_copies", function);
+  }
+  recover_pointer_structs(function);
+  if (options.after_pass) {
+    options.after_pass("recover_pointer_structs", function);
   }
   internal::remove_dead_temporaries(function);
   if (options.after_pass) {
@@ -1725,6 +1854,16 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   internal::remove_dead_temporaries(function);
   if (options.after_pass) {
     options.after_pass("remove_dead_temporaries", function);
+  }
+  internal::forward_compare_loads(function);
+  if (options.after_pass) {
+    options.after_pass("forward_compare_loads", function);
+  }
+  // Last, so the blocks are laid out as the loops read: a block order change does not affect
+  // the dataflow the passes above compute.
+  internal::arrange_loop_tests(function);
+  if (options.after_pass) {
+    options.after_pass("arrange_loop_tests", function);
   }
 }
 

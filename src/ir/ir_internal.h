@@ -3,6 +3,7 @@
 #include <cstddef>
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -71,20 +72,23 @@ Graph build_graph(const IrFunction& function);
 std::vector<BitSet> compute_dominators(const Graph& graph);
 
 /// Render an operand into C-like expression text.
-std::string render_operand(const IrFunction& function, const IrOperand& operand);
+std::string render_operand(const IrFunction& function, const IrOperand& operand,
+                           const std::map<std::uint64_t, std::string>* string_literals = nullptr);
 
 /// Render one non-control-flow statement (or a `return`) without indentation.
 /// `previous` is the statement before it in the same block; conditions on a
 /// compare/test depend on it.
 std::string render_statement(const IrFunction& function, const IrStatement& statement,
-                             const IrStatement* previous);
+                             const IrStatement* previous,
+                             const std::map<std::uint64_t, std::string>* string_literals = nullptr);
 
 /// The textual condition of a conditional branch, e.g. `rax == 0x0`, derived
 /// from the branch's condition and the compare/test that precedes it. When
 /// `negate` is true, an exactly complementary condition is used (so `==`
 /// becomes `!=`); conditions without a total complement are wrapped in `!(...)`.
 std::string render_condition(const IrFunction& function, const IrStatement& statement,
-                             const IrStatement* previous, bool negate = false);
+                             const IrStatement* previous, bool negate = false,
+                             const std::map<std::uint64_t, std::string>* string_literals = nullptr);
 
 /// The Compare/Test whose flags the statement at `index` of `block` reads:
 /// the nearest one before it in the block. Null when there is none, or when
@@ -102,6 +106,8 @@ struct StructuredLine {
 /// to labeled blocks with explicit `goto` when `nullopt` is returned; no guessed
 /// structure is ever emitted.
 std::optional<std::string> format_structured_body(const IrFunction& function);
-std::optional<std::vector<StructuredLine>> format_structured_body_lines(const IrFunction& function);
+std::optional<std::vector<StructuredLine>> format_structured_body_lines(
+    const IrFunction& function,
+    const std::map<std::uint64_t, std::string>* string_literals = nullptr);
 
 }  // namespace donkey::detail

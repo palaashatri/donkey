@@ -75,6 +75,12 @@ int main(int argc, char** argv) {
   if (command == "archive") {
     return donkey::cli::command_archive(rest);
   }
+  if (command == "sig") {
+    return donkey::cli::command_sig(rest);
+  }
+  if (command == "link") {
+    return donkey::cli::command_link(rest);
+  }
   if (command == "debug") {
     return donkey::cli::command_debug(rest);
   }

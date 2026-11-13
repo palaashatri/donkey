@@ -1,0 +1,23 @@
+# G17: the Symbols window lists the image's symbols with their kind, binding, size and readable name
+# (G10-T4). The hierarchy fixture (passed as FILE) has C++ symbols: _ZN5ShapeD2Ev is the destructor of
+# Shape, shown as Shape::~Shape(). The counts are the loader's: donkey-cli info reports 90 symbols for
+# this file, and nm -C finds 7 lines that mention Shape. The filter keeps the symbols whose raw or
+# readable name contains every word typed.
+wait_idle
+frames 5
+assert_no_error
+
+assert_symbol _ZN5ShapeD2Ev function
+assert_symbol_shown _ZN5ShapeD2Ev Shape::~Shape()
+assert_symbol_shown main main
+
+symbols_filter
+assert_symbol_rows 90
+symbols_filter Shape
+assert_symbol_rows 7
+# Case-insensitive, as the palette: three symbols are Shape destructors (nm -C shows the two
+# aliases at 0x118a and the deleting destructor at 0x11a8).
+symbols_filter shape ~
+assert_symbol_rows 3
+symbols_filter
+assert_no_error

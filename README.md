@@ -1,23 +1,32 @@
 # Donkey
 
-A planned free, open-source, native binary reverse-engineering suite: disassembler, analysis graphs, decompiler and debugger, written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core that also runs from the command line.
+A free, open-source, native binary reverse-engineering suite: disassembler, analysis graphs, decompiler and debugger, written in C++20 with a Dear ImGui + SDL3 desktop shell and a headless core that also runs from the command line.
 
 **Status: alpha.** Useful for real work on small and medium binaries, but not feature-complete and not a replacement for IDA, Ghidra or Binary Ninja. The table below is the honest state; anything not covered by the test suite should be treated as unverified. The authoritative milestone record is [docs/DESIGN.md §17.2](docs/DESIGN.md).
+
+**Goal: parity with IDA Pro and Ghidra for everyday work.** Donkey is a long way from it. [docs/PARITY.md](docs/PARITY.md) scores 24 areas against both tools, says how each is measured, and gives the order of the work; a summary is [below](#road-to-parity-with-ida-pro-and-ghidra).
 
 ### What works
 
 | Area | State | Notes |
 |---|---|---|
 | ELF / PE / Mach-O import (32/64-bit, fat Mach-O, raw) | Implemented | Bounds-checked; malformed input gives diagnostics, never crashes (fuzzed). Optional OS-process isolation (`--isolate`) on POSIX hosts. |
+| Other inputs | Implemented, with limits | Relocatable objects (x86-64 and AArch64 relocations, partial), static archives (listed), Intel HEX, S-records, ELF core files and Windows minidumps (checked on a generated file, not on one Windows wrote). `donkey-cli link` binds the imports of an ELF image to the libraries it names, through PLT stubs and, on x86-64, GOT slots; PE and Mach-O are not bound. One image per project in the desktop app. |
 | Disassembly (x86, x86-64, AArch64) | Implemented | Capstone 5.0.9; call/jump/return classes, xrefs, RIP-relative and ADRP data refs. |
+| More instruction sets | Decode only | 32-bit ARM (A32), RISC-V (RV64GC), MIPS and PowerPC are disassembled and checked against `llvm-objdump`. They are not lifted or decompiled, and Thumb is not decoded. |
 | Functions, CFG, call graph, strings, xrefs | Implemented | Bounded and deterministic. x86 and AArch64 jump tables (the GCC and Clang forms) are recovered from the bounds check and the table bytes; other indirect branches are marked `Partial`. Function boundaries can be defined or removed and persist in projects. |
-| Decompiler | Partial (integer subset) | Verified-IR subset of x86-64, x86-32 and AArch64: structuring, switches, ABI signatures, stack locals, conditional moves, structs behind pointer arguments. Checked against the compiled code on a 39-function corpus at -O0/-O2/-O3 (`docs/SUPPORT_MATRIX.md`): no Complete result disagrees. Floating point, SIMD, varargs and 32-bit ARM are not implemented; they show as Partial or Unsupported, never guessed. |
+| Decompiler | Partial (verified subset) | Verified-IR subset of x86-64, x86-32 and AArch64: integer code, scalar floating point on x86-64 (SSE) and AArch64, structuring, switches, ABI signatures, stack locals, conditional moves, structs behind pointer arguments. Every result marked Complete on the differential corpus is executed and compared with the compiled code at -O0/-O2/-O3 (`docs/SUPPORT_MATRIX.md`): no Complete result disagrees. A function that makes a call is Partial, because call arguments and results are not modelled yet. SIMD, varargs and every other instruction set are not implemented; they show as Partial or Unsupported, never guessed. |
 | Projects (SQLite) | Implemented | Renames, comments, bookmarks, function-boundary edits, undo/redo, schema migrations, crash-safe backup/restore (fault-injection tested). |
 | Patching | Implemented | Hex-view editor in the GUI and `donkey-cli patch apply`; original-byte checks, overlap rejection, export to a new file, signature-invalidation warnings. |
-| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS, FreeBSD and Windows arm64** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules (including libraries loaded after launch, named from their own symbols), ASLR-aware static↔runtime mapping, explanatory permission errors. Single traced thread; no hardware breakpoints or remote targets. |
-| Debug information | DWARF 2-5 | Functions, prototypes, parameters, variables and types from ELF and MinGW PE, each labelled with its provenance; user renames always win. PDB and Apple .dSYM bundles are not read. |
+| Native debugger | Implemented on Linux x86-64/AArch64 (ptrace) and Windows x64 (Win32 debug API); **unsupported on macOS, FreeBSD and Windows arm64** | Launch to the real entry point, software breakpoints, step into/over/out, registers, memory read/write, pause, attach/detach, call stack, modules (including libraries loaded after launch, named from their own symbols), ASLR-aware static↔runtime mapping, explanatory permission errors. Multithreaded targets are all-stop. From `donkey-cli` and the library only: hardware watchpoints on Linux x86-64, and conditional breakpoints on Linux (run on x86-64; the AArch64 code is compiled but was not run). No remote targets. |
+| Debug information | DWARF 2-5; PDB 7.00 (C types) | Functions, prototypes, parameters, variables and types from DWARF in ELF and MinGW PE, each labelled with its provenance; user renames always win. PDB 7.00 gives C structures, enums, procedures and globals, not C++ class layouts. Separate debug files are found by build-id and debuglink, a `.dSYM` bundle by its UUID, and zlib- and zstd-compressed DWARF is read. |
+| C++ | Partial | Itanium and MSVC name demangling (both partial). Itanium RTTI and vtables of ELF images and MSVC RTTI of x64 PE images. The desktop app shows readable names with the raw symbol in a tooltip, and a Classes window for the Itanium classes of ELF images. No exception tables, and virtual calls are not resolved. |
+| Library function identification | Partial | A signature format, a matcher that refuses ambiguous names, and `donkey-cli sig make` for x86-64 ELF objects and archives ([docs/SIGNATURES.md](docs/SIGNATURES.md)). One shipped set, musl 1.2.4: it names 34 of 67 known functions of a static musl program, none wrongly. Not available in the desktop app yet. |
+| Types | Partial | A type store, a bounded C declaration parser, and adding, listing and applying types from `donkey-cli`. No type libraries, and no type editing in the desktop app. |
+| Interactive edits | Partial | Make code, make data and undefine (C, D, U) with undo and redo; arrays and strings as data ranges, and a user-defined string prints as a literal in the decompiler; rename, comment, bookmark, function boundaries. No types for locals and no inline data rows in the listing. |
+| Scripting | Implemented | `donkey-cli serve` ([docs/RPC.md](docs/RPC.md)): JSON-RPC 2.0 with read methods, decompile and, with `--project --allow-write`, rename, comment and apply type; a batch mode; an optional Python client (`bindings/python`). Scripts run outside the desktop app. |
 | Plugins | Implemented on POSIX; isolation unsupported on Windows | Versioned C ABI; untrusted plugins run in a forked worker. On Windows, untrusted inspection fails closed. |
-| Desktop app | Implemented | Dear ImGui + SDL3: docked overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics. Keyboard-only use (G go to, N rename, ; comment), saved layouts, DPI changes, display removal and graphics-device loss are handled and tested by scripted UI tests (`docs/UI_TESTING.md`). Falls back to a software renderer when no Vulkan/D3D12/Metal device is available. No screen-reader support. |
+| Desktop app | Implemented | Dear ImGui + SDL3: docked overview, sections, functions, disassembly, graph, decompiler, hex editor, strings, xrefs, bookmarks, debugger, diagnostics, plus a command palette (Ctrl/Cmd+Shift+P), a Search window (bytes, immediates, regular expressions), Symbols, a cross-reference graph and Classes. Keyboard-only use (G go to, N rename, ; comment), saved layouts, DPI changes, display removal and graphics-device loss are handled and tested by scripted UI tests (`docs/UI_TESTING.md`). Falls back to a software renderer when no Vulkan/D3D12/Metal device is available. No screen-reader support. |
 
 ### Platforms
 
@@ -28,7 +37,30 @@ A planned free, open-source, native binary reverse-engineering suite: disassembl
 | Windows 10/11 x64 and arm64 | `setup.exe` (NSIS), portable `.zip` | CI on Windows Server 2022 (silent install, run, uninstall) and local wine runs |
 | FreeBSD 14 amd64 and arm64 | `.pkg`, `.tar.gz` | CI in a FreeBSD 14.3 VM (CLI and software-rendered GUI); no native debugger |
 
-Not done yet: native debugging on macOS (Mach task ports and entitlements), FreeBSD and Windows on Arm; PDB and .dSYM debug information; remote debug protocols and hardware breakpoints; floating-point/SIMD decompilation and AArch64 jump tables; user-entered type edits; resolving imports across images; screen-reader accessibility; multi-image project tabs; notarised macOS builds and signed Windows installers. Files of 64 MiB and more are memory-mapped, and a 1 GiB file stays inside a 48 MiB memory budget (tested).
+Not done yet: call arguments and results in the decompiler; SIMD and varargs; lifting for ARM, RISC-V, MIPS and PowerPC; type libraries, and signature sets beyond musl; function discovery from unwind tables or heuristics (functions are found from the entry point, exported symbols and call targets); Go, Rust, Objective-C and Swift metadata; native debugging on macOS (Mach task ports and entitlements), FreeBSD and Windows on Arm; remote debug protocols; PDB C++ class layouts; type editing in the desktop app; multi-image project tabs, and imports across PE or Mach-O images; emulation, an assembler and binary diffing; screen-reader accessibility; notarised macOS builds and signed Windows installers. Files of 64 MiB and more are memory-mapped, and a 1 GiB file stays inside a 48 MiB memory budget (tested).
+
+## Road to parity with IDA Pro and Ghidra
+
+The goal past v1.0 is that a reverse engineer can do everyday work in Donkey without reaching for IDA Pro or Ghidra. That is a goal, not a claim. [docs/PARITY.md](docs/PARITY.md) scores each area as None, Basic, Usable or Parity; a row moves only when its measure passes in CI. On `main` today:
+
+| Level | Areas |
+|---|---|
+| Usable | Executable formats; debug information; byte patching |
+| Basic | Disassembly and decompilation beyond x86 and AArch64; analysis of stripped code; decompiler coverage and readability; types; C++; library function identification; debugger; scripting; interactive editing; desktop views; scale |
+| None | Go, Rust, Objective-C and Swift; emulation; diffing and version tracking; collaboration; managed code |
+| Blocked on the owner | Signed releases; screen-reader accessibility |
+
+One thing Donkey does that the other two do not: every decompiler result marked Complete on the differential corpus is executed and compared with the compiled code. Parity work is not allowed to trade that away.
+
+The order of the work, most useful first:
+
+1. **Every function decompiles to something useful.** Measure the decompiler on real programs, model call arguments and results, find the functions of stripped binaries, read unwind tables.
+2. **Names and types appear without typing them.** Library signatures, type libraries, C++ and exception tables, Go, Rust, Objective-C and Swift.
+3. **Breadth.** A processor strategy, lifting for more instruction sets, SIMD, several images in one project.
+4. **Dynamic analysis.** Remote targets, the missing hosts, emulation.
+5. **Workflow.** Editing, views, scripting inside the app, assembling, diffing, collaboration.
+
+The task-level plans are in [docs/IDA_GAP_LEDGER.md](docs/IDA_GAP_LEDGER.md) (gaps G01 to G32).
 
 ## Install
 
@@ -69,6 +101,7 @@ Older captures:
 *Four bytes at `0x1060` replaced with `nop`s: the patch is staged on a copy (highlighted in orange), can be reverted, and is exported to a new file; the opened binary is never modified.*
 
 - Design, architecture and milestones: [docs/DESIGN.md](docs/DESIGN.md)
+- Parity scorecard and roadmap: [docs/PARITY.md](docs/PARITY.md); task plans: [docs/IDA_GAP_LEDGER.md](docs/IDA_GAP_LEDGER.md)
 - Contributor and coding-agent instructions: [AGENTS.md](AGENTS.md)
 
 ## Build
@@ -98,7 +131,7 @@ cd build/package-linux && cpack
 
 Milestones M0-M11 of [docs/DESIGN.md](docs/DESIGN.md) are implemented for the platforms and features listed above. The truth table (§17.2) gives the evidence for each and states what is not claimed. The 26 end-to-end acceptance projects are in [tests/acceptance/manifest.json](tests/acceptance/manifest.json): 23 pass, and 3 are partial with their gaps stated. Measured decompiler coverage per compiler and ISA is in [docs/SUPPORT_MATRIX.md](docs/SUPPORT_MATRIX.md), and the [user guide](docs/USER_GUIDE.md) ships in every package.
 
-Donkey is a fast native workbench with an honest, tested decompiler subset. It is not a replacement for IDA Pro, Ghidra or Binary Ninja: their decompilers, type libraries, signature databases and processor coverage are far broader.
+Donkey is a fast native workbench with an honest, tested decompiler subset. It is not a replacement for IDA Pro, Ghidra or Binary Ninja: their decompilers, type libraries, signature databases and processor coverage are far broader. Closing that gap is the project's goal, and [docs/PARITY.md](docs/PARITY.md) tracks it.
 
 ## Licence
 

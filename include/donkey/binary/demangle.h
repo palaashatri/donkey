@@ -18,13 +18,15 @@ struct DemangleOptions {
   std::size_t max_output_bytes = 16 * 1024;
 };
 
-/// True when `name` begins with the Itanium `_Z` prefix.
+/// True when `name` begins with the Itanium `_Z` prefix, or the Mach-O spelling that adds one
+/// extra leading underscore (`__Z`).
 [[nodiscard]] bool is_itanium_name(std::string_view name) noexcept;
 
-/// Demangles an Itanium-ABI name, for example `_ZN3foo3barEi` to `foo::bar(int)`.
-/// Errors are `InvalidInput` with a code under `demangle.`: `not_mangled` for a name
-/// without the `_Z` prefix, `syntax` for a malformed or unsupported name, and
-/// `too_long`, `too_deep` and `too_large` for the limits in `DemangleOptions`.
+/// Demangles an Itanium-ABI name, for example `_ZN3foo3barEi` to `foo::bar(int)`. The extra
+/// leading underscore of a Mach-O symbol (`__ZN...`) is accepted. Errors are `InvalidInput` with a
+/// code under `demangle.`: `not_mangled` for a name without the `_Z` prefix, `syntax` for a
+/// malformed or unsupported name, and `too_long`, `too_deep` and `too_large` for the limits in
+/// `DemangleOptions`.
 [[nodiscard]] Result<std::string> demangle_itanium(std::string_view name,
                                                    const DemangleOptions& options = {});
 

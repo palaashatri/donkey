@@ -197,7 +197,12 @@ jobs:
           "$app/Contents/MacOS/donkey-cli" --version
           "$app/Contents/MacOS/donkey-cli" info "$app/Contents/MacOS/Donkey" | head -8
           "$app/Contents/MacOS/Donkey" "$app/Contents/MacOS/donkey-cli" --exit-after-frames 30
-          hdiutil detach "$mount"
+          # The app has just run from the image, and a helper can keep the read-only volume
+          # busy for a moment after it exits, so retry the detach and then force it: nothing
+          # can be pending on a read-only image, and its contents were verified above.
+          hdiutil detach "$mount" ||
+            { sleep 2; hdiutil detach "$mount"; } ||
+            { sleep 2; hdiutil detach -force "$mount"; }
       - uses: actions/upload-artifact@v4
         with:
           name: donkey-macos-arm64
@@ -366,12 +371,12 @@ jobs:
             done
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             sleep 2
-            # The aarch64 VM runs without hardware virtualisation (about 70 min
-            # against 7 for amd64), so frame-time limits mean nothing there. The
-            # UI scripts' timing limits are reported but not enforced
-            # (DONKEY_UI_NO_TIMING), and the two scripts that only measure
-            # timing exceed CTest's timeout, so they run on amd64 only.
-            # Every other test and assertion runs.
+            # The aarch64 VM runs without hardware virtualisation (about two hours against
+            # about ten minutes for amd64), so frame-time limits mean nothing there. The
+            # UI scripts' timing limits are reported but not enforced (DONKEY_UI_NO_TIMING),
+            # tests/CMakeLists.txt raises their CTest limit to 600 s on this platform, and
+            # the two scripts that only measure timing are excluded, so they run on amd64
+            # only. Every other test and assertion runs.
             exclude=''
             if [ "${{ matrix.vm_arch }}" = aarch64 ]; then
               exclude='ui[.]script_(virtualization|responsiveness)'

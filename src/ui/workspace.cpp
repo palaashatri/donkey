@@ -1,7 +1,9 @@
 #include "workspace.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <optional>
 
 #include "components.h"
 #include "imgui.h"
@@ -25,6 +27,11 @@ constexpr const char* kDataWindow = "Data";
 constexpr const char* kDebuggerWindow = "Debugger";
 constexpr const char* kOverviewWindow = "Overview";
 constexpr const char* kDiagnosticsWindow = "Diagnostics";
+constexpr const char* kClassesWindow = "Classes";
+constexpr const char* kSearchWindow = "Search";
+constexpr const char* kSymbolsWindow = "Symbols";
+constexpr const char* kXrefGraphWindow = "Xref Graph";
+constexpr const char* kCommandPalette = "Command Palette";
 
 ImGuiWindowFlags panel_flags() {
   return ImGuiWindowFlags_NoCollapse;
@@ -94,6 +101,9 @@ void Workspace::draw(bool& quit) {
       if (state_.selected_address != 0) {
         session_.toggle_bookmark(state_.selected_address);
       }
+    } else if (cmd_or_ctrl && shift && ImGui::IsKeyPressed(ImGuiKey_P, false)) {
+      // Ctrl/Cmd+Shift+P: the command palette (G17-T1).
+      palette_request_ = true;
     } else if (alt && ImGui::IsKeyPressed(ImGuiKey_LeftArrow)) {
       state_.nav_back(session_.document().get());
     } else if (alt && ImGui::IsKeyPressed(ImGuiKey_RightArrow)) {
@@ -340,6 +350,19 @@ void Workspace::draw(bool& quit) {
 
   draw_component_gallery(gallery_);
 
+  draw_command_palette();
+  // A window a palette command showed is focused now, after draw_panels has shown it (the command
+  // ran at the end of the previous frame). Then the command the palette chose runs.
+  if (focus_window_ != nullptr) {
+    ImGui::SetWindowFocus(focus_window_);
+    focus_window_ = nullptr;
+  }
+  if (pending_command_) {
+    std::function<void()> command = std::move(pending_command_);
+    pending_command_ = nullptr;
+    command();
+  }
+
   if (show_about_) {
     ImGui::Begin("About Donkey", &show_about_, ImGuiWindowFlags_AlwaysAutoResize);
     ImGui::TextUnformatted("Donkey — native binary reverse-engineering suite");
@@ -357,6 +380,196 @@ void Workspace::draw(bool& quit) {
     ImGui::TextDisabled("Opened files are only read; nothing is executed.");
     ImGui::End();
   }
+}
+
+namespace {
+
+/// The words of a palette filter, lowercased. A command matches when each word is part of its
+/// label.
+std::vector<std::string> palette_words(const char* text) {
+  std::vector<std::string> words;
+  std::string word;
+  for (const char* c = text; *c != '\0'; ++c) {
+    if (*c == ' ' || *c == '\t') {
+      if (!word.empty()) {
+        words.push_back(std::move(word));
+        word.clear();
+      }
+    } else {
+      word.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(*c))));
+    }
+  }
+  if (!word.empty()) {
+    words.push_back(std::move(word));
+  }
+  return words;
+}
+
+bool palette_matches(const std::string& label, const std::vector<std::string>& words) {
+  std::string lower(label);
+  for (char& c : lower) {
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  }
+  for (const std::string& word : words) {
+    if (lower.find(word) == std::string::npos) {
+      return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+bool Workspace::command_palette_open() const {
+  return palette_open_;
+}
+
+std::vector<Workspace::PaletteEntry> Workspace::palette_entries() {
+  // The commands the menus run, with the same enabling rules, so a command the menus disable is
+  // not runnable from the palette either. The views are shown and focused rather than toggled.
+  const bool document = session_.document() != nullptr;
+  const bool idle = !session_.busy();
+  const bool selected = state_.selected_address != 0;
+  std::vector<PaletteEntry> entries;
+  entries.push_back(PaletteEntry{"Go to…", "G", document, [this] { goto_popup_ = true; }});
+  entries.push_back(PaletteEntry{"Rename…", "N", selected && document, [this] {
+                                   open_annotation_editor(AnnotationKind::Rename,
+                                                          state_.selected_address);
+                                 }});
+  entries.push_back(PaletteEntry{"Comment…", ";", selected && document, [this] {
+                                   open_annotation_editor(AnnotationKind::Comment,
+                                                          state_.selected_address);
+                                 }});
+  const bool bookmarked =
+      state_.annotations != nullptr && state_.annotations->has_bookmark(state_.selected_address);
+  entries.push_back(PaletteEntry{bookmarked ? "Remove Bookmark" : "Toggle Bookmark", "Cmd+B",
+                                 selected,
+                                 [this] { session_.toggle_bookmark(state_.selected_address); }});
+  entries.push_back(PaletteEntry{"Back", "Alt+Left", state_.can_nav_back(),
+                                 [this] { state_.nav_back(session_.document().get()); }});
+  entries.push_back(PaletteEntry{"Forward", "Alt+Right", state_.can_nav_forward(),
+                                 [this] { state_.nav_forward(session_.document().get()); }});
+  entries.push_back(
+      PaletteEntry{"Undo", "Cmd+Z", session_.can_undo(), [this] { session_.undo(); }});
+  entries.push_back(
+      PaletteEntry{"Redo", "Cmd+Shift+Z", session_.can_redo(), [this] { session_.redo(); }});
+  entries.push_back(PaletteEntry{"Save Project", "Cmd+S", session_.has_project() && idle,
+                                 [this] { session_.save_project(session_.project_path()); }});
+  entries.push_back(PaletteEntry{"Reload", "", !session_.path().empty() && idle,
+                                 [this] { session_.open(session_.path()); }});
+  entries.push_back(PaletteEntry{"Reset Layout", "", true, [this] { reset_layout(); }});
+  entries.push_back(PaletteEntry{"Component Gallery", "", true, [this] { gallery_.open = true; }});
+  entries.push_back(PaletteEntry{"About Donkey", "", true, [this] { show_about_ = true; }});
+
+  const auto show = [&entries, this](const char* title, bool* flag) {
+    entries.push_back(PaletteEntry{std::string("Show ") + title, "", true, [this, flag, title] {
+                                     *flag = true;
+                                     focus_window_ = title;
+                                   }});
+  };
+  show(kOverviewWindow, &show_overview_);
+  show(kSectionsWindow, &show_sections_);
+  show(kFunctionsWindow, &show_functions_);
+  show(kDisassemblyWindow, &show_disassembly_);
+  show(kDecompilerWindow, &show_decompiler_);
+  show(kGraphWindow, &show_graph_);
+  show(kHexWindow, &show_hex_);
+  show(kStringsWindow, &show_strings_);
+  show(kXrefsWindow, &show_xrefs_);
+  show(kBookmarksWindow, &show_bookmarks_);
+  show(kDataWindow, &show_data_);
+  show(kDebuggerWindow, &show_debugger_);
+  show(kDiagnosticsWindow, &show_diagnostics_);
+  show(kClassesWindow, &show_classes_);
+  show(kSearchWindow, &show_search_);
+  show(kSymbolsWindow, &show_symbols_);
+  show(kXrefGraphWindow, &show_xref_graph_);
+  return entries;
+}
+
+void Workspace::draw_command_palette() {
+  if (palette_request_) {
+    palette_request_ = false;
+    palette_buffer_[0] = '\0';
+    palette_selected_ = 0;
+    palette_focus_input_ = true;
+    palette_open_ = true;
+    ImGui::OpenPopup(kCommandPalette);
+  }
+  ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Appearing);
+  if (!ImGui::BeginPopupModal(kCommandPalette, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+    palette_open_ = false;
+    return;
+  }
+  if (palette_focus_input_) {
+    ImGui::SetKeyboardFocusHere();
+    palette_focus_input_ = false;
+  }
+  ImGui::SetNextItemWidth(520.0f);
+  if (ImGui::InputText("##palette_filter", palette_buffer_, sizeof(palette_buffer_))) {
+    palette_selected_ = 0;
+  }
+  const std::vector<PaletteEntry> entries = palette_entries();
+  const std::vector<std::string> words = palette_words(palette_buffer_);
+  std::vector<std::size_t> matches;
+  for (std::size_t i = 0; i < entries.size(); ++i) {
+    if (palette_matches(entries[i].label, words)) {
+      matches.push_back(i);
+    }
+  }
+  if (matches.empty()) {
+    palette_selected_ = 0;
+  } else if (palette_selected_ >= matches.size()) {
+    palette_selected_ = matches.size() - 1;
+  }
+  if (ImGui::IsKeyPressed(ImGuiKey_DownArrow) && palette_selected_ + 1 < matches.size()) {
+    ++palette_selected_;
+  }
+  if (ImGui::IsKeyPressed(ImGuiKey_UpArrow) && palette_selected_ > 0) {
+    --palette_selected_;
+  }
+
+  std::optional<std::size_t> chosen;
+  if (matches.empty()) {
+    ImGui::TextDisabled("No command matches.");
+  } else {
+    // Every BeginChild is matched by an EndChild, whether or not it returned true.
+    if (ImGui::BeginChild("##palette_results", ImVec2(520.0f, 260.0f))) {
+      for (std::size_t row = 0; row < matches.size(); ++row) {
+        const PaletteEntry& entry = entries[matches[row]];
+        if (!entry.enabled) {
+          ImGui::BeginDisabled();
+        }
+        const bool clicked = ImGui::Selectable(entry.label.c_str(), row == palette_selected_);
+        if (!entry.shortcut.empty()) {
+          ImGui::SameLine();
+          ImGui::TextDisabled("%s", entry.shortcut.c_str());
+        }
+        if (!entry.enabled) {
+          ImGui::EndDisabled();
+        }
+        if (clicked && entry.enabled) {
+          chosen = row;
+        }
+      }
+    }
+    ImGui::EndChild();
+  }
+
+  if (!matches.empty() && (ImGui::IsKeyPressed(ImGuiKey_Enter, false) ||
+                           ImGui::IsKeyPressed(ImGuiKey_KeypadEnter, false))) {
+    chosen = palette_selected_;
+  }
+  if (chosen && entries[matches[*chosen]].enabled) {
+    // The command runs after the popup is closed and the frame's popups are drawn.
+    pending_command_ = entries[matches[*chosen]].run;
+    palette_open_ = false;
+    ImGui::CloseCurrentPopup();
+  } else if (ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    palette_open_ = false;
+    ImGui::CloseCurrentPopup();
+  }
+  ImGui::EndPopup();
 }
 
 void Workspace::draw_menu_bar(bool& quit) {
@@ -466,6 +679,10 @@ void Workspace::draw_menu_bar(bool& quit) {
     ImGui::MenuItem(kDataWindow, nullptr, &show_data_);
     ImGui::MenuItem(kDebuggerWindow, nullptr, &show_debugger_);
     ImGui::MenuItem(kDiagnosticsWindow, nullptr, &show_diagnostics_);
+    ImGui::MenuItem(kClassesWindow, nullptr, &show_classes_);
+    ImGui::MenuItem(kSearchWindow, nullptr, &show_search_);
+    ImGui::MenuItem(kSymbolsWindow, nullptr, &show_symbols_);
+    ImGui::MenuItem(kXrefGraphWindow, nullptr, &show_xref_graph_);
     ImGui::Separator();
     if (ImGui::MenuItem("Reset Layout")) {
       reset_layout();
@@ -547,6 +764,144 @@ void Workspace::debug_terminate_for_testing() {
 bool Workspace::debug_stopped_for_testing() const {
   return state_.debug_controller != nullptr &&
          state_.debug_controller->snapshot().state == debug::SessionState::Stopped;
+}
+
+void Workspace::run_search(SearchKind kind, const std::string& query) {
+  state_.search_document_owner = session_.document();
+  if (!state_.search_document_owner) {
+    return;
+  }
+  state_.search->kind_input = static_cast<int>(kind);
+  std::snprintf(state_.search->query_input, sizeof(state_.search->query_input), "%s",
+                query.c_str());
+  state_.search->start(state_.search_document_owner, kind, query);
+}
+
+bool Workspace::xref_graph_snapshot(std::size_t& nodes, std::size_t& edges,
+                                    std::vector<std::string>& names) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  const views::XrefNeighbourhood graph =
+      views::xref_neighbourhood(*document, state_, state_.selected_address, state_.xref_depth, 64);
+  if (graph.nodes.empty()) {
+    return false;
+  }
+  nodes = graph.nodes.size();
+  edges = graph.edges.size();
+  names.clear();
+  for (const views::XrefNode& node : graph.nodes) {
+    names.push_back(node.shown);
+  }
+  return true;
+}
+
+std::size_t Workspace::symbol_row_count() {
+  const auto document = session_.document();
+  return document ? views::symbol_listing(*document, state_).size() : 0;
+}
+
+bool Workspace::symbol_shown(const std::string& raw, std::string& shown) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  for (const Symbol& symbol : document->loaded.image.symbols) {
+    if (symbol.name == raw) {
+      shown = views::symbol_shown_name(state_, symbol);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Workspace::symbol_kind(const std::string& raw, std::string& kind) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  for (const Symbol& symbol : document->loaded.image.symbols) {
+    if (symbol.name == raw) {
+      kind = symbol_kind_name(symbol.kind);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Workspace::function_containing_name(std::uint64_t address, std::string& shown) {
+  const auto document = session_.document();
+  if (!document) {
+    return false;
+  }
+  const Function* function = views::function_containing_address(*document, address);
+  if (function == nullptr) {
+    return false;
+  }
+  shown = views::shown_function_name(state_, *function);
+  return true;
+}
+
+void Workspace::set_xref_depth(int depth) {
+  state_.xref_depth = depth < 1 ? 1 : (depth > 2 ? 2 : depth);
+}
+
+void Workspace::set_symbol_filter(const std::string& filter) {
+  state_.symbol_filter = filter;
+}
+
+void Workspace::wait_search() {
+  state_.search->wait();
+}
+
+std::size_t Workspace::search_hit_count() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->rows.size();
+}
+
+bool Workspace::search_has_hit(std::uint64_t address) {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  for (const SearchRow& row : state_.search->rows) {
+    if (row.address == address) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool Workspace::search_preview(std::uint64_t address, std::string& preview) {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  for (const SearchRow& row : state_.search->rows) {
+    if (row.address == address) {
+      preview = row.preview;
+      return true;
+    }
+  }
+  return false;
+}
+
+std::string Workspace::search_error() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->error;
+}
+
+std::string Workspace::search_status() {
+  std::lock_guard<std::mutex> lock(state_.search->mutex);
+  return state_.search->status;
+}
+
+std::string Workspace::function_name_shown(std::uint64_t address) {
+  const auto document = session_.document();
+  if (!document) {
+    return {};
+  }
+  for (const Function& function : document->analysis.functions) {
+    if (function.address == address) {
+      return views::shown_function_name(state_, function);
+    }
+  }
+  return {};
 }
 
 std::uint64_t Workspace::resolve_location(const std::string& query) const {
@@ -790,6 +1145,43 @@ void Workspace::draw_panels() {
     ImGui::Begin(kDiagnosticsWindow, &show_diagnostics_, panel_flags());
     if (document) {
       views::diagnostics(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_xref_graph_) {
+    ImGui::Begin(kXrefGraphWindow, &show_xref_graph_, panel_flags());
+    if (document) {
+      views::xref_graph(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_symbols_) {
+    ImGui::Begin(kSymbolsWindow, &show_symbols_, panel_flags());
+    if (document) {
+      views::symbols(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_search_) {
+    ImGui::Begin(kSearchWindow, &show_search_, panel_flags());
+    if (document) {
+      state_.search_document_owner = document;
+      views::search(*document, state_);
+    } else {
+      ImGui::TextDisabled("No document.");
+    }
+    ImGui::End();
+  }
+  if (show_classes_) {
+    ImGui::Begin(kClassesWindow, &show_classes_, panel_flags());
+    if (document) {
+      views::classes(*document, state_);
     } else {
       ImGui::TextDisabled("No document.");
     }

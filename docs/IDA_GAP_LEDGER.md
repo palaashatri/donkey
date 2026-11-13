@@ -11,6 +11,11 @@ it is done.
   `docs/DESIGN.md` §17.2, and measured results are in `docs/SUPPORT_MATRIX.md`.
 - **Not a claim:** this file plans work. Nothing here is implemented until its
   row says DONE with evidence. Do not cite this file as a capability anywhere.
+- **The goal is parity with IDA Pro and Ghidra** for everyday work.
+  `docs/PARITY.md` has the scorecard (where `main` stands, area by area), how
+  parity is measured, and the order of the work. G01 to G19 are planned task
+  by task in section 5. G20 to G32 (section 5a) are planned at gap level, and
+  each starts with a task that writes its detailed plan.
 
 Read sections 1-3 before taking any task.
 
@@ -154,22 +159,38 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; no corpus loop prints as `for` yet: O0 keeps counters in stack slots, and O2 and O3 rotate loops into guarded do-while forms); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` form for register counters is unit-tested, no corpus loop is `for` yet) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` for register and in-memory counters; O0 corpus loops print `for`, O2 and O3 guarded do-while loops do not) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
-| G09 | Library function identification | FLIRT signatures, Lumina | None | P1 | TODO |
-| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF with AArch64 PLT names (T3, partial); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
+| G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). The generator for x86-64 ELF objects and static archives, `donkey-cli sig make` (T2, partial: no shared objects, PE import libraries or AArch64). One shipped set, musl 1.2.4 (MIT), identifying 34 of 67 known functions of a static musl program, 0 named wrongly, 28 byte-identical aliases reported ambiguous (T3, partial; the 90 % named bar is an owner decision) | P1 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 PARTIAL, owner decision open) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium and x64 MSVC RTTI and vtables (T3, partial: AArch64 PLT stubs are named at any stride, BTI-prefixed ones included; 32-bit MSVC, virtual base classes and call-site resolution are open); demangled names in donkey-cli info, in the desktop app's function names, call targets, Xrefs, Xref Graph and debugger frames, and the Classes window (Itanium classes of ELF images only), with the raw symbol in a tooltip (T4, DONE; the decompiler's pseudocode body keeps the engine's identifiers by rule) | P1 | IN PROGRESS (T1 to T3 PARTIAL; T4 DONE) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
-| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
+| G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test; user strings print as literals in the command-line, RPC and desktop decompiler (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
-| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints | Hardware watchpoints on Linux x86-64 (T5, partial) in the library and the CLI; the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
-| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Multi-image projects not started (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO; T3 DONE) |
-| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
-| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
+| G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64, with conditions, and conditional breakpoints on Linux (x86-64; AArch64 compiled, not run in this change), in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
+| G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs and, on x86-64, GOT slots read directly, across images (`donkey-cli link`, `project link`), done for ELF; calls through a register loaded from a GOT slot, AArch64 GOT calls, and PE and Mach-O references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
+| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions and over one real large binary (LLVM's libLLVM.so.1, 123 MB), with time, peak memory and the status each run reports. The block bound is now exact. Memory is about 1 KB per decoded instruction (T1, partial: one real binary, no UI frame times). Incremental re-analysis not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO) |
+| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
+| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Measured only on the differential corpus; no whole-program measurement | P0 | TODO |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | A call prints as `sub_x();` with no arguments or result, and every function that makes a call is Partial | P0 | TODO |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | TODO (T2 needs an owner decision on header sources) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | Not read | P1 | TODO |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols and call targets only | P0 | TODO |
+| G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
+| G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
+| G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
+| G28 | Diffing and version tracking | Lumina, BinDiff, Diaphora (Ghidra: Version Tracking, BSim) | None | P2 | TODO (after G09) |
+| G29 | Assembling for patches | Assemble an instruction | Byte patches only | P2 | TODO (T2 needs an owner decision) |
+| G30 | More containers and managed code | Many loaders; Dalvik, .NET | None of these | P2 | TODO (T4 and T5 need an owner decision) |
+| G31 | Scripting inside the app, full API coverage | IDAPython (Ghidra: Java and Python scripts) inside the tool | Out-of-process JSON-RPC and Python client; partial coverage of the UI's actions | P1 | TODO |
+| G32 | Collaboration | IDA Teams (Ghidra: Ghidra Server) | Single-user projects | P3 | BLOCKED [owner decision] |
+
+G20 to G32 were added on 2026-11-13 from `docs/PARITY.md`. Their plans are in
+section 5a. In their rows the "IDA Pro" column also names what Ghidra has.
 
 ### Status at the end of this session
 
@@ -798,6 +819,24 @@ for Partial functions.
   it into `for (init; cond; step)` would move the step in front of the test, and that is
   only equal when the loop is entered with the test true, which needs a proof from the
   entry guard.
+  A loop compiled with its test after its body and entered by a jump to the test
+  (GCC and Clang at -O0) is now laid out with the test first and printed as a `while`: the
+  pass `arrange_loop_tests` swaps the two blocks, negates the test and renumbers the
+  references, which is exact, and `forward_compare_loads` reads a counter that a compare
+  takes straight from memory when nothing else reads the register. `c_sum_array` at -O0
+  prints `while (*(u32 *)(rbp - 0x8) < *(u32 *)(rbp - 0x1c)) { ... }` with no labels.
+  Evidence: `Ir.StructuresRotatedLoopAsWhile` (its result is checked by the interpreter),
+  `Ir.ACompareReadsTheMemoryOfALoadThatNothingElseReads`,
+  `Ir.ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare`, and
+  `DecompilerCorpus.EveryPassPreservesSemantics` with the two passes in its list. Still not
+  done. A counted loop whose counter is in memory, the -O0 form, now prints as `for`: the
+  planner takes the init as a store or an assign, and the step as the three statements that
+  an add to memory lifts to (a load into a temporary, the add, a store), printed as one
+  update `M = M + c`. `c_sum_array` at -O0 prints `for (*(u32 *)(rsp - 0x8) = 0x0;
+  *(u32 *)(rbp - 0x8) < ...; *(u32 *)(rbp - 0x8) = *(u32 *)(rbp - 0x8) + 0x1)`. Evidence:
+  `Ir.StructuresCounterInMemoryAsFor`. The task stays PARTIAL: the -O2 loops are guarded
+  do-while loops and do not print as `for`. The printed form is checked by the construction
+  of the planner and by that test, not by the interpreter, which runs IR and not text.
   Step 2 is done for `break`. A branch from a loop body to the loop's exit prints
   `break;`, and the body's exit is the one the loop's own test leaves to, with the blocks
   the header dominates below it included (so a `break` block that no path back to the
@@ -932,8 +971,21 @@ for Partial functions.
   (the value of `c_point_sum` on a concrete `corpus_point` is the same before and after
   the prototype, 120), `DecompilerCorpus.AppliedPrototypeThatContradictsTheFunctionIsRefused`,
   and the full headless ctest suite (415 of 415) and the Release `DecompilerCorpus.*`, `Ir.*`
-  and `Types.*` suites (166 of 166), on Linux x86-64. Not done: step 3, types flowing
-  forward through copies and loads, so a value loaded from a typed field is not typed. The
+  and `Types.*` suites (166 of 166), on Linux x86-64. Step 3 is partly done: a parameter
+  that an unoptimised build spills to the stack and reloads is still that parameter.
+  `forward_slot_copies` turns an 8-byte reload of a slot into a copy of the register that
+  was stored there, while neither the slot nor the register has changed; copy propagation
+  then carries the copy into the accesses, and the pointer structure is recovered before the
+  printer runs. A prototype applied to the -O0 `c_point_sum` prints `p->z` and keeps the
+  value (`DecompilerCorpus.AppliedPrototypeReachesAnO0SpilledParameter`), and the forwarding
+  is tested in `Ir.ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter` and
+  `Ir.ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore`. This holds on x86-64 only. On
+  AArch64 an unoptimised build reloads the parameter into `x0`, the register it arrived in, and
+  then overwrites `x0`, so the slot is the only home of the pointer and nothing is forwarded:
+  the member accesses stay untyped there (seen on the arm64 CI host; the corpus test asserts the
+  member names on x86-64 only). Not done: that AArch64 case; a value loaded from a
+  typed pointer member keeps no type, so a pointer member of a structure is not followed to
+  its pointee; and the forwarding does not cross a block boundary. The
   conversion from a `TypeTable` to an `IrPrototype` is written by the caller (the test does
   it); the CLI and UI that would do it are G05-T4.
 
@@ -1056,6 +1108,11 @@ own code.
 ### G09 Library function identification
 
 - **G09-T1 Signature format and matcher.**
+  - **Status:** PARTIAL. Done: the format and its strict reader and writer, the matcher, and the
+    naming rules (`include/donkey/analysis/signatures.h`, `src/analysis/signatures.cpp`). Evidence:
+    `Signatures.*` (thirteen unit tests, with three mutations checked), and `fuzz_sig`. The library-level
+    match test is `Signatures.IdentifyMuslFunctionsInAStaticBinary` (G09-T3). Not done: a CLI command that
+    matches a set against a binary.
   1. Design an original format, documented in `docs/SIGNATURES.md`: for each
      function, the first N bytes with a mask for relocated bytes, the length,
      a CRC32 of the remaining bytes up to the function end, the name, and the
@@ -1067,7 +1124,40 @@ own code.
 - **G09-T2 Generator.** `donkey-cli sig make <archive.a|lib.so|.lib> --lib
   NAME --version V --out FILE`. Reads relocations to build the masks. Needs
   ELF relocatable support (G15-T1) for `.a`.
-- **G09-T3 Signature sets.**
+  - **Status:** PARTIAL. Done: `generate_signatures` (`include/donkey/analysis/signature_gen.h`,
+    `src/analysis/signature_gen.cpp`) reads the raw bytes of x86-64 ELF relocatable objects and of the
+    relocatable members of static archives, without laying them out. The global and weak functions with a
+    size are named. Each relocation inside a function makes a wildcard of its width, and a function that
+    cannot be described exactly (an unknown relocation type, a relocation past its end, a compressed or
+    out-of-file section) is skipped with a note. `donkey-cli sig make` writes the set, with `--license`
+    required because the format requires it. Local (static) functions are named as well as global and weak
+    ones: a static body identical to a global one is then ambiguous, not named after the global (see
+    `docs/SIGNATURES.md`, "Which functions"). Evidence: `SignatureGen.*` (ten tests, on
+    `tests/fixtures/sig/gen/`), whose match test links the library into `sig_static` and checks that the
+    five library functions (four global, one static) are named and nothing else is;
+    `cli.sig_make_writes_a_set_from_an_archive` and `cli.sig_make_refuses_an_executable`;
+    `fuzz_sig_object`. Mutations checked: ignoring relocations fails three tests; dropping the local
+    functions fails `Signatures.IdentifyMuslFunctionsInAStaticBinary` with two wrong names, and restoring
+    them passes. Not done: shared objects (`.so`), PE import libraries, an AArch64 generator, and the
+    `--lib` name taken from the file itself. Known gap: the wildcards do not cover a linker's relaxation of
+    an opcode (GOTPCRELX `mov` to `lea`), which leaves some functions unmatched.
+- **G09-T3 Signature sets.** Status: PARTIAL, one set shipped and an owner decision open.
+  - Shipped: `signatures/musl-1.2.4.json` (musl 1.2.4, MIT, 2,096 signatures), with its provenance in
+    `signatures/PROVENANCE.md`. Identification on a static musl program (`tests/fixtures/sig/musl/`):
+    of 67 known functions, 34 named and correct, 28 ambiguous byte-identical aliases (named nothing, by
+    the rule of G09-T1 point 3), 5 unmatched, and 0 named wrongly. Matching uses the new start-address
+    mode, `identify_at_starts`, because the analysis's extents of this stripped program are wrong for
+    many functions (checked on the 47 known global functions of the first measurement: 10 had the wrong extent,
+    and 16 were not found as functions by the analysis).
+  - **[owner decision]** The plan asks for at least 90 % of the known functions named. Under the
+    ambiguity rule, a byte-identical alias is never named, and 28 of 67 have one, so that bar cannot be
+    met soundly. The options are: accept 90 % identified (named or flagged ambiguous, 62 of 67 here,
+    which the test asserts) with at least half named, or allow an alias to be named after one of its
+    names, which can name a function wrongly. The test holds the first.
+  - The plan also asks for a CI build of a musl binary. The fixture is committed instead, with its
+    ground truth (`tests/fixtures/sig/musl/symbols.txt`), so CI does not need `musl-gcc`.
+  - Not yet: the other libraries of the plan (compiler-rt, libc++, MinGW CRT, FreeBSD libc).
+- **G09-T3 Signature sets.** (The plan below is the original; the status above records what was done.)
   - Generate sets only from libraries whose licence allows redistribution of
     derived data: musl (MIT), compiler-rt and libc++ (Apache-2.0 with LLVM
     exception), the MinGW-w64 CRT (check its notices), and FreeBSD libc
@@ -1077,7 +1167,8 @@ own code.
 - **Tests:**
   - `Signatures.IdentifyMuslFunctionsInAStaticBinary`: build a static
     binary against musl in CI; at least 90 % of known functions named and
-    0 wrong names.
+    0 wrong names. (Measured: 0 wrong; 92 % identified; 51 % named. See the
+    owner decision above.)
   - `Signatures.AmbiguousPatternsNameNothing`
   - fuzz target `fuzz_sig`
 
@@ -1121,9 +1212,14 @@ own code.
     mutation). The expected values were read from gdb. Also fixed: `c++filt`-style thunk names
     (`non-virtual thunk to Foo::bar()`) came out without their target; pinned by
     `Demangle.ThunksNameTheirTarget`. Fuzzed (`fuzz_rtti`).
-    Not done: MSVC RTTI (Complete Object Locators), AArch64 PLT stubs other than the 16-byte form (for example BTI-prefixed entries), and call-site
-    resolution in the decompiler (`call [reg + k]` through a known vtable). The GUI class
-    hierarchy panel is G10-T4.
+    Done since: MSVC RTTI for x64 PE images (`read_msvc_rtti`: complete object locators, type
+    descriptors, class hierarchy descriptors and the vtables they name; checked on a fixture against
+    the source, `RttiMsvc.*`, and fuzzed by `fuzz_rtti`, which now dispatches by format).
+    AArch64 PLT stubs are named at any stride, BTI-prefixed ones included (`PltStubsAArch64.*`,
+    fixtures in `tests/fixtures/link/aarch64/`). The PLT stub reader is shared with the cross-image
+    call resolution of G15-T2 (`src/binary/plt.cpp`).
+    Not done: 32-bit MSVC and virtual base classes, and call-site resolution in the decompiler
+    (`call [reg + k]` through a known vtable). The GUI class hierarchy panel is G10-T4.
   - Parse Itanium `typeinfo` objects and vtables (offset-to-top, typeinfo
     pointer, function pointers), and MSVC RTTI Complete Object Locators.
   - Build a class hierarchy.
@@ -1132,6 +1228,27 @@ own code.
     indirect in the IR.
 - **G10-T4 UI.** Show demangled names everywhere, with the raw name in the
   tooltip, and a class hierarchy panel.
+  - **Status:** DONE, with one stated exception. Done in the desktop app:
+    - The Classes window (`views::classes`) lists each class of the image's C++ RTTI with its kind,
+      direct bases in order, vtable address and primary slot count. Selecting a class navigates to
+      its vtable, or its typeinfo when it has none. The RTTI is read on the worker when a document
+      opens (`attach_rtti`); an image without it shows why. Each class's raw symbol is its tooltip.
+      Evidence: `ui.script_classes` (`assert_rtti_class` and `assert_rtti_bases` on
+      `donkey_test_hierarchy`; a mutated expected base fails it).
+    - A function's readable name (`readable_name`, `src/ui/names.cpp`, from the core demangler; the
+      raw symbol is kept) is shown in the Functions list, the call graph header and its caller and
+      callee lists, the disassembly call-target column, the Xrefs window (the function containing each
+      end of a reference), the Xref Graph header, the decompiler header and progress line, and the
+      debugger's stack frames. Each shows the raw symbol as its tooltip when the two differ. A user
+      rename is shown as typed, and the Rename prompt starts from the raw name. Evidence:
+      `ui.script_readable_names` (`_ZN5ShapeD2Ev` shows `Shape::~Shape()`), `ui.script_xref_graph`
+      (containing-function checks; a mutated lookup fails it).
+    - The full desktop suite passes (663 of 663); the headless Debug and Release suites pass.
+  - **The exception, by rule:** the decompiler's pseudocode body keeps the symbols as C identifiers.
+    The pseudocode is the engine's output from verified IR, and AGENTS.md forbids generating
+    pseudocode by string formatting, so the readable name is not written into it. A demangled name
+    inside a call would not be valid C in any case. The readable name is in the decompiler header.
+    MSVC RTTI and call-site resolution are G10-T3 items, not part of this entry.
 
 ### G11 Scripting and automation
 
@@ -1197,9 +1314,22 @@ out-of-process RPC. So scripting is RPC.
     UTF-16LE string with its two-byte terminator, read as 2-byte elements. The Data window previews
     it with `\uXXXX` escapes for non-ASCII units. Evidence: `Session.DefineString16DefinesTheTerminatedBytesAndRefusesOthers`,
     the parse cases in `Project.ParsesAndStoresStringRangesAndRefusesBadStringText`, and the scripted
-    test `tests/ui/utf16.donkeyui` on `tests/fixtures/utf16`. Not done: the listing draws no data
-    rows, so a range shows in the Data window only; a decompiler that prints a string literal;
-    a UTF-16 preview for surrogate pairs (they show as two `\uXXXX` escapes).
+    test `tests/ui/utf16.donkeyui` on `tests/fixtures/utf16`.
+    Printed literals (command line and RPC): a user-defined one-byte string prints as its C literal
+    in the pseudocode, where its address is loaded by a `lea` or by a 4- or 8-byte constant
+    assignment (a `mov` of an absolute address, as non-PIE builds emit). `donkey-cli project string
+    <db> <image-id> <address>` defines the string from the saved binary, after its SHA-256 check, and
+    `decompile --project` and the RPC `decompile` method print it. Evidence: `Ir.ALeaOfAUserString*`,
+    `Ir.AStringLiteralIsPrintedInStructuredCodeToo`, `Ir.AMovOfAStringAddressPrintsTheLiteral`,
+    `StringLiterals.*`, and the CTest cases `cli.project_string_*` on the fixture
+    `tests/fixtures/strings/hello-x86_64` (`rdi = (u64)("hello, donkey");`, and the address without
+    the project). Mutation checked: disabling the constant lookup fails the unit test and the CLI test.
+    The desktop decompiler view prints them too: the literals come from the annotation snapshot, travel
+    with each lift request, and are part of its cache key; `tests/ui/strings.donkeyui` (Linux x86-64,
+    run under Xvfb) defines the string, checks the literal, undoes it and checks the address again.
+    Not done: the listing draws no data rows, so a range shows in the Data window only;
+    a UTF-16 preview for surrogate pairs (they show as two `\uXXXX` escapes); a literal is printed for
+    any NUL-terminated bytes the user defines, which is the user's choice, not a check that they are text.
 - **G12-T3 Rename and type locals in the decompiler.**
   - Stored per function and IR variable, keyed by stack offset or register
     and definition address. They survive re-analysis when the key still
@@ -1307,6 +1437,39 @@ platform; do not write new, weaker ones.
 - **G14-T4 Windows on Arm.** ARM64 `CONTEXT` in `native_windows.cpp`.
 - **G14-T5 Hardware watchpoints and conditional breakpoints.** Use the debug
   registers (x86 DR0-DR7, AArch64 DBGWVR through ptrace) where the OS allows.
+  - **Status:** PARTIAL. Done on Linux x86-64: hardware watchpoints in DR0-DR3 and DR7
+    (`set_watchpoint`, `donkey-cli debug launch --watch`). Done on Linux (x86-64 and
+    AArch64): conditional software breakpoints. `set_conditional_breakpoint` takes a condition
+    `<operand> <op> <value>` (`include/donkey/debug/condition.h`, `src/debug/condition.cpp`): the
+    operand is a host register (`rsp`, `x0`) or the 8-byte word at an address (`*0x4010`), the
+    operator is one of `== != < <= > >=`, and the value is decimal or hex. A condition is parsed
+    when it is set, and a register the host does not have is refused. A trap whose conditions are
+    all false is passed over: the thread steps off the breakpoint with every other thread stopped,
+    the breakpoint goes back in, and the target runs on. No hit is counted and nothing is
+    reported. A condition that cannot be read stops the target and says why. A breakpoint that
+    already exists at the address is refused, because attaching a condition would change it.
+    `donkey-cli debug launch --break-if SYMBOL|ADDR CONDITION` takes the same syntax; a `*SYMBOL`
+    operand names a data symbol, and the address is a file address that is translated to runtime.
+    Evidence: `BreakCondition.*` (parser and comparison truth tables), `NativeDebug.Conditional*`
+    and `NativeDebug.ConditionOnARegisterIsReadAtTheHit` against `donkey_test_debuggee` (the stop
+    comes at the third call, the hit count is 1, a false condition never stops and the program
+    exits 42), `cli.debug_native_condition_json`, `cli.debug_mock_condition_is_unsupported` and
+    `cli.debug_break_if_rejects_a_malformed_condition`. Mutations checked: never passing a trap
+    fails two native tests; not reinserting the breakpoint after the silent step fails the
+    counting test. The AArch64 path is compiled but not run: the test host is x86-64.
+    Done on Linux x86-64: conditions on hardware watchpoints (`set_conditional_watchpoint`, and
+    `donkey-cli debug launch --watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION`). The condition is parsed
+    and its register checked when the watch is set, so a refused one takes no debug register. It is
+    evaluated after the access, so the stop reports the value written. A watch trap whose
+    conditions are all false is passed over: no hit is counted, nothing is reported, and the target
+    runs on. Evidence: `NativeDebug.ConditionalWatchpointStopsOnlyWhereItsConditionHolds` (the
+    counter is written 1, 2 and 3, and the target stops only at 2),
+    `NativeDebug.ConditionalWatchpointRefusesABadConditionBeforeAnySlotIsUsed`, and
+    `cli.debug_native_watch_if_json` (one watch stop, then exit 42). Mutation checked: disabling
+    the pass-over branch fails the stop test.
+    Not done: conditions with more than one comparison; a condition on a register of a thread
+    other than the one that hit; remote debugging (T1);
+    FreeBSD, macOS and Windows on Arm (T2 to T4).
 
 ### G15 Loaders and multiple images
 
@@ -1334,12 +1497,65 @@ platform; do not write new, weaker ones.
     built with GCC) and `RelocateAArch64.*` (built with clang for AArch64): the data
     pointer holds its target's address, a call reaches its callee, and the unresolved
     call is reported. `fuzz_binary` runs both objects as seeds (60 s and 45 s, no
-    finding). Not done: GOT-based relocations (`GOTPCREL`), the TLS types, the AArch64
-    page and `LO12` forms (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols, and
-    the relocations of non-allocated sections (debug information).
+    finding).
+  - **Later additions:** the TLS relocations named in the G15-T1 task are done, x86-64
+    local-exec included. Also applied: GOT-based relocations
+    (`GOTPCREL`, `GOTPCRELX`, `REX_GOTPCRELX`), the AArch64 page and `LO12` forms
+    (`ADR_PREL_PG_HI21`, `ADD_ABS_LO12_NC`), `COMMON` symbols placed in zero-filled `.bss`,
+    and TLS: x86-64 local-exec, initial-exec, global-dynamic and local-dynamic (relaxed as `ld`
+    does), and AArch64 local-exec, initial-exec and TLSDESC. Evidence: `RelocateTls.*`,
+    `RelocateGot.*`, `RelocateCommon.*` and `RelocateAArch64.*`. Not done, and recorded as
+    follow-ups: the classic AArch64 global- and local-dynamic sequences (`-mtls-dialect=trad`,
+    which need `__tls_get_addr`), and the relocations of non-allocated sections (debug
+    information), which the code leaves unapplied on purpose.
 - **G15-T2 Several images in one project.** Load several binaries, resolve
   imports to exports by name and library, and add cross-image xrefs. This is
   acceptance project A14's gap.
+  - **Status:** PARTIAL. Done for ELF:
+    - `resolve_imports` (`include/donkey/binary/link.h`, `src/binary/link.cpp`) binds each import
+      of an image to the first other image, in link order, that exports the name and is one of
+      the libraries the importer names: DT_NEEDED (matched against the provider's DT_SONAME or
+      file name), or the DLL named by a PE import (matched by file name). Unbound imports are
+      counted.
+    - `plt_stub_imports` (`include/donkey/binary/plt.h`, `src/binary/plt.cpp`) names each PLT stub
+      by the import its JUMP_SLOT relocation calls. x86-64 stubs and AArch64 stubs are read; the
+      AArch64 scan tries every 4-byte position, because lld 18's BTI stubs are 24 bytes apart
+      (16-byte scanning named one of the two imports in the fixture and missed the other).
+    - `resolve_import_calls` (`include/donkey/analysis/link_calls.h`, `src/analysis/link_calls.cpp`)
+      binds each call or jump the analysis finds through a stub to the export `resolve_imports`
+      chose, so a call to `provided_fn@plt` names the provider's address. A call to an import no
+      input exports is listed as unbound.
+    - `donkey-cli link <executable> <library>... [--json]` prints the bindings, the calls and the
+      unbound counts, and reports when an analysis was partial.
+    - `donkey-cli project link <database> [--json]` links the images of a project in the order they
+      were saved (the first is the executable). Each file must still match the SHA-256 the project
+      recorded; a changed file is refused with `project.image_changed`.
+    - Evidence: `Link.*` (5), `LinkCalls.*` (3), `PltStubs.*` (3), `PltStubsAArch64.*` and
+      `LinkCallsAArch64.*` on the BTI fixtures in `tests/fixtures/link/aarch64/`; CTest
+      `cli.link_*`, `cli.project_link_*`, and `cli.project_link_refusals` (a changed file and a
+      one-image project are refused). Mutations checked: removing the library rule fails two
+      `Link.*` tests; looking up stubs by the call site fails two `LinkCalls.*` tests; removing
+      the SHA-256 check fails `cli.project_link_refusals`.
+    - Done (x86-64 ELF): calls that read a GOT slot directly (`call *slot(%rip)`, which `-fno-plt`
+      code makes) are bound like PLT calls. `got_import_slots` (`include/donkey/binary/plt.h`)
+      names each GLOB_DAT slot of an import, and a Data xref from an indirect call or jump to such
+      a slot is an `ImportCall`; a plain load of the slot is not listed. A symbol the image defines
+      is not an import, so neither its PLT stub nor its GOT slot is named (this was a bug in the
+      PLT reader, found by the fixture: the stub of an interposable own function was listed as an
+      unbound import). Evidence: `GotSlots.*` (2), `LinkCalls.ACallThroughAGotSlot*` (2),
+      `LinkCalls.ALoadOfAGotSlot*`, `LinkCalls.ACallThroughARegisterLoaded*`,
+      `LinkCalls.ACallToAFunctionTheImageDefinesIsNotListed`, `PltStubs.AStubForAFunction*`, and
+      `cli.link_reports_calls_through_got_slots`, on `libconsumer_got.so` (built with `-fno-plt`,
+      see `tests/fixtures/link/PROVENANCE.md`). Mutations checked: removing the indirect-transfer
+      check fails the two negative `LinkCalls` tests; removing the imported-name filter from the
+      GOT reader fails `GotSlots.ASymbolTheImageDefinesIsNotAnImportSlot`; removing it from the PLT
+      reader fails the two own-function tests.
+    - Not done: a call through a register that code loaded from a GOT slot first (the call does
+      not read the slot itself, so it is not bound; `libconsumer_got.so`'s `_init` is the
+      fixture for this); imports used as data pointers (their xrefs are data, not calls); PE and
+      Mach-O cross-image calls (the PE import is an IAT slot, not a stub); AArch64 GOT calls
+      (`adrp`/`ldr`/`blr`); ordinal imports and forwarded exports. The project does not store the
+      cross-image results: `project link` recomputes them.
 - **G15-T3 Dumps and firmware.** ELF core files (show threads and memory),
   Windows minidumps (MIT-licensed format docs), Intel HEX and S-records as raw
   images.
@@ -1357,14 +1573,26 @@ platform; do not write new, weaker ones.
     and the memory ranges, read by address. Evidence: six `MinidumpReader.*` unit tests on a
     dump made by `tests/fixtures/minidump/make_sample_minidump.py` (which follows Microsoft's
     documented layout, not Windows output), `cli.core_minidump`, and the new
-    `fuzz/fuzz_minidump.cpp` harness, which compiles with clang (run not yet done). Not done:
-    a dump written by Windows has not been checked; other architectures keep their threads
-    without registers; the architecture for a raw record image is still supplied by the caller.
+    `fuzz/fuzz_minidump.cpp` harness: 319,333 runs in 61 s under clang with ASan and UBSan,
+    no finding. Not done: a dump written by Windows has not been checked; other architectures
+    keep their threads without registers; the architecture for a raw record image is still
+    supplied by the caller.
 
 ### G16 Scale
 
 - **G16-T1 Real-world benchmark.**
-  - A CI job (`workflow_dispatch` only) downloads pinned, checksummed,
+  - **Status:** PARTIAL. Done: `tools/bench/scale_benchmark.py --binary PATH` measures
+    `donkey-cli analyze` on an existing binary, with its SHA-256, wall time and peak RSS. The manual
+    workflow's `real-binary` job runs it on libLLVM.so.1 from the pinned package
+    `libllvm18=1:18.1.3-1ubuntu1` at 1M and 10M instructions. It ran on the hosted runner (run
+    42467464472: both jobs succeeded and uploaded their artifacts). The
+    local series, with the machine and the diagnostics, is in `docs/BENCHMARKS.md`. Every run is
+    Partial, because each budget or the block bound stops it first. Two defects found by this
+    benchmark were fixed: the block bound was exceeded (`Cfg.TheBlockBoundHoldsAcrossFunctions`),
+    and the instruction-budget diagnostic was repeated per function
+    (`Cfg.TheInstructionLimitIsReportedOnceForAllFunctions`). Not done: UI frame times with the UI
+    scripts; a second real binary (Firefox `libxul` is not redistributable, so it is not committed).
+  - Design (kept for reference): A CI job (`workflow_dispatch` only) downloads pinned, checksummed,
     redistributable large binaries and records analysis time, peak RSS and
     UI frame times with the UI scripts. Results go into
     `docs/BENCHMARKS.md`, labelled with the machine.
@@ -1398,6 +1626,358 @@ Dear ImGui has no accessibility tree. The options are:
   this needs **[owner decision]**)
 
 The first step is a written design in `docs/` only.
+
+---
+
+## 5a. Parity gaps G20 to G32
+
+These gaps were added on 2026-11-13 from the scorecard in `docs/PARITY.md`.
+G01 to G19 came from comparing features with IDA Pro. G20 to G32 come from
+asking what a user still has to leave Donkey for, in IDA Pro or in Ghidra.
+
+They are written at gap level, not yet at the file-by-file level of G01 to
+G07. **The first task of each gap is T0: write the task-level plan** (files,
+steps, test names, done-when, pitfalls) in this file, in its own PR, after
+reading the code the gap touches. Do not start T1 of a gap whose T0 is not
+merged. "Donkey today" in each entry was checked against `main` at `eb9fa61`.
+
+Shared terms:
+
+- **R1** is the reference corpus of real programs that G20-T1 defines.
+- **[ground truth]** marks a task measured against the unstripped build of
+  the same program, with no reference tool (see `docs/PARITY.md` section 2).
+- A threshold marked "proposed" is fixed by the owner after the first
+  measured baseline. Never lower one to pass.
+
+### G20 Decompiler coverage on real programs (P0)
+
+**Why.** The differential corpus proves the decompiler correct on a small set
+of functions. IDA Pro and Ghidra decompile nearly every function of a real
+program. Nothing measures Donkey on whole programs, so the order of the
+decompiler work is a guess.
+
+**Donkey today.** The corpus in `tests/corpus/*.c` (see
+`docs/SUPPORT_MATRIX.md`). No whole-program measurement.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Define R1: permissively licensed programs (proposed:
+  zlib, Lua, SQLite, and a static musl libc program) fetched in CI from
+  pinned URLs with SHA-256, built at `-O0` and `-O2` for x86-64, each as an
+  unstripped and a stripped binary. AArch64 follows through the cross
+  compiler. Record the provenance as `docs/DESIGN.md` §11.5 requires.
+- **T2.** A batch run over R1 that records for every function: Complete,
+  Partial with its first note, Unsupported, or error. Publish the counts and
+  the 20 most frequent Partial reasons as a CI artifact and as a table in
+  `docs/SUPPORT_MATRIX.md`.
+- **T3.** A ratchet: the Complete count per program and level is stored in
+  the repository, and CI fails when it drops.
+- **T4 [oracle].** Extend the execution comparison to the R1 functions that
+  can be called in isolation (a manifest of pure functions), so Complete on
+  R1 is verified as it is on the corpus.
+
+**Done when.** The ratchet runs in CI, and the reason table is used to order
+G21, G01, G08 and G04. Proposed parity threshold for scorecard row 6: at
+least 90% of R1 functions are Complete or Partial with a full body, and no
+verified function disagrees with the compiled code.
+
+**Pitfalls.** Do not commit built binaries. Keep the job inside the CI time
+budget (sample large programs, and say that you sampled). A function that is
+Complete but not executed is not verified: report the two counts separately.
+
+### G21 Call sites and calling conventions (P0)
+
+**Why.** Both reference tools print `r = f(a, b);`. Donkey prints
+`sub_401000();`, with no arguments and no result.
+
+**Donkey today.** `lift_call` in `src/ir/lift.cpp` and
+`src/ir/lift_aarch64.cpp` keeps only the target and marks the function
+Partial ("outgoing call arguments and return values follow no modelled ABI").
+So every function that makes a call is Partial.
+
+**Tasks.**
+
+- **T0.** Task-level plan, including the IR change (a call with explicit
+  argument and result operands) and its verifier rules.
+- **T1 [oracle].** The clobber model. After a call the caller-saved registers
+  are undefined and the callee-saved ones are preserved (System V x86-64 and
+  AAPCS64 first, Windows x64 next). The interpreter calls the real callee in
+  the differential harness.
+- **T2 [oracle].** Arguments and results from a known prototype: the callee's
+  recovered signature inside the image, DWARF or PDB, an applied type (G05)
+  or a type library (G22). Integer and pointer arguments in registers first.
+- **T3.** Stack arguments, structures by value and through a hidden pointer,
+  floating-point arguments (after G01).
+- **T4.** Variadic calls. Count arguments only from a constant format string;
+  otherwise the call is Partial.
+- **T5.** A call to a no-return function ends the block (needs G24-T3).
+- **T6.** Indirect calls: function pointers, vtable slots (the G10-T3
+  call-site work), import stubs.
+
+**Done when.** No R1 function is Partial only because it calls, and the
+corpus has call-heavy functions verified by execution.
+
+**Pitfalls.** An argument count taken from register liveness is an inference.
+Label it as one (`signature_inferred`) and never print it as certain. A wrong
+prototype must fail the oracle, not print plausible code.
+
+### G22 Type libraries (P1)
+
+**Why.** IDA Pro's type libraries and Ghidra's data type archives give every
+imported function a prototype and every system structure a layout before the
+user does anything.
+
+**Donkey today.** A type store, a bounded C declaration parser and prototype
+application from the CLI (G05). No bundled declarations.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** A versioned library file: C declarations for one platform and ABI,
+  read by a bounded reader with a fuzz target.
+- **T2 [owner decision].** A generator that builds libraries from headers
+  whose licence is on the allowed list, with provenance. Candidates: musl
+  (MIT) for libc and POSIX, Microsoft's win32metadata (MIT) for the Windows
+  API. Headers under other licences need a decision before use.
+- **T3.** Apply prototypes to imports by name, and to functions identified by
+  G09, with provenance `TypeLibrary`. A user edit always wins.
+- **T4.** The decompiler shows typed arguments at calls (needs G21-T2).
+
+**Done when.** The libc calls of R1 show prototypes with no user action, and
+each applied type records where it came from.
+
+**Pitfalls.** Never copy an IDA type library or a Ghidra data type archive.
+Generate from headers and record the header version.
+
+### G23 Unwind tables and exception handling (P1)
+
+**Why.** `.eh_frame` and `.pdata` give the exact start and length of almost
+every function in a stripped binary. Exception tables give the `try` and
+`catch` regions. Both reference tools read them.
+
+**Donkey today.** Not read.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** `.eh_frame` and `.eh_frame_hdr`: CIE and FDE records as function
+  ranges with provenance. Bounded and fuzzed. Oracle: `readelf
+  --debug-dump=frames`.
+- **T2.** PE x64 `.pdata` and `.xdata` (`RUNTIME_FUNCTION`, `UNWIND_INFO`,
+  chained entries), then the ARM64 forms. Oracle: `llvm-readobj --unwind`.
+- **T3.** Mach-O `__unwind_info` and `LC_FUNCTION_STARTS`.
+- **T4.** The Itanium LSDA (`.gcc_except_table`): landing pads become CFG
+  edges, and the decompiler marks the protected region. The result stays
+  Partial until the handler semantics are modelled.
+- **T5.** MSVC C++ exception data and SEH scope tables.
+
+**Done when.** G24-T1 shows the gain in function-start recall on stripped R1
+binaries, and a C++ fixture with `try`/`catch` shows its regions.
+
+### G24 Analysis of stripped binaries (P0)
+
+**Why.** Finding the functions of a stripped binary is the core of both
+reference tools. Everything else works on what this step finds.
+
+**Donkey today.** `src/analysis/analysis.cpp` seeds functions from the entry
+point, exported function symbols and call targets. There is no prologue scan,
+no no-return analysis, no thunk classification and no stack-depth analysis.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** The measurement: for each R1 program, compare the
+  function starts found in the stripped binary with the symbols and DWARF of
+  the unstripped one. Report precision and recall, and ratchet them in CI.
+- **T2.** More seeds, most reliable first: unwind tables (G23), code
+  addresses stored in data and relocations (function-pointer tables, vtables,
+  `.init_array`), tail-call targets, and prologue patterns last. A function
+  found by a heuristic carries that provenance.
+- **T3.** No-return functions: known names first (`exit`, `abort`,
+  `__stack_chk_fail` and the like), then propagation through the call graph.
+- **T4.** Thunks and import stubs are named for their targets; a jump is
+  classified as a tail call or a branch.
+- **T5.** Data in code: jump tables in `.text`, literal pools, padding. Bytes
+  that are not proven code are not decoded silently.
+- **T6.** The stack-pointer delta at every instruction (needed by G21-T3 and
+  by frame locals without a frame pointer).
+- **T7.** Bounded value propagation for indirect branch and call targets.
+
+**Done when.** Proposed thresholds on stripped x86-64 R1: recall and
+precision of function starts both at least 98%.
+
+**Pitfalls.** Recall bought with false functions is worse than a gap. Measure
+precision in the same run.
+
+### G25 Language runtimes: Go, Rust, Objective-C, Swift (P1)
+
+**Why.** A stripped Go binary still names every function in its runtime
+tables. Objective-C binaries describe every class. Both reference tools use
+this; Donkey ignores it.
+
+**Donkey today.** None of the four.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Go: `.gopclntab` (the 1.2, 1.16, 1.18 and 1.20
+  layouts) for function names and ranges, module data, build information.
+  Compare with the unstripped build.
+- **T2.** Rust: the legacy and v0 mangling schemes (RFC 2603). Oracle:
+  `rustfilt` output on a list of names.
+- **T3.** Objective-C: class lists, method lists and selector references, so
+  methods are named and `objc_msgSend` calls with a constant selector get a
+  cross-reference. Oracle: `llvm-objdump --objc-meta-data`.
+- **T4.** Swift: demangling (oracle: `swift demangle`). Type metadata later.
+
+**Pitfalls.** These are parsers of untrusted bytes: bounded, with fuzz
+targets.
+
+### G26 Processor strategy (P1) [owner decision]
+
+**Why.** G13 decodes four more instruction sets but lifts none of them. A
+hand-written, verified lifter per instruction set is the bottleneck between
+three architectures and the dozens the reference tools cover.
+
+**Options.**
+
+- **A. Hand-written lifters**, each checked by the differential oracle under
+  `qemu-user`. Consistent with today's design. Slow.
+- **B. SLEIGH specifications.** Ghidra's processor descriptions are
+  Apache-2.0. A C++ SLEIGH engine turns bytes into p-code, and a translator
+  turns p-code into Donkey IR, checked by the same oracle. This is the
+  fastest route to breadth. It adds a large third-party component and a
+  second IR to keep honest.
+- **C. Both.** Hand-written for the instruction sets that matter most
+  (x86-64, AArch64, then ARM and RISC-V), SLEIGH for the rest.
+
+**Tasks.**
+
+- **T0.** A spike on one instruction set that Donkey decodes but does not
+  lift (RV64 or A32): corpus functions to p-code, to Donkey IR, through the
+  oracle. Report coverage, binary size, build time, the licence inventory,
+  and whether the engine builds without a JVM. No product code is merged.
+- The decision is recorded in `AGENTS.md` under "Settled decisions". The
+  tasks after T0 are written then.
+
+**Until the decision.** G13 continues by hand: Thumb decoding, then A32 and
+RV64 lifting.
+
+**Pitfalls.** "Verified IR" does not bend. Whatever produces the IR, a
+Complete result is one that the oracle executed.
+
+### G27 Emulation (P2)
+
+**Why.** Ghidra has a p-code emulator, and IDA Pro has Appcall and emulator
+plug-ins. Users decrypt strings and unpack code with them.
+
+**Donkey today.** The IR interpreter (`include/donkey/ir/eval.h`) runs in the
+tests only.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** Emulate one function from the CLI with given register and memory
+  inputs over the image's bytes. Bounded steps and memory. An unmodelled
+  operation stops the run with a diagnostic.
+- **T2.** A memory model (sections copy-on-write, a stack, a stub heap) and
+  hooks for imported functions.
+- **T3.** In the desktop app: emulate a selection and keep the result as a
+  comment or a data definition.
+- **T4.** Start from a debugger stop (registers and memory of the live
+  target).
+
+**Pitfalls.** Emulation never runs native code. Opening a file still never
+executes it.
+
+### G28 Diffing and version tracking (P2)
+
+**Why.** Ghidra has Version Tracking, Program Diff and BSim. IDA Pro users
+have Lumina, BinDiff and Diaphora. Analysts carry their work from one build
+of a program to the next.
+
+**Donkey today.** None.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Match the functions of two images: masked byte
+  hashes first (the masking G09 defines), then call-graph and CFG structure.
+  Report matched, changed, added and removed, as JSON from the CLI. The
+  oracle is two builds of one source with known changes.
+- **T2.** Carry names, comments and types from a project to a new build, with
+  provenance and a list for review.
+- **T3.** A side-by-side view in the desktop app.
+
+**Depends on.** G09.
+
+### G29 Assembling for patches (P2) [owner decision]
+
+**Why.** Both reference tools let the user type an instruction to patch.
+
+**Donkey today.** Byte patches only. Keystone is GPL-2 and forbidden.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** Patch helpers that need no assembler: invert a conditional branch,
+  replace an instruction with no-ops, force a jump, change an immediate. Each
+  result is decoded again and compared before it is staged.
+- **T2 [owner decision].** A text assembler: LLVM MC (Apache-2.0 with the
+  LLVM exception, large), a small own encoder for the common forms, or the
+  SLEIGH assembler if G26 chooses SLEIGH.
+
+### G30 More containers and managed code (P2)
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** COFF objects and import libraries (extends G15-T1).
+- **T2.** The dyld shared cache and Mach-O kernel collections: open one image
+  out of the container, bounded and memory-mapped.
+- **T3.** Firmware: a raw loader with a user memory map and a vector table
+  for Cortex-M, and peripheral names from a user-supplied CMSIS-SVD file.
+- **T4 [owner decision].** WebAssembly.
+- **T5 [owner decision].** DEX, Java class files and .NET metadata. These are
+  not native code and need their own IR. Decide the scope first.
+
+### G31 Scripting inside the app and full API coverage (P1)
+
+**Why.** IDAPython and Ghidra scripts reach everything the user interface
+can do, from inside the tool.
+
+**Donkey today.** A JSON-RPC server with read methods, decompile, rename,
+comment and type application; a batch mode; an optional Python client; C ABI
+plugins. Scripts run out of process only, and the API covers part of what the
+desktop app does.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** An API coverage table in `docs/RPC.md`: every user action (make
+  code and data, patch, bookmark, navigate, cross-references, types, debugger
+  control) against its RPC method, with a test per method. Missing methods
+  become tasks.
+- **T2.** A script runner and console in the desktop app that talks to the
+  live session through the same RPC, never on the render thread.
+- **T3.** Read access to the verified IR for scripts, as versioned JSON.
+- **T4.** Batch analysis of a directory with a script before and after each
+  file.
+
+**Pitfalls.** Python stays optional (`AGENTS.md`, "Settled decisions").
+
+### G32 Collaboration (P3) [owner decision]
+
+**Why.** IDA Teams and Ghidra Server let several analysts share one project.
+
+**Donkey today.** Single-user projects.
+
+**Tasks.**
+
+- **T0.** A written design: a deterministic text export of names, comments,
+  types and bookmarks that merges three ways and reports conflicts (so it
+  works with any version control), against a server. The owner chooses.
 
 ---
 
@@ -1483,3 +2063,33 @@ instead of slipping through:
 
 Do the tasks one at a time, each with its own PR and green CI, before the
 next starts on top of it.
+
+### Order from 2026-11-13
+
+Most of the list above is done (see the table in section 4). From here the
+order is the waves in `docs/PARITY.md` section 4:
+
+1. **Wave 1.** G20-T0 to T3 first, because it measures what the rest is
+   ordered by. Then G21, G24, G23-T1 to T3, and the open tasks of G04, G05
+   and G01.
+2. **Wave 2.** G09, G22, the open tasks of G10 and G06, G23-T4 and T5, G25.
+3. **Wave 3.** G26-T0 (a spike, then an owner decision), G13, G08, G15-T2,
+   G30.
+4. **Wave 4.** G14, G27.
+5. **Wave 5.** G12, G17, G31, G29, G28, G32.
+
+Inside a wave, take an **[oracle]** or **[ground truth]** task before one
+without a machine check. Take T0 of a G20 to G32 gap before any other task of
+that gap.
+
+Branch hygiene, so that `main` stays the one place where work lives:
+
+- At most three task branches are open at once, and each has an open PR.
+- Do not stack a branch on an unmerged branch unless the task depends on it.
+  If you do, say so in both PRs.
+- When a PR merges, delete its branch in the same session. When work is
+  superseded, close its PR with a link to what replaced it, check that every
+  commit on the branch is in `main` or in the replacement (`git cherry
+  origin/main <branch>`), and then delete the branch.
+- Never leave pushed work without an open PR. A branch with neither a PR nor
+  a line in an open PR's description is lost work waiting to happen.

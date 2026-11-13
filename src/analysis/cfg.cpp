@@ -939,8 +939,18 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
 
   std::size_t decoded_limit = options.max_instructions;
   std::size_t decoded = 0;
+  // Set when a block would exceed kMaxBlocks. Once it is set, no further seed is traversed, so
+  // the graph never holds more blocks than the bound.
+  bool block_bound_reached = false;
+  // Functions whose traversal stopped at the instruction budget. One diagnostic reports them all,
+  // so a large image does not produce one diagnostic per function.
+  std::size_t truncated_functions = 0;
+  std::uint64_t first_truncated = 0;
 
   for (std::size_t seed_index = 0; seed_index < seeds.size(); ++seed_index) {
+    if (block_bound_reached) {
+      break;
+    }
     if (options.cancellation_token.is_cancelled()) {
       return make_error<ControlFlowGraph>(Status::Cancelled, "analysis.cancelled",
                                           "control-flow analysis was cancelled");
@@ -1078,10 +1088,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
 
     if (truncated) {
       graph.partial = true;
-      graph.diagnostics.push_back(Diagnostic::make(
-          Status::Partial, "analysis.instruction_limit",
-          "control-flow traversal hit the instruction limit; extents are lower bounds",
-          function.address));
+      if (truncated_functions == 0) {
+        first_truncated = function.address;
+      }
+      ++truncated_functions;
     }
 
     if (reached.empty()) {
@@ -1141,18 +1151,11 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       const bool is_leader = std::binary_search(leaders.begin(), leaders.end(), address);
       const bool gap = have_previous && previous_end != address;
       if (is_leader || gap || !have_previous) {
-        BasicBlock block;
-        block.id = BasicBlockId{static_cast<std::uint64_t>(graph.blocks.size() + 1)};
-        block.function = function.id;
-        block.address = address;
-        block.end_address = address;
-        block.first_instruction = index_by_address[address];
-        block.instruction_count = 0;
-        block_by_address.emplace(address, graph.blocks.size());
-        graph.blocks.push_back(block);
-        if (graph.blocks.size() > kMaxBlocks) {
+        if (graph.blocks.size() >= kMaxBlocks) {
+          // The bound is checked before the block is made, so the graph holds at most kMaxBlocks.
           // A partial result says why: the block bound is a resource limit, not a decoding failure.
-          // The reason is recorded once, however many seeds reach the bound.
+          // The reason is recorded once.
+          block_bound_reached = true;
           graph.partial = true;
           const bool reported = std::any_of(graph.diagnostics.begin(), graph.diagnostics.end(),
                                             [](const Diagnostic& diagnostic) {
@@ -1166,6 +1169,15 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           }
           break;
         }
+        BasicBlock block;
+        block.id = BasicBlockId{static_cast<std::uint64_t>(graph.blocks.size() + 1)};
+        block.function = function.id;
+        block.address = address;
+        block.end_address = address;
+        block.first_instruction = index_by_address[address];
+        block.instruction_count = 0;
+        block_by_address.emplace(address, graph.blocks.size());
+        graph.blocks.push_back(block);
       }
       BasicBlock& block = graph.blocks.back();
       block.instruction_count += 1;
@@ -1269,6 +1281,13 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
     }
   }
 
+  if (truncated_functions > 0) {
+    graph.diagnostics.push_back(Diagnostic::make(
+        Status::Partial, "analysis.instruction_limit",
+        "control-flow traversal hit the instruction limit in " +
+            std::to_string(truncated_functions) + " function(s); their extents are lower bounds",
+        first_truncated));
+  }
   return graph;
 }
 

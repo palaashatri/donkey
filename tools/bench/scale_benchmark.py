@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
-"""Scale benchmark for donkey-cli analyze (G16-T1, first step).
+"""Scale benchmark for donkey-cli analyze (G16-T1).
 
-Generates synthetic C programs of several sizes (fixed seed, so the inputs are the same on every
-run), compiles them with the C compiler, and measures `donkey-cli analyze` on each: wall-clock time
-and the peak resident memory of the child process. Results are printed as a table and written as
-JSON. The synthetic programs are generated here, not downloaded; no third-party binary is used.
+Two kinds of input. With no --binary, it generates synthetic C programs of several sizes (fixed
+seed, so the inputs are the same on every run) and compiles them with the C compiler. With --binary,
+it measures real binaries that already exist on the machine, which are not built or modified here.
+Either way it measures `donkey-cli analyze` on each input: wall-clock time, the peak resident memory
+of the child process, and the status and counts the analysis reported. Results are printed as a table
+and written as JSON.
 
 Usage:
   python3 tools/bench/scale_benchmark.py --cli build/headless-linux/apps/donkey-cli/donkey-cli \
       --work /tmp/donkey-bench --sizes 2000 10000 40000 --json results.json
+
+  python3 tools/bench/scale_benchmark.py --cli build/release/apps/donkey-cli/donkey-cli \
+      --work /tmp/donkey-bench --binary /usr/lib/llvm-18/lib/libLLVM.so.1 --max-instructions 10000000 \
+      --json llvm-results.json
 
 The peak memory is ru_maxrss of the child, so it counts the whole process. Run each size once
 per machine; numbers from one run are not a distribution. Record the machine with the results.
@@ -17,6 +23,7 @@ per machine; numbers from one run are not a distribution. Record the machine wit
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -71,6 +78,14 @@ def machine() -> dict:
     }
 
 
+def sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def measure(cli: str, binary: Path, scratch: Path, max_instructions: int) -> dict:
     """Runs `donkey-cli analyze` and reads its own resource usage. RUSAGE_CHILDREN would report the
     largest child seen so far, which here can be the C compiler, so the child is waited for by pid."""
@@ -102,7 +117,11 @@ def main() -> int:
     parser.add_argument("--cli", required=True, help="path to donkey-cli")
     parser.add_argument("--work", required=True, help="directory for the generated sources and binaries")
     parser.add_argument("--cc", default=os.environ.get("CC", "gcc"), help="C compiler (default: $CC or gcc)")
-    parser.add_argument("--sizes", type=int, nargs="+", default=[2000, 10000, 40000])
+    parser.add_argument("--sizes", type=int, nargs="+", default=None,
+                        help="function counts of the synthetic programs (default 2000 10000 40000 when no "
+                             "--binary is given)")
+    parser.add_argument("--binary", action="append", default=[],
+                        help="measure this existing binary instead of the synthetic programs (repeatable)")
     parser.add_argument("--max-instructions", type=int, default=4_000_000,
                         help="instruction cap for analyze; a run that hits it is Partial, not Complete")
     parser.add_argument("--json", help="write the results to this file")
@@ -111,7 +130,19 @@ def main() -> int:
     work = Path(args.work)
     work.mkdir(parents=True, exist_ok=True)
     results = []
-    for functions in args.sizes:
+    sizes = args.sizes if args.sizes is not None else ([] if args.binary else [2000, 10000, 40000])
+    for path in args.binary:
+        binary = Path(path)
+        row = {
+            "binary": str(binary),
+            "binary_bytes": binary.stat().st_size,
+            "sha256": sha256_of(binary),
+        }
+        row.update(measure(args.cli, binary, work, args.max_instructions))
+        results.append(row)
+        print(f"{binary.name:<28} {row['binary_bytes']:>12} bytes  {row['wall_seconds']:>8.2f} s  "
+              f"{row['peak_rss_mb']:>8.1f} MB  {row['status']}  exit {row['exit']}", flush=True)
+    for functions in sizes:
         source = work / f"synthetic-{functions}.c"
         binary = work / f"synthetic-{functions}"
         generate(functions, source)
@@ -129,8 +160,8 @@ def main() -> int:
               f"{row['wall_seconds']:>8.2f} s  {row['peak_rss_mb']:>8.1f} MB  exit {row['exit']}",
               flush=True)
 
-    report = {"machine": machine(), "compiler": args.cc, "max_instructions": args.max_instructions,
-              "results": results}
+    report = {"machine": machine(), "compiler": args.cc if sizes else None,
+              "max_instructions": args.max_instructions, "results": results}
     if args.json:
         Path(args.json).write_text(json.dumps(report, indent=2) + "\n")
     shutil.rmtree(work / "__pycache__", ignore_errors=True)

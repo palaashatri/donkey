@@ -162,6 +162,39 @@ std::string canonical_or_self(const std::string& path) {
   return ec ? path : canonical.string();
 }
 
+/// The value of a register of this host, by the name read_registers gives it. Empty when the host
+/// has no register of that name.
+std::optional<std::uint64_t> register_value(const NativeRegs& regs, const std::string& name) {
+#if defined(__x86_64__)
+  for (const RegisterSlot& slot : kRegisterSlots) {
+    if (name == slot.name) {
+      return static_cast<std::uint64_t>(regs.*slot.field);
+    }
+  }
+#else
+  if (name == "sp") {
+    return static_cast<std::uint64_t>(regs.sp);
+  }
+  if (name == "pc") {
+    return static_cast<std::uint64_t>(regs.pc);
+  }
+  if (name == "pstate") {
+    return static_cast<std::uint64_t>(regs.pstate);
+  }
+  if (name.size() >= 2 && name[0] == 'x') {
+    const int index = std::atoi(name.c_str() + 1);
+    if (index >= 0 && index < 31 && name == "x" + std::to_string(index)) {
+      return static_cast<std::uint64_t>(regs.regs[index]);
+    }
+  }
+#endif
+  return std::nullopt;
+}
+
+bool is_host_register(const std::string& name) {
+  return register_value(NativeRegs{}, name).has_value();
+}
+
 }  // namespace
 
 struct LocalDebugAdapter::Impl {
@@ -174,6 +207,11 @@ struct LocalDebugAdapter::Impl {
   native::StaticImage image;
   std::vector<SoftwareBreakpoint> breakpoints;
   std::uint64_t next_breakpoint_id = 1;
+  /// What the event loop does after a status it handled without reporting a stop (G14-T5).
+  enum class After : std::uint8_t { Report, PassOver, Resume };
+  After after = After::Report;
+  std::uint64_t pass_address = 0;  ///< the breakpoint a PassOver steps off
+  bool silent_step = false;        ///< the step in progress passes over a breakpoint silently
   StopInfo stop;
   // Threads. The session is all-stop: when one thread stops, every other
   // traced thread is stopped before the stop is reported, and a resume
@@ -194,6 +232,12 @@ struct LocalDebugAdapter::Impl {
   static constexpr std::size_t kWatchSlots = 4;
   std::vector<Watchpoint> watches;
   std::uint64_t next_watch_id = 1;
+  /// What a trap with a watch bit set means: the first hit whose condition holds stops the target
+  /// (`stop`), and a trap whose hits all have false conditions is passed over (`passed`).
+  struct WatchOutcome {
+    std::optional<StopInfo> stop;
+    bool passed = false;
+  };
 
 #if defined(__x86_64__)
   static std::uintptr_t debugreg_offset(int index) {
@@ -243,14 +287,52 @@ struct LocalDebugAdapter::Impl {
     return poke_debugreg(thread, 7, dr7) && poke_debugreg(thread, 6, 0);
   }
 
-  /// The watch whose DR6 bit is set, if the thread stopped on one. Clears DR6 after reading it.
-  std::optional<StopInfo> watch_stop(pid_t thread, std::uint64_t pc) {
+  /// Whether a watch's condition holds at this access. An unconditional watch always does. A
+  /// condition that cannot be evaluated also does, and `error` says why, so that the stop is never
+  /// silent. The condition is read from its text, which was checked when the watch was set.
+  bool watch_holds(const Watchpoint& watch, const NativeRegs& regs, bool have_regs,
+                   std::string& error) const {
+    if (watch.condition.empty()) {
+      return true;
+    }
+    auto parsed = debug::parse_break_condition(watch.condition);
+    if (!parsed) {
+      error = "its condition could not be read: " + parsed.diagnostic().message;
+      return true;
+    }
+    if (!have_regs) {
+      error = "its condition could not be evaluated: the registers could not be read";
+      return true;
+    }
+    const std::optional<std::uint64_t> operand = condition_operand(parsed.value(), regs);
+    if (!operand) {
+      if (parsed.value().memory) {
+        char address_text[32];
+        std::snprintf(address_text, sizeof(address_text), "0x%llx",
+                      static_cast<unsigned long long>(parsed.value().address));
+        error = std::string("its condition could not be evaluated: the word at ") + address_text +
+                " could not be read";
+      } else {
+        error = "its condition could not be evaluated: no register named `" +
+                parsed.value().register_name + "`";
+      }
+      return true;
+    }
+    return condition_holds(parsed.value(), *operand);
+  }
+
+  /// Sorts a trap on `thread` with watch bits set in DR6, and clears DR6. The first hit whose
+  /// condition holds is counted and reported. When there are hits and none of their conditions
+  /// holds, the trap is passed over: no hit is counted and nothing is reported.
+  WatchOutcome watch_outcome(pid_t thread, std::uint64_t pc, const NativeRegs& regs,
+                             bool have_regs) {
+    WatchOutcome outcome;
     if (watches.empty()) {
-      return std::nullopt;
+      return outcome;
     }
     unsigned long status = 0;
     if (!peek_debugreg(thread, 6, status) || (status & 0xfUL) == 0) {
-      return std::nullopt;
+      return outcome;
     }
     poke_debugreg(thread, 6, 0);
     for (std::size_t slot = 0; slot < watches.size() && slot < kWatchSlots; ++slot) {
@@ -258,6 +340,10 @@ struct LocalDebugAdapter::Impl {
         continue;
       }
       Watchpoint& watch = watches[slot];
+      std::string error;
+      if (!watch_holds(watch, regs, have_regs, error)) {
+        continue;
+      }
       ++watch.hit_count;
       char address_text[32];
       std::snprintf(address_text, sizeof(address_text), "0x%llx",
@@ -266,14 +352,19 @@ struct LocalDebugAdapter::Impl {
           "watchpoint " + std::to_string(watch.id) +
           " hit: " + (watch.kind == WatchKind::Write ? "write" : "read or write") + " of " +
           std::to_string(watch.length) + " bytes at " + address_text;
-      return StopInfo{StopReason::Watchpoint, static_cast<std::uint64_t>(thread), pc,
-                      std::move(description), 0};
+      if (!error.empty()) {
+        description += " (" + error + ")";
+      }
+      outcome.stop = StopInfo{StopReason::Watchpoint, static_cast<std::uint64_t>(thread), pc,
+                              std::move(description), 0};
+      return outcome;
     }
-    return std::nullopt;
+    outcome.passed = true;
+    return outcome;
   }
 #else
   bool arm_thread(pid_t) const { return true; }
-  std::optional<StopInfo> watch_stop(pid_t, std::uint64_t) { return std::nullopt; }
+  WatchOutcome watch_outcome(pid_t, std::uint64_t, const NativeRegs&, bool) { return {}; }
 #endif
 
   /// Arms every stopped thread. Called only while the target is stopped.
@@ -766,6 +857,18 @@ struct LocalDebugAdapter::Impl {
     }
     current = thread;
     handle_status(status);
+    switch (after) {
+      case After::PassOver:
+        after = After::Report;
+        stop_others();
+        // The step's trap comes next, and nothing is reported until then.
+        return !begin_pass_over(pass_address);
+      case After::Resume:
+        after = After::Report;
+        return !resume_after_silent_step();
+      case After::Report:
+        break;
+    }
     if (pid > 0 && state == SessionState::Stopped) {
       stop_others();
     }
@@ -797,14 +900,33 @@ struct LocalDebugAdapter::Impl {
     const int sig = WSTOPSIG(status);
     const bool was_stepping = stepping;
     stepping = false;
+    // A step past a breakpoint whose condition is false ends here, whatever stopped it: the
+    // breakpoints go back in before anything is reported.
+    const bool was_silent = silent_step;
+    silent_step = false;
+    if (was_silent) {
+      reinsert_enabled();
+    }
     NativeRegs regs{};
     const bool have_regs = get_regs(regs);
     std::uint64_t at = have_regs ? reg_pc(regs) : 0;
 
     if (sig == SIGTRAP) {
-      if (std::optional<StopInfo> watch = watch_stop(static_cast<pid_t>(tid), at)) {
+      const WatchOutcome watch = watch_outcome(static_cast<pid_t>(tid), at, regs, have_regs);
+      if (watch.stop) {
         drop_internal_breakpoints();
-        stop = *watch;
+        stop = *watch.stop;
+        return;
+      }
+      if (watch.passed && !was_stepping) {
+        // Every hit's condition is false. A watch trap follows the store, so nothing needs to be
+        // stepped off: the target runs on. A user single step that also hit a watch falls through
+        // and is reported as the step it is.
+        after = After::Resume;
+        return;
+      }
+      if (was_silent) {
+        after = After::Resume;  // the step is done: the target runs on
         return;
       }
       // A software breakpoint traps after the int3 on x86 and at the BRK on
@@ -817,18 +939,41 @@ struct LocalDebugAdapter::Impl {
           set_regs(regs);
         }
         at = trap_address;
-        const bool internal_only = bp->internal;
-        const std::string reason_text = bp->tag;
-        // Count the hit on every breakpoint (user or internal) at the address.
+        // An internal breakpoint (a step-over or run-to target) here is reported as itself.
+        const SoftwareBreakpoint* internal_here = nullptr;
+        for (const auto& candidate : breakpoints) {
+          if (candidate.info.address == at && candidate.internal) {
+            internal_here = &candidate;
+            break;
+          }
+        }
+        const bool internal_only = internal_here != nullptr;
+        const std::string reason_text =
+            internal_here != nullptr ? internal_here->tag : std::string();
+        // A trap whose user breakpoints all have false conditions is passed over: no hit is
+        // counted and nothing is reported. The event loop steps the thread off the breakpoint.
+        const TrapVerdict verdict = trap_verdict(at, regs, have_regs);
+        if (verdict.pass) {
+          after = After::PassOver;
+          pass_address = at;
+          return;
+        }
+        // Count the hit on every user breakpoint here whose condition holds.
         bool user_hit = false;
         for (auto& candidate : breakpoints) {
           if (candidate.info.address == at && !candidate.internal) {
-            ++candidate.info.hit_count;
-            user_hit = true;
+            std::string ignored;
+            if (breakpoint_holds(candidate, regs, have_regs, ignored)) {
+              ++candidate.info.hit_count;
+              user_hit = true;
+            }
           }
         }
         StopReason reason = StopReason::Breakpoint;
         std::string description = "breakpoint hit";
+        if (!verdict.error.empty()) {
+          description += " (" + verdict.error + ")";
+        }
         if (!user_hit && internal_only) {
           reason = reason_text == "entry" ? StopReason::Entrypoint : StopReason::SingleStep;
           description = reason_text == "entry" ? "stopped at program entry" : "step completed";
@@ -856,6 +1001,135 @@ struct LocalDebugAdapter::Impl {
 
   // ---- execution control -------------------------------------------------
 
+  /// Reinserts every enabled breakpoint that is not in memory.
+  void reinsert_enabled() {
+    for (auto& candidate : breakpoints) {
+      if (candidate.info.enabled && !candidate.inserted) {
+        insert(candidate);
+      }
+    }
+  }
+
+  /// The value a condition compares now: a register, or the 8-byte word at its address. Empty when
+  /// it cannot be read.
+  std::optional<std::uint64_t> condition_operand(const BreakCondition& condition,
+                                                 const NativeRegs& regs) const {
+    if (!condition.memory) {
+      return register_value(regs, condition.register_name);
+    }
+    std::uint64_t word = 0;
+    if (!raw_read(condition.address, &word, sizeof(word))) {
+      return std::nullopt;
+    }
+    return word;
+  }
+
+  /// Whether a user breakpoint stops the target at this hit. An unconditional one always does. A
+  /// condition that cannot be evaluated also does, and `error` says why, so that the stop is never
+  /// silent.
+  bool breakpoint_holds(const SoftwareBreakpoint& candidate, const NativeRegs& regs, bool have_regs,
+                        std::string& error) const {
+    if (!candidate.condition) {
+      return true;
+    }
+    if (!have_regs) {
+      error = "its condition could not be evaluated: the registers could not be read";
+      return true;
+    }
+    const std::optional<std::uint64_t> operand = condition_operand(*candidate.condition, regs);
+    if (!operand) {
+      if (candidate.condition->memory) {
+        char address_text[32];
+        std::snprintf(address_text, sizeof(address_text), "0x%llx",
+                      static_cast<unsigned long long>(candidate.condition->address));
+        error = std::string("its condition could not be evaluated: the word at ") + address_text +
+                " could not be read";
+      } else {
+        error = "its condition could not be evaluated: no register named `" +
+                candidate.condition->register_name + "`";
+      }
+      return true;
+    }
+    return condition_holds(*candidate.condition, *operand);
+  }
+
+  struct TrapVerdict {
+    bool pass = false;  ///< no user breakpoint here stops the target: the trap is passed over
+    std::string error;  ///< why a breakpoint here stops although its condition could not be read
+  };
+
+  /// How a trap at `address` is treated. It is passed over only when it has user breakpoints, none
+  /// of them internal, and every one of their conditions is false.
+  TrapVerdict trap_verdict(std::uint64_t address, const NativeRegs& regs, bool have_regs) const {
+    TrapVerdict verdict;
+    bool any_user = false;
+    bool any_holds = false;
+    for (const SoftwareBreakpoint& candidate : breakpoints) {
+      if (candidate.info.address != address) {
+        continue;
+      }
+      if (candidate.internal) {
+        return verdict;  // an internal breakpoint here is always reported
+      }
+      any_user = true;
+      std::string error;
+      if (breakpoint_holds(candidate, regs, have_regs, error)) {
+        any_holds = true;
+      }
+      if (!error.empty()) {
+        verdict.error = error;
+      }
+    }
+    verdict.pass = any_user && !any_holds;
+    return verdict;
+  }
+
+  /// Starts the single step that moves the trapping thread off a breakpoint whose condition is
+  /// false. Every other thread is stopped by now. The step's trap comes back through handle_status,
+  /// which reinserts the breakpoints and resumes the target. Returns false when the step could not
+  /// start, and `stop` then says so.
+  bool begin_pass_over(std::uint64_t address) {
+    if (SoftwareBreakpoint* bp = breakpoint_at(address)) {
+      uninsert(*bp);
+    }
+    const pid_t thread = cur();
+    const int sig = take_pending(thread);
+    stepping = true;
+    silent_step = true;
+    if (::ptrace(PTRACE_SINGLESTEP, thread, nullptr,
+                 reinterpret_cast<void*>(static_cast<std::intptr_t>(sig))) != 0) {
+      stepping = false;
+      silent_step = false;
+      reinsert_enabled();
+      stop =
+          StopInfo{StopReason::Breakpoint, static_cast<std::uint64_t>(thread), address,
+                   "a breakpoint's condition is false, but the target could not step past it", 0};
+      return false;
+    }
+    stopped.erase(thread);
+    state = SessionState::Running;
+    return true;
+  }
+
+  /// The silent step is done: every breakpoint goes back in, and every thread runs on. Returns
+  /// false, with `stop` set, when the current thread cannot be resumed.
+  bool resume_after_silent_step() {
+    reinsert_enabled();
+    const pid_t thread = cur();
+    if (!resume_thread(thread)) {
+      stop = StopInfo{StopReason::Breakpoint, static_cast<std::uint64_t>(thread), 0,
+                      "could not resume the target after a breakpoint whose condition is false", 0};
+      state = SessionState::Stopped;
+      return false;
+    }
+    for (pid_t other : std::vector<pid_t>(stopped.begin(), stopped.end())) {
+      resume_thread(other);  // a thread that just exited cannot be resumed
+    }
+    state = SessionState::Running;
+    stop = StopInfo{};
+    return true;
+  }
+
   /// Execute exactly one instruction from the current PC, stepping over a
   /// breakpoint that sits there. Leaves `stop` describing the result.
   bool single_step(int timeout_ms) {
@@ -879,11 +1153,7 @@ struct LocalDebugAdapter::Impl {
     state = SessionState::Running;
     const bool finished = wait(timeout_ms);
     if (pid > 0 && state == SessionState::Stopped) {
-      for (auto& candidate : breakpoints) {
-        if (candidate.info.enabled && !candidate.inserted) {
-          insert(candidate);
-        }
-      }
+      reinsert_enabled();
     }
     return finished;
   }
@@ -1408,6 +1678,42 @@ Result<Breakpoint> LocalDebugAdapter::set_breakpoint(std::uint64_t address) {
   return bp.info;
 }
 
+Result<Breakpoint> LocalDebugAdapter::set_conditional_breakpoint(std::uint64_t address,
+                                                                 const std::string& condition) {
+  Impl& d = *impl_;
+  auto parsed = debug::parse_break_condition(condition);
+  if (!parsed) {
+    return Result<Breakpoint>(parsed.diagnostic());
+  }
+  if (!parsed.value().memory && !is_host_register(parsed.value().register_name)) {
+    return make_error<Breakpoint>(
+        Status::InvalidInput, "debug.condition_register",
+        "this host has no register named `" + parsed.value().register_name + "`");
+  }
+  // set_breakpoint returns an existing breakpoint at the address. Attaching a condition to it would
+  // change a breakpoint the user set without a condition, so that case is refused.
+  for (const auto& bp : d.breakpoints) {
+    if (!bp.internal && bp.info.address == address) {
+      return make_error<Breakpoint>(Status::InvalidInput, "debug.breakpoint_exists",
+                                    "a breakpoint is already set at that address; remove it "
+                                    "before setting a conditional one");
+    }
+  }
+  auto created = set_breakpoint(address);
+  if (!created) {
+    return created;
+  }
+  for (auto& bp : d.breakpoints) {
+    if (!bp.internal && bp.info.id == created.value().id) {
+      bp.condition = parsed.value();
+      bp.info.condition = condition;
+      return bp.info;
+    }
+  }
+  return make_error<Breakpoint>(Status::InternalError, "debug.breakpoint_lost",
+                                "the new breakpoint was not recorded");
+}
+
 Result<bool> LocalDebugAdapter::remove_breakpoint(std::uint64_t id_or_address) {
   Impl& d = *impl_;
   for (auto it = d.breakpoints.begin(); it != d.breakpoints.end(); ++it) {
@@ -1709,6 +2015,36 @@ Result<Watchpoint> LocalDebugAdapter::set_watchpoint(std::uint64_t address, std:
                                   "the kernel refused the debug registers for that address");
   }
   return watch;
+}
+
+Result<Watchpoint> LocalDebugAdapter::set_conditional_watchpoint(std::uint64_t address,
+                                                                 std::uint8_t length,
+                                                                 WatchKind kind,
+                                                                 const std::string& condition) {
+  Impl& d = *impl_;
+  auto parsed = debug::parse_break_condition(condition);
+  if (!parsed) {
+    return Result<Watchpoint>(parsed.diagnostic());
+  }
+  if (!parsed.value().memory && !is_host_register(parsed.value().register_name)) {
+    return make_error<Watchpoint>(
+        Status::InvalidInput, "debug.condition_register",
+        "this host has no register named `" + parsed.value().register_name + "`");
+  }
+  // set_watchpoint checks the request and takes a debug register. Only then is the condition
+  // recorded, so a refused request leaves no slot in use.
+  auto created = set_watchpoint(address, length, kind);
+  if (!created) {
+    return created;
+  }
+  for (Watchpoint& watch : d.watches) {
+    if (watch.id == created.value().id) {
+      watch.condition = condition;
+      return watch;
+    }
+  }
+  return make_error<Watchpoint>(Status::InternalError, "debug.watch_lost",
+                                "the new watchpoint was not recorded");
 }
 
 Result<bool> LocalDebugAdapter::remove_watchpoint(std::uint64_t id) {

@@ -2,6 +2,7 @@
 #include <cctype>
 #include <cstdio>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "components.h"
@@ -15,6 +16,8 @@ struct DisassemblyCache {
   std::string filter;
   std::vector<std::uint32_t> indices;
   std::uint64_t scrolled_to = 0;  ///< selection the view last scrolled to
+  /// Functions by entry address, for the readable names of call targets (G10-T4).
+  std::unordered_map<std::uint64_t, const Function*> functions_at;
 };
 
 bool contains_lower(std::string_view haystack, std::string_view needle) {
@@ -40,6 +43,10 @@ void rebuild(const Document& document, UiState& state, DisassemblyCache& cache) 
   cache.document = &document;
   cache.filter = state.disassembly_filter;
   cache.indices.clear();
+  cache.functions_at.clear();
+  for (const Function& function : document.analysis.functions) {
+    cache.functions_at.emplace(function.address, &function);
+  }
   const auto& instructions = document.analysis.instructions;
   cache.indices.reserve(instructions.size());
   char address[32];
@@ -234,6 +241,15 @@ void disassembly(const Document& document, UiState& state) {
         ImGui::TextUnformatted(
             components::format_address(instruction.direct_target.value()).c_str());
         ImGui::PopStyleColor();
+        if (const auto target = cache.functions_at.find(instruction.direct_target.value());
+            target != cache.functions_at.end()) {
+          const std::string shown = shown_function_name(state, *target->second);
+          ImGui::SameLine();
+          ImGui::TextUnformatted(shown.c_str());
+          if (ImGui::IsItemHovered() && shown != target->second->name) {
+            ImGui::SetTooltip("%s", target->second->name.c_str());
+          }
+        }
       }
 
       ImGui::TableSetColumnIndex(4);

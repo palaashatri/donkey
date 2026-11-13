@@ -78,6 +78,10 @@ add_library(donkey_binary STATIC
   src/binary/demangle.cpp
   src/binary/demangle_msvc.cpp
   src/binary/rtti.cpp
+  src/binary/rtti_msvc.cpp
+  src/binary/link.cpp
+  src/binary/plt.cpp
+  src/binary/elf_dynamic.cpp
   src/binary/core.cpp
   src/binary/minidump.cpp
   src/binary/inflate.cpp
@@ -111,6 +115,10 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/signatures.cpp
+  src/analysis/signature_gen.cpp
+  src/analysis/link_calls.cpp
+  src/analysis/search.cpp
   src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
@@ -147,6 +155,7 @@ donkey_apply_warnings(donkey_ir)
 add_library(donkey_project STATIC
   src/project/cdecl.cpp
   src/project/project.cpp
+  src/project/string_literals.cpp
   src/project/types.cpp
 )
 add_library(donkey::project ALIAS donkey_project)
@@ -161,6 +170,7 @@ target_compile_features(donkey_project PUBLIC cxx_std_20)
 donkey_apply_warnings(donkey_project)
 
 add_library(donkey_debug STATIC
+  src/debug/condition.cpp
   src/debug/controller.cpp
   src/debug/debug.cpp
   src/debug/mock_adapter.cpp
@@ -210,6 +220,7 @@ donkey_apply_warnings(donkey_plugin)
 # thread. It has no SDL or ImGui dependency, so it is built headless and is
 # covered by the unit tests even when the desktop shell is disabled.
 add_library(donkey_session STATIC
+  src/ui/names.cpp
   src/ui/session.cpp
 )
 add_library(donkey::session ALIAS donkey_session)
@@ -245,6 +256,9 @@ if(DONKEY_BUILD_UI)
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
+    src/ui/search_view.cpp
+    src/ui/symbols_view.cpp
+    src/ui/xref_graph_view.cpp
     src/ui/theme.cpp
     src/ui/ui_test.cpp
     src/ui/workspace.cpp
@@ -349,6 +363,16 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_cdecl PRIVATE cxx_std_20)
   target_compile_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_sig fuzz/fuzz_sig.cpp)
+  target_link_libraries(fuzz_sig PRIVATE donkey::analysis)
+  target_compile_features(fuzz_sig PRIVATE cxx_std_20)
+  target_compile_options(fuzz_sig PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_sig PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_sig_object fuzz/fuzz_sig_object.cpp)
+  target_link_libraries(fuzz_sig_object PRIVATE donkey::analysis)
+  target_compile_features(fuzz_sig_object PRIVATE cxx_std_20)
+  target_compile_options(fuzz_sig_object PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_sig_object PRIVATE ${DONKEY_FUZZ_SANITIZE})
 endif()
 
 # ---------------------------------------------------------------------------

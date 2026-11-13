@@ -5,6 +5,7 @@
 #include <cinttypes>
 #include <cstddef>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -15,16 +16,21 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/analysis/link_calls.h"
+#include "donkey/analysis/signature_gen.h"
+#include "donkey/analysis/signatures.h"
 #include "donkey/binary/archive.h"
 #include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/link.h"
 #include "donkey/binary/minidump.h"
 #include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
 #include "donkey/core/status.h"
 #include "donkey/core/version.h"
+#include "donkey/debug/condition.h"
 #include "donkey/debug/debug.h"
 #include "donkey/decode/decode.h"
 #include "donkey/ir/debug_names.h"
@@ -34,6 +40,7 @@
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/string_literals.h"
 #include "donkey/project/types.h"
 #include "json.h"
 
@@ -796,6 +803,11 @@ void print_usage(std::FILE* out) {
       "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] [--project "
       "DB]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
+      "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
+      " [--json]\n"
+      "  donkey-cli link <executable> <library>... [--json]\n"
+      "  donkey-cli project link <database> [--json]\n"
+      "  donkey-cli project string <database> <image-id> <address> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
       "  donkey-cli project save <database> <binary> [--json]\n"
       "  donkey-cli project info <database> [--json]\n"
@@ -807,8 +819,9 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project local-names <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
-      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--watch "
-      "SYMBOL|ADDR[:LEN][:rw]]... [--run]"
+      "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
+      "SYMBOL|ADDR CONDITION]... [--watch "
+      "SYMBOL|ADDR[:LEN][:rw]]... [--watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION]... [--run]"
       " [--mock] [--json]\n"
       "  donkey-cli patch apply <binary> --offset <hex> --replacement <hex> [--original "
       "<hex>] --output <out> [--force] [--json]\n"
@@ -1686,6 +1699,8 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // The local names the project saved for this binary (G12-T3). They are applied after the debug
   // names, so a user name wins.
   std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
+  // The strings the project defines, as the literals the pseudocode prints (G12-T2).
+  PseudocodeOptions pseudo_options;
   if (!request.project_path.empty()) {
     auto project = Project::open(request.project_path);
     if (!project) {
@@ -1714,6 +1729,11 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     for (const LocalName& entry : names.value()) {
       user_names[entry.function_address].push_back(UserLocalName{entry.variable, entry.name});
     }
+    auto rows = project.value().annotations(*image_id);
+    if (!rows) {
+      return fail(rows.diagnostic());
+    }
+    pseudo_options.string_literals = string_literals(rows.value(), loaded.image, loaded.data);
   }
 
   // The DWARF of the binary, when it has any, names the parameters and the frame slots of
@@ -1773,7 +1793,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         ++written;
         continue;
       }
-      auto pseudo_res = format_pseudocode_lines(lifted.value());
+      auto pseudo_res = format_pseudocode_lines(lifted.value(), pseudo_options);
       if (!pseudo_res) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
@@ -1817,7 +1837,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
                   lifted.diagnostic().code.c_str());
       continue;
     }
-    auto text = format_pseudocode(lifted.value());
+    auto text = format_pseudocode(lifted.value(), pseudo_options);
     if (!text) {
       std::printf("// %s: rejected IR (%s: %s)\n", display_name(function->name).c_str(),
                   text.diagnostic().code.c_str(), text.diagnostic().message.c_str());
@@ -2016,6 +2036,107 @@ std::string octal_mode(std::uint32_t mode) {
 
 }  // namespace
 
+int command_sig(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty() || arguments[0] != "make") {
+    return usage_error("sig needs a subcommand: make");
+  }
+  std::string path;
+  std::string out;
+  donkey::SignatureGenOptions options;
+  bool json = false;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view arg = arguments[i];
+    if (arg == "--json") {
+      json = true;
+    } else if (arg == "--lib" || arg == "--version" || arg == "--license" || arg == "--out") {
+      std::string_view value;
+      if (!take_value(arguments, i, value)) {
+        return usage_error("sig make: each of --lib, --version, --license and --out needs a value");
+      }
+      if (arg == "--lib") {
+        options.library = std::string(value);
+      } else if (arg == "--version") {
+        options.version = std::string(value);
+      } else if (arg == "--license") {
+        options.license = std::string(value);
+      } else {
+        out = std::string(value);
+      }
+    } else if (!arg.empty() && arg.front() == '-') {
+      return usage_error("unknown option for sig make");
+    } else if (path.empty()) {
+      path = std::string(arg);
+    } else {
+      return usage_error("sig make takes one object or archive file");
+    }
+  }
+  if (path.empty() || out.empty()) {
+    return usage_error("sig make needs an object or archive file and --out FILE");
+  }
+  // Objects and archives are read whole; the limit keeps a huge file from exhausting memory.
+  constexpr std::uintmax_t kMaxInputBytes = std::uintmax_t{1} << 30;
+  std::error_code size_error;
+  const std::uintmax_t size = std::filesystem::file_size(path, size_error);
+  if (size_error) {
+    return usage_error("cannot open the object or archive file");
+  }
+  if (size > kMaxInputBytes) {
+    return usage_error("the object or archive file is larger than 1 GiB");
+  }
+  std::ifstream file(path, std::ios::binary);
+  if (!file) {
+    return usage_error("cannot open the object or archive file");
+  }
+  std::vector<std::byte> bytes;
+  bytes.reserve(static_cast<std::size_t>(size));
+  std::vector<char> buffer(1 << 20);
+  while (file) {
+    file.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+    const auto count = static_cast<std::size_t>(file.gcount());
+    for (std::size_t i = 0; i < count; ++i) {
+      bytes.push_back(static_cast<std::byte>(buffer[i]));
+    }
+  }
+
+  auto generated = donkey::generate_signatures(bytes, options);
+  if (!generated) {
+    return fail(generated.diagnostic());
+  }
+  const donkey::SignatureGenResult& result = generated.value();
+  std::ofstream written(out, std::ios::binary | std::ios::trunc);
+  if (!written) {
+    return fail(Diagnostic{Status::InvalidInput, "sig.write", "cannot write the signature file",
+                           std::nullopt});
+  }
+  written << donkey::write_signature_set(result.set) << '\n';
+  if (!written) {
+    return fail(Diagnostic{Status::InvalidInput, "sig.write", "cannot write the signature file",
+                           std::nullopt});
+  }
+  if (json) {
+    std::string text = "{\n";
+    text += "  \"library\": " + quote(result.set.library) + ",\n";
+    text += "  \"version\": " + quote(result.set.version) + ",\n";
+    text += "  \"signatures\": " + std::to_string(result.set.signatures.size()) + ",\n";
+    text += "  \"functions\": " + std::to_string(result.functions) + ",\n";
+    text += "  \"skipped\": " + std::to_string(result.skipped) + ",\n";
+    text += std::string("  \"partial\": ") + (result.partial ? "true" : "false") + ",\n";
+    text += "  \"out\": " + quote(out) + "\n}\n";
+    std::fwrite(text.data(), 1, text.size(), stdout);
+    return kExitOk;
+  }
+  std::printf("wrote %zu signatures for %s %s to %s (%zu functions, %zu skipped)\n",
+              result.set.signatures.size(), result.set.library.c_str(), result.set.version.c_str(),
+              out.c_str(), result.functions, result.skipped);
+  for (const std::string& note : result.notes) {
+    std::printf("  note: %s\n", note.c_str());
+  }
+  if (result.partial) {
+    std::printf("  note: reading stopped early, so the set may be incomplete\n");
+  }
+  return kExitOk;
+}
+
 int command_archive(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
     return usage_error("archive needs a subcommand: list");
@@ -2095,9 +2216,151 @@ int command_archive(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+namespace {
+
+/// The link report of `loaded` images in link order, each labelled by `labels`. Imports are bound
+/// by name and library. Each image is analysed, so a call through a PLT stub is bound to the export
+/// the link chose for that import (G15-T2).
+int report_link(const std::vector<std::string>& labels,
+                const std::vector<donkey::LoadedBinary>& loaded, bool json) {
+  std::vector<donkey::LinkInput> inputs;
+  inputs.reserve(loaded.size());
+  for (const donkey::LoadedBinary& item : loaded) {
+    inputs.push_back({&item.image, item.data});
+  }
+  const donkey::LinkResult result = donkey::resolve_imports(inputs);
+  // Each image is analysed for its call sites, so a call through a PLT stub can be bound to the
+  // export the link chose for that import.
+  std::vector<donkey::AnalysisResult> analyses;
+  analyses.reserve(loaded.size());
+  bool partial = false;
+  for (const donkey::LoadedBinary& item : loaded) {
+    auto analysis = donkey::analyze(item.image, item.data);
+    if (!analysis) {
+      return fail(analysis.diagnostic());
+    }
+    partial = partial || analysis.value().partial;
+    analyses.push_back(std::move(analysis.value()));
+  }
+  auto resolved = donkey::resolve_import_calls(inputs, result, analyses);
+  if (!resolved) {
+    return fail(resolved.diagnostic());
+  }
+  const std::vector<donkey::ImportCall>& calls = resolved.value();
+  std::size_t unbound_calls = 0;
+  for (const donkey::ImportCall& call : calls) {
+    if (call.provider == donkey::kUnboundImport) {
+      ++unbound_calls;
+    }
+  }
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"inputs\": [";
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(std::string(labels[i]));
+    }
+    out += "],\n";
+    out += "  \"unbound\": " + std::to_string(result.unbound) + ",\n";
+    out += "  \"bindings\": [";
+    for (std::size_t i = 0; i < result.bindings.size(); ++i) {
+      const donkey::ImportBinding& binding = result.bindings[i];
+      const bool bound = binding.provider != donkey::kUnboundImport;
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"importer\": " + quote(labels[binding.importer]) +
+             ", \"name\": " + quote(binding.name) +
+             ", \"provider\": " + (bound ? quote(labels[binding.provider]) : std::string("null")) +
+             ", \"library\": " + quote(binding.library) +
+             ", \"address\": " + (bound ? quote(hex(binding.address)) : std::string("null")) + "}";
+    }
+    out += result.bindings.empty() ? "],\n" : "\n  ],\n";
+    out += "  \"partial\": " + std::string(partial ? "true" : "false") + ",\n";
+    out += "  \"unbound_calls\": " + std::to_string(unbound_calls) + ",\n";
+    out += "  \"calls\": [";
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+      const donkey::ImportCall& call = calls[i];
+      const bool bound = call.provider != donkey::kUnboundImport;
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"importer\": " + quote(labels[call.importer]) +
+             ", \"from\": " + quote(hex(call.from)) +
+             ", \"kind\": " + quote(donkey::xref_kind_name(call.kind)) +
+             ", \"stub\": " + quote(hex(call.stub)) + ", \"name\": " + quote(call.name) +
+             ", \"provider\": " + (bound ? quote(labels[call.provider]) : std::string("null")) +
+             ", \"to\": " + (bound ? quote(hex(call.to)) : std::string("null")) + "}";
+    }
+    out += calls.empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu imports, %zu unbound\n", result.bindings.size(), result.unbound);
+    for (const donkey::ImportBinding& binding : result.bindings) {
+      const std::string& importer = labels[binding.importer];
+      if (binding.provider == donkey::kUnboundImport) {
+        std::printf("  %s: %s is not exported by any input\n", importer.c_str(),
+                    binding.name.c_str());
+      } else {
+        std::printf("  %s: %s from %s at %s\n", importer.c_str(), binding.name.c_str(),
+                    binding.library.c_str(), hex(binding.address).c_str());
+      }
+    }
+    std::printf("%zu calls through PLT stubs or GOT slots, %zu to imports no input exports\n",
+                calls.size(), unbound_calls);
+    for (const donkey::ImportCall& call : calls) {
+      const std::string& importer = labels[call.importer];
+      if (call.provider == donkey::kUnboundImport) {
+        std::printf("  %s: %s %s calls %s, which no input exports\n", importer.c_str(),
+                    donkey::xref_kind_name(call.kind), hex(call.from).c_str(), call.name.c_str());
+      } else {
+        std::printf("  %s: %s %s calls %s in %s at %s\n", importer.c_str(),
+                    donkey::xref_kind_name(call.kind), hex(call.from).c_str(), call.name.c_str(),
+                    labels[call.provider].c_str(), hex(call.to).c_str());
+      }
+    }
+    if (partial) {
+      std::printf("note: an image was only partly analysed, so some call sites may be missing\n");
+    }
+  }
+  return kExitOk;
+}
+
+}  // namespace
+
+int command_link(const std::vector<std::string_view>& arguments) {
+  bool json = false;
+  std::vector<std::string_view> positional;
+  for (const std::string_view argument : arguments) {
+    if (argument == "--json") {
+      json = true;
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for link");
+    } else {
+      positional.push_back(argument);
+    }
+  }
+  if (positional.size() < 2) {
+    return usage_error("link needs the executable and at least one library, in link order");
+  }
+  // The link inputs point into these buffers, so they are all loaded before any input is built.
+  std::vector<std::string> labels;
+  std::vector<donkey::LoadedBinary> loaded;
+  labels.reserve(positional.size());
+  loaded.reserve(positional.size());
+  for (const std::string_view path : positional) {
+    auto result = donkey::load_binary(std::string(path));
+    if (!result) {
+      return fail(result.diagnostic());
+    }
+    labels.emplace_back(path);
+    loaded.push_back(std::move(result.value()));
+  }
+  return report_link(labels, loaded, json);
+}
+
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
-    return usage_error("project needs a subcommand: save, info or type");
+    return usage_error("project needs a subcommand: save, info, link, string or type");
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
@@ -2177,6 +2440,45 @@ int command_project(const std::vector<std::string_view>& arguments) {
     return kExitOk;
   }
 
+  if (subcommand == "link") {
+    if (positional.size() != 1) {
+      return usage_error("project link needs a database path");
+    }
+    const std::string database(positional[0]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    if (images.value().size() < 2) {
+      return usage_error("project link needs at least two images in the project");
+    }
+    // The project lists its images in the order they were saved, which is the link order: the
+    // first image saved is the executable. Each file must still match the hash the project
+    // recorded.
+    std::vector<std::string> labels;
+    std::vector<donkey::LoadedBinary> loaded;
+    for (const ProjectImage& image : images.value()) {
+      auto result = donkey::load_binary(image.path);
+      if (!result) {
+        return fail(result.diagnostic());
+      }
+      if (result.value().image.sha256 != image.sha256) {
+        std::fprintf(stderr,
+                     "error [project.image_changed]: %s no longer matches the hash the project "
+                     "recorded\n",
+                     image.path.c_str());
+        return kExitFailure;
+      }
+      labels.push_back(image.path);
+      loaded.push_back(std::move(result.value()));
+    }
+    return report_link(labels, loaded, json);
+  }
+
   if (subcommand == "info") {
     if (positional.size() != 1) {
       return usage_error("project info needs a database path");
@@ -2231,6 +2533,99 @@ int command_project(const std::vector<std::string_view>& arguments) {
                     image.architecture.c_str(), image.bits, hex(image.entry_point).c_str(),
                     image.sections, image.functions, image.analysis_partial ? " (partial)" : "");
       }
+    }
+    return kExitOk;
+  }
+
+  if (subcommand == "string") {
+    // project string <db> <image-id> <address>: the NUL-terminated string at that address becomes a
+    // string range of the project (G12-T2). The bytes come from the saved binary, and only when its
+    // SHA-256 still matches the project's record.
+    if (positional.size() != 3) {
+      return usage_error("project string needs a database, image id and address");
+    }
+    const std::string database(positional[0]);
+    std::uint64_t parsed_id = 0;
+    if (!parse_u64(positional[1], parsed_id) || parsed_id == 0 ||
+        parsed_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+      return usage_error("invalid image id");
+    }
+    std::uint64_t address = 0;
+    if (!parse_u64(positional[2], address)) {
+      return usage_error("invalid address");
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    const ProjectImage* found = nullptr;
+    for (const ProjectImage& image : images.value()) {
+      if (image.id == static_cast<std::int64_t>(parsed_id)) {
+        found = &image;
+        break;
+      }
+    }
+    if (found == nullptr) {
+      return usage_error("no image with that id in the project");
+    }
+    auto loaded = donkey::load_binary(found->path);
+    if (!loaded) {
+      return fail(loaded.diagnostic());
+    }
+    if (loaded.value().image.sha256 != found->sha256) {
+      std::fprintf(stderr,
+                   "error [project.image_changed]: %s no longer matches the hash the project "
+                   "recorded\n",
+                   found->path.c_str());
+      return kExitFailure;
+    }
+    auto offset = loaded.value().image.va_to_file_offset(address);
+    if (!offset) {
+      return fail(Diagnostic::make(
+          Status::InvalidInput, "cli.unmapped_address",
+          "the address " + hex(address) + " is not in a section of the image", std::nullopt));
+    }
+    const std::span<const std::byte> file = loaded.value().data;
+    const std::uint64_t available =
+        file.size() - std::min<std::uint64_t>(file.size(), offset.value());
+    const std::uint64_t limit = std::min<std::uint64_t>(available, donkey::kMaxDataRangeBytes);
+    std::uint64_t length = 0;
+    while (length < limit &&
+           file[static_cast<std::size_t>(offset.value() + length)] != std::byte{0}) {
+      ++length;
+    }
+    if (length == limit) {
+      return fail(Diagnostic::make(Status::InvalidInput, "cli.no_terminator",
+                                   "no NUL terminator within the range the image holds at that "
+                                   "address",
+                                   address));
+    }
+    const std::string text = donkey::format_string_range_text(length + 1);
+    auto written = project.value().set_annotation(static_cast<std::int64_t>(parsed_id),
+                                                  AnnotationKind::DataRange, address, text);
+    if (!written) {
+      return fail(written.diagnostic());
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"image_id\": " + std::to_string(parsed_id) + ",\n";
+      out += "  \"address\": " + quote(hex(address)) + ",\n";
+      out += "  \"text\": " + quote(text) + ",\n";
+      out += "  \"bytes\": " + std::to_string(length + 1) + "\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Set string at %s in image %llu: %llu bytes with the terminator\n",
+                  hex(address).c_str(), static_cast<unsigned long long>(parsed_id),
+                  static_cast<unsigned long long>(length + 1));
     }
     return kExitOk;
   }
@@ -2556,6 +2951,88 @@ std::string json_stop(const DebugStopRecord& stop) {
 }
 
 /// Resolve a breakpoint spec: a hex/decimal static address or a symbol name.
+bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out);
+
+/// A condition with each `*SYMBOL` operand replaced by the symbol's static address, so a condition
+/// can name a data symbol the way --break names a function. Other text is left as it is.
+Result<std::string> resolve_condition_symbols(const BinaryImage* image, std::string_view text) {
+  std::string out;
+  std::size_t i = 0;
+  while (i < text.size()) {
+    if (text[i] != '*') {
+      out.push_back(text[i]);
+      ++i;
+      continue;
+    }
+    std::size_t start = i + 1;
+    while (start < text.size() && std::isspace(static_cast<unsigned char>(text[start])) != 0) {
+      ++start;
+    }
+    const bool identifier =
+        start < text.size() &&
+        (std::isalpha(static_cast<unsigned char>(text[start])) != 0 || text[start] == '_');
+    if (!identifier) {
+      out.push_back('*');
+      ++i;
+      continue;
+    }
+    std::size_t end = start;
+    while (end < text.size() &&
+           (std::isalnum(static_cast<unsigned char>(text[end])) != 0 || text[end] == '_')) {
+      ++end;
+    }
+    const std::string_view name = text.substr(start, end - start);
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, name, address)) {
+      return make_error<std::string>(
+          Status::InvalidInput, "debug.unknown_symbol",
+          "no symbol named `" + std::string(name) + "` for a condition operand");
+    }
+    out += "*" + hex(address);
+    i = end;
+  }
+  return out;
+}
+
+/// A condition as the adapter takes it: the operand, the operator and the value. A memory operand
+/// is written at `memory_address`, the runtime address.
+std::string condition_text(const debug::BreakCondition& condition, std::uint64_t memory_address) {
+  const std::string operand =
+      condition.memory ? "*" + hex(memory_address) : condition.register_name;
+  return operand + " " + debug::condition_op_text(condition.op) + " " + hex(condition.value);
+}
+
+/// A watch as the command line gives it: TARGET[:LENGTH][:rw]. The target's address is the part
+/// before the first colon, its size in bytes is 1, 2, 4 or 8 (default 4), and the access is write
+/// (default), or read-or-write with `rw`. Returns the problem, or an empty string when the spec is
+/// well formed.
+std::string split_watch_spec(std::string_view spec, std::string& target, std::uint64_t& length,
+                             debug::WatchKind& kind) {
+  const std::string text(spec);
+  const auto first = text.find(':');
+  target = text.substr(0, first);
+  length = 4;
+  kind = debug::WatchKind::Write;
+  if (first == std::string::npos) {
+    return {};
+  }
+  const std::string rest = text.substr(first + 1);
+  const auto second = rest.find(':');
+  std::uint64_t parsed = 0;
+  if (!parse_u64(rest.substr(0, second), parsed) ||
+      (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
+    return "a watch's length must be 1, 2, 4 or 8 bytes";
+  }
+  length = parsed;
+  if (second != std::string::npos) {
+    if (rest.substr(second + 1) != "rw") {
+      return "a watch's access must be rw (the default is write)";
+    }
+    kind = debug::WatchKind::ReadWrite;
+  }
+  return {};
+}
+
 bool resolve_breakpoint(const BinaryImage* image, std::string_view spec, std::uint64_t& out) {
   if (parse_u64(spec, out)) {
     return true;
@@ -2591,6 +3068,8 @@ int command_debug(const std::vector<std::string_view>& arguments) {
   std::vector<std::string> args;
   std::vector<std::string> break_specs;
   std::vector<std::string> watch_specs;
+  std::vector<std::pair<std::string, std::string>> conditional_specs;        // location, condition
+  std::vector<std::pair<std::string, std::string>> conditional_watch_specs;  // watch, condition
 
   for (std::size_t i = 1; i < arguments.size(); ++i) {
     const std::string_view arg = arguments[i];
@@ -2600,6 +3079,20 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       mock = true;
     } else if (arg == "--run") {
       run = true;
+    } else if (arg == "--break-if") {
+      std::string_view spec;
+      std::string_view condition;
+      if (!take_value(arguments, i, spec) || !take_value(arguments, i, condition)) {
+        return usage_error("--break-if needs a location and a condition");
+      }
+      conditional_specs.emplace_back(std::string(spec), std::string(condition));
+    } else if (arg == "--watch-if") {
+      std::string_view spec;
+      std::string_view condition;
+      if (!take_value(arguments, i, spec) || !take_value(arguments, i, condition)) {
+        return usage_error("--watch-if needs a watch and a condition");
+      }
+      conditional_watch_specs.emplace_back(std::string(spec), std::string(condition));
     } else if (arg == "--arg" || arg == "--break" || arg == "--watch") {
       std::string_view val;
       if (!take_value(arguments, i, val)) {
@@ -2646,6 +3139,64 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     static_breaks.push_back(address);
   }
 
+  // A conditional breakpoint's condition is checked here, before anything runs, so a malformed one
+  // or an unknown symbol is refused before the target is started.
+  struct PendingCondition {
+    std::uint64_t static_address = 0;
+    debug::BreakCondition condition;
+  };
+  std::vector<PendingCondition> pending_conditions;
+  for (const auto& [spec, text] : conditional_specs) {
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, spec, address)) {
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_breakpoint",
+                             "no symbol or address '" + spec + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto resolved = resolve_condition_symbols(image, text);
+    if (!resolved) {
+      return fail(resolved.diagnostic());
+    }
+    auto parsed = debug::parse_break_condition(resolved.value());
+    if (!parsed) {
+      return fail(parsed.diagnostic());
+    }
+    pending_conditions.push_back(PendingCondition{address, parsed.value()});
+  }
+  // A conditional watch is checked here, before the launch, like a conditional breakpoint.
+  struct PendingWatchCondition {
+    std::uint64_t static_address = 0;
+    std::uint64_t length = 4;
+    debug::WatchKind kind = debug::WatchKind::Write;
+    debug::BreakCondition condition;
+  };
+  std::vector<PendingWatchCondition> pending_watch_conditions;
+  for (const auto& [spec, text] : conditional_watch_specs) {
+    std::string target;
+    std::uint64_t length = 4;
+    auto kind = debug::WatchKind::Write;
+    const std::string problem = split_watch_spec(spec, target, length, kind);
+    if (!problem.empty()) {
+      return usage_error(problem.c_str());
+    }
+    std::uint64_t address = 0;
+    if (!resolve_breakpoint(image, target, address)) {
+      return fail(Diagnostic{Status::InvalidInput, "debug.unknown_watch",
+                             "no symbol or address '" + target + "' in " + binary_path,
+                             std::nullopt});
+    }
+    auto resolved = resolve_condition_symbols(image, text);
+    if (!resolved) {
+      return fail(resolved.diagnostic());
+    }
+    auto parsed = debug::parse_break_condition(resolved.value());
+    if (!parsed) {
+      return fail(parsed.diagnostic());
+    }
+    pending_watch_conditions.push_back(
+        PendingWatchCondition{address, length, kind, parsed.value()});
+  }
+
   debug::LaunchConfig config;
   config.binary_path = binary_path;
   config.arguments = args;
@@ -2685,31 +3236,30 @@ int command_debug(const std::vector<std::string_view>& arguments) {
       return fail(bp.diagnostic());
     }
   }
+  for (const PendingCondition& pending : pending_conditions) {
+    // A memory operand's address is a file address in the condition, and the target sees it at
+    // its runtime address.
+    const std::uint64_t memory =
+        pending.condition.memory ? translator.static_to_runtime(pending.condition.address) : 0;
+    auto bp =
+        adapter->set_conditional_breakpoint(translator.static_to_runtime(pending.static_address),
+                                            condition_text(pending.condition, memory));
+    if (!bp) {
+      (void)adapter->terminate();
+      return fail(bp.diagnostic());
+    }
+  }
   // A watch is TARGET[:LENGTH][:rw]: the target's address, its size in bytes (default 4), and the
   // access (default write; rw traps on reads and writes too). The debug registers take it only
   // while the target is stopped, which it is here.
   for (const std::string& spec : watch_specs) {
-    const auto first = spec.find(':');
-    const std::string target = spec.substr(0, first);
+    std::string target;
     std::uint64_t length = 4;
     auto kind = debug::WatchKind::Write;
-    if (first != std::string::npos) {
-      const std::string rest = spec.substr(first + 1);
-      const auto second = rest.find(':');
-      std::uint64_t parsed = 0;
-      if (!parse_u64(rest.substr(0, second), parsed) ||
-          (parsed != 1 && parsed != 2 && parsed != 4 && parsed != 8)) {
-        (void)adapter->terminate();
-        return usage_error("--watch length must be 1, 2, 4 or 8 bytes");
-      }
-      length = parsed;
-      if (second != std::string::npos) {
-        if (rest.substr(second + 1) != "rw") {
-          (void)adapter->terminate();
-          return usage_error("--watch access must be rw (the default is write)");
-        }
-        kind = debug::WatchKind::ReadWrite;
-      }
+    const std::string problem = split_watch_spec(spec, target, length, kind);
+    if (!problem.empty()) {
+      (void)adapter->terminate();
+      return usage_error(problem.c_str());
     }
     std::uint64_t address = 0;
     if (!resolve_breakpoint(image, target, address)) {
@@ -2720,6 +3270,21 @@ int command_debug(const std::vector<std::string_view>& arguments) {
     }
     auto watch = adapter->set_watchpoint(translator.static_to_runtime(address),
                                          static_cast<std::uint8_t>(length), kind);
+    if (!watch) {
+      (void)adapter->terminate();
+      return fail(watch.diagnostic());
+    }
+  }
+  // A conditional watch was checked before the launch and is set now that the target is stopped.
+  // A memory operand's address is a file address in the condition, and the target sees it at its
+  // runtime address.
+  for (const PendingWatchCondition& pending : pending_watch_conditions) {
+    const std::uint64_t memory =
+        pending.condition.memory ? translator.static_to_runtime(pending.condition.address) : 0;
+    auto watch =
+        adapter->set_conditional_watchpoint(translator.static_to_runtime(pending.static_address),
+                                            static_cast<std::uint8_t>(pending.length), pending.kind,
+                                            condition_text(pending.condition, memory));
     if (!watch) {
       (void)adapter->terminate();
       return fail(watch.diagnostic());

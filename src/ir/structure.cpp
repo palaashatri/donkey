@@ -166,16 +166,20 @@ struct Loop {
 };
 
 /// A while loop that prints as `for (init; test; step)`: the init is statement `init_index`
-/// of the block before the header, the step is statement `step_index` of the latch.
+/// of the block before the header; the step is statements `step_first` to `step_last` of the
+/// latch. A register step is one statement; a counter in memory is three (G04-T3).
 struct ForPlan {
   BlockId preheader = 0;
   std::size_t init_index = 0;
   BlockId latch = 0;
-  std::size_t step_index = 0;
+  std::size_t step_first = 0;
+  std::size_t step_last = 0;
 };
 
 struct Structurer {
-  explicit Structurer(const IrFunction& function) : function_(function) {}
+  Structurer(const IrFunction& function,
+             const std::map<std::uint64_t, std::string>* string_literals)
+      : function_(function), string_literals_(string_literals) {}
 
   std::optional<std::string> run() {
     const std::size_t count = function_.blocks.size();
@@ -233,7 +237,8 @@ struct Structurer {
         continue;  // printed in the header of the `for` loop it steps
       }
       const IrStatement* previous = flags_producer(body, index);
-      const std::string text = render_statement(function_, body.statements[index], previous);
+      const std::string text =
+          render_statement(function_, body.statements[index], previous, string_literals_);
       if (!text.empty()) {
         line(text, body.statements[index].source_address);
         line_of_[statement_key(block, index)] = lines_.size() - 1;
@@ -273,14 +278,14 @@ struct Structurer {
         continue;
       }
       const std::size_t init_index = preheader.statements.size() - 2;
-      const std::size_t step_index = latch_block.statements.size() - 2;
+      const std::size_t step_last = latch_block.statements.size() - 2;
       const IrStatement& init = preheader.statements[init_index];
-      const IrStatement& step = latch_block.statements[step_index];
-      if (init.op != IrOp::Assign || init.dest.kind != IrOperandKind::Register ||
-          (step.op != IrOp::Add && step.op != IrOp::Sub) ||
-          step.dest.kind != IrOperandKind::Register || step.dest.reg != init.dest.reg ||
-          step.a.kind != IrOperandKind::Register || step.a.reg != step.dest.reg ||
-          step.b.kind != IrOperandKind::Constant) {
+      if (!((init.op == IrOp::Assign && init.dest.kind == IrOperandKind::Register) ||
+            (init.op == IrOp::Store && init.a.kind == IrOperandKind::Memory))) {
+        continue;
+      }
+      const auto step_first = counter_step_first(latch_block, step_last, init);
+      if (!step_first) {
         continue;
       }
       // The header's test must read flags set in the header, so the step's flags do not
@@ -288,8 +293,74 @@ struct Structurer {
       if (flags_producer(header_block, header_block.statements.size() - 1) == nullptr) {
         continue;
       }
-      for_plans_.emplace(header, ForPlan{header - 1, init_index, latch, step_index});
+      for_plans_.emplace(header, ForPlan{header - 1, init_index, latch, *step_first, step_last});
     }
+  }
+
+  /// The first statement of the step of a `for` loop whose step ends at statement `last` of
+  /// `latch`, or nothing. Two shapes qualify. A register counter: `r = r + c;` (or `- c`), where
+  /// r is the register that `init` assigns. A counter in memory, which is what a compiler without
+  /// optimisation produces: `t = M; t = t + c; M = t;`, where M is a memory operand and t is a
+  /// register that no other statement of the function names. The three statements are moved
+  /// into the header together, as `M = M + c`.
+  std::optional<std::size_t> counter_step_first(const IrBlock& latch, std::size_t last,
+                                                const IrStatement& init) const {
+    const IrStatement& step = latch.statements[last];
+    if (init.op == IrOp::Assign && init.dest.kind == IrOperandKind::Register &&
+        (step.op == IrOp::Add || step.op == IrOp::Sub) &&
+        step.dest.kind == IrOperandKind::Register && step.dest.reg == init.dest.reg &&
+        step.a.kind == IrOperandKind::Register && step.a.reg == step.dest.reg &&
+        step.b.kind == IrOperandKind::Constant) {
+      return last;
+    }
+    if (last < 2) {
+      return std::nullopt;
+    }
+    const IrStatement& load = latch.statements[last - 2];
+    const IrStatement& add = latch.statements[last - 1];
+    if ((load.op != IrOp::Assign && load.op != IrOp::Load) ||
+        load.dest.kind != IrOperandKind::Register || load.a.kind != IrOperandKind::Memory ||
+        load.dest.width != load.a.width) {
+      return std::nullopt;
+    }
+    const std::string& temp = load.dest.reg;
+    if (add.op != IrOp::Add || add.dest.kind != IrOperandKind::Register || add.dest.reg != temp ||
+        add.a.kind != IrOperandKind::Register || add.a.reg != temp ||
+        add.b.kind != IrOperandKind::Constant || add.width != load.a.width) {
+      return std::nullopt;
+    }
+    if (step.op != IrOp::Store || step.a.kind != IrOperandKind::Memory ||
+        !same_memory(step.a, load.a) || step.b.kind != IrOperandKind::Register ||
+        step.b.reg != temp || step.b.width != load.a.width) {
+      return std::nullopt;
+    }
+    // The temporary's four uses are the load, the add (written and read) and the store. Any
+    // other use would need the value the moved statements leave behind.
+    if (count_register_uses(temp) != 4) {
+      return std::nullopt;
+    }
+    return last - 2;
+  }
+
+  static bool same_memory(const IrOperand& a, const IrOperand& b) {
+    return a.kind == b.kind && a.reg == b.reg && a.index == b.index && a.scale == b.scale &&
+           a.constant == b.constant && a.width == b.width;
+  }
+
+  /// How many operands of the function name register `name` directly.
+  [[nodiscard]] std::size_t count_register_uses(const std::string& name) const {
+    std::size_t uses = 0;
+    for (const IrBlock& block : function_.blocks) {
+      for (const IrStatement& statement : block.statements) {
+        for (const IrOperand* operand :
+             {&statement.dest, &statement.a, &statement.b, &statement.c}) {
+          if (operand->kind == IrOperandKind::Register && operand->reg == name) {
+            ++uses;
+          }
+        }
+      }
+    }
+    return uses;
   }
 
   /// Prints a planned `for` loop, or returns false when the init is not the last line
@@ -303,11 +374,9 @@ struct Structurer {
     const IrBlock& preheader = function_.blocks[plan.preheader];
     const IrBlock& latch_block = function_.blocks[plan.latch];
     const IrStatement& init = preheader.statements[plan.init_index];
-    const IrStatement& step = latch_block.statements[plan.step_index];
-    std::string init_text =
-        render_statement(function_, init, flags_producer(preheader, plan.init_index));
-    std::string step_text =
-        render_statement(function_, step, flags_producer(latch_block, plan.step_index));
+    std::string init_text = render_statement(
+        function_, init, flags_producer(preheader, plan.init_index), string_literals_);
+    std::string step_text = step_text_of(latch_block, plan);
     if (init_text.size() < 2 || step_text.size() < 2 || init_text.back() != ';' ||
         step_text.back() != ';') {
       return false;
@@ -323,8 +392,9 @@ struct Structurer {
       out_ += emitted.text;
       out_ += '\n';
     }
-    const std::uint64_t step_key = statement_key(plan.latch, plan.step_index);
-    in_header_.insert(step_key);
+    for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
+      in_header_.insert(statement_key(plan.latch, index));
+    }
     line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address);
     ++indent_;
     frames_.push_back(LoopFrame{loop.exit, 0});
@@ -332,8 +402,30 @@ struct Structurer {
     frames_.pop_back();
     --indent_;
     line("}");
-    in_header_.erase(step_key);
+    for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
+      in_header_.erase(statement_key(plan.latch, index));
+    }
     return true;
+  }
+
+  /// The text of a planned loop's step, without its `;`. A register step is rendered as it
+  /// is. A memory counter is rendered as one update of the counter's memory, `M = M + c`,
+  /// built from the store and the add of the moved statements.
+  std::string step_text_of(const IrBlock& latch, const ForPlan& plan) const {
+    if (plan.step_first == plan.step_last) {
+      return render_statement(function_, latch.statements[plan.step_last],
+                              flags_producer(latch, plan.step_last), string_literals_);
+    }
+    const IrStatement& add = latch.statements[plan.step_last - 1];
+    const IrStatement& store = latch.statements[plan.step_last];
+    IrStatement update;
+    update.op = IrOp::Add;
+    update.dest = store.a;
+    update.a = store.a;
+    update.b = add.b;
+    update.width = store.a.width;
+    update.source_address = store.source_address;
+    return render_statement(function_, update, nullptr, string_literals_);
   }
 
   bool find_loops() {
@@ -548,7 +640,7 @@ struct Structurer {
     const IrBlock& block = function_.blocks[branch_block];
     const IrStatement& branch = block.statements.back();
     const IrStatement* previous = flags_producer(block, block.statements.size() - 1);
-    return render_condition(function_, branch, previous, negate);
+    return render_condition(function_, branch, previous, negate, string_literals_);
   }
 
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
@@ -610,7 +702,7 @@ struct Structurer {
         if (!frames_.empty()) {
           ++frames_.back().switch_depth;
         }
-        line("switch (" + render_operand(function_, terminator.dest) + ") {");
+        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {");
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
           char val_buf[32];
@@ -838,6 +930,7 @@ struct Structurer {
   }
 
   const IrFunction& function_;
+  const std::map<std::uint64_t, std::string>* string_literals_ = nullptr;
   Graph graph_;
   std::vector<BitSet> dominators_;
   std::vector<BlockId> immediate_post_dominator_;
@@ -865,13 +958,13 @@ struct Structurer {
 }  // namespace
 
 std::optional<std::string> format_structured_body(const IrFunction& function) {
-  Structurer structurer(function);
+  Structurer structurer(function, nullptr);
   return structurer.run();
 }
 
 std::optional<std::vector<StructuredLine>> format_structured_body_lines(
-    const IrFunction& function) {
-  Structurer structurer(function);
+    const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals) {
+  Structurer structurer(function, string_literals);
   if (!structurer.run().has_value()) {
     return std::nullopt;
   }

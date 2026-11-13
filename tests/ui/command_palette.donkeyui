@@ -1,0 +1,61 @@
+# G17-T1: the command palette (Ctrl/Cmd+Shift+P) lists the commands the menus run, keeps the ones
+# that match every word typed, runs the chosen one with Enter, and closes with Escape. A disabled
+# command is listed but cannot be run. Opens the debuggee: the default file for the UI scripts.
+wait_idle
+frames 5
+assert_no_error
+
+# Closed at first; Escape closes it again without running anything.
+assert_command_palette 0
+key shortcut+shift+p
+assert_command_palette 1
+key escape
+assert_command_palette 0
+
+# Words filter the list and Enter runs the first match. "show hex" matches only "Show Hex", which
+# shows the Hex window and focuses it once it is drawn.
+key shortcut+shift+p
+text show hex
+key enter
+assert_command_palette 0
+frames 3
+assert_focus Hex
+
+# A word that matches nothing leaves the palette open and runs nothing.
+key shortcut+shift+p
+text zzzz
+key enter
+assert_command_palette 1
+key escape
+assert_command_palette 0
+
+# Down moves the selection through the matches. "show" lists the views in their order, so Down
+# twice and Enter runs the third, "Show Functions".
+key shortcut+shift+p
+text show
+key down
+key down
+key enter
+assert_command_palette 0
+frames 3
+assert_focus Functions
+
+# "undo" matches the Undo command, which is disabled before any edit: Enter does not run it and the
+# palette stays open.
+key shortcut+shift+p
+text undo
+key enter
+assert_command_palette 1
+key escape
+assert_command_palette 0
+
+# "go to" matches only "Go to…", which opens the Go to dialog.
+key shortcut+shift+p
+text go to
+key enter
+assert_command_palette 0
+frames 3
+assert_focus Go to
+key escape
+frames 2
+assert_no_error

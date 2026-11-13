@@ -1,0 +1,21 @@
+# G10-T4: the Classes window lists the Itanium classes of the hierarchy fixture (passed on the
+# command line with FILE), with each class's direct bases in declaration order. Shape is the root
+# (no bases); Square derives from Shape; Cube from Square; Tagged from Shape and then Named. Lone
+# and Named are polymorphic roots. Opens nothing itself.
+wait_idle
+frames 5
+assert_no_error
+
+assert_rtti_class Shape
+assert_rtti_class Square
+assert_rtti_class Cube
+assert_rtti_class Tagged
+assert_rtti_class Named
+assert_rtti_class Lone
+assert_rtti_bases Shape -
+assert_rtti_bases Named -
+assert_rtti_bases Lone -
+assert_rtti_bases Square Shape
+assert_rtti_bases Cube Square
+assert_rtti_bases Tagged Shape,Named
+assert_no_error

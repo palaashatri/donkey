@@ -1420,12 +1420,26 @@ class Parser {
 
 }  // namespace
 
+namespace {
+
+/// Mach-O prefixes every symbol with an underscore, so an Itanium name arrives as `__Z...`.
+/// The extra underscore is not part of the ABI; strip exactly one before parsing.
+std::string_view itanium_spelling(std::string_view name) noexcept {
+  if (name.size() >= 3 && name[0] == '_' && name[1] == '_' && name[2] == 'Z') {
+    return name.substr(1);
+  }
+  return name;
+}
+
+}  // namespace
+
 bool is_itanium_name(std::string_view name) noexcept {
-  return name.size() >= 2 && name[0] == '_' && name[1] == 'Z';
+  const std::string_view spelling = itanium_spelling(name);
+  return spelling.size() >= 2 && spelling[0] == '_' && spelling[1] == 'Z';
 }
 
 Result<std::string> demangle_itanium(std::string_view name, const DemangleOptions& options) {
-  Parser parser(name, options);
+  Parser parser(itanium_spelling(name), options);
   return parser.run();
 }
 

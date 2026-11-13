@@ -10,6 +10,7 @@
 #include "components.h"
 #include "donkey/debug/controller.h"
 #include "imgui.h"
+#include "names.h"
 #include "views.h"
 
 namespace donkey::ui::views {
@@ -300,9 +301,15 @@ void debugger(const Document& document, UiState& state) {
           ImGui::Text("%u", frame.index);
           ImGui::TableSetColumnIndex(1);
           ImGui::PushID(static_cast<int>(frame.index));
-          const char* name = frame.function_name.empty() ? "?" : frame.function_name.c_str();
-          if (ImGui::Selectable(name, false, ImGuiSelectableFlags_SpanAllColumns) &&
-              document.loaded.image.section_for_va(frame.static_address) != nullptr) {
+          const std::string name =
+              frame.function_name.empty() ? std::string("?") : readable_name(frame.function_name);
+          const bool clicked =
+              ImGui::Selectable(name.c_str(), false, ImGuiSelectableFlags_SpanAllColumns);
+          if (ImGui::IsItemHovered() && !frame.function_name.empty() &&
+              name != frame.function_name) {
+            ImGui::SetTooltip("%s", frame.function_name.c_str());
+          }
+          if (clicked && document.loaded.image.section_for_va(frame.static_address) != nullptr) {
             state.navigate_to(frame.static_address, &document);
           }
           ImGui::PopID();

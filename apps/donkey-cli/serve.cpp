@@ -25,6 +25,7 @@
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
 #include "donkey/project/project.h"
+#include "donkey/project/string_literals.h"
 #include "json.h"
 #include "serve.h"
 
@@ -594,7 +595,17 @@ Reply decompile_method(const JsonValue& params, Session& session) {
       (void)apply_debug_stack_names(lifted.value(), *named, read.value());
     }
   }
-  auto text = format_pseudocode(lifted.value());
+  // The strings the project defines for this binary print as literals (G12-T2). Without a project
+  // that holds this binary there are none.
+  PseudocodeOptions pseudo_options;
+  std::int64_t image_id = 0;
+  if (!project_image(session, image_id).has_value()) {
+    if (auto rows = session.project->annotations(image_id); rows.has_value()) {
+      pseudo_options.string_literals =
+          string_literals(rows.value(), session.loaded.image, session.loaded.data);
+    }
+  }
+  auto text = format_pseudocode(lifted.value(), pseudo_options);
   if (!text) {
     return failure(kAnalysisFailed, "rpc.format_failed",
                    text.diagnostic().code + ": " + text.diagnostic().message);

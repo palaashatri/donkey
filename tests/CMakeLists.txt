@@ -138,6 +138,15 @@ add_executable(donkey_unit_tests
   unit/demangle_test.cpp
   unit/demangle_msvc_test.cpp
   unit/rtti_test.cpp
+  unit/signatures_test.cpp
+  unit/signature_gen_test.cpp
+  unit/signatures_musl_test.cpp
+  unit/rtti_msvc_test.cpp
+  unit/link_test.cpp
+  unit/link_calls_test.cpp
+  unit/link_aarch64_test.cpp
+  unit/condition_test.cpp
+  unit/string_literals_test.cpp
   unit/core_test.cpp
   unit/relocate_tls_test.cpp
   unit/inflate_test.cpp
@@ -168,11 +177,13 @@ add_executable(donkey_unit_tests
   unit/plugin_test.cpp
   unit/project_test.cpp
   unit/scheduler_test.cpp
+  unit/search_test.cpp
   unit/session_test.cpp
 )
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
+  DONKEY_SIGNATURE_DIR="${PROJECT_SOURCE_DIR}/signatures"
   TEST_PLUGIN_VALID_PATH="$<TARGET_FILE:test_plugin_valid>"
   TEST_PLUGIN_BAD_ABI_PATH="$<TARGET_FILE:test_plugin_bad_abi>"
   TEST_PLUGIN_CRASH_PATH="$<TARGET_FILE:test_plugin_crash>"
@@ -479,6 +490,14 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   set(DONKEY_UI_REPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-reports)
   set(DONKEY_UI_CONFIG_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-config)
   file(MAKE_DIRECTORY ${DONKEY_UI_REPORT_DIR})
+  # The CTest limit only guards against a hang. The FreeBSD aarch64 CI VM runs without
+  # hardware virtualisation and needs minutes per script: display_dpi_device_auto takes
+  # about 150 s there against the 180 s default, so an ordinary slow run times out while
+  # still making progress.
+  set(DONKEY_UI_SCRIPT_TIMEOUT 180)
+  if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(DONKEY_UI_SCRIPT_TIMEOUT 600)
+  endif()
   function(donkey_ui_script name)
     # FILE opens a file other than the debuggee (a fixture under tests/fixtures).
     cmake_parse_arguments(ARG "" "CONFIG;RENDERER;FILE" "" ${ARGN})
@@ -500,7 +519,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
                      --ui-report ${DONKEY_UI_REPORT_DIR}/${name}.json
                      ${ARG_OPEN})
     set_tests_properties(ui.script_${name} PROPERTIES
-      TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+      TIMEOUT ${DONKEY_UI_SCRIPT_TIMEOUT} PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
       FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
   endfunction()
   donkey_ui_script(keyboard_ime)
@@ -512,6 +531,33 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     donkey_ui_script(data)
   endif()
   donkey_ui_script(utf16 FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/utf16/utf16)
+  donkey_ui_script(command_palette)
+  # The search and xref graph scripts assert the x86-64 Linux debuggee's fixed addresses and
+  # instruction text (the .interp at 0x318, "sub rsp, 8" at 0x1004, and the call graph counts), so
+  # they run only where that debuggee is built, as the data and strings scripts above do.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(search)
+    donkey_ui_script(xref_graph)
+  endif()
+  # The Classes panel (G10-T4) lists the RTTI of the hierarchy fixture: the bases of each class
+  # are the ones the fixture declares. The fixture exists only where the RTTI test builds it, and
+  # only the ELF readers load Itanium RTTI, so PE and Mach-O hosts have nothing to list.
+  if((CMAKE_SYSTEM_NAME STREQUAL "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "FreeBSD")
+     AND TARGET donkey_test_hierarchy)
+    donkey_ui_script(classes FILE $<TARGET_FILE:donkey_test_hierarchy>)
+  endif()
+  # readable_names and symbols assert the x86-64 Linux hierarchy fixture's addresses and loader
+  # symbol counts (90, 7 and 3), which the other hosts' builds of the fixture do not share.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$"
+     AND TARGET donkey_test_hierarchy)
+    donkey_ui_script(readable_names FILE $<TARGET_FILE:donkey_test_hierarchy>)
+    donkey_ui_script(symbols FILE $<TARGET_FILE:donkey_test_hierarchy>)
+  endif()
+  # The strings script defines a string in the desktop app and expects the decompiled main to print it
+  # as a literal (G12-T2). The fixture is the x86-64 Linux string fixture (non-PIE, fixed addresses).
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$")
+    donkey_ui_script(strings FILE ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64)
+  endif()
   donkey_ui_script(gallery_keyboard)
   donkey_ui_script(virtualization)
   donkey_ui_script(display_dpi_device)
@@ -522,7 +568,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
                    --ui-report ${DONKEY_UI_REPORT_DIR}/display_dpi_device_auto.json
                    $<TARGET_FILE:donkey_test_debuggee>)
   set_tests_properties(ui.script_display_dpi_device_auto PROPERTIES
-    TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+    TIMEOUT ${DONKEY_UI_SCRIPT_TIMEOUT} PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
     FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
   # Documentation screenshots of the demo program (BMP; see docs/UI_TESTING.md).
   add_test(NAME ui.screenshots
@@ -615,6 +661,67 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
     TIMEOUT 120
     DEPENDS cli.project_save_elf_json)
 endif()
+
+# User-defined strings as literals (G12-T2): the string the fixture passes to puts is defined in a
+# project, and the decompiled main prints it. Without the project the address is printed.
+add_test(NAME cli.decompile_without_a_string_prints_the_address
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
+                 --function 0x401130)
+set_tests_properties(cli.decompile_without_a_string_prints_the_address PROPERTIES
+  PASS_REGULAR_EXPRESSION "rdi = 0x402004;")
+set(DONKEY_CLI_STRING_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-string.db")
+add_test(NAME cli.project_string_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_STRING_DB}
+                 ${DONKEY_CLI_STRING_DB}-shm ${DONKEY_CLI_STRING_DB}-wal)
+add_test(NAME cli.project_string_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_STRING_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64 --json)
+set_tests_properties(cli.project_string_save PROPERTIES DEPENDS cli.project_string_reset)
+add_test(NAME cli.project_string_define
+         COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x402004 --json)
+set_tests_properties(cli.project_string_define PROPERTIES
+  PASS_REGULAR_EXPRESSION "\\\"text\\\": \\\"string:14\\\""
+  DEPENDS cli.project_string_save)
+add_test(NAME cli.project_string_decompile_prints_the_literal
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
+                 --project ${DONKEY_CLI_STRING_DB} --function 0x401130)
+set_tests_properties(cli.project_string_decompile_prints_the_literal PROPERTIES
+  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\);"
+  DEPENDS cli.project_string_define)
+add_test(NAME cli.project_string_refuses_an_unmapped_address
+         COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x9999999)
+set_tests_properties(cli.project_string_refuses_an_unmapped_address PROPERTIES WILL_FAIL TRUE)
+
+# Several images in one project (G15-T2): the images are linked in the order they were saved,
+# so the executable is saved first and the provider last.
+set(DONKEY_CLI_LINK_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-link.db")
+add_test(NAME cli.project_link_reset
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_LINK_DB}
+                 ${DONKEY_CLI_LINK_DB}-shm ${DONKEY_CLI_LINK_DB}-wal)
+add_test(NAME cli.project_link_save_executable
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so --json)
+set_tests_properties(cli.project_link_save_executable PROPERTIES DEPENDS cli.project_link_reset)
+add_test(NAME cli.project_link_save_other
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1 --json)
+set_tests_properties(cli.project_link_save_other PROPERTIES DEPENDS cli.project_link_save_executable)
+add_test(NAME cli.project_link_save_provider
+         COMMAND donkey-cli project save ${DONKEY_CLI_LINK_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.project_link_save_provider PROPERTIES DEPENDS cli.project_link_save_other)
+add_test(NAME cli.project_link_reports_calls
+         COMMAND donkey-cli project link ${DONKEY_CLI_LINK_DB} --json)
+set_tests_properties(cli.project_link_reports_calls PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null"
+  DEPENDS cli.project_link_save_provider)
+
+add_test(NAME cli.project_link_refusals
+         COMMAND ${CMAKE_COMMAND}
+                 -DDONKEY_CLI=$<TARGET_FILE:donkey-cli>
+                 -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
+                 -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link
+                 -P ${CMAKE_CURRENT_SOURCE_DIR}/cli/project_link_refusals.cmake)
 
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info
@@ -777,6 +884,12 @@ add_test(NAME cli.debug_launch_mock_json
 set_tests_properties(cli.debug_launch_mock_json PROPERTIES
   PASS_REGULAR_EXPRESSION "\"state\": \"Stopped\".*\"stop_reason\": \"Entrypoint\".*\"frames\":")
 
+# A malformed condition is refused before the target is started.
+add_test(NAME cli.debug_break_if_rejects_a_malformed_condition
+         COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --mock --break-if _start "rax ==")
+set_tests_properties(cli.debug_break_if_rejects_a_malformed_condition PROPERTIES WILL_FAIL TRUE)
+
 add_test(NAME cli.debug_launch_human
          COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --mock)
 set_tests_properties(cli.debug_launch_human PROPERTIES
@@ -798,6 +911,14 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
                      --watch donkey_debuggee_counter --run --json)
     set_tests_properties(cli.debug_native_watch_json PROPERTIES
       PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"Watchpoint\".*\"Watchpoint\".*\"exit_code\": 42")
+    # A conditional watch (G14-T5): the counter is written with 1, 2 and 3, and the condition stops
+    # the target only where it equals 2. Exactly one watch stop, then the program exits with 42.
+    add_test(NAME cli.debug_native_watch_if_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --watch-if donkey_debuggee_counter "*donkey_debuggee_counter == 2" --run --json)
+    set_tests_properties(cli.debug_native_watch_if_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\"stops\": \\[.*\"Watchpoint\".*\"exit_code\": 42"
+      FAIL_REGULAR_EXPRESSION "\"Watchpoint\".*\"Watchpoint\"")
   endif()
   # The simulation adapter has no watchpoints, and the command says so rather than pretending.
   add_test(NAME cli.debug_mock_watch_is_unsupported
@@ -805,6 +926,22 @@ if((CMAKE_SYSTEM_NAME STREQUAL "Linux" AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_6
                    --mock --watch _start)
   set_tests_properties(cli.debug_mock_watch_is_unsupported PROPERTIES
     PASS_REGULAR_EXPRESSION "debug\\.watchpoints_unsupported")
+  # Conditional breakpoints from the command line (G14-T5): the condition holds at the third call
+  # only, so the program stops once there, and then runs to its own exit. Only the Linux adapter
+  # implements conditions; the Windows adapter refuses them with debug.conditions_unsupported.
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_test(NAME cli.debug_native_condition_json
+             COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>
+                     --break-if donkey_debuggee_tick "*donkey_debuggee_counter == 2" --run --json)
+    set_tests_properties(cli.debug_native_condition_json PROPERTIES
+      PASS_REGULAR_EXPRESSION "\\\"stops\\\": \\[.*\\\"reason\\\": \\\"Breakpoint\\\".*\\\"function\\\": \\\"donkey_debuggee_tick\\\".*\\\"exit_code\\\": 42")
+  endif()
+  # The simulation adapter has no conditional breakpoints, and the command says so.
+  add_test(NAME cli.debug_mock_condition_is_unsupported
+           COMMAND donkey-cli debug launch ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                   --mock --break-if _start "rax == 0")
+  set_tests_properties(cli.debug_mock_condition_is_unsupported PROPERTIES
+    PASS_REGULAR_EXPRESSION "debug\\.conditions_unsupported")
 else()
   add_test(NAME cli.debug_native_unsupported
            COMMAND donkey-cli debug launch $<TARGET_FILE:donkey_test_debuggee>)
@@ -911,3 +1048,52 @@ set_tests_properties(cli.archive_list_gnu PROPERTIES
 add_test(NAME cli.archive_rejects_a_non_archive
          COMMAND donkey-cli archive list ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types.h)
 set_tests_properties(cli.archive_rejects_a_non_archive PROPERTIES WILL_FAIL TRUE)
+# Signature generation (G09-T2): the fixture archive gives five functions (four global, one static),
+# with no skips and no partial reading.
+add_test(NAME cli.sig_make_writes_a_set_from_an_archive
+         COMMAND donkey-cli sig make ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sig/gen/libsigfuncs.a
+                 --lib sigfuncs --version 1.0 --license MIT
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/sigfuncs.sig.json --json)
+set_tests_properties(cli.sig_make_writes_a_set_from_an_archive PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"signatures\": 5,.*\"functions\": 5,.*\"skipped\": 0,.*\"partial\": false")
+# An executable is not something to generate signatures from: the command exits with an error, and
+# the unit tests check that the error is sig.not_relocatable.
+add_test(NAME cli.sig_make_refuses_an_executable
+         COMMAND donkey-cli sig make ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/sig/gen/sig_static
+                 --lib sigfuncs --version 1.0 --license MIT
+                 --out ${CMAKE_CURRENT_BINARY_DIR}/refused.sig.json)
+set_tests_properties(cli.sig_make_refuses_an_executable PROPERTIES WILL_FAIL TRUE)
+
+
+# Several images (G15-T2): the consumer's import is bound to the library it needs, not to the
+# first input that exports the name (libother.so.1 is listed before libprovider.so.1).
+add_test(NAME cli.link_binds_imports_to_needed_libraries
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_binds_imports_to_needed_libraries PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"library\": \"libprovider.so.1\".*\"name\": \"missing_fn\", \"provider\": null, \"library\": \"\", \"address\": null")
+
+# Calls through PLT stubs (G15-T2): the consumer's call to provided_fn is bound to the export the
+# consumer needs, and its call to missing_fn is listed as unbound rather than dropped.
+add_test(NAME cli.link_reports_calls_through_plt_stubs
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libother.so.1
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_reports_calls_through_plt_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null")
+
+# Calls through GOT slots (G15-T2): the -fno-plt consumer's call to provided_fn reads its GOT slot
+# and is bound to the export the consumer needs. The function it defines itself, which it calls
+# through a PLT stub, is not an import and must not be listed.
+add_test(NAME cli.link_reports_calls_through_got_slots
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer_got.so
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libprovider.so.1 --json)
+set_tests_properties(cli.link_reports_calls_through_got_slots PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"partial\": false.*\"name\": \"provided_fn\", \"provider\": \".*libprovider.so.1\", \"to\": \"0x15f0\".*\"name\": \"missing_fn\", \"provider\": null, \"to\": null"
+  FAIL_REGULAR_EXPRESSION "own_fn")
+
+# A link needs at least two images: the executable and one library.
+add_test(NAME cli.link_needs_a_library
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so)
+set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
