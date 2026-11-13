@@ -9,9 +9,11 @@
 #include <vector>
 
 #include "components.h"
+#include "names.h"
 #include "views.h"
 
 #include "donkey/binary/image.h"
+#include "donkey/binary/rtti.h"
 #include "donkey/project/project.h"
 
 namespace donkey::ui::views {
@@ -143,13 +145,28 @@ const Function* function_containing(const Document& document, std::uint64_t addr
   return best;
 }
 
-std::string function_label(const Document& document, std::uint64_t address) {
+std::string function_label(UiState& state, const Document& document, std::uint64_t address) {
   for (const Function& function : document.analysis.functions) {
     if (function.address == address) {
-      return function.name;
+      return shown_function_name(state, function);
     }
   }
   return components::format_address(address);
+}
+
+/// After a function's Selectable: its raw symbol in a tooltip when the readable name differs.
+void raw_name_tooltip(UiState& state, const Document& document, std::uint64_t address) {
+  if (!ImGui::IsItemHovered()) {
+    return;
+  }
+  for (const Function& function : document.analysis.functions) {
+    if (function.address == address) {
+      if (shown_function_name(state, function) != function.name) {
+        ImGui::SetTooltip("%s", function.name.c_str());
+      }
+      return;
+    }
+  }
 }
 
 /// Callers and callees of the selected function, from the call graph.
@@ -166,18 +183,23 @@ void call_graph_panel(const Document& document, UiState& state) {
   for (const auto& site : graph.unresolved) {
     indirect += site.caller == function->address ? 1 : 0;
   }
-  ImGui::TextDisabled("%s: calls %zu, called by %zu%s", function->name.c_str(), callees.size(),
+  const std::string shown = shown_function_name(state, *function);
+  ImGui::TextDisabled("%s: calls %zu, called by %zu%s", shown.c_str(), callees.size(),
                       callers.size(),
                       indirect != 0 ? (", " + std::to_string(indirect) + " indirect").c_str() : "");
+  if (ImGui::IsItemHovered() && shown != function->name) {
+    ImGui::SetTooltip("%s", function->name.c_str());
+  }
   if (ImGui::BeginChild("##calls", ImVec2(0.0f, 0.0f))) {
     if (ImGui::TreeNodeEx("Calls", ImGuiTreeNodeFlags_DefaultOpen)) {
       for (const CallGraphEdge& edge : callees) {
         ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
-        const std::string label = function_label(document, edge.callee) + "  (at " +
+        const std::string label = function_label(state, document, edge.callee) + "  (at " +
                                   components::format_address(edge.site) + ")";
         if (ImGui::Selectable(label.c_str())) {
           state.navigate_to(edge.callee, &document);
         }
+        raw_name_tooltip(state, document, edge.callee);
         ImGui::PopID();
       }
       ImGui::TreePop();
@@ -185,11 +207,12 @@ void call_graph_panel(const Document& document, UiState& state) {
     if (ImGui::TreeNodeEx("Called by", ImGuiTreeNodeFlags_DefaultOpen)) {
       for (const CallGraphEdge& edge : callers) {
         ImGui::PushID(static_cast<int>(edge.site & 0x7fffffff));
-        const std::string label = function_label(document, edge.caller) + "  (at " +
+        const std::string label = function_label(state, document, edge.caller) + "  (at " +
                                   components::format_address(edge.site) + ")";
         if (ImGui::Selectable(label.c_str())) {
           state.navigate_to(edge.site, &document);
         }
+        raw_name_tooltip(state, document, edge.caller);
         ImGui::PopID();
       }
       ImGui::TreePop();
@@ -199,6 +222,15 @@ void call_graph_panel(const Document& document, UiState& state) {
 }
 
 }  // namespace
+
+std::string shown_function_name(UiState& state, const Function& function) {
+  const std::string* renamed =
+      state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
+  if (renamed != nullptr) {
+    return *renamed;  // a user's name is shown as typed
+  }
+  return cached_readable_name(state.readable_names, function.name);
+}
 
 void functions(const Document& document, UiState& state) {
   components::search_field("##functionfilter", state.function_filter, "Filter functions");
@@ -221,8 +253,9 @@ void functions(const Document& document, UiState& state) {
   for (const Function& function : document.analysis.functions) {
     const std::string* renamed =
         state.annotations != nullptr ? state.annotations->rename_at(function.address) : nullptr;
-    const std::string display = renamed != nullptr ? *renamed : function.name;
-    if (!matches(display, state.function_filter)) {
+    const std::string display = shown_function_name(state, function);
+    if (!matches(display, state.function_filter) &&
+        !matches(function.name, state.function_filter)) {
       continue;
     }
     ImGui::TableNextRow();
@@ -237,7 +270,7 @@ void functions(const Document& document, UiState& state) {
         state.annotation_kind = AnnotationKind::Rename;
         state.annotation_address = function.address;
         std::snprintf(state.annotation_buffer, sizeof(state.annotation_buffer), "%s",
-                      display.c_str());
+                      (renamed != nullptr ? *renamed : function.name).c_str());
         state.annotation_modal_requested = true;
       }
       const std::string* comment =
@@ -255,7 +288,9 @@ void functions(const Document& document, UiState& state) {
     ImGui::TextUnformatted(display.c_str());
     const DebugFunction* debug =
         document.debug_info ? document.debug_info->function_at(function.address) : nullptr;
-    if (debug != nullptr && ImGui::IsItemHovered()) {
+    if (debug == nullptr && display != function.name && ImGui::IsItemHovered()) {
+      ImGui::SetTooltip("%s", function.name.c_str());
+    } else if (debug != nullptr && ImGui::IsItemHovered()) {
       std::string tip = document.debug_info->prototype(*debug);
       if (!debug->file.empty()) {
         tip += "\n" + debug->file + ":" + std::to_string(debug->line);
@@ -333,19 +368,84 @@ void strings(const Document& document, UiState& state) {
   ImGui::EndTable();
 }
 
+namespace {
+
+/// Functions sorted by entry address, built once per document, so the Xrefs window can find the
+/// function containing an address without a scan per row (G10-T4).
+struct FunctionIndex {
+  const Document* document = nullptr;
+  std::vector<const Function*> by_address;
+};
+
+const FunctionIndex& function_index(const Document& document) {
+  static FunctionIndex index;
+  if (index.document != &document) {
+    index.document = &document;
+    index.by_address.clear();
+    for (const Function& function : document.analysis.functions) {
+      index.by_address.push_back(&function);
+    }
+    std::sort(index.by_address.begin(), index.by_address.end(),
+              [](const Function* a, const Function* b) { return a->address < b->address; });
+  }
+  return index;
+}
+
+/// The function that contains `address`, by the rule function_containing uses: the function
+/// starting at it, or else the one with the largest start whose extent covers it.
+const Function* containing_function(const Document& document, std::uint64_t address) {
+  const std::vector<const Function*>& starts = function_index(document).by_address;
+  auto it =
+      std::upper_bound(starts.begin(), starts.end(), address,
+                       [](std::uint64_t value, const Function* f) { return value < f->address; });
+  while (it != starts.begin()) {
+    --it;
+    const Function* function = *it;
+    if (function->address == address) {
+      return function;
+    }
+    if (function->has_extent && address < function->end_address) {
+      return function;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+const Function* function_containing_address(const Document& document, std::uint64_t address) {
+  return containing_function(document, address);
+}
+
 void xrefs(const Document& document, UiState& state) {
   components::search_field("##xreffilter", state.xref_filter, "Filter by kind, source or target");
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
-  if (!ImGui::BeginTable("##xrefs", 3, flags)) {
+  if (!ImGui::BeginTable("##xrefs", 5, flags)) {
     return;
   }
   ImGui::TableSetupScrollFreeze(0, 1);
   ImGui::TableSetupColumn("From", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("In", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableSetupColumn("To", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+  ImGui::TableSetupColumn("Target", ImGuiTableColumnFlags_WidthStretch, 1.8f);
   ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthStretch, 1.0f);
   ImGui::TableHeadersRow();
+
+  // The function name a row shows, and the raw symbol as its tooltip when the two differ (G10-T4).
+  const auto name_cell = [&](std::uint64_t address) {
+    const Function* function = containing_function(document, address);
+    if (function == nullptr) {
+      ImGui::TextDisabled("-");
+      return;
+    }
+    const std::string shown = shown_function_name(state, *function);
+    ImGui::TextUnformatted(shown.c_str());
+    if (ImGui::IsItemHovered() && shown != function->name) {
+      ImGui::SetTooltip("%s", function->name.c_str());
+    }
+  };
 
   for (const Xref& xref : document.analysis.xrefs) {
     const std::string from = components::format_address(xref.from);
@@ -361,8 +461,12 @@ void xrefs(const Document& document, UiState& state) {
       state.selected_address = xref.from;
     }
     ImGui::TableSetColumnIndex(1);
-    ImGui::TextUnformatted(to.c_str());
+    name_cell(xref.from);
     ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(to.c_str());
+    ImGui::TableSetColumnIndex(3);
+    name_cell(xref.to);
+    ImGui::TableSetColumnIndex(4);
     ImGui::TextDisabled("%s", kind.c_str());
   }
   ImGui::EndTable();
@@ -546,6 +650,71 @@ void data_ranges(const Document& document, UiState& state) {
       state.annotation_modal_requested = true;
     }
     ImGui::PopID();
+  }
+  ImGui::EndTable();
+}
+
+void classes(const Document& document, UiState& state) {
+  components::search_field("##classfilter", state.class_filter, "Filter classes");
+  if (!document.rtti) {
+    ImGui::TextWrapped("%s", document.rtti_note.empty() ? "No RTTI was read for this image."
+                                                        : document.rtti_note.c_str());
+    return;
+  }
+  const RttiInfo& info = *document.rtti;
+  ImGui::TextDisabled("%s", document.rtti_note.c_str());
+
+  const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
+                                ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;
+  if (!ImGui::BeginTable("##classes", 5, flags)) {
+    return;
+  }
+  ImGui::TableSetupScrollFreeze(0, 1);
+  ImGui::TableSetupColumn("Class", ImGuiTableColumnFlags_WidthStretch, 2.4f);
+  ImGui::TableSetupColumn("Kind", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+  ImGui::TableSetupColumn("Bases", ImGuiTableColumnFlags_WidthStretch, 2.0f);
+  ImGui::TableSetupColumn("Vtable", ImGuiTableColumnFlags_WidthStretch, 1.1f);
+  ImGui::TableSetupColumn("Slots", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+  ImGui::TableHeadersRow();
+
+  for (const RttiClass& cls : info.classes) {
+    if (!matches(cls.name, state.class_filter)) {
+      continue;
+    }
+    const std::uint64_t address =
+        cls.vtable_address != 0 ? cls.vtable_address : cls.typeinfo_address;
+    std::string bases;
+    for (const std::uint64_t base : cls.bases) {
+      const RttiClass* found = find_rtti_class(info, base);
+      if (!bases.empty()) {
+        bases += ", ";
+      }
+      bases += found != nullptr ? found->name : components::format_address(base);
+    }
+    std::size_t slots = cls.groups.empty() ? 0 : cls.groups.front().slots.size();
+
+    ImGui::TableNextRow();
+    ImGui::TableSetColumnIndex(0);
+    const std::string label = cls.name + "##" + std::to_string(cls.typeinfo_address);
+    if (ImGui::Selectable(label.c_str(), state.selected_address == address,
+                          ImGuiSelectableFlags_SpanAllColumns)) {
+      state.navigate_to(address, &document);
+    }
+    if (ImGui::IsItemHovered() && !cls.typeinfo_symbol.empty()) {
+      ImGui::SetTooltip("%s", cls.typeinfo_symbol.c_str());
+    }
+    ImGui::TableSetColumnIndex(1);
+    ImGui::TextUnformatted(rtti_kind_name(cls.kind));
+    ImGui::TableSetColumnIndex(2);
+    ImGui::TextUnformatted(bases.empty() ? "-" : bases.c_str());
+    ImGui::TableSetColumnIndex(3);
+    if (cls.vtable_address != 0) {
+      ImGui::TextUnformatted(components::format_address(cls.vtable_address).c_str());
+    } else {
+      ImGui::TextDisabled("-");
+    }
+    ImGui::TableSetColumnIndex(4);
+    ImGui::Text("%zu", slots);
   }
   ImGui::EndTable();
 }

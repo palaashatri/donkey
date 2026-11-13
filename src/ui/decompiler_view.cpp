@@ -317,11 +317,22 @@ void decompiler(const Document& document, UiState& state) {
     }
   }
 
+  // The pseudocode keeps the symbol as the engine names it (a C identifier); the readable name is
+  // the header, with the raw symbol as its tooltip (G10-T4).
+  const std::string header_name = shown_function_name(state, *function);
+  ImGui::TextUnformatted(header_name.c_str());
+  if (ImGui::IsItemHovered() && header_name != function->name) {
+    ImGui::SetTooltip("%s", function->name.c_str());
+  }
   ImGui::Separator();
   ImGui::BeginChild("##pseudocode", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
                     ImGuiWindowFlags_HorizontalScrollbar);
   if (state.pseudocode_in_progress) {
-    ImGui::TextDisabled("Decompiling %s in background...", function->name.c_str());
+    const std::string shown = shown_function_name(state, *function);
+    ImGui::TextDisabled("Decompiling %s in background...", shown.c_str());
+    if (ImGui::IsItemHovered() && shown != function->name) {
+      ImGui::SetTooltip("%s", function->name.c_str());
+    }
   } else if (state.pseudocode_status == "Unsupported" || state.pseudocode_status == "InvalidIR") {
     ImGui::PushStyleColor(ImGuiCol_Text, components::status_color("Unsupported"));
     ImGui::TextWrapped("%s", state.pseudocode_text.c_str());

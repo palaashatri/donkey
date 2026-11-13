@@ -118,6 +118,7 @@ add_library(donkey_analysis STATIC
   src/analysis/signatures.cpp
   src/analysis/signature_gen.cpp
   src/analysis/link_calls.cpp
+  src/analysis/search.cpp
   src/analysis/graph_layout.cpp
 )
 add_library(donkey::analysis ALIAS donkey_analysis)
@@ -218,6 +219,7 @@ donkey_apply_warnings(donkey_plugin)
 # thread. It has no SDL or ImGui dependency, so it is built headless and is
 # covered by the unit tests even when the desktop shell is disabled.
 add_library(donkey_session STATIC
+  src/ui/names.cpp
   src/ui/session.cpp
 )
 add_library(donkey::session ALIAS donkey_session)
@@ -253,6 +255,9 @@ if(DONKEY_BUILD_UI)
     src/ui/graph_view.cpp
     src/ui/hex_view.cpp
     src/ui/panels_view.cpp
+    src/ui/search_view.cpp
+    src/ui/symbols_view.cpp
+    src/ui/xref_graph_view.cpp
     src/ui/theme.cpp
     src/ui/ui_test.cpp
     src/ui/workspace.cpp

@@ -165,14 +165,14 @@ P0 is the most important, P3 the least.
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
 | G09 | Library function identification | FLIRT signatures, Lumina | Signature format, reader, matcher and the naming rules (ambiguity, user names, provenance) in the library, with `docs/SIGNATURES.md` (T1, partial). The generator for x86-64 ELF objects and static archives, `donkey-cli sig make` (T2, partial: no shared objects, PE import libraries or AArch64). One shipped set, musl 1.2.4 (MIT), identifying 34 of 67 known functions of a static musl program, 0 named wrongly, 28 byte-identical aliases reported ambiguous (T3, partial; the 90 % named bar is an owner decision) | P1 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 PARTIAL, owner decision open) |
-| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium RTTI and vtables for ELF, with AArch64 PLT stubs named (T3, partial: the `__cxa_pure_virtual` slot of the AArch64 fixtures); demangled names in donkey-cli info (T4, CLI part) | P1 | IN PROGRESS (T1 to T4 PARTIAL; the GUI demangled-name and class-hierarchy panel is open) |
+| G10 | C++ (demangling, RTTI, vtables) | Full | Itanium demangler (T1, partial: 502 of 512 corpus names match c++filt); MSVC demangler (T2, partial); Itanium and x64 MSVC RTTI and vtables (T3, partial: AArch64 PLT stubs are named at any stride, BTI-prefixed ones included; 32-bit MSVC, virtual base classes and call-site resolution are open); demangled names in donkey-cli info, in the desktop app's function names, call targets, Xrefs, Xref Graph and debugger frames, and the Classes window (Itanium classes of ELF images only), with the raw symbol in a tooltip (T4, DONE; the decompiler's pseudocode body keeps the engine's identifiers by rule) | P1 | IN PROGRESS (T1 to T3 PARTIAL; T4 DONE) |
 | G11 | Scripting and automation | IDAPython, IDC, plugin SDK | serve: JSON-RPC 2.0 with the read methods, decompile and annotations.list (with --project), and the write methods rename, comment and type.apply (with --project and --allow-write); batch mode; the optional Python client; a fuzz target for the request handling | P1 | DONE (G11-T1 to T3) |
 | G12 | Interactive edits | Make code/data, define arrays and strings, rename and type locals | Make code, make data and undefine with undo and redo, with UI keys C, D and U and a scripted test (T1). Arrays (Shift+D, `<size>:<count>`) and strings (A, `string:<bytes>`) as data ranges, with a Data window and a scripted test (T2, partial: no inline listing rows; UTF-16 strings done). Rename, comment, bookmark and function boundaries from before | P1 | IN PROGRESS (T1 DONE; T2 PARTIAL: no inline listing rows; UTF-16 strings done; T3 PARTIAL: local names for parameters and frame slots, headless, CLI and session API with undo, shown in the decompiler; no GUI rename gesture, no local types) |
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64, with conditions, and conditional breakpoints on Linux (x86-64; AArch64 compiled, not run in this change), in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs and, on x86-64, GOT slots read directly, across images (`donkey-cli link`, `project link`), done for ELF; calls through a register loaded from a GOT slot, AArch64 GOT calls, and PE and Mach-O references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
 | G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions; the block bound is reported, not silent (T1, partial). No real-world corpus yet | P2 | IN PROGRESS (T1 PARTIAL; T2 incremental re-analysis and real-world corpus TODO) |
-| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
+| G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Measured only on the differential corpus; no whole-program measurement | P0 | TODO |
@@ -1197,6 +1197,27 @@ own code.
     indirect in the IR.
 - **G10-T4 UI.** Show demangled names everywhere, with the raw name in the
   tooltip, and a class hierarchy panel.
+  - **Status:** DONE, with one stated exception. Done in the desktop app:
+    - The Classes window (`views::classes`) lists each class of the image's C++ RTTI with its kind,
+      direct bases in order, vtable address and primary slot count. Selecting a class navigates to
+      its vtable, or its typeinfo when it has none. The RTTI is read on the worker when a document
+      opens (`attach_rtti`); an image without it shows why. Each class's raw symbol is its tooltip.
+      Evidence: `ui.script_classes` (`assert_rtti_class` and `assert_rtti_bases` on
+      `donkey_test_hierarchy`; a mutated expected base fails it).
+    - A function's readable name (`readable_name`, `src/ui/names.cpp`, from the core demangler; the
+      raw symbol is kept) is shown in the Functions list, the call graph header and its caller and
+      callee lists, the disassembly call-target column, the Xrefs window (the function containing each
+      end of a reference), the Xref Graph header, the decompiler header and progress line, and the
+      debugger's stack frames. Each shows the raw symbol as its tooltip when the two differ. A user
+      rename is shown as typed, and the Rename prompt starts from the raw name. Evidence:
+      `ui.script_readable_names` (`_ZN5ShapeD2Ev` shows `Shape::~Shape()`), `ui.script_xref_graph`
+      (containing-function checks; a mutated lookup fails it).
+    - The full desktop suite passes (663 of 663); the headless Debug and Release suites pass.
+  - **The exception, by rule:** the decompiler's pseudocode body keeps the symbols as C identifiers.
+    The pseudocode is the engine's output from verified IR, and AGENTS.md forbids generating
+    pseudocode by string formatting, so the readable name is not written into it. A demangled name
+    inside a call would not be valid C in any case. The readable name is in the decompiler header.
+    MSVC RTTI and call-site resolution are G10-T3 items, not part of this entry.
 
 ### G11 Scripting and automation
 

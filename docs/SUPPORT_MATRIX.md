@@ -52,7 +52,7 @@ files, and refuses a file whose SHA-256 has changed.
 | Itanium (`_Z`) | `demangle_itanium` (G10-T1, partial) | 502 of 512 `c++filt` corpus names match; 10 are Unsupported | expression template arguments, generic lambdas |
 | MSVC (`?`, x64 `__cdecl`) | `demangle_msvc` (G10-T2, partial) | 87 of 95 `llvm-undname` corpus names match exactly; 8 are Unsupported | templates, arrays, string literals, vftables, dynamic initialisers, function and member pointers, 32-bit forms and other calling conventions |
 
-`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app and the symbol list do not show demangled names yet (G10-T4).
+`donkey-cli info` shows the demangled form of Itanium and MSVC exports (the `demangled` JSON field, and the name in brackets in the human output); the raw name is always kept. The desktop app shows the readable form of a function's symbol in the Functions list, the call graph, the disassembly call-target column, the decompiler header and the debugger's stack frames, with the raw symbol as a tooltip (`ui.script_readable_names`, on the hierarchy fixture). The decompiler's pseudocode body keeps the symbols as C identifiers. Its Classes window lists the Itanium classes of an ELF image with their direct bases, vtable address and slot count (`ui.script_classes`); other images show why they have no RTTI. MSVC RTTI is not read (G10-T4 partial).
 
 | MSVC RTTI and vtables (x64 PE) | `read_msvc_rtti` (G10-T3, partial) | The x64 fixture `tests/fixtures/rtti/msvc/hierarchy.exe` (clang 18 for the MSVC target, linked with LLD; see its PROVENANCE.md). The class names, the direct bases (a three-level chain, so an indirect base is not listed), the vtable groups and the slot counts are checked against the source (`RttiMsvc.*`). The COL-to-vtable reference is checked against the file bytes | 32-bit MSVC; virtual base classes (the vbtable); class names that are templates or use special characters (reported, not shown); the names of the slots (no PDB symbols); call sites through a vtable |
 
@@ -264,6 +264,14 @@ compare, because GCC's table code overwrites `x0`.
 | Python client (`bindings/python`, optional) | Partial | Typed wrappers for the implemented methods, tested against the built tool (`python.rpc_client`) |
 
 ## UI
+
+Command palette (Ctrl/Cmd+Shift+P, G17-T1): the commands the menus run and a Show command per view, filtered by the words typed; a disabled command is listed but does not run. Checked by `ui.script_command_palette`.
+
+Search window (G17-T2): byte patterns with `??` wildcards, an immediate number (decimal or 0x hex) and an ECMAScript regular expression over each instruction's "mnemonic operands" text. Searches run in the background, keep the newest result, cap the hits at 10,000 and can be cancelled. An immediate search reads every number in the operand text, so a displacement or an address can match as well. Checked by `search.*` (core) and `ui.script_search`.
+
+Symbols window (G17-T3): every symbol of the image with its kind, binding and size, the readable name of each (raw name as the tooltip), and a case-insensitive word filter. Checked by `ui.script_symbols`.
+
+Xref Graph window (G17-T4): the call neighbourhood of the selected function, callers on the left and callees on the right, one column per call depth (1 or 2), at most 64 functions. Built from the analysis's direct calls only: indirect calls are not drawn. Clicking a node navigates to it. Checked by `ui.script_xref_graph` against the CLI's call graph. Not yet: the theme editor and synchronised views (G17).
 
 Covered by the scripted UI tests (`docs/UI_TESTING.md`) on every platform
 whose package job runs them: keyboard-only navigation, IME commit and

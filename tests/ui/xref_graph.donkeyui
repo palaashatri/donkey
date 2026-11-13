@@ -1,0 +1,24 @@
+# G17: the cross-reference graph draws the call neighbourhood of the selected function. Go to main in
+# the debuggee (its entry, 0x1380). One call out, main has five functions in its graph and four calls
+# among them; two calls out, eleven and eleven. Both numbers are the CLI's own call graph walked the
+# same way (donkey-cli callgraph --json), not a second copy of the rule.
+wait_idle
+frames 5
+assert_no_error
+
+key g
+text main
+key enter
+frames 3
+assert_xref_graph 5 4
+assert_xref_graph_has main
+assert_xref_graph_has donkey_debuggee_tick
+
+xref_depth 2
+frames 2
+assert_xref_graph 11 11
+# The Xrefs window names the function that contains each end of a reference (G10-T4): the call at
+# 0x1442 is inside main, and its target 0x11e9 is donkey_debuggee_tick.
+assert_function_containing 0x1442 main
+assert_function_containing 0x11e9 donkey_debuggee_tick
+assert_no_error

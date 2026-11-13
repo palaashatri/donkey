@@ -91,6 +91,46 @@ struct GalleryState {
 
 void draw_component_gallery(GalleryState& gallery);
 
+/// What the Search window looks for (G17): bytes, an immediate number, or a regular expression over
+/// the instruction text.
+enum class SearchKind : int { Bytes = 0, Immediate = 1, Text = 2 };
+
+/// One hit of a search, with the text it is shown with: the bytes at the address, or the
+/// instruction.
+struct SearchRow {
+  std::uint64_t address = 0;
+  std::string preview;
+};
+
+/// The Search window's searches (G17). A search runs on the scheduler, never on the render thread,
+/// and only the newest one is kept. The window reads the last finished result under `mutex`.
+struct AsyncSearchState {
+  AsyncSearchState() = default;
+  ~AsyncSearchState() = default;
+
+  AsyncSearchState(const AsyncSearchState&) = delete;
+  AsyncSearchState& operator=(const AsyncSearchState&) = delete;
+
+  /// Starts a search of `doc`. A search still running is cancelled, and its result is dropped.
+  void start(std::shared_ptr<const Document> doc, SearchKind kind, std::string query);
+  /// Blocks until no search is running. UI scripts use it; the window never does.
+  void wait();
+
+  // Render-thread inputs: the kind and the text typed in the window.
+  int kind_input = 0;
+  char query_input[256] = {};
+
+  std::mutex mutex;
+  std::uint64_t generation = 0;  // guarded by mutex
+  bool running = false;          // guarded by mutex
+  std::string error;             // guarded by mutex: "code: message" when the pattern is refused
+  std::string status;            // guarded by mutex
+  std::vector<SearchRow> rows;   // guarded by mutex
+
+  /// Declared last, so it is destroyed first: its workers stop before the members above go.
+  JobScheduler scheduler{1};
+};
+
 /// Selection and filter state shared by every panel. It is render-thread
 /// state only; the parsed document stays immutable.
 struct UiState {
@@ -99,6 +139,14 @@ struct UiState {
   std::string section_filter;
   std::string function_filter;
   std::string string_filter;
+  /// The Classes panel filter (G10-T4).
+  std::string class_filter;
+  /// The Symbols window filter (G17).
+  std::string symbol_filter;
+  /// The cross-reference graph's depth: 1 or 2 calls out (G17).
+  int xref_depth = 1;
+  /// Readable names of the symbols the views show (G10-T4), cached by raw name.
+  std::unordered_map<std::string, std::string> readable_names;
   std::string xref_filter;
   std::string disassembly_filter;
   bool show_hex_bytes = true;
@@ -123,6 +171,9 @@ struct UiState {
   /// Cached decompilation for the currently selected function. Lifting is
   /// bounded and executed asynchronously off the render thread.
   std::shared_ptr<const Document> pseudocode_document_owner;
+  /// The Search window's searches, and the document they read (set each frame it is shown).
+  std::shared_ptr<AsyncSearchState> search = std::make_shared<AsyncSearchState>();
+  std::shared_ptr<const Document> search_document_owner;
   const Document* pseudocode_document = nullptr;
   std::uint64_t pseudocode_address = 0;
   std::string pseudocode_function;
@@ -272,10 +323,49 @@ class Workspace {
 
   /// Resolve a "Go to" query: a hex address (0x optional) or a function,
   /// symbol or user-renamed name. Returns 0 when nothing matches.
+  /// Runs a search of the open document, as the Search window's button does (G17). The UI tests use
+  /// it.
+  void run_search(SearchKind kind, const std::string& query);
+  /// The Symbols window: how many symbols it lists under the filter, and the readable name of the
+  /// first symbol with a raw name (UI scripts only; the window draws the same rows).
+  [[nodiscard]] std::size_t symbol_row_count();
+  /// The cross-reference graph of the selected function: its node and edge counts and the readable
+  /// names of its nodes. False when no function is selected.
+  [[nodiscard]] bool xref_graph_snapshot(std::size_t& nodes, std::size_t& edges,
+                                         std::vector<std::string>& names);
+  [[nodiscard]] bool symbol_shown(const std::string& raw, std::string& shown);
+  void set_symbol_filter(const std::string& filter);
+  void set_xref_depth(int depth);
+  /// The name the views show for the function containing `address`, or false when none does.
+  [[nodiscard]] bool function_containing_name(std::uint64_t address, std::string& shown);
+  [[nodiscard]] bool symbol_kind(const std::string& raw, std::string& kind);
+  /// Blocks until the search that is running has finished (UI scripts only).
+  void wait_search();
+  [[nodiscard]] std::size_t search_hit_count();
+  [[nodiscard]] bool search_has_hit(std::uint64_t address);
+  /// The shown text of a hit, or false when the address is not a hit.
+  [[nodiscard]] bool search_preview(std::uint64_t address, std::string& preview);
+  [[nodiscard]] std::string search_error();
+  [[nodiscard]] std::string search_status();
+  /// The name a view shows for the function at `address` (G10-T4), or empty.
+  [[nodiscard]] std::string function_name_shown(std::uint64_t address);
+  /// Whether the command palette (Ctrl/Cmd+Shift+P) is open. The palette lists commands that the
+  /// menus also run, filters them by the words typed, and runs the chosen one (G17-T1).
+  [[nodiscard]] bool command_palette_open() const;
   [[nodiscard]] std::uint64_t resolve_location(const std::string& query) const;
 
  private:
+  /// One command the palette can run. A disabled command is listed but cannot be chosen.
+  struct PaletteEntry {
+    std::string label;
+    std::string shortcut;  ///< the menu shortcut, shown beside the label; may be empty
+    bool enabled = true;
+    std::function<void()> run;
+  };
+
   void draw_menu_bar(bool& quit);
+  void draw_command_palette();
+  [[nodiscard]] std::vector<PaletteEntry> palette_entries();
   void draw_dockspace();
   void draw_panels();
   void build_default_layout(ImGuiID dockspace_id);
@@ -301,8 +391,25 @@ class Workspace {
   bool show_data_ = true;
   bool show_debugger_ = true;
   bool show_diagnostics_ = true;
+  bool show_classes_ = true;
+  bool show_search_ = true;
+  bool show_symbols_ = true;
+  bool show_xref_graph_ = true;
   bool show_about_ = false;
   bool goto_popup_ = false;
+  /// The command palette: opened by its shortcut, filtered by the text in its field, and closed
+  /// after a command is run. The command runs at the end of the frame, after the popups are drawn.
+  bool palette_request_ = false;
+  /// Whether the palette popup is open. Kept here, not asked of ImGui, because a UI script reads it
+  /// between frames, when ImGui has no current window to look a popup up in.
+  bool palette_open_ = false;
+  bool palette_focus_input_ = false;
+  char palette_buffer_[128] = {};
+  std::size_t palette_selected_ = 0;
+  std::function<void()> pending_command_;
+  /// A window to focus once it is shown: a palette "Show ..." command sets it, and the next frame
+  /// focuses the window, after draw_panels has shown it.
+  const char* focus_window_ = nullptr;
   char goto_buffer_[256] = {};
   std::string goto_error_;
   GalleryState gallery_;

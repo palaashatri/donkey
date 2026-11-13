@@ -534,6 +534,222 @@ bool UiScriptRunner::execute(const Command& c, UiTestHost& host) {
     }
     return true;
   }
+  if (c.name == "assert_rtti_class" || c.name == "assert_rtti_bases") {
+    // assert_rtti_class NAME: the Classes panel lists the class. assert_rtti_bases NAME LIST:
+    // its direct bases by name, in order, joined with commas; "-" when it has none (G10-T4).
+    const auto document = session.document();
+    if (!document || !document->rtti) {
+      fail(c,
+           "no RTTI is loaded: " + (document ? document->rtti_note : std::string("no document")));
+      return true;
+    }
+    const std::string name = arg(0);
+    const RttiClass* found = nullptr;
+    for (const RttiClass& cls : document->rtti->classes) {
+      if (cls.name == name) {
+        found = &cls;
+        break;
+      }
+    }
+    if (found == nullptr) {
+      fail(c, "no class named '" + name + "'");
+      return true;
+    }
+    if (c.name == "assert_rtti_bases") {
+      std::string got;
+      for (const std::uint64_t base : found->bases) {
+        const RttiClass* resolved = find_rtti_class(*document->rtti, base);
+        if (!got.empty()) {
+          got += ",";
+        }
+        got += resolved != nullptr ? resolved->name : std::string("<unnamed>");
+      }
+      if (got.empty()) {
+        got = "-";
+      }
+      if (got != arg(1)) {
+        fail(c, "bases of " + name + " are '" + got + "', wanted '" + arg(1) + "'");
+      }
+    }
+    return true;
+  }
+  if (c.name == "search_run") {
+    // search_run BYTES|IMMEDIATE|TEXT QUERY: runs a search as the Search window's button does.
+    // QUERY is the rest of the line, so it may contain spaces (G17).
+    const std::size_t space = c.rest.find(' ');
+    const std::string kind_name = c.rest.substr(0, space);
+    const std::string query = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    SearchKind kind = SearchKind::Bytes;
+    if (kind_name == "BYTES") {
+      kind = SearchKind::Bytes;
+    } else if (kind_name == "IMMEDIATE") {
+      kind = SearchKind::Immediate;
+    } else if (kind_name == "TEXT") {
+      kind = SearchKind::Text;
+    } else {
+      fail(c, "search_run takes BYTES, IMMEDIATE or TEXT, not '" + kind_name + "'");
+      return true;
+    }
+    workspace.run_search(kind, query);
+    return true;
+  }
+  if (c.name == "symbols_filter") {
+    // symbols_filter TEXT: the Symbols window lists the symbols that match every word of TEXT
+    // (G17).
+    workspace.set_symbol_filter(c.rest);
+    return true;
+  }
+  if (c.name == "assert_symbol_rows") {
+    // assert_symbol_rows N: the Symbols window lists N symbols under the current filter.
+    const auto want = static_cast<std::size_t>(number(0, -1.0));
+    const std::size_t got = workspace.symbol_row_count();
+    if (got != want) {
+      fail(c, "the Symbols window lists " + std::to_string(got) + " symbols, wanted " +
+                  std::to_string(want));
+    }
+    return true;
+  }
+  if (c.name == "assert_symbol") {
+    // assert_symbol RAW KIND: the image has a symbol with that raw name, of that kind.
+    std::string kind;
+    if (!workspace.symbol_kind(arg(0), kind) || kind != arg(1)) {
+      fail(c, "symbol " + arg(0) + " is not a " + arg(1) + " (it is '" + kind + "')");
+    }
+    return true;
+  }
+  if (c.name == "assert_symbol_shown") {
+    // assert_symbol_shown RAW TEXT: the Symbols window shows TEXT for that raw symbol (G10-T4).
+    const std::size_t space = c.rest.find(' ');
+    const std::string raw = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    std::string got;
+    if (!workspace.symbol_shown(raw, got) || got != want) {
+      fail(c, "the Symbols window shows '" + got + "' for " + raw + ", wanted '" + want + "'");
+    }
+    return true;
+  }
+  if (c.name == "assert_function_containing") {
+    // assert_function_containing ADDRESS-OR-NAME TEXT: the function containing that address is
+    // shown as TEXT (G10-T4). TEXT is the rest of the line, so it may contain spaces.
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    std::string got;
+    if (address == 0 || !workspace.function_containing_name(address, got) || got != want) {
+      fail(c, "the function containing " + location + " is shown as '" + got + "', wanted '" +
+                  want + "'");
+    }
+    return true;
+  }
+  if (c.name == "xref_depth") {
+    // xref_depth 1|2: the cross-reference graph shows that many calls out (G17).
+    workspace.set_xref_depth(static_cast<int>(number(0, 1.0)));
+    return true;
+  }
+  if (c.name == "assert_xref_graph") {
+    // assert_xref_graph NODES EDGES: the cross-reference graph of the selected function has those
+    // counts (G17).
+    std::size_t nodes = 0;
+    std::size_t edges = 0;
+    std::vector<std::string> names;
+    if (!workspace.xref_graph_snapshot(nodes, edges, names)) {
+      fail(c, "no function is selected for the cross-reference graph");
+      return true;
+    }
+    const auto want_nodes = static_cast<std::size_t>(number(0, -1.0));
+    const auto want_edges = static_cast<std::size_t>(number(1, -1.0));
+    if (nodes != want_nodes || edges != want_edges) {
+      fail(c, "the graph has " + std::to_string(nodes) + " functions and " + std::to_string(edges) +
+                  " calls, wanted " + std::to_string(want_nodes) + " and " +
+                  std::to_string(want_edges));
+    }
+    return true;
+  }
+  if (c.name == "assert_xref_graph_has") {
+    // assert_xref_graph_has NAME: the graph has a function shown as NAME.
+    std::size_t nodes = 0;
+    std::size_t edges = 0;
+    std::vector<std::string> names;
+    if (!workspace.xref_graph_snapshot(nodes, edges, names)) {
+      fail(c, "no function is selected for the cross-reference graph");
+      return true;
+    }
+    if (std::find(names.begin(), names.end(), arg(0)) == names.end()) {
+      fail(c, "the cross-reference graph has no function " + arg(0));
+    }
+    return true;
+  }
+  if (c.name == "wait_search") {
+    workspace.wait_search();
+    return true;
+  }
+  if (c.name == "assert_search_hits") {
+    // assert_search_hits N: the search found exactly N hits.
+    const auto want = static_cast<std::size_t>(number(0, -1.0));
+    const std::size_t got = workspace.search_hit_count();
+    if (got != want) {
+      fail(c, "the search found " + std::to_string(got) + " hits, wanted " + std::to_string(want) +
+                  " (" + workspace.search_status() + ")");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_some") {
+    if (workspace.search_hit_count() == 0) {
+      fail(c, "the search found no hits (" + workspace.search_status() + ")");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_hit") {
+    // assert_search_hit ADDRESS-OR-NAME: the search found a hit at that address.
+    const std::uint64_t address = workspace.resolve_location(arg(0));
+    if (address == 0 || !workspace.search_has_hit(address)) {
+      fail(c, "the search has no hit at " + arg(0));
+    }
+    return true;
+  }
+  if (c.name == "assert_search_preview") {
+    // assert_search_preview ADDRESS-OR-NAME TEXT: the hit at that address shows TEXT (the rest of
+    // the line).
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    std::string got;
+    if (address == 0 || !workspace.search_preview(address, got) || got != want) {
+      fail(c, "the hit at " + location + " shows '" + got + "', wanted '" + want + "'");
+    }
+    return true;
+  }
+  if (c.name == "assert_search_error") {
+    // assert_search_error CODE: the search was refused with that diagnostic code.
+    const std::string error = workspace.search_error();
+    if (error.rfind(arg(0) + ":", 0) != 0) {
+      fail(c, "the search error is '" + error + "', wanted code " + arg(0));
+    }
+    return true;
+  }
+  if (c.name == "assert_command_palette") {
+    // assert_command_palette 0|1: the command palette is closed (0) or open (1) (G17-T1).
+    const bool want = number(0, 1) != 0.0;
+    if (workspace.command_palette_open() != want) {
+      fail(c, std::string("the command palette is ") + (want ? "closed" : "open"));
+    }
+    return true;
+  }
+  if (c.name == "assert_function_name") {
+    // assert_function_name ADDRESS|NAME TEXT: the views show TEXT for that function (G10-T4).
+    // TEXT is the rest of the line, so it may contain spaces.
+    const std::size_t space = c.rest.find(' ');
+    const std::string location = c.rest.substr(0, space);
+    const std::string want = space == std::string::npos ? std::string() : c.rest.substr(space + 1);
+    const std::uint64_t address = workspace.resolve_location(location);
+    const std::string got = address != 0 ? workspace.function_name_shown(address) : std::string();
+    if (address == 0 || got != want) {
+      fail(c, "the views show '" + got + "' for " + location + ", wanted '" + want + "'");
+    }
+    return true;
+  }
   if (c.name == "assert_focus") {
     ImGuiWindow* nav = GImGui->NavWindow;
     if (!name_matches(nav != nullptr ? nav->Name : nullptr, c.rest)) {
