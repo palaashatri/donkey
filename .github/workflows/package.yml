@@ -197,7 +197,12 @@ jobs:
           "$app/Contents/MacOS/donkey-cli" --version
           "$app/Contents/MacOS/donkey-cli" info "$app/Contents/MacOS/Donkey" | head -8
           "$app/Contents/MacOS/Donkey" "$app/Contents/MacOS/donkey-cli" --exit-after-frames 30
-          hdiutil detach "$mount"
+          # The app has just run from the image, and a helper can keep the read-only volume
+          # busy for a moment after it exits, so retry the detach and then force it: nothing
+          # can be pending on a read-only image, and its contents were verified above.
+          hdiutil detach "$mount" ||
+            { sleep 2; hdiutil detach "$mount"; } ||
+            { sleep 2; hdiutil detach -force "$mount"; }
       - uses: actions/upload-artifact@v4
         with:
           name: donkey-macos-arm64
