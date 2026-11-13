@@ -46,17 +46,17 @@ Result<std::vector<PatternByte>> parse_pattern(std::string_view text, std::size_
           "'" + std::string(token) + "' is not a byte (two hex digits, or ?? for any byte)");
     }
     if (bytes.size() > max_length) {
-      return make_error<std::vector<PatternByte>>(Status::InvalidInput, "search.pattern",
-                                                  "the pattern is longer than " +
-                                                      std::to_string(max_length) + " bytes");
+      return make_error<std::vector<PatternByte>>(
+          Status::InvalidInput, "search.pattern",
+          "the pattern is longer than " + std::to_string(max_length) + " bytes");
     }
   }
   if (bytes.empty()) {
     return make_error<std::vector<PatternByte>>(Status::InvalidInput, "search.pattern",
                                                 "the pattern is empty");
   }
-  const bool fixed = std::any_of(bytes.begin(), bytes.end(),
-                                 [](const PatternByte& b) { return !b.wildcard; });
+  const bool fixed =
+      std::any_of(bytes.begin(), bytes.end(), [](const PatternByte& b) { return !b.wildcard; });
   if (!fixed) {
     return make_error<std::vector<PatternByte>>(Status::InvalidInput, "search.pattern",
                                                 "a pattern needs at least one fixed byte");
@@ -66,8 +66,7 @@ Result<std::vector<PatternByte>> parse_pattern(std::string_view text, std::size_
 
 bool matches_at(std::span<const std::byte> bytes, const std::vector<PatternByte>& pattern) {
   for (std::size_t k = 0; k < pattern.size(); ++k) {
-    if (!pattern[k].wildcard &&
-        std::to_integer<std::uint8_t>(bytes[k]) != pattern[k].value) {
+    if (!pattern[k].wildcard && std::to_integer<std::uint8_t>(bytes[k]) != pattern[k].value) {
       return false;
     }
   }
@@ -95,11 +94,10 @@ std::vector<std::uint64_t> operand_numbers(std::string_view operands) {
     const bool hex = token.size() > 2 && token[0] == '0' && (token[1] == 'x' || token[1] == 'X');
     const std::string digits = hex ? token.substr(2) : token;
     const int base = hex ? 16 : 10;
-    const bool valid = !digits.empty() &&
-                       std::all_of(digits.begin(), digits.end(), [base](char c) {
-                         return base == 16 ? std::isxdigit(static_cast<unsigned char>(c)) != 0
-                                           : std::isdigit(static_cast<unsigned char>(c)) != 0;
-                       });
+    const bool valid = !digits.empty() && std::all_of(digits.begin(), digits.end(), [base](char c) {
+      return base == 16 ? std::isxdigit(static_cast<unsigned char>(c)) != 0
+                        : std::isdigit(static_cast<unsigned char>(c)) != 0;
+    });
     if (!valid) {
       continue;
     }
@@ -138,9 +136,8 @@ Result<SearchHits> search_bytes(const BinaryImage& image, std::span<const std::b
       continue;
     }
     const std::size_t begin = static_cast<std::size_t>(section.file_offset);
-    const std::size_t end =
-        static_cast<std::size_t>(std::min<std::uint64_t>(section.file_offset + section.file_size,
-                                                         file.size()));
+    const std::size_t end = static_cast<std::size_t>(
+        std::min<std::uint64_t>(section.file_offset + section.file_size, file.size()));
     if (end - begin < bytes.size()) {
       continue;
     }
@@ -193,9 +190,9 @@ Result<SearchHits> search_text(std::span<const Instruction> instructions, std::s
     return make_error<SearchHits>(Status::InvalidInput, "search.regex", "the pattern is empty");
   }
   if (pattern.size() > options.max_pattern_length) {
-    return make_error<SearchHits>(Status::InvalidInput, "search.regex",
-                                  "the pattern is longer than " +
-                                      std::to_string(options.max_pattern_length) + " characters");
+    return make_error<SearchHits>(
+        Status::InvalidInput, "search.regex",
+        "the pattern is longer than " + std::to_string(options.max_pattern_length) + " characters");
   }
   std::regex regex;
   try {

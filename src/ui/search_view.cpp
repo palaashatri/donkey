@@ -1,6 +1,6 @@
 // The Search window (G17): byte, immediate and regular expression searches. The searches run on the
-// scheduler, off the render thread, through the headless core (donkey/analysis/search.h); the window
-// only draws the newest finished result.
+// scheduler, off the render thread, through the headless core (donkey/analysis/search.h); the
+// window only draws the newest finished result.
 
 #include <algorithm>
 #include <cstdio>
@@ -46,11 +46,10 @@ std::string hex_bytes(std::span<const std::byte> bytes) {
 const Instruction* instruction_at(const std::vector<Instruction>& instructions, bool sorted,
                                   std::uint64_t address) {
   if (sorted) {
-    const auto it = std::lower_bound(
-        instructions.begin(), instructions.end(), address,
-        [](const Instruction& instruction, std::uint64_t value) {
-          return instruction.address < value;
-        });
+    const auto it = std::lower_bound(instructions.begin(), instructions.end(), address,
+                                     [](const Instruction& instruction, std::uint64_t value) {
+                                       return instruction.address < value;
+                                     });
     return it != instructions.end() && it->address == address ? &*it : nullptr;
   }
   for (const Instruction& instruction : instructions) {
@@ -122,8 +121,8 @@ SearchOutput run_search(const Document& document, SearchKind kind, const std::st
       if (offset && offset.value() < document.loaded.data.size()) {
         const std::size_t available = document.loaded.data.size() - offset.value();
         const std::size_t count = std::min<std::size_t>(8, available);
-        row.preview = hex_bytes(document.loaded.data.span().subspan(
-            static_cast<std::size_t>(offset.value()), count));
+        row.preview = hex_bytes(
+            document.loaded.data.span().subspan(static_cast<std::size_t>(offset.value()), count));
       }
     } else if (const Instruction* instruction = instruction_at(instructions, sorted, address)) {
       row.preview = instruction->mnemonic + " " + instruction->operands;
@@ -157,19 +156,20 @@ void AsyncSearchState::start(std::shared_ptr<const Document> doc, SearchKind kin
     status = "Searching...";
   }
   scheduler.cancel_all();  // a newer search supersedes the one still running
-  scheduler.submit(JobPriority::Visible,
-                   [this, gen, doc, kind, query](const CancellationToken& token) {
-                     SearchOutput out = run_search(*doc, kind, query, token);
-                     std::lock_guard<std::mutex> lock(mutex);
-                     if (generation != gen) {
-                       return;  // superseded: its result is not shown
-                     }
-                     running = false;
-                     error = std::move(out.error);
-                     status = std::move(out.status);
-                     rows = std::move(out.rows);
-                   },
-                   "search");
+  scheduler.submit(
+      JobPriority::Visible,
+      [this, gen, doc, kind, query](const CancellationToken& token) {
+        SearchOutput out = run_search(*doc, kind, query, token);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (generation != gen) {
+          return;  // superseded: its result is not shown
+        }
+        running = false;
+        error = std::move(out.error);
+        status = std::move(out.status);
+        rows = std::move(out.rows);
+      },
+      "search");
 }
 
 void AsyncSearchState::wait() {
@@ -182,14 +182,15 @@ namespace donkey::ui::views {
 
 void search(const Document& document, UiState& state) {
   AsyncSearchState& search = *state.search;
-  static const char* const kKinds = "Bytes (hex, ?? any byte)\0Immediate (a number)\0Regex (instruction text)\0";
+  static const char* const kKinds =
+      "Bytes (hex, ?? any byte)\0Immediate (a number)\0Regex (instruction text)\0";
   ImGui::SetNextItemWidth(230.0f);
   ImGui::Combo("##searchkind", &search.kind_input, kKinds);
   ImGui::SameLine();
   ImGui::SetNextItemWidth(-90.0f);
-  const bool enter = ImGui::InputText("##searchquery", search.query_input,
-                                      sizeof(search.query_input),
-                                      ImGuiInputTextFlags_EnterReturnsTrue);
+  const bool enter =
+      ImGui::InputText("##searchquery", search.query_input, sizeof(search.query_input),
+                       ImGuiInputTextFlags_EnterReturnsTrue);
   ImGui::SameLine();
   if ((ImGui::Button("Search") || enter) && state.search_document_owner) {
     search.start(state.search_document_owner, static_cast<SearchKind>(search.kind_input),

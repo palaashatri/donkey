@@ -72,8 +72,7 @@ std::vector<std::size_t> symbol_listing(const Document& document, UiState& state
 void symbols(const Document& document, UiState& state) {
   components::search_field("##symbolfilter", state.symbol_filter, "Filter symbols");
   const std::vector<std::size_t> listed = symbol_listing(document, state);
-  ImGui::TextDisabled("%zu of %zu symbols", listed.size(),
-                      document.loaded.image.symbols.size());
+  ImGui::TextDisabled("%zu of %zu symbols", listed.size(), document.loaded.image.symbols.size());
 
   const ImGuiTableFlags flags = ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_BordersInnerV;

@@ -56,10 +56,10 @@ Instruction insn(std::uint64_t address, std::string mnemonic, std::string operan
 TEST(Search, ABytePatternWithWildcardsMatchesAtItsVirtualAddress) {
   // 48 8b 04 24 at offset 4, and 48 8b 4c 24 at offset 12; the wildcard matches the third byte.
   const std::vector<std::byte> file = {
-      std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x48},
-      std::byte{0x8b}, std::byte{0x04}, std::byte{0x24}, std::byte{0x90}, std::byte{0x90},
-      std::byte{0x90}, std::byte{0x90}, std::byte{0x48}, std::byte{0x8b}, std::byte{0x4c},
-      std::byte{0x24}};
+      std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+      std::byte{0x48}, std::byte{0x8b}, std::byte{0x04}, std::byte{0x24},
+      std::byte{0x90}, std::byte{0x90}, std::byte{0x90}, std::byte{0x90},
+      std::byte{0x48}, std::byte{0x8b}, std::byte{0x4c}, std::byte{0x24}};
   auto hits = donkey::search_bytes(image_of(file.size()), file, "48 8b ?? 24");
   ASSERT_TRUE(hits.has_value()) << hits.diagnostic().code;
   EXPECT_EQ(hits.value().addresses, (std::vector<std::uint64_t>{kBase + 4, kBase + 12}));

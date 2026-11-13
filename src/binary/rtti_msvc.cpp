@@ -29,8 +29,8 @@ namespace {
 
 constexpr std::uint64_t kColSize = 24;
 constexpr std::uint64_t kTypeDescriptorName = 16;
-constexpr std::uint64_t kClassHierarchySize = 16;
-constexpr std::uint64_t kBaseClassDescriptorSize = 24;
+// A class hierarchy descriptor is 16 bytes and a base class descriptor 24. Neither size is needed
+// as a constant: every field is read through u32_at, which checks its own bounds.
 constexpr std::uint64_t kPointerSize = 8;
 constexpr std::uint32_t kColSignatureX64 = 1;
 constexpr std::size_t kMaxNameLength = 512;

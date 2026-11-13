@@ -16,9 +16,9 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/analysis/link_calls.h"
 #include "donkey/analysis/signature_gen.h"
 #include "donkey/analysis/signatures.h"
-#include "donkey/analysis/link_calls.h"
 #include "donkey/binary/archive.h"
 #include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
