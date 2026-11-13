@@ -490,6 +490,14 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
   set(DONKEY_UI_REPORT_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-reports)
   set(DONKEY_UI_CONFIG_DIR ${CMAKE_CURRENT_BINARY_DIR}/ui-config)
   file(MAKE_DIRECTORY ${DONKEY_UI_REPORT_DIR})
+  # The CTest limit only guards against a hang. The FreeBSD aarch64 CI VM runs without
+  # hardware virtualisation and needs minutes per script: display_dpi_device_auto takes
+  # about 150 s there against the 180 s default, so an ordinary slow run times out while
+  # still making progress.
+  set(DONKEY_UI_SCRIPT_TIMEOUT 180)
+  if(CMAKE_SYSTEM_NAME STREQUAL "FreeBSD" AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(DONKEY_UI_SCRIPT_TIMEOUT 600)
+  endif()
   function(donkey_ui_script name)
     # FILE opens a file other than the debuggee (a fixture under tests/fixtures).
     cmake_parse_arguments(ARG "" "CONFIG;RENDERER;FILE" "" ${ARGN})
@@ -511,7 +519,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
                      --ui-report ${DONKEY_UI_REPORT_DIR}/${name}.json
                      ${ARG_OPEN})
     set_tests_properties(ui.script_${name} PROPERTIES
-      TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+      TIMEOUT ${DONKEY_UI_SCRIPT_TIMEOUT} PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
       FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
   endfunction()
   donkey_ui_script(keyboard_ime)
@@ -560,7 +568,7 @@ if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
                    --ui-report ${DONKEY_UI_REPORT_DIR}/display_dpi_device_auto.json
                    $<TARGET_FILE:donkey_test_debuggee>)
   set_tests_properties(ui.script_display_dpi_device_auto PROPERTIES
-    TIMEOUT 180 PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
+    TIMEOUT ${DONKEY_UI_SCRIPT_TIMEOUT} PASS_REGULAR_EXPRESSION "donkey ui-test: PASS"
     FAIL_REGULAR_EXPRESSION "donkey ui-test: FAIL")
   # Documentation screenshots of the demo program (BMP; see docs/UI_TESTING.md).
   add_test(NAME ui.screenshots

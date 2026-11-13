@@ -13,10 +13,10 @@ Scripts live in `tests/ui/*.donkeyui` and run under CTest as
 `ui.script_*` when the build has `-DDONKEY_UI_SMOKE_TEST=ON` (Linux CI runs
 them under Xvfb; the package jobs run them on every platform, except the
 scripts whose assertions are tied to one platform's fixture layout, marked in
-the table below. FreeBSD
-aarch64's CI VM is emulated, so there the timing limits are reported but not
-enforced (`DONKEY_UI_NO_TIMING=1`), and the two timing-only scripts,
-`virtualization` and `responsiveness`, are not run).
+the table below. FreeBSD aarch64's CI VM is emulated, so there the timing
+limits are reported but not enforced (`DONKEY_UI_NO_TIMING=1`), the CTest
+wall-clock limit for these scripts is 600 s rather than 180 s, and the two
+timing-only scripts, `virtualization` and `responsiveness`, are not run).
 
 ```bash
 cmake --preset dev-linux -DDONKEY_UI_SMOKE_TEST=ON
