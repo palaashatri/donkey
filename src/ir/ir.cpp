@@ -1698,20 +1698,101 @@ void recover_stack_variables(IrFunction& function) {
             });
 }
 
+namespace internal {
+
+void arrange_loop_tests(IrFunction& function) {
+  // A loop that a compiler lays out with its test at the bottom and a jump to the test on entry:
+  //   goto test;  body: ...; goto test;  test: if (c) goto body;  exit: ...
+  // becomes a while loop in block order, with the test first and its condition negated:
+  //   test: if (!c) goto exit;  body: ...; goto test;  exit: ...
+  // The two adjacent blocks are swapped and every reference is renumbered. The blocks run in the
+  // same order and the test reads the same flags, so the change is exact. Only this shape is
+  // changed: the body ends with an explicit branch to the test, the block before the body does
+  // not fall into it, and the test ends with a conditional branch back to the body whose
+  // condition has an exact complement.
+  std::vector<IrBlock>& blocks = function.blocks;
+  for (std::size_t test = 2; test + 1 < blocks.size(); ++test) {
+    const std::size_t body = test - 1;
+    const IrBlock& before = blocks[test - 2];
+    if (before.statements.empty()) {
+      continue;  // falls through into the body
+    }
+    const IrOp before_op = before.statements.back().op;
+    if (before_op != IrOp::Branch && before_op != IrOp::Switch && before_op != IrOp::Return) {
+      continue;  // a conditional branch or a fall-through would fall into the body
+    }
+    IrBlock& body_block = blocks[body];
+    if (body_block.statements.empty()) {
+      continue;
+    }
+    const IrStatement& enter = body_block.statements.back();
+    if (enter.op != IrOp::Branch || enter.a.kind != IrOperandKind::Block || enter.a.block != test) {
+      continue;
+    }
+    IrBlock& test_block = blocks[test];
+    if (test_block.statements.empty()) {
+      continue;
+    }
+    IrStatement& test_branch = test_block.statements.back();
+    if (test_branch.op != IrOp::CondBranch || test_branch.b.kind != IrOperandKind::Block ||
+        test_branch.b.block != body || test_branch.condition == IrCondition::None) {
+      continue;
+    }
+    const IrCondition* complement = complement_of(test_branch.condition);
+    if (complement == nullptr) {
+      continue;
+    }
+    // The test now jumps to the exit when its complement holds and falls through into the body.
+    test_branch.condition = *complement;
+    test_branch.b = IrOperand::block_ref(static_cast<std::uint32_t>(test + 1));
+    std::swap(blocks[body], blocks[test]);
+
+    const auto renumber = [body, test](std::uint32_t index) -> std::uint32_t {
+      if (index == body) {
+        return static_cast<std::uint32_t>(test);
+      }
+      if (index == test) {
+        return static_cast<std::uint32_t>(body);
+      }
+      return index;
+    };
+    for (IrBlock& block : blocks) {
+      for (IrStatement& statement : block.statements) {
+        for (IrOperand* operand : {&statement.dest, &statement.a, &statement.b, &statement.c}) {
+          if (operand->kind == IrOperandKind::Block) {
+            operand->block = renumber(operand->block);
+          }
+        }
+        for (IrSwitchCase& switch_case : statement.switch_cases) {
+          switch_case.target_block = renumber(switch_case.target_block);
+        }
+      }
+    }
+  }
+}
+
+}  // namespace internal
+
 void run_ir_passes(IrFunction& function, const PassOptions& options) {
   infer_signature(function, options.architecture, options.format);
   if (options.after_pass) {
     options.after_pass("infer_signature", function);
   }
-  recover_pointer_structs(function);
-  if (options.after_pass) {
-    options.after_pass("recover_pointer_structs", function);
-  }
   // The statement passes run after the signature is inferred, so the parameters do not
-  // change when a read of an argument register is removed.
+  // change when a read of an argument register is removed. A parameter that the code spills
+  // to the stack and reloads (an unoptimised build) is read through the copies that the slot
+  // forwarding and the copy propagation leave, so the accesses it makes are recovered below.
+  internal::forward_slot_copies(function);
+  if (options.after_pass) {
+    options.after_pass("forward_slot_copies", function);
+  }
   internal::propagate_copies(function);
   if (options.after_pass) {
     options.after_pass("propagate_copies", function);
+  }
+  recover_pointer_structs(function);
+  if (options.after_pass) {
+    options.after_pass("recover_pointer_structs", function);
   }
   internal::remove_dead_temporaries(function);
   if (options.after_pass) {
@@ -1725,6 +1806,16 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   internal::remove_dead_temporaries(function);
   if (options.after_pass) {
     options.after_pass("remove_dead_temporaries", function);
+  }
+  internal::forward_compare_loads(function);
+  if (options.after_pass) {
+    options.after_pass("forward_compare_loads", function);
+  }
+  // Last, so the blocks are laid out as the loops read: a block order change does not affect
+  // the dataflow the passes above compute.
+  internal::arrange_loop_tests(function);
+  if (options.after_pass) {
+    options.after_pass("arrange_loop_tests", function);
   }
 }
 

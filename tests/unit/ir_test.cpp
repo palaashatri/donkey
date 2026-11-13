@@ -2573,6 +2573,148 @@ TEST(Ir, StatementBudgetKeepsEveryBlockTerminated) {
   EXPECT_EQ(statements.back().op, donkey::IrOp::Return);
 }
 
+TEST(Ir, StructuresRotatedLoopAsWhile) {
+  // xor eax, eax; xor ecx, ecx; jmp test; body: add eax, ecx; inc ecx; test: cmp ecx, edi;
+  // jl body; ret. The compiler put the test after the body, so the lifted blocks are
+  // [entry, body, test, return] and the arrangement pass swaps the body and the test.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x31, 0xc0, 0x31, 0xc9, 0xeb, 0x04, 0x01, 0xc8, 0xff, 0xc1, 0x39, 0xf9, 0x7c, 0xf8, 0xc3},
+      function));
+  EXPECT_FALSE(function.partial);
+  // The rearranged blocks compute the same thing: 0 + 1 + 2 + 3 + 4 for an argument of 5.
+  EXPECT_EQ(run_x86_64(function, {5}), 10U);
+  EXPECT_EQ(run_x86_64(function, {0}), 0U);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("while ("), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto "), std::string::npos) << text.value();
+}
+
+namespace {
+
+// A function of three blocks: the entry loads [rbp - 8] into eax, compares it with 5 and
+// branches to block 2 when it is less; blocks 1 and 2 return the register `returned`.
+donkey::IrFunction load_compare_branch(const std::string& returned) {
+  donkey::IrFunction function;
+  donkey::IrBlock entry;
+  donkey::IrStatement load;
+  load.op = donkey::IrOp::Assign;
+  load.dest = donkey::IrOperand::register_ref("rax", 4);
+  load.a = donkey::IrOperand::memory_reference("rbp", "", 1, -8, 4);
+  load.width = 4;
+  entry.statements.push_back(load);
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::Compare;
+  compare.a = donkey::IrOperand::register_ref("rax", 4);
+  compare.b = donkey::IrOperand::constant_value(5, 4);
+  compare.condition = donkey::IrCondition::SignedLess;
+  compare.width = 4;
+  entry.statements.push_back(compare);
+  donkey::IrStatement branch;
+  branch.op = donkey::IrOp::CondBranch;
+  branch.condition = donkey::IrCondition::SignedLess;
+  branch.b = donkey::IrOperand::block_ref(2);
+  branch.width = 4;
+  entry.statements.push_back(branch);
+  function.blocks.push_back(entry);
+  for (int i = 0; i < 2; ++i) {
+    donkey::IrBlock block;
+    donkey::IrStatement ret;
+    ret.op = donkey::IrOp::Return;
+    ret.a = donkey::IrOperand::register_ref(returned, 8);
+    ret.width = 8;
+    block.statements.push_back(ret);
+    function.blocks.push_back(block);
+  }
+  return function;
+}
+
+}  // namespace
+
+TEST(Ir, ACompareReadsTheMemoryOfALoadThatNothingElseReads) {
+  // The exit returns rbx, so rax is dead after the compare: the compare reads the memory and the
+  // load is removed. The statements are exact: the value compared is the one the load read.
+  donkey::IrFunction function = load_compare_branch("rbx");
+  donkey::PassOptions options;
+  options.architecture = donkey::Architecture::X86_64;
+  donkey::run_ir_passes(function, options);
+  const auto& statements = function.blocks.front().statements;
+  ASSERT_EQ(statements.size(), 2U);
+  EXPECT_EQ(statements[0].op, donkey::IrOp::Compare);
+  EXPECT_EQ(statements[0].a.kind, donkey::IrOperandKind::Memory);
+  EXPECT_EQ(statements[1].op, donkey::IrOp::CondBranch);
+}
+
+TEST(Ir, ALoadIsKeptWhenItsRegisterIsReadAfterTheCompare) {
+  // The block that returns rax reads it after the compare, so the load must stay.
+  donkey::IrFunction function = load_compare_branch("rax");
+  donkey::PassOptions options;
+  options.architecture = donkey::Architecture::X86_64;
+  donkey::run_ir_passes(function, options);
+  const auto& statements = function.blocks.front().statements;
+  ASSERT_EQ(statements.size(), 3U);
+  EXPECT_EQ(statements[0].op, donkey::IrOp::Assign);
+  EXPECT_EQ(statements[1].a.kind, donkey::IrOperandKind::Register);
+}
+
+TEST(Ir, StructuresCounterInMemoryAsFor) {
+  // mov dword [rbp - 8], 0; jmp test; body: add dword [rbp - 8], 1; test: cmp [rbp - 8], edi;
+  // jl body; mov eax, [rbp - 8]; ret. A compiler without optimisation keeps the counter in memory:
+  // the init is the store before the jump, and the step is the three statements that the add
+  // lifts to (load into a temporary, add, store) at the end of the body. The printed loop moves
+  // them into the header as one update.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x04, 0x83, 0x45,
+                               0xf8, 0x01, 0x39, 0x7d, 0xf8, 0x7c, 0xf7, 0x8b, 0x45, 0xf8, 0xc3},
+                              function));
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_NE(code.find("for (*(u32 *)(rbp - 0x8) = 0x0; "), std::string::npos) << code;
+  EXPECT_NE(code.find("= *(u32 *)(rbp - 0x8) + 0x1)"), std::string::npos) << code;
+  // The update is printed once, in the header; the body keeps no copy of it.
+  EXPECT_EQ(code.find("+ 0x1;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+TEST(Ir, ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter) {
+  // mov [rbp - 8], rdi; mov rax, [rbp - 8]; mov eax, [rax + 4]; mov rdx, [rbp - 8];
+  // mov ecx, [rdx + 8]; add eax, ecx; ret. An unoptimised build keeps the pointer in a frame
+  // slot. The reloads are copies of rdi while the slot is unchanged, so both accesses are
+  // accesses through the parameter, and its structure has the two fields.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0x48, 0x89, 0x7d, 0xf8, 0x48, 0x8b, 0x45, 0xf8, 0x8b, 0x40, 0x04,
+                               0x48, 0x8b, 0x55, 0xf8, 0x8b, 0x4a, 0x08, 0x01, 0xc8, 0xc3},
+                              function));
+  ASSERT_EQ(function.pointer_structs.size(), 1U);
+  const donkey::IrPointerStruct& structure = function.pointer_structs.front();
+  EXPECT_EQ(structure.base_register, "rdi");
+  ASSERT_EQ(structure.fields.size(), 2U);
+  EXPECT_EQ(structure.fields[0].offset, 4);
+  EXPECT_EQ(structure.fields[1].offset, 8);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("a0->f_4"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("a0->f_8"), std::string::npos) << text.value();
+}
+
+TEST(Ir, ASlotThatIsStoredAgainIsNotForwardedFromTheFirstStore) {
+  // mov [rbp - 8], rdi; mov [rbp - 8], rsi; then two reloads through the slot. The second store
+  // replaces the first, so the reloads are copies of rsi and not of rdi: the structure is
+  // recovered for rsi, and rdi is never accessed.
+  donkey::IrFunction function;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0x48, 0x89, 0x7d, 0xf8, 0x48, 0x89, 0x75, 0xf8, 0x48, 0x8b, 0x45, 0xf8, 0x8b,
+                       0x40, 0x04, 0x48, 0x8b, 0x55, 0xf8, 0x8b, 0x4a, 0x08, 0x01, 0xc8, 0xc3},
+                      function));
+  for (const donkey::IrPointerStruct& structure : function.pointer_structs) {
+    EXPECT_NE(structure.base_register, "rdi") << "an access went through the first store's value";
+  }
+  ASSERT_EQ(function.pointer_structs.size(), 1U);
+  EXPECT_EQ(function.pointer_structs.front().base_register, "rsi");
+}
+
 TEST(Ir, X86ReturnIsDeterminedWhenOnePathWritesFourBytes) {
   // test rsi, rsi; je zero; mov rax, rdi; jmp done; zero: mov eax, 0; done: ret
   // The 4-byte write zero-extends into rax, so both paths define the returned register and the

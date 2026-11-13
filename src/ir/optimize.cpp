@@ -424,4 +424,164 @@ void remove_dead_register_writes(IrFunction& function) {
   }
 }
 
+namespace {
+
+/// The live-in set of every block, by iteration to a fixed point over the successors.
+std::vector<Live> live_in_sets(const IrFunction& function) {
+  const std::size_t count = function.blocks.size();
+  std::vector<std::vector<std::size_t>> successors(count);
+  for (std::size_t b = 0; b < count; ++b) {
+    successors[b] = successors_of(function, b);
+  }
+  std::vector<Live> live_in(count);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t b = count; b-- > 0;) {
+      Live live_out;
+      for (const std::size_t next : successors[b]) {
+        live_out.unite(live_in[next]);
+      }
+      Live updated = walk_block(function.blocks[b], live_out, nullptr);
+      if (!(updated == live_in[b])) {
+        live_in[b] = updated;
+        changed = true;
+      }
+    }
+  }
+  return live_in;
+}
+
+/// The register family a plain register write names, when it is not a temporary.
+bool is_named_register(const IrOperand& operand) {
+  return operand.kind == IrOperandKind::Register && !operand.reg.empty() &&
+         !is_temporary(operand.reg);
+}
+
+}  // namespace
+
+void forward_compare_loads(IrFunction& function) {
+  // A compiler without optimisation loads a counter into a register and compares the register:
+  //   rax = *(u32 *)(rbp - 8); flags = (u32)rax >= *(u32 *)(rbp - 0x1c); if (...) goto exit;
+  // The compare can read the memory itself, because nothing runs between the load and the
+  // compare, so the register is not needed when the compare reads it and the register is dead
+  // after the compare. The load is then removed. Only that shape is rewritten.
+  const std::vector<Live> live_in = live_in_sets(function);
+  const std::size_t count = function.blocks.size();
+  for (std::size_t b = 0; b < count; ++b) {
+    IrBlock& block = function.blocks[b];
+    for (std::size_t i = 0; i + 1 < block.statements.size(); ++i) {
+      const IrStatement& load = block.statements[i];
+      const IrStatement& compare = block.statements[i + 1];
+      if ((load.op != IrOp::Assign && load.op != IrOp::Load) || !is_named_register(load.dest) ||
+          load.a.kind != IrOperandKind::Memory || load.dest.width != load.a.width ||
+          compare.op != IrOp::Compare || compare.a.kind != IrOperandKind::Register ||
+          family(compare.a.reg) != family(load.dest.reg) || compare.a.width != load.dest.width) {
+        continue;
+      }
+      const std::string name = family(load.dest.reg);
+      if (compare.b.kind == IrOperandKind::Register && family(compare.b.reg) == name) {
+        continue;  // the compare reads the register twice
+      }
+      // The register must be dead after the compare: live_out of the block, through the tail.
+      Live live;
+      for (const std::size_t next : successors_of(function, b)) {
+        live.unite(live_in[next]);
+      }
+      IrBlock tail;
+      tail.statements.assign(block.statements.begin() + static_cast<std::ptrdiff_t>(i + 2),
+                             block.statements.end());
+      if (walk_block(tail, live, nullptr).contains(name)) {
+        continue;
+      }
+      block.statements[i + 1].a = load.a;
+      block.statements.erase(block.statements.begin() + static_cast<std::ptrdiff_t>(i));
+    }
+  }
+}
+
+namespace {
+
+/// A frame slot whose value is the register `source`: stored from it, and neither the slot nor
+/// the register has been written since.
+struct SlotValue {
+  IrOperand slot;
+  std::string source;
+};
+
+/// Whether two memory operands name the same slot exactly.
+bool same_slot(const IrOperand& a, const IrOperand& b) {
+  return a.kind == b.kind && a.reg == b.reg && a.index == b.index && a.scale == b.scale &&
+         a.constant == b.constant && a.width == b.width;
+}
+
+/// Whether a write to `written` may change any byte of `slot`. The write is known not to
+/// overlap only when both name the same base with no index, and their byte ranges are apart.
+bool may_overlap(const IrOperand& written, const IrOperand& slot) {
+  if (!written.index.empty() || !slot.index.empty() || written.reg.empty() ||
+      family(written.reg) != family(slot.reg)) {
+    return true;
+  }
+  const auto start_written = static_cast<std::int64_t>(written.constant);
+  const auto start_slot = static_cast<std::int64_t>(slot.constant);
+  return start_written < start_slot + static_cast<std::int64_t>(slot.width) &&
+         start_slot < start_written + static_cast<std::int64_t>(written.width);
+}
+
+}  // namespace
+
+void forward_slot_copies(IrFunction& function) {
+  // A value stored to a frame slot and loaded back before either changes is a copy of the
+  // register it was stored from. The load becomes a register copy, which copy propagation then
+  // carries into the accesses that follow, so an access through a spilled parameter reads that
+  // parameter. Only an 8-byte store and an 8-byte load are forwarded.
+  for (IrBlock& block : function.blocks) {
+    std::vector<SlotValue> known;
+    for (IrStatement& statement : block.statements) {
+      if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
+        known.clear();  // the callee or the unknown statement may write any slot or register
+        continue;
+      }
+      if ((statement.op == IrOp::Assign || statement.op == IrOp::Load) &&
+          statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+          !is_temporary(statement.dest.reg) && statement.a.kind == IrOperandKind::Memory &&
+          statement.dest.width == 8 && statement.a.width == 8 && statement.width == 8) {
+        for (const SlotValue& value : known) {
+          if (same_slot(value.slot, statement.a)) {
+            if (family(value.source) != family(statement.dest.reg)) {
+              statement.op = IrOp::Assign;
+              statement.a = IrOperand::register_ref(value.source, 8);
+            }
+            break;
+          }
+        }
+      }
+      if (statement.op == IrOp::Store || statement.dest.kind == IrOperandKind::Memory) {
+        const IrOperand& written = statement.op == IrOp::Store ? statement.a : statement.dest;
+        known.erase(std::remove_if(known.begin(), known.end(),
+                                   [&written](const SlotValue& value) {
+                                     return may_overlap(written, value.slot);
+                                   }),
+                    known.end());
+      }
+      if (writes_destination(statement.op) && statement.dest.kind == IrOperandKind::Register &&
+          !statement.dest.reg.empty()) {
+        const std::string written = family(statement.dest.reg);
+        known.erase(std::remove_if(
+                        known.begin(), known.end(),
+                        [&written](const SlotValue& value) {
+                          return value.source == written || family(value.slot.reg) == written ||
+                                 (!value.slot.index.empty() && family(value.slot.index) == written);
+                        }),
+                    known.end());
+      }
+      if (statement.op == IrOp::Store && statement.a.kind == IrOperandKind::Memory &&
+          statement.a.width == 8 && statement.b.kind == IrOperandKind::Register &&
+          statement.b.width == 8 && !statement.b.reg.empty() && !is_temporary(statement.b.reg)) {
+        known.push_back(SlotValue{statement.a, family(statement.b.reg)});
+      }
+    }
+  }
+}
+
 }  // namespace donkey::internal
