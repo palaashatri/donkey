@@ -11,6 +11,11 @@ it is done.
   `docs/DESIGN.md` §17.2, and measured results are in `docs/SUPPORT_MATRIX.md`.
 - **Not a claim:** this file plans work. Nothing here is implemented until its
   row says DONE with evidence. Do not cite this file as a capability anywhere.
+- **The goal is parity with IDA Pro and Ghidra** for everyday work.
+  `docs/PARITY.md` has the scorecard (where `main` stands, area by area), how
+  parity is measured, and the order of the work. G01 to G19 are planned task
+  by task in section 5. G20 to G32 (section 5a) are planned at gap level, and
+  each starts with a task that writes its detailed plan.
 
 Read sections 1-3 before taking any task.
 
@@ -170,6 +175,22 @@ P0 is the most important, P3 the least.
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists | P3 | TODO |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
+| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Measured only on the differential corpus; no whole-program measurement | P0 | TODO |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | A call prints as `sub_x();` with no arguments or result, and every function that makes a call is Partial | P0 | TODO |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | TODO (T2 needs an owner decision on header sources) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | Not read | P1 | TODO |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols and call targets only | P0 | TODO |
+| G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
+| G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
+| G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
+| G28 | Diffing and version tracking | Lumina, BinDiff, Diaphora (Ghidra: Version Tracking, BSim) | None | P2 | TODO (after G09) |
+| G29 | Assembling for patches | Assemble an instruction | Byte patches only | P2 | TODO (T2 needs an owner decision) |
+| G30 | More containers and managed code | Many loaders; Dalvik, .NET | None of these | P2 | TODO (T4 and T5 need an owner decision) |
+| G31 | Scripting inside the app, full API coverage | IDAPython (Ghidra: Java and Python scripts) inside the tool | Out-of-process JSON-RPC and Python client; partial coverage of the UI's actions | P1 | TODO |
+| G32 | Collaboration | IDA Teams (Ghidra: Ghidra Server) | Single-user projects | P3 | BLOCKED [owner decision] |
+
+G20 to G32 were added on 2026-11-13 from `docs/PARITY.md`. Their plans are in
+section 5a. In their rows the "IDA Pro" column also names what Ghidra has.
 
 ### Status at the end of this session
 
@@ -1401,6 +1422,358 @@ The first step is a written design in `docs/` only.
 
 ---
 
+## 5a. Parity gaps G20 to G32
+
+These gaps were added on 2026-11-13 from the scorecard in `docs/PARITY.md`.
+G01 to G19 came from comparing features with IDA Pro. G20 to G32 come from
+asking what a user still has to leave Donkey for, in IDA Pro or in Ghidra.
+
+They are written at gap level, not yet at the file-by-file level of G01 to
+G07. **The first task of each gap is T0: write the task-level plan** (files,
+steps, test names, done-when, pitfalls) in this file, in its own PR, after
+reading the code the gap touches. Do not start T1 of a gap whose T0 is not
+merged. "Donkey today" in each entry was checked against `main` at `eb9fa61`.
+
+Shared terms:
+
+- **R1** is the reference corpus of real programs that G20-T1 defines.
+- **[ground truth]** marks a task measured against the unstripped build of
+  the same program, with no reference tool (see `docs/PARITY.md` section 2).
+- A threshold marked "proposed" is fixed by the owner after the first
+  measured baseline. Never lower one to pass.
+
+### G20 Decompiler coverage on real programs (P0)
+
+**Why.** The differential corpus proves the decompiler correct on a small set
+of functions. IDA Pro and Ghidra decompile nearly every function of a real
+program. Nothing measures Donkey on whole programs, so the order of the
+decompiler work is a guess.
+
+**Donkey today.** The corpus in `tests/corpus/*.c` (see
+`docs/SUPPORT_MATRIX.md`). No whole-program measurement.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Define R1: permissively licensed programs (proposed:
+  zlib, Lua, SQLite, and a static musl libc program) fetched in CI from
+  pinned URLs with SHA-256, built at `-O0` and `-O2` for x86-64, each as an
+  unstripped and a stripped binary. AArch64 follows through the cross
+  compiler. Record the provenance as `docs/DESIGN.md` §11.5 requires.
+- **T2.** A batch run over R1 that records for every function: Complete,
+  Partial with its first note, Unsupported, or error. Publish the counts and
+  the 20 most frequent Partial reasons as a CI artifact and as a table in
+  `docs/SUPPORT_MATRIX.md`.
+- **T3.** A ratchet: the Complete count per program and level is stored in
+  the repository, and CI fails when it drops.
+- **T4 [oracle].** Extend the execution comparison to the R1 functions that
+  can be called in isolation (a manifest of pure functions), so Complete on
+  R1 is verified as it is on the corpus.
+
+**Done when.** The ratchet runs in CI, and the reason table is used to order
+G21, G01, G08 and G04. Proposed parity threshold for scorecard row 6: at
+least 90% of R1 functions are Complete or Partial with a full body, and no
+verified function disagrees with the compiled code.
+
+**Pitfalls.** Do not commit built binaries. Keep the job inside the CI time
+budget (sample large programs, and say that you sampled). A function that is
+Complete but not executed is not verified: report the two counts separately.
+
+### G21 Call sites and calling conventions (P0)
+
+**Why.** Both reference tools print `r = f(a, b);`. Donkey prints
+`sub_401000();`, with no arguments and no result.
+
+**Donkey today.** `lift_call` in `src/ir/lift.cpp` and
+`src/ir/lift_aarch64.cpp` keeps only the target and marks the function
+Partial ("outgoing call arguments and return values follow no modelled ABI").
+So every function that makes a call is Partial.
+
+**Tasks.**
+
+- **T0.** Task-level plan, including the IR change (a call with explicit
+  argument and result operands) and its verifier rules.
+- **T1 [oracle].** The clobber model. After a call the caller-saved registers
+  are undefined and the callee-saved ones are preserved (System V x86-64 and
+  AAPCS64 first, Windows x64 next). The interpreter calls the real callee in
+  the differential harness.
+- **T2 [oracle].** Arguments and results from a known prototype: the callee's
+  recovered signature inside the image, DWARF or PDB, an applied type (G05)
+  or a type library (G22). Integer and pointer arguments in registers first.
+- **T3.** Stack arguments, structures by value and through a hidden pointer,
+  floating-point arguments (after G01).
+- **T4.** Variadic calls. Count arguments only from a constant format string;
+  otherwise the call is Partial.
+- **T5.** A call to a no-return function ends the block (needs G24-T3).
+- **T6.** Indirect calls: function pointers, vtable slots (the G10-T3
+  call-site work), import stubs.
+
+**Done when.** No R1 function is Partial only because it calls, and the
+corpus has call-heavy functions verified by execution.
+
+**Pitfalls.** An argument count taken from register liveness is an inference.
+Label it as one (`signature_inferred`) and never print it as certain. A wrong
+prototype must fail the oracle, not print plausible code.
+
+### G22 Type libraries (P1)
+
+**Why.** IDA Pro's type libraries and Ghidra's data type archives give every
+imported function a prototype and every system structure a layout before the
+user does anything.
+
+**Donkey today.** A type store, a bounded C declaration parser and prototype
+application from the CLI (G05). No bundled declarations.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** A versioned library file: C declarations for one platform and ABI,
+  read by a bounded reader with a fuzz target.
+- **T2 [owner decision].** A generator that builds libraries from headers
+  whose licence is on the allowed list, with provenance. Candidates: musl
+  (MIT) for libc and POSIX, Microsoft's win32metadata (MIT) for the Windows
+  API. Headers under other licences need a decision before use.
+- **T3.** Apply prototypes to imports by name, and to functions identified by
+  G09, with provenance `TypeLibrary`. A user edit always wins.
+- **T4.** The decompiler shows typed arguments at calls (needs G21-T2).
+
+**Done when.** The libc calls of R1 show prototypes with no user action, and
+each applied type records where it came from.
+
+**Pitfalls.** Never copy an IDA type library or a Ghidra data type archive.
+Generate from headers and record the header version.
+
+### G23 Unwind tables and exception handling (P1)
+
+**Why.** `.eh_frame` and `.pdata` give the exact start and length of almost
+every function in a stripped binary. Exception tables give the `try` and
+`catch` regions. Both reference tools read them.
+
+**Donkey today.** Not read.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** `.eh_frame` and `.eh_frame_hdr`: CIE and FDE records as function
+  ranges with provenance. Bounded and fuzzed. Oracle: `readelf
+  --debug-dump=frames`.
+- **T2.** PE x64 `.pdata` and `.xdata` (`RUNTIME_FUNCTION`, `UNWIND_INFO`,
+  chained entries), then the ARM64 forms. Oracle: `llvm-readobj --unwind`.
+- **T3.** Mach-O `__unwind_info` and `LC_FUNCTION_STARTS`.
+- **T4.** The Itanium LSDA (`.gcc_except_table`): landing pads become CFG
+  edges, and the decompiler marks the protected region. The result stays
+  Partial until the handler semantics are modelled.
+- **T5.** MSVC C++ exception data and SEH scope tables.
+
+**Done when.** G24-T1 shows the gain in function-start recall on stripped R1
+binaries, and a C++ fixture with `try`/`catch` shows its regions.
+
+### G24 Analysis of stripped binaries (P0)
+
+**Why.** Finding the functions of a stripped binary is the core of both
+reference tools. Everything else works on what this step finds.
+
+**Donkey today.** `src/analysis/analysis.cpp` seeds functions from the entry
+point, exported function symbols and call targets. There is no prologue scan,
+no no-return analysis, no thunk classification and no stack-depth analysis.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** The measurement: for each R1 program, compare the
+  function starts found in the stripped binary with the symbols and DWARF of
+  the unstripped one. Report precision and recall, and ratchet them in CI.
+- **T2.** More seeds, most reliable first: unwind tables (G23), code
+  addresses stored in data and relocations (function-pointer tables, vtables,
+  `.init_array`), tail-call targets, and prologue patterns last. A function
+  found by a heuristic carries that provenance.
+- **T3.** No-return functions: known names first (`exit`, `abort`,
+  `__stack_chk_fail` and the like), then propagation through the call graph.
+- **T4.** Thunks and import stubs are named for their targets; a jump is
+  classified as a tail call or a branch.
+- **T5.** Data in code: jump tables in `.text`, literal pools, padding. Bytes
+  that are not proven code are not decoded silently.
+- **T6.** The stack-pointer delta at every instruction (needed by G21-T3 and
+  by frame locals without a frame pointer).
+- **T7.** Bounded value propagation for indirect branch and call targets.
+
+**Done when.** Proposed thresholds on stripped x86-64 R1: recall and
+precision of function starts both at least 98%.
+
+**Pitfalls.** Recall bought with false functions is worse than a gap. Measure
+precision in the same run.
+
+### G25 Language runtimes: Go, Rust, Objective-C, Swift (P1)
+
+**Why.** A stripped Go binary still names every function in its runtime
+tables. Objective-C binaries describe every class. Both reference tools use
+this; Donkey ignores it.
+
+**Donkey today.** None of the four.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Go: `.gopclntab` (the 1.2, 1.16, 1.18 and 1.20
+  layouts) for function names and ranges, module data, build information.
+  Compare with the unstripped build.
+- **T2.** Rust: the legacy and v0 mangling schemes (RFC 2603). Oracle:
+  `rustfilt` output on a list of names.
+- **T3.** Objective-C: class lists, method lists and selector references, so
+  methods are named and `objc_msgSend` calls with a constant selector get a
+  cross-reference. Oracle: `llvm-objdump --objc-meta-data`.
+- **T4.** Swift: demangling (oracle: `swift demangle`). Type metadata later.
+
+**Pitfalls.** These are parsers of untrusted bytes: bounded, with fuzz
+targets.
+
+### G26 Processor strategy (P1) [owner decision]
+
+**Why.** G13 decodes four more instruction sets but lifts none of them. A
+hand-written, verified lifter per instruction set is the bottleneck between
+three architectures and the dozens the reference tools cover.
+
+**Options.**
+
+- **A. Hand-written lifters**, each checked by the differential oracle under
+  `qemu-user`. Consistent with today's design. Slow.
+- **B. SLEIGH specifications.** Ghidra's processor descriptions are
+  Apache-2.0. A C++ SLEIGH engine turns bytes into p-code, and a translator
+  turns p-code into Donkey IR, checked by the same oracle. This is the
+  fastest route to breadth. It adds a large third-party component and a
+  second IR to keep honest.
+- **C. Both.** Hand-written for the instruction sets that matter most
+  (x86-64, AArch64, then ARM and RISC-V), SLEIGH for the rest.
+
+**Tasks.**
+
+- **T0.** A spike on one instruction set that Donkey decodes but does not
+  lift (RV64 or A32): corpus functions to p-code, to Donkey IR, through the
+  oracle. Report coverage, binary size, build time, the licence inventory,
+  and whether the engine builds without a JVM. No product code is merged.
+- The decision is recorded in `AGENTS.md` under "Settled decisions". The
+  tasks after T0 are written then.
+
+**Until the decision.** G13 continues by hand: Thumb decoding, then A32 and
+RV64 lifting.
+
+**Pitfalls.** "Verified IR" does not bend. Whatever produces the IR, a
+Complete result is one that the oracle executed.
+
+### G27 Emulation (P2)
+
+**Why.** Ghidra has a p-code emulator, and IDA Pro has Appcall and emulator
+plug-ins. Users decrypt strings and unpack code with them.
+
+**Donkey today.** The IR interpreter (`include/donkey/ir/eval.h`) runs in the
+tests only.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** Emulate one function from the CLI with given register and memory
+  inputs over the image's bytes. Bounded steps and memory. An unmodelled
+  operation stops the run with a diagnostic.
+- **T2.** A memory model (sections copy-on-write, a stack, a stub heap) and
+  hooks for imported functions.
+- **T3.** In the desktop app: emulate a selection and keep the result as a
+  comment or a data definition.
+- **T4.** Start from a debugger stop (registers and memory of the live
+  target).
+
+**Pitfalls.** Emulation never runs native code. Opening a file still never
+executes it.
+
+### G28 Diffing and version tracking (P2)
+
+**Why.** Ghidra has Version Tracking, Program Diff and BSim. IDA Pro users
+have Lumina, BinDiff and Diaphora. Analysts carry their work from one build
+of a program to the next.
+
+**Donkey today.** None.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1 [ground truth].** Match the functions of two images: masked byte
+  hashes first (the masking G09 defines), then call-graph and CFG structure.
+  Report matched, changed, added and removed, as JSON from the CLI. The
+  oracle is two builds of one source with known changes.
+- **T2.** Carry names, comments and types from a project to a new build, with
+  provenance and a list for review.
+- **T3.** A side-by-side view in the desktop app.
+
+**Depends on.** G09.
+
+### G29 Assembling for patches (P2) [owner decision]
+
+**Why.** Both reference tools let the user type an instruction to patch.
+
+**Donkey today.** Byte patches only. Keystone is GPL-2 and forbidden.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** Patch helpers that need no assembler: invert a conditional branch,
+  replace an instruction with no-ops, force a jump, change an immediate. Each
+  result is decoded again and compared before it is staged.
+- **T2 [owner decision].** A text assembler: LLVM MC (Apache-2.0 with the
+  LLVM exception, large), a small own encoder for the common forms, or the
+  SLEIGH assembler if G26 chooses SLEIGH.
+
+### G30 More containers and managed code (P2)
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** COFF objects and import libraries (extends G15-T1).
+- **T2.** The dyld shared cache and Mach-O kernel collections: open one image
+  out of the container, bounded and memory-mapped.
+- **T3.** Firmware: a raw loader with a user memory map and a vector table
+  for Cortex-M, and peripheral names from a user-supplied CMSIS-SVD file.
+- **T4 [owner decision].** WebAssembly.
+- **T5 [owner decision].** DEX, Java class files and .NET metadata. These are
+  not native code and need their own IR. Decide the scope first.
+
+### G31 Scripting inside the app and full API coverage (P1)
+
+**Why.** IDAPython and Ghidra scripts reach everything the user interface
+can do, from inside the tool.
+
+**Donkey today.** A JSON-RPC server with read methods, decompile, rename,
+comment and type application; a batch mode; an optional Python client; C ABI
+plugins. Scripts run out of process only, and the API covers part of what the
+desktop app does.
+
+**Tasks.**
+
+- **T0.** Task-level plan.
+- **T1.** An API coverage table in `docs/RPC.md`: every user action (make
+  code and data, patch, bookmark, navigate, cross-references, types, debugger
+  control) against its RPC method, with a test per method. Missing methods
+  become tasks.
+- **T2.** A script runner and console in the desktop app that talks to the
+  live session through the same RPC, never on the render thread.
+- **T3.** Read access to the verified IR for scripts, as versioned JSON.
+- **T4.** Batch analysis of a directory with a script before and after each
+  file.
+
+**Pitfalls.** Python stays optional (`AGENTS.md`, "Settled decisions").
+
+### G32 Collaboration (P3) [owner decision]
+
+**Why.** IDA Teams and Ghidra Server let several analysts share one project.
+
+**Donkey today.** Single-user projects.
+
+**Tasks.**
+
+- **T0.** A written design: a deterministic text export of names, comments,
+  types and bookmarks that merges three ways and reports conflicts (so it
+  works with any version control), against a server. The owner chooses.
+
+---
+
 ## 6. PR description template
 
 ```
@@ -1483,3 +1856,33 @@ instead of slipping through:
 
 Do the tasks one at a time, each with its own PR and green CI, before the
 next starts on top of it.
+
+### Order from 2026-11-13
+
+Most of the list above is done (see the table in section 4). From here the
+order is the waves in `docs/PARITY.md` section 4:
+
+1. **Wave 1.** G20-T0 to T3 first, because it measures what the rest is
+   ordered by. Then G21, G24, G23-T1 to T3, and the open tasks of G04, G05
+   and G01.
+2. **Wave 2.** G09, G22, the open tasks of G10 and G06, G23-T4 and T5, G25.
+3. **Wave 3.** G26-T0 (a spike, then an owner decision), G13, G08, G15-T2,
+   G30.
+4. **Wave 4.** G14, G27.
+5. **Wave 5.** G12, G17, G31, G29, G28, G32.
+
+Inside a wave, take an **[oracle]** or **[ground truth]** task before one
+without a machine check. Take T0 of a G20 to G32 gap before any other task of
+that gap.
+
+Branch hygiene, so that `main` stays the one place where work lives:
+
+- At most three task branches are open at once, and each has an open PR.
+- Do not stack a branch on an unmerged branch unless the task depends on it.
+  If you do, say so in both PRs.
+- When a PR merges, delete its branch in the same session. When work is
+  superseded, close its PR with a link to what replaced it, check that every
+  commit on the branch is in `main` or in the replacement (`git cherry
+  origin/main <branch>`), and then delete the branch.
+- Never leave pushed work without an open PR. A branch with neither a PR nor
+  a line in an open PR's description is lost work waiting to happen.
