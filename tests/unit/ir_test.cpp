@@ -3039,15 +3039,14 @@ TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
   }
 }
 
-TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedMove) {
-  // cmp rdi, rsi; mov r8w, 1; adc rdx, rcx; mov rax, rdx; ret
-  // The 16-bit move to r8w has no IR width, so it is Unsupported and may have written the flags.
-  // The flags are then unknown, so the adc is not lifted with the compare's carry: the function is
-  // partial. Before this rule the adc was lifted, and the verifier rejected the whole function.
+TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedSixteenBitExchange) {
+  // cmp rdi, rsi; xchg [rdi], ax; adc rdx, rcx; mov rax, rdx; ret
+  // The 16-bit memory exchange is Unsupported and may have written the flags, so the adc is not
+  // lifted with the compare's carry: the function is partial. (This used to be a `mov r8w, 1`,
+  // which had no IR width until the r8w to r15w entries were added in the register table.)
   donkey::IrFunction f;
   ASSERT_TRUE(lift_raw_x86_64(
-      {0x48, 0x39, 0xf7, 0x66, 0x41, 0xb8, 0x01, 0x00, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3},
-      f));
+      {0x48, 0x39, 0xf7, 0x66, 0x87, 0x07, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
   EXPECT_TRUE(f.partial);
   for (const donkey::IrBlock& block : f.blocks) {
     for (const donkey::IrStatement& statement : block.statements) {
@@ -4384,4 +4383,53 @@ TEST(Ir, AMovOfAStringAddressPrintsTheLiteral) {
   auto unchanged = donkey::format_pseudocode(f, other);
   ASSERT_TRUE(unchanged.has_value());
   EXPECT_EQ(unchanged.value(), plain.value());
+}
+
+// Goal 1: the 16-bit forms of r8w to r15w have a width, so a rotate of them lifts and
+// evaluates. Before the fix their width was 0 and the rotate divided by it (SIGFPE).
+TEST(Ir, RotateOfAHighSixteenBitRegisterLiftsAndEvaluates) {
+  // mov r9d, 0x1234; rol r9w, 8; mov rax, r9; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x41, 0xb9, 0x34, 0x12, 0x00, 0x00, 0x66, 0x41, 0xc1, 0xc1, 0x08, 0x4c, 0x89, 0xc8, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {}), 0x3412U);
+}
+
+TEST(Ir, RotateOfR12WRightLiftsAndEvaluates) {
+  // mov r12d, 0x1234; ror r12w, 4; mov rax, r12; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x41, 0xbc, 0x34, 0x12, 0x00, 0x00, 0x66, 0x41, 0xc1, 0xcc, 0x04, 0x4c, 0x89, 0xe0, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {}), 0x4123U);
+}
+
+// Every 16-bit name r8w to r15w has a width: rol <name>, 1 lifts to 2-byte shifts, and the full
+// register is written after them (the register table entry; a zero width used to fault).
+TEST(Ir, RegisterWidthTableCoversEveryHighSixteenBitName) {
+  for (std::uint8_t reg = 8; reg <= 15; ++reg) {
+    const std::string name = "r" + std::to_string(reg) + "w";
+    // 66 REX.B c1 /0 ib: rol r/m16, imm8 with the register in r/m. Then mov rax, r<n> (REX.WR 89
+    // /r) reads the register back, so the rotate is not removed as dead.
+    const auto rm = static_cast<std::uint8_t>(reg - 8);
+    const auto modrm = static_cast<std::uint8_t>(0xc0 | (rm << 3));  // reg = r<n>, r/m = rax
+    donkey::IrFunction f;
+    ASSERT_TRUE(lift_raw_x86_64(
+        {0x66, 0x41, 0xc1, static_cast<std::uint8_t>(0xc0 | rm), 0x01, 0x4c, 0x89, modrm, 0xc3}, f))
+        << name;
+    bool shifted_16 = false;
+    bool writes_full = false;
+    for (const donkey::IrBlock& block : f.blocks) {
+      for (const donkey::IrStatement& statement : block.statements) {
+        shifted_16 = shifted_16 || (statement.op == IrOp::Shl && statement.width == 2);
+        writes_full = writes_full || (statement.dest.kind == IrOperandKind::Register &&
+                                      statement.dest.reg == "r" + std::to_string(reg));
+      }
+    }
+    EXPECT_TRUE(shifted_16) << name;
+    EXPECT_TRUE(writes_full) << name;
+  }
 }
