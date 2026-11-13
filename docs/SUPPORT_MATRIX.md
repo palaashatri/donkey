@@ -35,6 +35,16 @@ panel and `donkey-cli debug` say so; nothing is simulated.
 | Windows minidump (`MDMP`) | architecture, exception, threads with x86-64 registers, modules with UTF-16 names, memory ranges read by address (`donkey-cli core`, `read_minidump_memory`). Checked against a generated file that follows Microsoft's documented layout; not yet against a dump written by Windows. Other architectures: threads without registers, reported partial | — | — |
 | Raw | with explicit `--arch --base --entry` | — | — |
 
+## Several images (`donkey-cli link`, `project link`)
+
+| Feature | Done | Not done | Evidence |
+|---|---|---|---|
+| ELF import binding | Each import is bound to the first linked image, in link order, that exports its name and is a library the importer names (DT_NEEDED against DT_SONAME or file name). Unbound imports are counted and listed | PE and Mach-O bindings beyond the DLL name; ordinal imports; forwarded exports | `Link.*`, `cli.link_binds_imports_to_needed_libraries`, `cli.project_link_*` |
+| ELF calls across images | Calls and jumps through a PLT stub (x86-64 and AArch64, including BTI stubs) and on x86-64 a call that reads a GOT slot directly (`call *slot(%rip)`, as `-fno-plt` code makes) are bound to the export. A function the image defines itself is never listed as an import | Calls through a register loaded from a GOT slot first; imports used as data pointers; AArch64 GOT calls; PE IAT and Mach-O stub calls | `LinkCalls.*`, `PltStubs*`, `GotSlots.*`, `cli.link_reports_calls_through_plt_stubs`, `cli.link_reports_calls_through_got_slots` |
+
+The project does not store the cross-image results: `project link` recomputes them from the saved
+files, and refuses a file whose SHA-256 has changed.
+
 ## C++ symbol names
 
 | Scheme | Demangler | Checked against | Not covered (reported Unsupported, never guessed) |

@@ -22,6 +22,7 @@ int command_analyze(const std::vector<std::string_view>& arguments);
 int command_project(const std::vector<std::string_view>& arguments);
 int command_archive(const std::vector<std::string_view>& arguments);
 int command_sig(const std::vector<std::string_view>& arguments);
+int command_link(const std::vector<std::string_view>& arguments);
 int command_debug(const std::vector<std::string_view>& arguments);
 int command_patch(const std::vector<std::string_view>& arguments);
 int command_plugin(const std::vector<std::string_view>& arguments);

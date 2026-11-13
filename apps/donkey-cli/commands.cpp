@@ -18,11 +18,13 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/analysis/signature_gen.h"
 #include "donkey/analysis/signatures.h"
+#include "donkey/analysis/link_calls.h"
 #include "donkey/binary/archive.h"
 #include "donkey/binary/core.h"
 #include "donkey/binary/debug_info.h"
 #include "donkey/binary/demangle.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/link.h"
 #include "donkey/binary/minidump.h"
 #include "donkey/binary/separate_debug.h"
 #include "donkey/core/checked.h"
@@ -800,6 +802,9 @@ void print_usage(std::FILE* out) {
       "DB]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
+      " [--json]\n"
+      "  donkey-cli link <executable> <library>... [--json]\n"
+      "  donkey-cli project link <database> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
       "  donkey-cli project save <database> <binary> [--json]\n"
       "  donkey-cli project info <database> [--json]\n"
@@ -2200,9 +2205,151 @@ int command_archive(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+namespace {
+
+/// The link report of `loaded` images in link order, each labelled by `labels`. Imports are bound
+/// by name and library. Each image is analysed, so a call through a PLT stub is bound to the export
+/// the link chose for that import (G15-T2).
+int report_link(const std::vector<std::string>& labels,
+                const std::vector<donkey::LoadedBinary>& loaded, bool json) {
+  std::vector<donkey::LinkInput> inputs;
+  inputs.reserve(loaded.size());
+  for (const donkey::LoadedBinary& item : loaded) {
+    inputs.push_back({&item.image, item.data});
+  }
+  const donkey::LinkResult result = donkey::resolve_imports(inputs);
+  // Each image is analysed for its call sites, so a call through a PLT stub can be bound to the
+  // export the link chose for that import.
+  std::vector<donkey::AnalysisResult> analyses;
+  analyses.reserve(loaded.size());
+  bool partial = false;
+  for (const donkey::LoadedBinary& item : loaded) {
+    auto analysis = donkey::analyze(item.image, item.data);
+    if (!analysis) {
+      return fail(analysis.diagnostic());
+    }
+    partial = partial || analysis.value().partial;
+    analyses.push_back(std::move(analysis.value()));
+  }
+  auto resolved = donkey::resolve_import_calls(inputs, result, analyses);
+  if (!resolved) {
+    return fail(resolved.diagnostic());
+  }
+  const std::vector<donkey::ImportCall>& calls = resolved.value();
+  std::size_t unbound_calls = 0;
+  for (const donkey::ImportCall& call : calls) {
+    if (call.provider == donkey::kUnboundImport) {
+      ++unbound_calls;
+    }
+  }
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"inputs\": [";
+    for (std::size_t i = 0; i < labels.size(); ++i) {
+      out += (i == 0 ? "" : ", ") + quote(std::string(labels[i]));
+    }
+    out += "],\n";
+    out += "  \"unbound\": " + std::to_string(result.unbound) + ",\n";
+    out += "  \"bindings\": [";
+    for (std::size_t i = 0; i < result.bindings.size(); ++i) {
+      const donkey::ImportBinding& binding = result.bindings[i];
+      const bool bound = binding.provider != donkey::kUnboundImport;
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"importer\": " + quote(labels[binding.importer]) +
+             ", \"name\": " + quote(binding.name) +
+             ", \"provider\": " + (bound ? quote(labels[binding.provider]) : std::string("null")) +
+             ", \"library\": " + quote(binding.library) +
+             ", \"address\": " + (bound ? quote(hex(binding.address)) : std::string("null")) + "}";
+    }
+    out += result.bindings.empty() ? "],\n" : "\n  ],\n";
+    out += "  \"partial\": " + std::string(partial ? "true" : "false") + ",\n";
+    out += "  \"unbound_calls\": " + std::to_string(unbound_calls) + ",\n";
+    out += "  \"calls\": [";
+    for (std::size_t i = 0; i < calls.size(); ++i) {
+      const donkey::ImportCall& call = calls[i];
+      const bool bound = call.provider != donkey::kUnboundImport;
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"importer\": " + quote(labels[call.importer]) +
+             ", \"from\": " + quote(hex(call.from)) +
+             ", \"kind\": " + quote(donkey::xref_kind_name(call.kind)) +
+             ", \"stub\": " + quote(hex(call.stub)) + ", \"name\": " + quote(call.name) +
+             ", \"provider\": " + (bound ? quote(labels[call.provider]) : std::string("null")) +
+             ", \"to\": " + (bound ? quote(hex(call.to)) : std::string("null")) + "}";
+    }
+    out += calls.empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu imports, %zu unbound\n", result.bindings.size(), result.unbound);
+    for (const donkey::ImportBinding& binding : result.bindings) {
+      const std::string& importer = labels[binding.importer];
+      if (binding.provider == donkey::kUnboundImport) {
+        std::printf("  %s: %s is not exported by any input\n", importer.c_str(),
+                    binding.name.c_str());
+      } else {
+        std::printf("  %s: %s from %s at %s\n", importer.c_str(), binding.name.c_str(),
+                    binding.library.c_str(), hex(binding.address).c_str());
+      }
+    }
+    std::printf("%zu calls through PLT stubs or GOT slots, %zu to imports no input exports\n",
+                calls.size(), unbound_calls);
+    for (const donkey::ImportCall& call : calls) {
+      const std::string& importer = labels[call.importer];
+      if (call.provider == donkey::kUnboundImport) {
+        std::printf("  %s: %s %s calls %s, which no input exports\n", importer.c_str(),
+                    donkey::xref_kind_name(call.kind), hex(call.from).c_str(), call.name.c_str());
+      } else {
+        std::printf("  %s: %s %s calls %s in %s at %s\n", importer.c_str(),
+                    donkey::xref_kind_name(call.kind), hex(call.from).c_str(), call.name.c_str(),
+                    labels[call.provider].c_str(), hex(call.to).c_str());
+      }
+    }
+    if (partial) {
+      std::printf("note: an image was only partly analysed, so some call sites may be missing\n");
+    }
+  }
+  return kExitOk;
+}
+
+}  // namespace
+
+int command_link(const std::vector<std::string_view>& arguments) {
+  bool json = false;
+  std::vector<std::string_view> positional;
+  for (const std::string_view argument : arguments) {
+    if (argument == "--json") {
+      json = true;
+    } else if (!argument.empty() && argument.front() == '-') {
+      return usage_error("unknown option for link");
+    } else {
+      positional.push_back(argument);
+    }
+  }
+  if (positional.size() < 2) {
+    return usage_error("link needs the executable and at least one library, in link order");
+  }
+  // The link inputs point into these buffers, so they are all loaded before any input is built.
+  std::vector<std::string> labels;
+  std::vector<donkey::LoadedBinary> loaded;
+  labels.reserve(positional.size());
+  loaded.reserve(positional.size());
+  for (const std::string_view path : positional) {
+    auto result = donkey::load_binary(std::string(path));
+    if (!result) {
+      return fail(result.diagnostic());
+    }
+    labels.emplace_back(path);
+    loaded.push_back(std::move(result.value()));
+  }
+  return report_link(labels, loaded, json);
+}
+
 int command_project(const std::vector<std::string_view>& arguments) {
   if (arguments.empty()) {
-    return usage_error("project needs a subcommand: save, info or type");
+    return usage_error("project needs a subcommand: save, info, link or type");
   }
   const std::string_view subcommand = arguments[0];
   bool json = false;
@@ -2280,6 +2427,45 @@ int command_project(const std::vector<std::string_view>& arguments) {
       std::printf("SHA-256:   %s\n", loaded.image.sha256.c_str());
     }
     return kExitOk;
+  }
+
+  if (subcommand == "link") {
+    if (positional.size() != 1) {
+      return usage_error("project link needs a database path");
+    }
+    const std::string database(positional[0]);
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    if (images.value().size() < 2) {
+      return usage_error("project link needs at least two images in the project");
+    }
+    // The project lists its images in the order they were saved, which is the link order: the
+    // first image saved is the executable. Each file must still match the hash the project
+    // recorded.
+    std::vector<std::string> labels;
+    std::vector<donkey::LoadedBinary> loaded;
+    for (const ProjectImage& image : images.value()) {
+      auto result = donkey::load_binary(image.path);
+      if (!result) {
+        return fail(result.diagnostic());
+      }
+      if (result.value().image.sha256 != image.sha256) {
+        std::fprintf(stderr,
+                     "error [project.image_changed]: %s no longer matches the hash the project "
+                     "recorded\n",
+                     image.path.c_str());
+        return kExitFailure;
+      }
+      labels.push_back(image.path);
+      loaded.push_back(std::move(result.value()));
+    }
+    return report_link(labels, loaded, json);
   }
 
   if (subcommand == "info") {
