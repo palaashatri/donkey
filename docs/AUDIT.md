@@ -196,8 +196,10 @@ Progress (the state is in the commits; this list is the order of the work):
 2. Done: trampoline entry rule removed from `reverse_postorder_copy` (no output changed; see below).
 3. Done: bounded duplication of small return blocks in the fallback (at most 8 statements per copied
    block, at most 64 duplicated statements per function). Measured below (step 5): the bar is met.
-4. Next: node splitting for irreducible functions under per-function and per-node bounds (step 2).
-5. Then: full verification on the final commit, and the doc updates (G04, PARITY row 7, README, AGENTS).
+4. Done: node splitting for irreducible functions under per-node (16 statements) and per-function
+   (64 statements) bounds. It makes 37 functions reducible but gains no structured function; see
+   the step 2 section.
+5. Next: full verification on the final commit, and the doc updates (G04, PARITY row 7, README, AGENTS).
 
 Bar: at most 1,032 of 1,986 labelled. Current: 996 (50.2%), met.
 
@@ -214,6 +216,7 @@ measurement is `tools/audit/sample_list.py measure` on `tools/audit/results/list
 | `9b49613` (dominance loops, reverse-postorder copy, break rules) | 715 | 143 | 1,128 | 1,271 | 64.0% |
 | step 1: fallback structurer and post-dominators | 915 | 143 | 928 | 1,071 | 53.9% |
 | step 5: return-block copies in the fallback (bounded) | 990 | 143 | 853 | 996 | 50.2% |
+| step 2: node splitting of irreducible functions | 990 | 106 | 890 | 996 | 50.2% |
 
 The bar is at most 52% of the list (at most 1,032 functions labelled). Step 1 brings it to 1,071
 (53.9%), still not met.
@@ -309,4 +312,39 @@ outside its region 82; a loop leaves to a block that is not its follow 8; a swit
 Tests (each fails when its rule is disabled, checked by hand): `Ir.FallbackCopiesASmallReturnBlockReachedTwice`
 (fails with the copy budget at zero), `Ir.FallbackDoesNotCopyAReturnBlockOverEightStatements`
 (the per-block bound), `Ir.FallbackStopsCopyingAtTheFunctionBudget` (fails with the budget at 1000).
+
+#### Step 2: node splitting (measured on the same 1,986 functions)
+
+For an irreducible function, the splitter finds a retreating edge whose target does not dominate its
+source, and copies that target once per incoming edge (the copies keep the source addresses). It
+repeats until no retreating edge is irreducible, then lays the blocks out again with explicit
+branches, and the structurer and the fallback run on the result. Bounds: a split duplicates at most
+16 statements, and a function at most 64 in all. Past a bound, or for a shape it does not model, the
+function stays irreducible and the verdict names the region.
+
+| Structured | Irreducible | Reducible but rejected | Labelled | Share |
+|---|---|---|---|---|
+| 990 | 106 | 890 | 996 | 50.2% |
+
+Against step 5: 37 functions are now reducible (the irreducible count fell from 143 to 106), and
+none of them is structured. The split leaves a loop header with two entries from outside (the copy
+of the target is an entry), and the structurer and the fallback model a single entry. Structuring
+them needs the loop body copied per entry, which the per-node bound does not allow for most loops.
+
+Remaining shapes, with one example address each (from the `ls` sample; the other binaries have the
+same shapes):
+
+| Shape | Example | Why it resists |
+|---|---|---|
+| node-splitting bound reached (16 per split, 64 per function) | `ls` 0x4da0 (irreducible region at 0x60f0) | splitting duplicates the whole target block; a loop with a large body exceeds the bound |
+| a terminator the splitter does not model (switch) | `ls` 0x11f70 | the splitter's successor model has branches and conditional branches only; a switch has case edges |
+| reducible after the split, the loop header has two entries | the test `Ir.SplitsAnIrreducibleFunctionIntoAReducibleOne` (shape of `ls` 0x7c50-class functions) | a single-entry loop is needed; copying the loop per entry is beyond the bound |
+| a block is reached twice (not a return) | `ls` 0x7c50 | a join reached from two arms with no common join needs node copies beyond return blocks |
+| a branch leaves its region | `ls` 0x6ea0 | a jump into a block that belongs to another region; the regions are built from the dominator trees and do not cover it |
+| an if joins outside its region | `ls` 0x8090 | the if's join is the post-dominator of an arm that reaches the exit separately |
+| the return duplication bound is reached | `ls` 0x8190 | more copies of return blocks than the 64-statement budget |
+
+Tests: `Ir.SplitsAnIrreducibleFunctionIntoAReducibleOne` (the verdict is ReducibleRejected rather
+than Irreducible; fails with splitting disabled) and `Ir.NodeSplittingKeepsItsPerNodeBound` (the
+verdict is Irreducible and names the bound; fails with the per-node bound removed).
 

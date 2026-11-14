@@ -1572,6 +1572,10 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
   }
 
   append_line("// note: control flow not fully structured; showing labeled blocks");
+  if (const StructureVerdict verdict = classify_structure(function);
+      verdict.cls == StructureClass::Irreducible) {
+    append_line("// note: " + verdict.reason);
+  }
   for (std::size_t index = 0; index < function.blocks.size(); ++index) {
     const IrBlock& block = function.blocks[index];
     append_line("loc_" + Renderer::hex(block.address) + ":", block.address);

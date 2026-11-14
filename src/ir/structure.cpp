@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -218,6 +219,255 @@ bool has_irreducible_retreat(const Graph& graph, const std::vector<BitSet>& domi
 /// position, so when its fall-through block is no longer next, a block that only branches to it is
 /// inserted right after the conditional branch. The entry block (block 0) is first. Blocks the
 /// entry cannot reach are left out (the structurer rejects a function with them anyway).
+// Node splitting (goal 8, step 2). An irreducible function has a retreating edge whose target
+// does not dominate its source. Splitting that target into one copy per incoming edge removes the
+// extra entry; the copies keep the source addresses. The splitter works on an explicit successor
+// model (a fall-through is an edge like any other), repeats until no retreating edge is
+// irreducible, and then lays the blocks out again with explicit branches. Two bounds keep the code
+// size honest: a split may duplicate at most kSplitNodeBound statements, and a function at most
+// kSplitFunctionBound in all. Past either bound the function stays labelled.
+constexpr std::size_t kSplitNodeBound = 16;
+constexpr std::size_t kSplitFunctionBound = 64;
+constexpr std::size_t kSplitIterationBound = 64;
+
+struct SplitNode {
+  std::vector<IrStatement> body;
+  IrStatement terminator;
+  std::vector<BlockId>
+      successors;  // Branch: one; CondBranch: taken, then fall-through; Return: none
+  std::uint64_t address = 0;
+  bool live = true;
+};
+
+std::string to_hex(std::uint64_t value) {
+  char buffer[24];
+  std::snprintf(buffer, sizeof buffer, "%llx", static_cast<unsigned long long>(value));
+  return buffer;
+}
+
+std::optional<IrFunction> split_irreducible(const IrFunction& function, std::string& note) {
+  const std::size_t count = function.blocks.size();
+  std::vector<SplitNode> nodes;
+  nodes.reserve(count);
+  for (BlockId index = 0; index < count; ++index) {
+    const IrBlock& block = function.blocks[index];
+    if (block.statements.empty()) {
+      note = "empty block";
+      return std::nullopt;
+    }
+    SplitNode node;
+    node.body.assign(block.statements.begin(), block.statements.end() - 1);
+    node.terminator = block.statements.back();
+    node.address = block.address;
+    switch (node.terminator.op) {
+      case IrOp::Return:
+        break;
+      case IrOp::Branch:
+        node.successors.push_back(node.terminator.a.block);
+        break;
+      case IrOp::CondBranch:
+        if (index + 1 >= count) {
+          note = "a conditional branch falls off the function";
+          return std::nullopt;
+        }
+        node.successors.push_back(node.terminator.b.block);
+        node.successors.push_back(index + 1);
+        break;
+      default:
+        note = "a terminator the splitter does not model";
+        return std::nullopt;
+    }
+    for (const BlockId successor : node.successors) {
+      if (successor >= count) {
+        note = "a branch leaves the function";
+        return std::nullopt;
+      }
+    }
+    nodes.push_back(std::move(node));
+  }
+
+  std::size_t duplicated = 0;
+  for (std::size_t iteration = 0; iteration < kSplitIterationBound; ++iteration) {
+    // The graph of the live nodes, and its dominators.
+    Graph graph;
+    graph.successors.assign(nodes.size(), {});
+    graph.predecessors.assign(nodes.size(), {});
+    for (BlockId index = 0; index < nodes.size(); ++index) {
+      if (!nodes[index].live) {
+        continue;
+      }
+      for (const BlockId successor : nodes[index].successors) {
+        graph.successors[index].push_back(successor);
+        graph.predecessors[successor].push_back(index);
+      }
+    }
+    const std::vector<BitSet> dominators = compute_dominators(graph);
+    // The first retreating edge (by depth-first search from the entry) whose target does not
+    // dominate its source names the node to split.
+    std::optional<BlockId> target;
+    {
+      std::vector<std::uint8_t> state(nodes.size(), 0);  // 0 new, 1 on the path, 2 done
+      std::vector<std::pair<BlockId, std::size_t>> path{{0, 0}};
+      state[0] = 1;
+      while (!path.empty() && !target) {
+        const BlockId block = path.back().first;
+        const std::size_t next = path.back().second;
+        if (next == graph.successors[block].size()) {
+          state[block] = 2;
+          path.pop_back();
+          continue;
+        }
+        path.back().second = next + 1;
+        const BlockId successor = graph.successors[block][next];
+        if (state[successor] == 1) {
+          if (!dominators[block].test(successor)) {
+            target = successor;
+          }
+        } else if (state[successor] == 0) {
+          state[successor] = 1;
+          path.emplace_back(successor, 0);
+        }
+      }
+    }
+    if (!target) {
+      // Reducible: lay the live nodes out in reverse postorder, with explicit branches.
+      std::vector<BlockId> postorder;
+      {
+        std::vector<std::uint8_t> seen(nodes.size(), 0);
+        std::vector<std::pair<BlockId, std::size_t>> path{{0, 0}};
+        seen[0] = 1;
+        while (!path.empty()) {
+          const BlockId block = path.back().first;
+          const std::size_t next = path.back().second;
+          if (next == graph.successors[block].size()) {
+            postorder.push_back(block);
+            path.pop_back();
+            continue;
+          }
+          path.back().second = next + 1;
+          const BlockId successor = graph.successors[block][next];
+          if (seen[successor] == 0) {
+            seen[successor] = 1;
+            path.emplace_back(successor, 0);
+          }
+        }
+      }
+      std::vector<BlockId> order(postorder.rbegin(), postorder.rend());
+      struct Entry {
+        BlockId node;
+        bool trampoline;
+      };
+      std::vector<Entry> entries;
+      for (std::size_t k = 0; k < order.size(); ++k) {
+        entries.push_back({order[k], false});
+        const SplitNode& node = nodes[order[k]];
+        if (node.terminator.op == IrOp::CondBranch) {
+          const BlockId fall = node.successors[1];
+          if (k + 1 >= order.size() || order[k + 1] != fall) {
+            entries.push_back({fall, true});
+          }
+        }
+      }
+      std::vector<BlockId> position(nodes.size(), kNoBlock);
+      for (std::size_t i = 0; i < entries.size(); ++i) {
+        if (!entries[i].trampoline) {
+          position[entries[i].node] = i;
+        }
+      }
+      IrFunction out = function;
+      out.blocks.clear();
+      for (const Entry& entry : entries) {
+        IrBlock block;
+        if (entry.trampoline) {
+          IrStatement branch;
+          branch.op = IrOp::Branch;
+          branch.a = IrOperand::block_ref(static_cast<std::uint32_t>(position[entry.node]));
+          branch.width = 8;
+          block.address = 0;
+          block.statements.push_back(branch);
+        } else {
+          const SplitNode& node = nodes[entry.node];
+          block.address = node.address;
+          block.statements = node.body;
+          IrStatement terminator = node.terminator;
+          if (terminator.op == IrOp::Branch) {
+            terminator.a =
+                IrOperand::block_ref(static_cast<std::uint32_t>(position[node.successors[0]]));
+          } else if (terminator.op == IrOp::CondBranch) {
+            terminator.b =
+                IrOperand::block_ref(static_cast<std::uint32_t>(position[node.successors[0]]));
+          }
+          block.statements.push_back(terminator);
+        }
+        out.blocks.push_back(std::move(block));
+      }
+      return out;
+    }
+
+    // Split the target: one copy per incoming edge, each copy with the target's statements and
+    // successors. The original loses its predecessors and leaves the function.
+    const BlockId split = *target;
+    std::size_t edges = 0;  // incoming edges: a branch with both arms to the target counts twice
+    for (BlockId index = 0; index < nodes.size(); ++index) {
+      if (!nodes[index].live) {
+        continue;
+      }
+      for (const BlockId successor : nodes[index].successors) {
+        edges += successor == split ? 1 : 0;
+      }
+    }
+    const std::size_t cost = edges < 2 ? 0 : (edges - 1) * (nodes[split].body.size() + 1);
+    if (edges < 2) {
+      note = "an irreducible region at 0x" + to_hex(nodes[split].address) +
+             " has a single entry edge: it cannot be split";
+      return std::nullopt;
+    }
+    if (cost > kSplitNodeBound || duplicated + cost > kSplitFunctionBound) {
+      note = "an irreducible region at 0x" + to_hex(nodes[split].address) +
+             ": the node-splitting bound is reached";
+      return std::nullopt;
+    }
+    const SplitNode original = nodes[split];
+    std::vector<BlockId> holders;
+    for (BlockId index = 0; index < nodes.size(); ++index) {
+      if (nodes[index].live) {
+        holders.push_back(index);
+      }
+    }
+    for (const BlockId holder : holders) {
+      for (std::size_t slot = 0; slot < nodes[holder].successors.size(); ++slot) {
+        if (nodes[holder].successors[slot] != split) {
+          continue;
+        }
+        SplitNode copy = original;
+        copy.live = true;
+        nodes.push_back(std::move(copy));
+        nodes[holder].successors[slot] = nodes.size() - 1;
+      }
+    }
+    nodes[split].live = false;
+    duplicated += cost;
+  }
+  note = "the node-splitting iteration bound is reached";
+  return std::nullopt;
+}
+
+// The split of an irreducible function, or nullopt (with the reason in `note`) when the function is
+// reducible or the split is over its bounds.
+std::optional<IrFunction> split_if_irreducible(const IrFunction& function, std::string& note) {
+  const Graph graph = build_graph(function);
+  if (!graph.valid) {
+    note = "invalid graph";
+    return std::nullopt;
+  }
+  const std::vector<BitSet> dominators = compute_dominators(graph);
+  if (!has_irreducible_retreat(graph, dominators)) {
+    note = "reducible";
+    return std::nullopt;
+  }
+  return split_irreducible(function, note);
+}
+
 std::optional<IrFunction> reverse_postorder_copy(const IrFunction& function) {
   const std::size_t count = function.blocks.size();
   if (count == 0) {
@@ -1707,7 +1957,19 @@ std::optional<std::string> format_structured_body(const IrFunction& function) {
     }
   }
   Structurer fallback(function, nullptr);
-  return fallback.run_fallback();
+  if (auto body = fallback.run_fallback()) {
+    return body;
+  }
+  std::string note;
+  if (auto split = split_if_irreducible(function, note)) {
+    Structurer structurer(*split, nullptr);
+    if (auto body = structurer.run()) {
+      return body;
+    }
+    Structurer split_fallback(*split, nullptr);
+    return split_fallback.run_fallback();
+  }
+  return std::nullopt;
 }
 
 std::optional<std::vector<StructuredLine>> format_structured_body_lines(
@@ -1727,6 +1989,17 @@ std::optional<std::vector<StructuredLine>> format_structured_body_lines(
   Structurer fallback(function, string_literals);
   if (fallback.run_fallback().has_value()) {
     return fallback.lines();
+  }
+  std::string note;
+  if (auto split = split_if_irreducible(function, note)) {
+    Structurer structurer(*split, string_literals);
+    if (structurer.run().has_value()) {
+      return structurer.lines();
+    }
+    Structurer split_fallback(*split, string_literals);
+    if (split_fallback.run_fallback().has_value()) {
+      return split_fallback.lines();
+    }
   }
   return std::nullopt;
 }
@@ -1760,7 +2033,23 @@ StructureVerdict classify_structure(const IrFunction& function) {
   }
   const std::vector<detail::BitSet> dominators = detail::compute_dominators(graph);
   if (detail::has_irreducible_retreat(graph, dominators)) {
-    return {StructureClass::Irreducible, "a retreating edge's target does not dominate its source"};
+    std::string note;
+    const auto split = detail::split_irreducible(function, note);
+    if (!split) {
+      return {StructureClass::Irreducible,
+              note.empty() ? "a retreating edge's target does not dominate its source" : note};
+    }
+    // Reducible after node splitting: the split function is structured like any other.
+    detail::Structurer structurer(*split, nullptr);
+    if (structurer.run().has_value()) {
+      return {StructureClass::Structured, ""};
+    }
+    detail::Structurer split_fallback(*split, nullptr);
+    if (split_fallback.run_fallback().has_value()) {
+      return {StructureClass::Structured, ""};
+    }
+    return {StructureClass::ReducibleRejected,
+            split_fallback.reason().empty() ? "unclassified (split)" : split_fallback.reason()};
   }
   std::string reason;
   {

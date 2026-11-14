@@ -614,7 +614,9 @@ TEST(Ir, StructuresDoWhileLoop) {
 
 TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
   // Blocks 1 and 2 form a cycle that block 0 enters at both ends (0 -> 1 and 0 -> 2), so the
-  // retreating edge 2 -> 1 does not have a dominating target: irreducible, and labelled.
+  // retreating edge 2 -> 1 does not have a dominating target: irreducible. Node splitting makes it
+  // reducible, but the loop header then has two entries from outside, which the structurer does
+  // not model, so the output stays labelled (see SplitsAnIrreducibleFunctionIntoAReducibleOne).
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5145,4 +5147,37 @@ TEST(Ir, FallbackStopsCopyingAtTheFunctionBudget) {
   auto text = donkey::format_pseudocode(f);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   EXPECT_NE(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
+  // The shape of FallsBackToLabelsForIrreducibleControlFlow. Without node splitting the verdict is
+  // Irreducible; with it the split function is reducible (ReducibleRejected: the structurer does
+  // not model a loop header with two entries from outside).
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  function.blocks[2].statements.push_back(compare_zero_statement());
+  function.blocks[2].statements.push_back(conditional_branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+  EXPECT_EQ(donkey::classify_structure(function).cls, donkey::StructureClass::ReducibleRejected);
+}
+
+TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
+  // The split target (block 2) has a body of twenty statements: one copy costs twenty more, over
+  // the per-node bound of sixteen, so the function stays Irreducible and the verdict names the
+  // region.
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  for (int i = 0; i < 20; ++i) {
+    function.blocks[2].statements.push_back(
+        assign_register_statement("rcx", static_cast<std::uint64_t>(i)));
+  }
+  function.blocks[2].statements.push_back(conditional_branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Irreducible);
+  EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
 }
