@@ -5181,3 +5181,34 @@ TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   EXPECT_EQ(verdict.cls, donkey::StructureClass::Irreducible);
   EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
 }
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentIsPartial) {
+  // caller (0x1000): call 0x1010; ret.  callee (0x1010): mov rax, [rsp+8]; ret.  The callee reads
+  // its seventh argument, which the caller passes on the stack, so the caller's call cannot be
+  // given the callee's register-only signature: the caller must not be Complete.
+  const std::uint8_t bytes[] = {
+      0xe8, 0x0b, 0x00, 0x00, 0x00,                                // 0x1000: call 0x1010
+      0xc3,                                                        // 0x1005: ret
+      0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,  // padding
+      0x48, 0x8b, 0x44, 0x24, 0x08,                                // 0x1010: mov rax, [rsp+8]
+      0xc3,                                                        // 0x1015: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::AnalysisResult& analysis = analyzed.value();
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analysis.functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analysis, *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}

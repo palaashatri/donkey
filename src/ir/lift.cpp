@@ -20,6 +20,175 @@
 namespace donkey {
 namespace {
 
+// Whether a callee's code may read an argument passed on the stack (the seventh and later integer
+// arguments, at entry rsp + 8 and up). The check runs a dataflow over the callee's IR (the lift
+// without passes): every register is tracked as an offset from the entry rsp when it holds a stack
+// address, and an access, a lea or a stack address passed to a call at offset 8 or more is taken as
+// an incoming argument. Whatever cannot be followed (a stack address of unknown offset, or a stack
+// address stored into a register the tracking does not model) is taken as an incoming argument too,
+// so the caller is never resolved on a guess. Returns true when the callee may read one.
+bool reads_incoming_stack_argument(const IrFunction& function) {
+  // A register family's value: absent (not a stack address), a known offset from the entry rsp, or
+  // nullopt (a stack address of unknown offset).
+  using StackValues = std::map<std::string, std::optional<std::int64_t>>;
+  const std::size_t count = function.blocks.size();
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::optional<StackValues>> entry(count);
+  entry[0] = StackValues{{"rsp", 0}};
+  bool refused = false;
+
+  auto join = [](const StackValues& a, const StackValues& b) {
+    StackValues out;
+    for (const auto& [family, value] : a) {
+      const auto other = b.find(family);
+      if (other == b.end()) {
+        out[family] = std::nullopt;
+      } else {
+        out[family] = value == other->second ? value : std::nullopt;
+      }
+    }
+    for (const auto& [family, value] : b) {
+      if (a.find(family) == a.end()) {
+        out[family] = std::nullopt;
+      }
+    }
+    return out;
+  };
+  auto same = [](const StackValues& a, const StackValues& b) { return a == b; };
+
+  auto check_memory = [&](const IrOperand& operand, const StackValues& values) {
+    if (operand.kind != IrOperandKind::Memory) {
+      return;
+    }
+    const std::string base =
+        operand.reg.empty() ? std::string() : internal::register_family(operand.reg);
+    const std::string index =
+        operand.index.empty() ? std::string() : internal::register_family(operand.index);
+    if (!index.empty() && values.count(index) != 0) {
+      refused = true;  // an indexed stack address
+    }
+    if (base.empty()) {
+      return;
+    }
+    const auto found = values.find(base);
+    if (found == values.end()) {
+      return;
+    }
+    if (!found->second.has_value()) {
+      refused = true;
+      return;
+    }
+    const auto displacement = static_cast<std::int64_t>(operand.constant);
+    if (*found->second + displacement >= 8) {
+      refused = true;  // an incoming stack argument (entry rsp + 8 and up)
+    }
+  };
+
+  auto transfer = [&](const IrStatement& statement, StackValues& values) {
+    check_memory(statement.dest, values);
+    check_memory(statement.a, values);
+    check_memory(statement.b, values);
+    check_memory(statement.c, values);
+    if (statement.op == IrOp::Call) {
+      for (const IrOperand& argument : statement.call_arguments) {
+        if (argument.kind == IrOperandKind::Register &&
+            values.count(internal::register_family(argument.reg)) != 0) {
+          refused = true;  // a stack address escapes into the callee
+        }
+      }
+    }
+    if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
+      return;
+    }
+    const std::string dest = internal::register_family(statement.dest.reg);
+    // The value the statement gives the destination, when it is a stack address.
+    std::optional<std::optional<std::int64_t>> result;  // outer: is a stack address
+    auto source_value =
+        [&](const IrOperand& operand) -> std::optional<std::optional<std::int64_t>> {
+      if (operand.kind != IrOperandKind::Register) {
+        return std::nullopt;
+      }
+      const auto found = values.find(internal::register_family(operand.reg));
+      if (found == values.end()) {
+        return std::nullopt;
+      }
+      return found->second;
+    };
+    if (statement.op == IrOp::Assign) {
+      result = source_value(statement.a);
+    } else if ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+               statement.b.kind == IrOperandKind::Constant) {
+      const auto source = source_value(statement.a);
+      if (source.has_value()) {
+        if (!source->has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto amount = static_cast<std::int64_t>(statement.b.constant);
+          result = statement.op == IrOp::Add ? **source + amount : **source - amount;
+        }
+      }
+    } else if (statement.op != IrOp::Load && statement.op != IrOp::Lea &&
+               statement.op != IrOp::Call && statement.op != IrOp::Return) {
+      // A write the tracking does not model: a stack address written into the destination by an
+      // arithmetic or other operation is no longer followed.
+      for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (source_value(*operand).has_value()) {
+          refused = true;
+        }
+      }
+    }
+    if (result.has_value()) {
+      values[dest] = *result;
+    } else {
+      values.erase(dest);
+    }
+  };
+
+  std::vector<std::size_t> worklist{0};
+  while (!worklist.empty() && !refused) {
+    const std::size_t block = worklist.back();
+    worklist.pop_back();
+    if (!entry[block].has_value()) {
+      continue;
+    }
+    StackValues values = *entry[block];
+    for (const IrStatement& statement : function.blocks[block].statements) {
+      transfer(statement, values);
+      if (refused) {
+        return true;
+      }
+    }
+    const IrStatement& terminator = function.blocks[block].statements.back();
+    std::vector<std::size_t> successors;
+    if (terminator.op == IrOp::Branch) {
+      successors.push_back(terminator.a.block);
+    } else if (terminator.op == IrOp::CondBranch) {
+      successors.push_back(terminator.b.block);
+      successors.push_back(block + 1);
+    } else if (terminator.op == IrOp::Switch) {
+      return true;  // not followed through a jump table
+    }
+    for (const std::size_t successor : successors) {
+      if (successor >= count) {
+        return true;
+      }
+      if (!entry[successor].has_value()) {
+        entry[successor] = values;
+        worklist.push_back(successor);
+      } else {
+        StackValues merged = join(*entry[successor], values);
+        if (!same(merged, *entry[successor])) {
+          entry[successor] = std::move(merged);
+          worklist.push_back(successor);
+        }
+      }
+    }
+  }
+  return refused;
+}
+
 using namespace donkey;
 
 std::uint8_t register_width(const std::string& name) {
@@ -1763,6 +1932,10 @@ struct Lifter {
     unoptimised.run_passes = false;
     auto raw = lift_function(image, analysis, *callee, unoptimised);
     if (!raw || raw.value().partial) {
+      return std::nullopt;
+    }
+    // A callee that reads a stack-passed argument has more parameters than the registers show.
+    if (reads_incoming_stack_argument(raw.value())) {
       return std::nullopt;
     }
     KnownCallee known;
