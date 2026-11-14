@@ -5,9 +5,9 @@
 // switch arms (which fall into the next arm without a break) and loops (break and continue leave
 // the innermost loop or switch), and then reads, for each IR block, the blocks that control reaches
 // from it. Those are compared with the IR's successors, edge for edge: a condition's true side must
-// enter the IR's taken block when the printed condition is the branch condition, and the fall-through
-// block otherwise. The check does not look at the text of statements, only at the tags and the
-// braces that the tags describe.
+// enter the IR's taken block when the printed condition is the branch condition, and the
+// fall-through block otherwise. The check does not look at the text of statements, only at the tags
+// and the braces that the tags describe.
 //
 // A mismatch is a bug in the structurer: the printer must not print code whose control flow
 // differs from the IR's. structure_function uses this check as a gate on each candidate structure.
@@ -283,10 +283,10 @@ constexpr std::size_t kUnplaced = std::numeric_limits<std::size_t>::max();
 
 struct Frame {
   bool loop = false;
-  BlockId follow = kNoBlock;      ///< the block a break names
-  BlockId header = kNoBlock;      ///< loops: the block a continue names
-  std::size_t follow_label = 0;   ///< where a break goes
-  std::size_t continue_label = 0; ///< where a continue goes (the test of a do loop)
+  BlockId follow = kNoBlock;       ///< the block a break names
+  BlockId header = kNoBlock;       ///< loops: the block a continue names
+  std::size_t follow_label = 0;    ///< where a break goes
+  std::size_t continue_label = 0;  ///< where a continue goes (the test of a do loop)
 };
 
 /// Lowers the tree to operations with C's jump rules.
@@ -339,7 +339,8 @@ class Lowerer {
       }
       const Frame& frame = frames_.back();
       if (frame.follow != claim) {
-        return fail("break at line " + std::to_string(line) + " names a block that is not the end "
+        return fail("break at line " + std::to_string(line) +
+                    " names a block that is not the end "
                     "of the innermost loop or switch");
       }
       emit(Op::Kind::Jump, kNoBlock, line);
@@ -352,7 +353,8 @@ class Lowerer {
         continue;
       }
       if (frame->header != claim) {
-        return fail("continue at line " + std::to_string(line) + " names a block that is not the "
+        return fail("continue at line " + std::to_string(line) +
+                    " names a block that is not the "
                     "header of the innermost loop");
       }
       emit(Op::Kind::Jump, kNoBlock, line);
@@ -510,7 +512,8 @@ struct Tail {
 /// Compares the lowered code with the IR. `ops` are resolved in place.
 class Checker {
  public:
-  Checker(const IrFunction& function, std::vector<Op>& ops, const std::vector<std::size_t>& label_pos)
+  Checker(const IrFunction& function, std::vector<Op>& ops,
+          const std::vector<std::size_t>& label_pos)
       : function_(function), ops_(ops), label_pos_(label_pos) {}
 
   std::optional<std::string> run() {
@@ -522,7 +525,8 @@ class Checker {
         continue;
       }
       if (op.block >= count) {
-        return "a printed block that the function does not have (line " + std::to_string(op.line) + ")";
+        return "a printed block that the function does not have (line " + std::to_string(op.line) +
+               ")";
       }
       if (first_block_[op.block] == kUnplaced) {
         first_block_[op.block] = pos;
@@ -657,9 +661,7 @@ class Checker {
     return tail;
   }
 
-  [[nodiscard]] static std::string hex(std::uint64_t value) {
-    return "#" + std::to_string(value);
-  }
+  [[nodiscard]] static std::string hex(std::uint64_t value) { return "#" + std::to_string(value); }
 
   [[nodiscard]] static std::string describe(const Reach& reach) {
     if (reach.cycle) {
@@ -696,8 +698,8 @@ class Checker {
         return std::nullopt;
       case IrOp::Branch: {
         if (tail.kind != Tail::Kind::Single || !is_exactly(tail.single, terminator.a.block)) {
-          return name + " branches to " + hex(terminator.a.block) + ", but the printed code continues to " +
-                 describe(tail.single);
+          return name + " branches to " + hex(terminator.a.block) +
+                 ", but the printed code continues to " + describe(tail.single);
         }
         return std::nullopt;
       }
@@ -710,16 +712,17 @@ class Checker {
         if (tail.tested != block) {
           return name + " is printed as the test of " + hex(tail.tested);
         }
-        // The printed condition holds exactly when the IR's does, unless the printer complemented it.
+        // The printed condition holds exactly when the IR's does, unless the printer complemented
+        // it.
         const BlockId expect_true = tail.negated ? fall : taken;
         const BlockId expect_false = tail.negated ? taken : fall;
         if (!is_exactly(tail.taken, expect_true)) {
-          return name + ": when the printed condition holds control goes to " + describe(tail.taken) +
-                 ", the IR expects " + hex(expect_true);
+          return name + ": when the printed condition holds control goes to " +
+                 describe(tail.taken) + ", the IR expects " + hex(expect_true);
         }
         if (!is_exactly(tail.fall, expect_false)) {
-          return name + ": when the printed condition fails control goes to " + describe(tail.fall) +
-                 ", the IR expects " + hex(expect_false);
+          return name + ": when the printed condition fails control goes to " +
+                 describe(tail.fall) + ", the IR expects " + hex(expect_false);
         }
         return std::nullopt;
       }
@@ -740,7 +743,8 @@ class Checker {
           }
           printed.push_back(arm.blocks[0]);
         }
-        // The dispatch may also go past the switch when no arm matches (no default arm in the code).
+        // The dispatch may also go past the switch when no arm matches (no default arm in the
+        // code).
         if (printed.size() == expected.size() + 1) {
           printed.pop_back();
         }
@@ -757,9 +761,8 @@ class Checker {
   }
 };
 
-
-/// The condition the printer shows for the branch of `block` (complemented when `negated`), rendered
-/// again here; empty when the block does not end in a conditional branch.
+/// The condition the printer shows for the branch of `block` (complemented when `negated`),
+/// rendered again here; empty when the block does not end in a conditional branch.
 std::string expected_condition(const IrFunction& function, BlockId block, bool negated,
                                const std::map<std::uint64_t, std::string>* literals) {
   const IrBlock& ir = function.blocks[block];
@@ -778,9 +781,9 @@ std::string hex_value(std::uint64_t value) {
 
 /// The text of each control line must say what its tag says: the condition of a branch, the value
 /// of a case, and the keyword of a jump. Statements are not checked here.
-std::optional<std::string> check_control_text(const IrFunction& function,
-                                              const std::vector<StructuredLine>& lines,
-                                              const std::map<std::uint64_t, std::string>* literals) {
+std::optional<std::string> check_control_text(
+    const IrFunction& function, const std::vector<StructuredLine>& lines,
+    const std::map<std::uint64_t, std::string>* literals) {
   const std::size_t count = function.blocks.size();
   for (std::size_t index = 0; index < lines.size(); ++index) {
     const StructuredLine& line = lines[index];
@@ -799,7 +802,8 @@ std::optional<std::string> check_control_text(const IrFunction& function,
     switch (tag.kind) {
       case LineKind::IfOpen: {
         if (!block_ok(tag.block)) return wrong("a block the function does not have");
-        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        const std::string condition =
+            expected_condition(function, tag.block, tag.negated, literals);
         if (text != "if (" + condition + ") {") return wrong("if (" + condition + ") {");
         break;
       }
@@ -820,7 +824,8 @@ std::optional<std::string> check_control_text(const IrFunction& function,
       case LineKind::WhileOpen: {
         if (tag.pure) {
           if (!block_ok(tag.block)) return wrong("a block the function does not have");
-          const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+          const std::string condition =
+              expected_condition(function, tag.block, tag.negated, literals);
           if (!starts_with(text, "while (" + condition + ") {")) {
             return wrong("while (" + condition + ") {");
           }
@@ -831,8 +836,10 @@ std::optional<std::string> check_control_text(const IrFunction& function,
       }
       case LineKind::ForOpen: {
         if (!block_ok(tag.block)) return wrong("a block the function does not have");
-        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
-        if (!starts_with(text, "for (") || text.find("; " + condition + "; ") == std::string::npos) {
+        const std::string condition =
+            expected_condition(function, tag.block, tag.negated, literals);
+        if (!starts_with(text, "for (") ||
+            text.find("; " + condition + "; ") == std::string::npos) {
           return wrong("for (...; " + condition + "; ...) {");
         }
         break;
@@ -842,12 +849,14 @@ std::optional<std::string> check_control_text(const IrFunction& function,
         break;
       case LineKind::DoClose: {
         if (!block_ok(tag.block)) return wrong("a block the function does not have");
-        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        const std::string condition =
+            expected_condition(function, tag.block, tag.negated, literals);
         if (text != "} while (" + condition + ");") return wrong("} while (" + condition + ");");
         break;
       }
       case LineKind::Case:
-        if (text != "case " + hex_value(tag.value) + ":") return wrong("case " + hex_value(tag.value) + ":");
+        if (text != "case " + hex_value(tag.value) + ":")
+          return wrong("case " + hex_value(tag.value) + ":");
         break;
       case LineKind::Default:
         if (text != "default:") return wrong("default:");

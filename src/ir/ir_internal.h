@@ -161,7 +161,8 @@ struct StructureResult {
   StructureOutcome outcome = StructureOutcome::Labelled;
   std::vector<StructuredLine> lines;  ///< empty when Labelled
   std::size_t gotos = 0;
-  /// Candidate structures the control-flow check refused before one passed (a bug in the candidate).
+  /// Candidate structures the control-flow check refused before one passed (a bug in the
+  /// candidate).
   std::size_t oracle_rejections = 0;
   /// The first refusal of the control-flow check, or empty.
   std::string oracle_detail;
@@ -171,13 +172,14 @@ struct StructureResult {
 
 /// Rules of the goto structurer (G04-T5, src/ir/structure_goto.cpp). Each can be switched off, so a
 /// test can show what the rule does: with it off, the construct it prints is a goto instead.
-inline constexpr std::uint32_t kGotoRuleSequence = 1U << 0;   ///< a block printed after its only path
-inline constexpr std::uint32_t kGotoRuleIfElse = 1U << 1;     ///< a condition as if/else at its join
-inline constexpr std::uint32_t kGotoRuleLoop = 1U << 2;       ///< a natural loop as a loop
+inline constexpr std::uint32_t kGotoRuleSequence = 1U
+                                                   << 0;   ///< a block printed after its only path
+inline constexpr std::uint32_t kGotoRuleIfElse = 1U << 1;  ///< a condition as if/else at its join
+inline constexpr std::uint32_t kGotoRuleLoop = 1U << 2;    ///< a natural loop as a loop
 inline constexpr std::uint32_t kGotoRuleWhileTest = 1U << 3;  ///< a pure-test header as `while (C)`
-inline constexpr std::uint32_t kGotoRuleBreak = 1U << 4;      ///< a branch to a loop's or switch's end
-inline constexpr std::uint32_t kGotoRuleContinue = 1U << 5;   ///< a branch to a loop header
-inline constexpr std::uint32_t kGotoRuleSwitch = 1U << 6;     ///< a switch with its arms printed
+inline constexpr std::uint32_t kGotoRuleBreak = 1U << 4;  ///< a branch to a loop's or switch's end
+inline constexpr std::uint32_t kGotoRuleContinue = 1U << 5;  ///< a branch to a loop header
+inline constexpr std::uint32_t kGotoRuleSwitch = 1U << 6;    ///< a switch with its arms printed
 inline constexpr std::uint32_t kGotoRuleAll = 0x7FU;
 
 struct GotoStructure {

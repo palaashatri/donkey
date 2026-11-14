@@ -929,7 +929,8 @@ struct Structurer {
   }
 
   void fb_emit_loop(FbLoop& loop) {
-    line("while (1) {", 0, make_tag(LineKind::WhileOpen, loop.header, loop.has_follow ? loop.follow : kNoBlock));
+    line("while (1) {", 0,
+         make_tag(LineKind::WhileOpen, loop.header, loop.has_follow ? loop.follow : kNoBlock));
     ++indent_;
     fb_active_.push_back(&loop);
     fb_region(loop.header, kNoBlock, loop.header);
@@ -1025,7 +1026,8 @@ struct Structurer {
           fb_region(target, arm_stop, block);
         };
         if (taken == join) {
-          line("if (" + condition_of(block, true) + ") {", 0, make_tag(LineKind::IfOpen, block, kNoBlock, true));
+          line("if (" + condition_of(block, true) + ") {", 0,
+               make_tag(LineKind::IfOpen, block, kNoBlock, true));
           ++indent_;
           emit_arm(fallthrough, join);
           --indent_;
@@ -1270,7 +1272,8 @@ struct Structurer {
     for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
       in_header_.insert(statement_key(plan.latch, index));
     }
-    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address, make_tag(LineKind::ForOpen, loop.header, loop.exit, loop.negate_condition, true));
+    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address,
+         make_tag(LineKind::ForOpen, loop.header, loop.exit, loop.negate_condition, true));
     ++indent_;
     frames_.push_back(LoopFrame{loop.exit, 0});
     emit_range(loop.header + 1, loop.exit, loop.header);
@@ -1633,7 +1636,8 @@ struct Structurer {
         if (!frames_.empty()) {
           ++frames_.back().switch_depth;
         }
-        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {", 0, make_tag(LineKind::SwitchOpen, index, join));
+        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {", 0,
+             make_tag(LineKind::SwitchOpen, index, join));
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
           char val_buf[32];
@@ -1734,7 +1738,8 @@ struct Structurer {
       // exit are handled as an if-guard below, never skipped: dropping them
       // would make the following blocks run unconditionally.
       if (loop_header != kNoBlock && target == loop_header) {
-        line("if (" + condition_of(index, false) + ") continue;", 0, ifjump_tag(index, LineKind::Continue, loop_header));
+        line("if (" + condition_of(index, false) + ") continue;", 0,
+             ifjump_tag(index, LineKind::Continue, loop_header));
         ++index;
         continue;
       }
@@ -1748,7 +1753,8 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") break;", 0, ifjump_tag(index, LineKind::Break, frames_.back().exit));
+        line("if (" + condition_of(index, false) + ") break;", 0,
+             ifjump_tag(index, LineKind::Break, frames_.back().exit));
         ++index;
         continue;
       }
@@ -1786,7 +1792,8 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, true) + ") {", 0, make_tag(LineKind::IfOpen, index, kNoBlock, true));
+        line("if (" + condition_of(index, true) + ") {", 0,
+             make_tag(LineKind::IfOpen, index, kNoBlock, true));
         ++indent_;
         emit_range(fallthrough, join, loop_header);
         --indent_;
@@ -1889,7 +1896,8 @@ struct Structurer {
           plan != for_plans_.end() && emit_counted_loop(loop, plan->second)) {
         return true;
       }
-      line("while (" + condition_of(loop.header, loop.negate_condition) + ") {", 0, make_tag(LineKind::WhileOpen, loop.header, loop.exit, loop.negate_condition, true));
+      line("while (" + condition_of(loop.header, loop.negate_condition) + ") {", 0,
+           make_tag(LineKind::WhileOpen, loop.header, loop.exit, loop.negate_condition, true));
       ++indent_;
       frames_.push_back(LoopFrame{loop.exit, 0});
       emit_range(first_body, loop.exit, loop.header);
@@ -1929,7 +1937,8 @@ struct Structurer {
     }
     frames_.pop_back();
     --indent_;
-    line("} while (" + condition_of(latch, loop.negate_condition) + ");", 0, make_tag(LineKind::DoClose, latch, kNoBlock, loop.negate_condition));
+    line("} while (" + condition_of(latch, loop.negate_condition) + ");", 0,
+         make_tag(LineKind::DoClose, latch, kNoBlock, loop.negate_condition));
     return true;
   }
 
@@ -2059,7 +2068,8 @@ StructureResult structure_function(const IrFunction& function,
     } else {
       result.lines = std::move(goto_structure->lines);
       result.gotos = goto_structure->gotos;
-      result.outcome = result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
+      result.outcome =
+          result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
       return result;
     }
   }

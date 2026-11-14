@@ -888,9 +888,10 @@ for Partial functions.
   is chosen, and its termination depends on the rewrite. An emitter that prints each block once,
   with gotos as the only escape, terminates by construction (recursion is bounded by the block
   count), and its output is checked by the oracle below, so a wrong choice is caught either way.
-- **Files:** `src/ir/structure.cpp` (tagged lines; the goto structurer as the last stage),
-  `src/ir/ir_internal.h` (line tags), `src/ir/structure_check.cpp` and `src/ir/structure_check.h`
-  (new; the oracle, listed in `src/ir/CMakeLists` explicitly), `src/ir/ir.cpp` (the note),
+- **Files:** `src/ir/structure.cpp` (tagged lines; the gate on the candidates),
+  `src/ir/structure_goto.cpp` (new; the goto structurer, the last stage), `src/ir/structure_check.cpp`
+  (new; the control-flow check), `src/ir/ir_internal.h` (line tags; the rule bits), the source list
+  in the top-level `CMakeLists.txt` (explicit), `src/ir/ir.cpp` (the note),
   `apps/donkey-cli/commands.cpp` (the class name), `tests/unit/ir_test.cpp`,
   `tests/unit/decompiler_corpus_test.cpp`, `tools/audit/sample_list.py`.
 - **Steps:**

@@ -5158,9 +5158,10 @@ TEST(Ir, FallbackStopsCopyingAtTheFunctionBudget) {
 }
 
 TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
-  // The shape of IrreducibleControlFlowPrintsGotoNotLabelledBlocks. The function is irreducible, and
-  // the split makes it reducible, but the structurer still rejects the split (a loop header with two
-  // entries from outside), so the printed form is the goto structurer's: one goto, no labelled form.
+  // The shape of IrreducibleControlFlowPrintsGotoNotLabelledBlocks. The function is irreducible,
+  // and the split makes it reducible, but the structurer still rejects the split (a loop header
+  // with two entries from outside), so the printed form is the goto structurer's: one goto, no
+  // labelled form.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5202,8 +5203,8 @@ namespace {
 using donkey::detail::check_structured_control_flow;
 using donkey::detail::GotoStructure;
 using donkey::detail::kGotoRuleAll;
-using donkey::detail::StructuredLine;
 using donkey::detail::structure_with_gotos;
+using donkey::detail::StructuredLine;
 
 std::string printed(const std::vector<StructuredLine>& lines) {
   std::string text;
@@ -5237,7 +5238,9 @@ IrStatement switch_on_rax(std::uint32_t default_block, std::vector<IrSwitchCase>
   return statement;
 }
 
-constexpr std::uint32_t kWithout(std::uint32_t rule) { return kGotoRuleAll & ~rule; }
+constexpr std::uint32_t kWithout(std::uint32_t rule) {
+  return kGotoRuleAll & ~rule;
+}
 
 }  // namespace
 
@@ -5268,8 +5271,8 @@ TEST(Ir, RuleIfElsePrintsADiamondAsIfElse) {
 }
 
 TEST(Ir, IfWithoutElsePrintsItsComplementedCondition) {
-  // if (rax == 0) { rdx = 1; } return rdx; -- the taken side is the join, so the printed condition is
-  // the complement of the branch's (rax != 0) and the body is the fall-through.
+  // if (rax == 0) { rdx = 1; } return rdx; -- the taken side is the join, so the printed condition
+  // is the complement of the branch's (rax != 0) and the body is the fall-through.
   const IrFunction f = fb_function({
       {fb_compare(), fb_branch(2)},
       {fb_set("rdx", 1), fb_jump(2)},

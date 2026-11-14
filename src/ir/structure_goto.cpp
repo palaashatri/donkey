@@ -3,9 +3,11 @@
 // It prints every block of a valid graph once, as structured C, and uses `goto` only for an edge
 // that no structured form expresses. Each block is printed where control first reaches it along a
 // path that the rules below can express; every other edge into a printed block is a goto to a label
-// on that block. The rules, tried in this order for an edge from the code being printed to a block T
+// on that block. The rules, tried in this order for an edge from the code being printed to a block
+// T
 // (`decide`):
-//   1. T is where the enclosing region falls out (its stop, when the caller prints it next): nothing.
+//   1. T is where the enclosing region falls out (its stop, when the caller prints it next):
+//   nothing.
 //   2. T is the header of the innermost loop: `continue;`.
 //   3. T is the end (follow) of the innermost loop or switch: `break;`.
 //   4. T is not printed yet, is dominated by the region's root and is not the end of an enclosing
@@ -13,14 +15,15 @@
 //   5. Otherwise `goto T;`, with a label on T.
 // A conditional branch is printed as if/else with both arms walked up to its immediate
 // post-dominator (its join): an arm that reaches the join falls out of the `if` when the join is
-// printed after it, and jumps otherwise. A natural loop is printed as `while (test)` when its header
-// is a pure test that leaves through one arm, and as `while (1)` otherwise; its follow is its exit
-// that most of its body reaches. A switch prints each arm from its target, with `break;` where an arm
-// reaches the join.
+// printed after it, and jumps otherwise. A natural loop is printed as `while (test)` when its
+// header is a pure test that leaves through one arm, and as `while (1)` otherwise; its follow is
+// its exit that most of its body reaches. A switch prints each arm from its target, with `break;`
+// where an arm reaches the join.
 //
 // The region stops are what make the output correct without a second pass over the text: an arm
-// falls out only by reaching its stop, so the code after the `if` is the join's code exactly when the
-// arm reached it. The control-flow check (check_structured_control_flow) verifies the result anyway.
+// falls out only by reaching its stop, so the code after the `if` is the join's code exactly when
+// the arm reached it. The control-flow check (check_structured_control_flow) verifies the result
+// anyway.
 //
 // The emitter runs twice. The first run finds the blocks that a goto names; the second prints the
 // labels. Both runs take the same decisions, because labels do not change the structure.
@@ -50,21 +53,25 @@ struct Next {
   Outcome outcome = Outcome::Jumps;
 };
 
-/// The region being printed: the block its code is dominated by, and where it ends. `stop` is a block
-/// that the region ends at: when `stop_falls`, reaching it falls out (the caller prints it next), and
-/// otherwise reaching it is an ordinary edge (a goto, break or continue).
+/// The region being printed: the block its code is dominated by, and where it ends. `stop` is a
+/// block that the region ends at: when `stop_falls`, reaching it falls out (the caller prints it
+/// next), and otherwise reaching it is an ordinary edge (a goto, break or continue).
 struct Ctx {
   BlockId root = kNoBlock;
   BlockId stop = kNoBlock;
   bool stop_falls = false;
 };
 
-/// An enclosing loop or switch: `follow` is where a break goes (kNoBlock when there is none), and
-/// `header` is where a continue goes (loops only).
+/// An enclosing loop or switch: `follow` is its end (kNoBlock when there is none), and `header` is
+/// where a continue goes (loops only). A break goes to `follow` only when `breaks` is set. That is
+/// true for a loop, whose follow is always printed (or jumped to) right after it, and false for a
+/// switch: its join is printed after the switch only when an arm falls out to it, so a break there
+/// would jump to whatever follows the switch instead.
 struct Frame {
   bool loop = false;
   BlockId header = kNoBlock;
   BlockId follow = kNoBlock;
+  bool breaks = false;
 };
 
 /// A natural loop: the blocks of its body, its follow, and whether its header is a pure test that
@@ -113,8 +120,8 @@ class Emitter {
       }
       char buffer[64];
       if (same > 1) {
-        std::snprintf(buffer, sizeof buffer, "loc_%llx_%zu", static_cast<unsigned long long>(address),
-                      static_cast<std::size_t>(block));
+        std::snprintf(buffer, sizeof buffer, "loc_%llx_%zu",
+                      static_cast<unsigned long long>(address), static_cast<std::size_t>(block));
       } else {
         std::snprintf(buffer, sizeof buffer, "loc_%llx", static_cast<unsigned long long>(address));
       }
@@ -350,7 +357,8 @@ class Emitter {
 
   /// Takes the lines printed since `mark`, out of the output.
   std::vector<StructuredLine> take(std::size_t mark) {
-    std::vector<StructuredLine> taken(lines_.begin() + static_cast<std::ptrdiff_t>(mark), lines_.end());
+    std::vector<StructuredLine> taken(lines_.begin() + static_cast<std::ptrdiff_t>(mark),
+                                      lines_.end());
     lines_.resize(mark);
     return taken;
   }
@@ -415,10 +423,11 @@ class Emitter {
     return nullptr;
   }
 
-  /// Whether `target` can be printed next, inside the region: not printed, dominated by the root, not
-  /// the end of an enclosing construct, and not the stop.
+  /// Whether `target` can be printed next, inside the region: not printed, dominated by the root,
+  /// not the end of an enclosing construct, and not the stop.
   [[nodiscard]] bool walkable(BlockId target, const Ctx& ctx) const {
-    if ((rules_ & kGotoRuleSequence) == 0 || target >= function_.blocks.size() || emitted_[target]) {
+    if ((rules_ & kGotoRuleSequence) == 0 || target >= function_.blocks.size() ||
+        emitted_[target]) {
       return false;
     }
     if (ctx.stop != kNoBlock && target == ctx.stop) {
@@ -460,7 +469,7 @@ class Emitter {
         return done(Outcome::Jumps);
       }
     }
-    if ((rules_ & kGotoRuleBreak) != 0 && !frames_.empty() &&
+    if ((rules_ & kGotoRuleBreak) != 0 && !frames_.empty() && frames_.back().breaks &&
         frames_.back().follow != kNoBlock && target == frames_.back().follow) {
       push("break;", 0, make_tag(LineKind::Break, target));
       return done(Outcome::Jumps);
@@ -495,17 +504,19 @@ class Emitter {
 
   // ---- blocks ----------------------------------------------------------------------------------
 
-  /// A loop whose header is entered here is printed as a loop; its follow is then the next decision.
+  /// A loop whose header is entered here is printed as a loop; its follow is then the next
+  /// decision.
   Next emit_loop(const LoopInfo& loop, const Ctx& ctx) {
     const BlockId header = loop.header;
     const BlockId follow = loop.follow;
-    frames_.push_back(Frame{true, header, follow});
+    frames_.push_back(Frame{true, header, follow, true});
     const bool test_form = (rules_ & kGotoRuleWhileTest) != 0 && loop.pure;
     if (test_form) {
       emitted_[header] = true;
       const bool negated = !loop.stay_taken;
       const std::string label = labelled_[header] ? names_[header] + ": " : std::string();
-      push(label + "while (" + condition_of(header, negated) + ") {", function_.blocks[header].address,
+      push(label + "while (" + condition_of(header, negated) + ") {",
+           function_.blocks[header].address,
            make_tag(LineKind::WhileOpen, header, follow, negated, true));
       ++depth_;
       const Ctx body{header, header, true};
@@ -536,8 +547,9 @@ class Emitter {
       return emit_loop(loops_[static_cast<std::size_t>(loop_of_[block])], ctx);
     }
     emitted_[block] = true;
-    const std::size_t marker = push(labelled_[block] ? names_[block] + ":" : std::string(),
-                                    function_.blocks[block].address, make_tag(LineKind::Marker, block));
+    const std::size_t marker =
+        push(labelled_[block] ? names_[block] + ":" : std::string(),
+             function_.blocks[block].address, make_tag(LineKind::Marker, block));
     const IrBlock& ir = function_.blocks[block];
     const IrStatement& terminator = ir.statements.back();
     Next result = done(Outcome::Jumps);
@@ -665,7 +677,7 @@ class Emitter {
       targets.push_back(def);
     }
 
-    frames_.push_back(Frame{false, kNoBlock, arm_stop});
+    frames_.push_back(Frame{false, kNoBlock, arm_stop, false});
     std::string operand = render_operand(function_, terminator.dest, literals_);
     push("switch (" + operand + ") {", function_.blocks[block].address,
          make_tag(LineKind::SwitchOpen, block, arm_stop));
@@ -675,7 +687,8 @@ class Emitter {
       for (const IrSwitchCase& switch_case : terminator.switch_cases) {
         if (switch_case.target_block == target) {
           char value[32];
-          std::snprintf(value, sizeof value, "0x%llx", static_cast<unsigned long long>(switch_case.value));
+          std::snprintf(value, sizeof value, "0x%llx",
+                        static_cast<unsigned long long>(switch_case.value));
           LineTag tag = make_tag(LineKind::Case);
           tag.value = switch_case.value;
           push(std::string("case ") + value + ":", 0, tag);
@@ -709,9 +722,9 @@ class Emitter {
 
 }  // namespace
 
-std::optional<GotoStructure> structure_with_gotos(const IrFunction& function,
-                                                  const std::map<std::uint64_t, std::string>* string_literals,
-                                                  std::uint32_t rules) {
+std::optional<GotoStructure> structure_with_gotos(
+    const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals,
+    std::uint32_t rules) {
   // The first run finds the labels; the second prints them. The structure is the same in both.
   Emitter first(function, string_literals, rules, {});
   if (!first.prepare() || !first.run()) {
