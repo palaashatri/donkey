@@ -5212,3 +5212,29 @@ TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentIsPartial) {
   ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   EXPECT_TRUE(lifted.value().partial);
 }
+
+TEST(Ir, IndirectTailJumpCallsItsOperand) {
+  // jmp rax (ff e0): a tail call through a register. The call must name rax, not address 0.
+  const std::uint8_t bytes[] = {0xff, 0xe0};
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrStatement* call = nullptr;
+  for (const IrBlock& block : lifted.value().blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.op == IrOp::Call) {
+        call = &statement;
+      }
+    }
+  }
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->a.kind, IrOperandKind::Register);
+  EXPECT_EQ(call->a.reg, "rax");
+}

@@ -2790,10 +2790,17 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           call.op = IrOp::Call;
           call.source_address = instruction.address;
           call.width = lifter.pointer_width;
-          call.a = instruction.direct_target.has_value()
-                       ? IrOperand::constant_value(instruction.direct_target.value(),
-                                                   lifter.pointer_width)
-                       : IrOperand::constant_value(0, lifter.pointer_width);
+          if (instruction.direct_target.has_value()) {
+            call.a =
+                IrOperand::constant_value(instruction.direct_target.value(), lifter.pointer_width);
+          } else if (!instruction.structured_operands.empty()) {
+            // An indirect jump (jmp rax, jmp [rip+x]) is called through its own operand, as an
+            // indirect call is.
+            call.a = to_ir_operand(instruction.structured_operands.front(), instruction,
+                                   lifter.pointer_width);
+          } else {
+            call.a = IrOperand::constant_value(0, lifter.pointer_width);
+          }
           if (const auto callee = lifter.known_callee(instruction)) {
             // A tail call to a function of the image with a known signature: the callee runs with
             // the caller's argument registers, and its result is what this function returns.
