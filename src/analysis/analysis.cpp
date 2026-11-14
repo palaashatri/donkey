@@ -1,5 +1,7 @@
 #include "donkey/analysis/analysis.h"
 
+#include "donkey/binary/eh_frame.h"
+
 #include <algorithm>
 #include <iterator>
 #include <limits>
@@ -487,6 +489,19 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       seeds.insert(xref.to);
     }
   }
+  // Unwind tables (G23-T1): every FDE of `.eh_frame` names a function's range, stripped or not.
+  // A start found only here is marked with the unwind provenance.
+  std::set<std::uint64_t> unwind_starts;
+  if (auto frames = read_eh_frame_of_image(image, file); frames) {
+    for (const EhFrameFunction& frame : frames.value().functions) {
+      if (executable_contains(image, frame.start)) {
+        seeds.insert(frame.start);
+        unwind_starts.insert(frame.start);
+      }
+    }
+  } else {
+    result.diagnostics.push_back(frames.diagnostic());
+  }
   std::set<std::uint64_t> user_defined;
   for (const std::uint64_t address : options.user_function_starts) {
     if (executable_contains(image, address)) {
@@ -514,6 +529,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     Function seed;
     seed.address = address;
     seed.from_symbol = named.count(address) != 0;
+    seed.from_unwind = unwind_starts.count(address) != 0;
     for (const Symbol& symbol : image.symbols) {
       if (!symbol.imported && !symbol.name.empty() && symbol.address == address &&
           (symbol.kind == SymbolKind::Function || symbol.exported)) {

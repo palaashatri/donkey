@@ -668,7 +668,8 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                ", \"blocks\": " + std::to_string(function.block_count) +
                ", \"estimated\": " + (function.estimated ? "true" : "false") +
                ", \"exported\": " + (function.exported ? "true" : "false") +
-               ", \"from_symbol\": " + (function.from_symbol ? "true" : "false") + "}";
+               ", \"from_symbol\": " + (function.from_symbol ? "true" : "false") +
+               ", \"from_unwind\": " + (function.from_unwind ? "true" : "false") + "}";
       }
       out += analysis.functions.empty() ? "]\n" : "\n  ]\n";
       out += "}\n";

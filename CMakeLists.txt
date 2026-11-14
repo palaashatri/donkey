@@ -70,6 +70,7 @@ add_library(donkey_binary STATIC
   src/binary/byte_buffer.cpp
   src/binary/byte_reader.cpp
   src/binary/dwarf.cpp
+  src/binary/eh_frame.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
   src/binary/isolation.cpp
@@ -336,6 +337,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_minidump PRIVATE cxx_std_20)
   target_compile_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_eh_frame fuzz/fuzz_eh_frame.cpp)
+  target_link_libraries(fuzz_eh_frame PRIVATE donkey::binary)
+  target_compile_features(fuzz_eh_frame PRIVATE cxx_std_20)
+  target_compile_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_core fuzz/fuzz_core.cpp)
   target_link_libraries(fuzz_core PRIVATE donkey::binary)
   target_compile_features(fuzz_core PRIVATE cxx_std_20)

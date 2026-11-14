@@ -161,6 +161,7 @@ add_executable(donkey_unit_tests
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
+  unit/eh_frame_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
