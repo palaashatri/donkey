@@ -433,6 +433,7 @@ struct Structurer {
     fb_find_loops();
     fb_emitted_.assign(count, false);
     fb_failed_ = false;
+    fb_duplicated_ = 0;
     fb_region(0, count, 0);
     if (fb_failed_) {
       return std::nullopt;
@@ -452,6 +453,17 @@ struct Structurer {
   std::vector<BitSet> post_;
   std::vector<bool> fb_emitted_;
   bool fb_failed_ = false;
+  // Return blocks are copied rather than rejected when reached twice: at most this many statements
+  // per copied block, and this many duplicated statements per function.
+  static constexpr std::size_t kReturnCopyMaxStatements = 8;
+  static constexpr std::size_t kReturnCopyBudget = 64;
+  std::size_t fb_duplicated_ = 0;
+
+  [[nodiscard]] bool fb_is_return_block(BlockId block) const {
+    return block < function_.blocks.size() && graph_.successors[block].empty() &&
+           !function_.blocks[block].statements.empty() &&
+           function_.blocks[block].statements.back().op == IrOp::Return;
+  }
   std::vector<FbLoop> fb_loops_;
   std::vector<const FbLoop*> fb_active_;
 
@@ -637,13 +649,15 @@ struct Structurer {
           return FbEdge::Reject;  // a jump out of two loops is not structured here
         }
       }
-      if (!inner.body[target]) {
-        // A return block that the loop leaves is printed in place.
-        if (!graph_.successors[target].empty() || fb_emitted_[target]) {
-          return FbEdge::Reject;
-        }
-        return FbEdge::Continue;
+      if (!inner.body[target] && !fb_is_return_block(target)) {
+        return FbEdge::Reject;  // the loop leaves to a block that is not its follow and not a
+                                // return
       }
+    }
+    // A return block has no successors, so it cannot escape the region, and it may be printed
+    // again as a copy (see fb_region).
+    if (fb_is_return_block(target)) {
+      return FbEdge::Continue;
     }
     if (fb_emitted_[target] || !dominators_[target].test(root)) {
       return FbEdge::Reject;
@@ -670,8 +684,23 @@ struct Structurer {
       if (fb_failed_ || block == stop) {
         return;
       }
-      if (block >= count || fb_emitted_[block]) {
-        fb_fail("a block is reached twice");
+      if (block >= count) {
+        fb_fail("a branch leaves the function");
+        return;
+      }
+      if (fb_emitted_[block]) {
+        // A return block reached again is printed as a copy, within the duplication bound.
+        if (!fb_is_return_block(block)) {
+          fb_fail("a block is reached twice");
+          return;
+        }
+        const std::size_t size = function_.blocks[block].statements.size();
+        if (size > kReturnCopyMaxStatements || fb_duplicated_ + size > kReturnCopyBudget) {
+          fb_fail("the return duplication bound is reached");
+          return;
+        }
+        fb_duplicated_ += size;
+        emit_statements(block, true);
         return;
       }
       if (FbLoop* loop = fb_loop_headed_by(block); loop != nullptr && !fb_active(block)) {

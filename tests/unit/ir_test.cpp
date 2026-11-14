@@ -5085,3 +5085,64 @@ TEST(Ir, FallbackJoinsAnIfAtItsPostDominator) {
   EXPECT_NE(text.value().find("rdx = 0x7;"), std::string::npos) << text.value();
   EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
 }
+
+TEST(Ir, FallbackCopiesASmallReturnBlockReachedTwice) {
+  // Block 3 is a one-statement return reached from block 0 and from block 1. The two arms of
+  // block 0 have no join but the virtual exit (block 2 returns elsewhere), so block 3 is printed
+  // in each arm: the second time as a copy.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(3)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 5), fb_return()},
+      {fb_set("rdx", 9), fb_return()},
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  std::size_t copies = 0;
+  for (std::size_t at = text.value().find("rdx = 0x9;"); at != std::string::npos;
+       at = text.value().find("rdx = 0x9;", at + 1)) {
+    ++copies;
+  }
+  EXPECT_EQ(copies, 2u) << text.value();
+}
+
+TEST(Ir, FallbackDoesNotCopyAReturnBlockOverEightStatements) {
+  // The same shape as FallbackCopiesASmallReturnBlockReachedTwice, but block 3 has nine statements
+  // (over the copy bound of eight), so the second arrival rejects and the function stays labelled.
+  std::vector<IrStatement> big;
+  for (int i = 0; i < 8; ++i) {
+    big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
+  }
+  big.push_back(fb_return());
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(3)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 5), fb_return()},
+      big,
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackStopsCopyingAtTheFunctionBudget) {
+  // Ten branches reach the eight-statement return block 10 (the first arrival prints it, the rest
+  // copy it): nine copies of eight statements is seventy-two, over the budget of sixty-four.
+  std::vector<IrStatement> big;
+  for (int i = 0; i < 7; ++i) {
+    big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
+  }
+  big.push_back(fb_return());  // eight statements in all: copyable, under the per-block bound
+  std::vector<std::vector<IrStatement>> blocks;
+  for (int i = 0; i < 9; ++i) {
+    blocks.push_back({fb_compare(), fb_branch(10)});
+  }
+  blocks.push_back({fb_compare(), fb_branch(11)});
+  blocks.push_back(big);
+  blocks.push_back({fb_set("rdx", 3), fb_return()});
+  const IrFunction f = fb_function(blocks);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("goto"), std::string::npos) << text.value();
+}

@@ -194,11 +194,12 @@ Progress (the state is in the commits; this list is the order of the work):
    structurer (`Structurer::run_fallback`), used only when the layout-based structurer and the
    reverse-postorder copy both reject a function. Measured below (step 1).
 2. Done: trampoline entry rule removed from `reverse_postorder_copy` (no output changed; see below).
-3. Next: bounded duplication of small return blocks in the fallback (step 5).
-4. Then: node splitting for irreducible functions under per-function and per-node bounds (step 2).
+3. Done: bounded duplication of small return blocks in the fallback (at most 8 statements per copied
+   block, at most 64 duplicated statements per function). Measured below (step 5): the bar is met.
+4. Next: node splitting for irreducible functions under per-function and per-node bounds (step 2).
 5. Then: full verification on the final commit, and the doc updates (G04, PARITY row 7, README, AGENTS).
 
-Bar: at most 1,032 of 1,986 labelled. Current: 1,071 (53.9%), not met.
+Bar: at most 1,032 of 1,986 labelled. Current: 996 (50.2%), met.
 
 
 Classification (`classify_structure`, `ir.h`): a function is **structured** (printed without labels),
@@ -211,7 +212,8 @@ measurement is `tools/audit/sample_list.py measure` on `tools/audit/results/list
 |---|---|---|---|---|---|
 | `665c9e4` (before the structuring work) | 669 | 143 | 1,174 | 1,317 | 66.3% |
 | `9b49613` (dominance loops, reverse-postorder copy, break rules) | 715 | 143 | 1,128 | 1,271 | 64.0% |
-| step 1: fallback structurer and post-dominators (this commit) | 915 | 143 | 928 | 1,071 | 53.9% |
+| step 1: fallback structurer and post-dominators | 915 | 143 | 928 | 1,071 | 53.9% |
+| step 5: return-block copies in the fallback (bounded) | 990 | 143 | 853 | 996 | 50.2% |
 
 The bar is at most 52% of the list (at most 1,032 functions labelled). Step 1 brings it to 1,071
 (53.9%), still not met.
@@ -288,4 +290,23 @@ output, 412,943 bytes each), so the rule was removed. The two trampoline tests a
 regressions and do not discriminate: `Ir.SyntheticEntryTrampolineDoesNotPrintAsGoto` and
 `Ir.SyntheticEntryTrampolineInAnIfWithTwoReturnsDoesNotPrintAsGoto` (the second is the shape of
 libc `sub_191770`). The original layout already structures these shapes.
+
+#### Step 5: bounded copies of return blocks (measured on the same 1,986 functions)
+
+A return block (a block with no successors, ending in `return`; a tail call is one) reached a second
+time in the fallback is printed again as a copy, if it has at most 8 statements and the copies in
+the function so far stay within 64 duplicated statements. A copy keeps the source addresses of the
+original. Past either bound the attempt is rejected and the function stays labelled.
+
+| Structured | Irreducible | Reducible but rejected | Labelled | Share |
+|---|---|---|---|---|
+| 990 | 143 | 853 | 996 | 50.2% |
+
+Rejections by the fallback (last attempt), 853 functions: a block is reached twice (not a return
+block) 342; a branch leaves its region 288; the return duplication bound is reached 128; an if joins
+outside its region 82; a loop leaves to a block that is not its follow 8; a switch 5.
+
+Tests (each fails when its rule is disabled, checked by hand): `Ir.FallbackCopiesASmallReturnBlockReachedTwice`
+(fails with the copy budget at zero), `Ir.FallbackDoesNotCopyAReturnBlockOverEightStatements`
+(the per-block bound), `Ir.FallbackStopsCopyingAtTheFunctionBudget` (fails with the budget at 1000).
 
