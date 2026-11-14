@@ -4777,6 +4777,10 @@ TEST(Ir, ConditionalBranchToTheLoopExitPrintsAsBreak) {
 // branches to the entry 2, which tests rdi and branches to 1 or falls through to 3; both join at 4,
 // a return.
 TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
+  // Block 0 is a synthetic entry trampoline (address 0) that jumps to block 2, the real entry.
+  // The original layout cannot structure this (the trampoline is a branch to a block that is not
+  // next), so the reverse-postorder copy must be used, and it must start at block 2, not at the
+  // trampoline. Without that entry rule the output contains a labelled goto.
   donkey::IrFunction f;
   f.address = 0x1000;
   f.name = "trampoline";
@@ -4799,10 +4803,10 @@ TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
   IrBlock trampoline;
   trampoline.address = 0;
   trampoline.statements.push_back(jump(2));
-  IrBlock else_arm;
-  else_arm.address = 0x1010;
-  else_arm.statements.push_back(assign_constant("rdx", 1));
-  else_arm.statements.push_back(jump(4));
+  IrBlock then_arm;
+  then_arm.address = 0x1008;
+  then_arm.statements.push_back(assign_constant("rdx", 2));
+  then_arm.statements.push_back(jump(4));
   IrBlock entry;
   entry.address = 0x1000;
   {
@@ -4821,10 +4825,10 @@ TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
     b.width = 8;
     entry.statements.push_back(b);
   }
-  IrBlock then_arm;
-  then_arm.address = 0x1008;
-  then_arm.statements.push_back(assign_constant("rdx", 2));
-  then_arm.statements.push_back(jump(4));
+  IrBlock else_arm;
+  else_arm.address = 0x1010;
+  else_arm.statements.push_back(assign_constant("rdx", 1));
+  else_arm.statements.push_back(jump(4));
   IrBlock join;
   join.address = 0x1020;
   {
@@ -4834,7 +4838,7 @@ TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
     r.width = 8;
     join.statements.push_back(r);
   }
-  f.blocks = {trampoline, else_arm, entry, then_arm, join};
+  f.blocks = {trampoline, then_arm, entry, else_arm, join};
   auto text = donkey::format_pseudocode(f);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
   EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
