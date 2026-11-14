@@ -5480,3 +5480,29 @@ TEST(Ir, ControlFlowCheckRefusesABlockThatIsNotPrinted) {
   ASSERT_TRUE(mismatch.has_value());
   EXPECT_NE(mismatch->find("not printed"), std::string::npos) << *mismatch;
 }
+TEST(Ir, SwitchInALoopWhoseArmLeavesTheLoopIsAGotoNotABreak) {
+  // A loop (header 1, body 1..5) whose only exit is block 6, the switch's join. Case 1 (block 4)
+  // leaves to 6 when rax == 0 and goes back to the header otherwise. A `break` in the switch would
+  // leave only the switch, so the leave is a goto (G04-T5: a switch's join is never a break
+  // target).
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(6)},
+      {switch_on_rax(3, {IrSwitchCase{0x1, 4}})},
+      {fb_set("rdx", 1), fb_jump(5)},
+      {fb_compare(), fb_branch(6)},
+      {fb_set("rdx", 3), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("case 0x1:"), std::string::npos) << printed(on.lines);
+  // The case arm itself does not break: its leave is the goto. (The loop's own exit from its test
+  // block is a break, which is correct.)
+  const std::string text = printed(on.lines);
+  const std::size_t arm = text.find("case 0x1:");
+  const std::size_t next = text.find("default:", arm);
+  ASSERT_NE(arm, std::string::npos) << text;
+  ASSERT_NE(next, std::string::npos) << text;
+  EXPECT_EQ(text.substr(arm, next - arm).find("break;"), std::string::npos) << text;
+}
