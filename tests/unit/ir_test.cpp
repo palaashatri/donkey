@@ -4700,3 +4700,144 @@ TEST(Ir, VerifierRejectsACallWithArgumentsButNoSignature) {
   ASSERT_FALSE(verified.has_value());
   EXPECT_EQ(verified.diagnostic().code, "ir.call_signature");
 }
+
+// Structuring (G8): a conditional branch to the enclosing loop's exit is `if (cond) break;`, not an
+// if region whose body is the exit's code. Hand-built IR: 1 is the loop header (its test leaves to
+// the exit, 5); 2 breaks out of the loop on a compare; 3 is the rest of the body; 4 is the latch.
+TEST(Ir, ConditionalBranchToTheLoopExitPrintsAsBreak) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "loop_break";
+  f.return_width = 8;
+  const auto compare = [](const std::string& reg) {
+    IrStatement c;
+    c.op = IrOp::Compare;
+    c.a = IrOperand::register_ref(reg, 8);
+    c.b = IrOperand::constant_value(0, 8);
+    c.condition = IrCondition::Equal;
+    c.width = 8;
+    return c;
+  };
+  const auto branch = [](IrCondition condition, std::uint32_t taken) {
+    IrStatement b;
+    b.op = IrOp::CondBranch;
+    b.condition = condition;
+    b.a = IrOperand::register_ref("rax", 8);
+    b.b = IrOperand::block_ref(taken);
+    b.width = 8;
+    return b;
+  };
+  const auto jump = [](std::uint32_t target) {
+    IrStatement j;
+    j.op = IrOp::Branch;
+    j.a = IrOperand::block_ref(target);
+    j.width = 8;
+    return j;
+  };
+  IrBlock entry;
+  entry.statements.push_back(jump(1));
+  IrBlock header;
+  header.statements.push_back(compare("rdi"));
+  header.statements.push_back(
+      branch(IrCondition::Equal, 5));  // while loop test: leaves to the exit
+  IrBlock inner;
+  inner.statements.push_back(compare("rsi"));
+  inner.statements.push_back(branch(IrCondition::Equal, 5));  // if (rsi == 0) break;
+  IrBlock rest;
+  {
+    IrStatement a;
+    a.op = IrOp::Assign;
+    a.dest = IrOperand::register_ref("rdx", 8);
+    a.a = IrOperand::constant_value(7, 8);
+    a.width = 8;
+    rest.statements.push_back(a);
+  }
+  rest.statements.push_back(jump(4));
+  IrBlock latch;
+  latch.statements.push_back(jump(1));
+  IrBlock exit;
+  {
+    IrStatement r;
+    r.op = IrOp::Return;
+    r.a = IrOperand::register_ref("rax", 8);
+    r.width = 8;
+    exit.statements.push_back(r);
+  }
+  f.blocks = {entry, header, inner, rest, latch, exit};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_NE(text.value().find("if ("), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find(") break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
+// Structuring (G8): the synthetic entry trampoline (a block at address 0 that only branches to the
+// entry, which lies after other blocks) must not show as `goto` or `loc_`. Hand-built IR: 0
+// branches to the entry 2, which tests rdi and branches to 1 or falls through to 3; both join at 4,
+// a return.
+TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "trampoline";
+  f.return_width = 8;
+  const auto jump = [](std::uint32_t target) {
+    IrStatement j;
+    j.op = IrOp::Branch;
+    j.a = IrOperand::block_ref(target);
+    j.width = 8;
+    return j;
+  };
+  const auto assign_constant = [](const std::string& reg, std::uint64_t value) {
+    IrStatement a;
+    a.op = IrOp::Assign;
+    a.dest = IrOperand::register_ref(reg, 8);
+    a.a = IrOperand::constant_value(value, 8);
+    a.width = 8;
+    return a;
+  };
+  IrBlock trampoline;
+  trampoline.address = 0;
+  trampoline.statements.push_back(jump(2));
+  IrBlock else_arm;
+  else_arm.address = 0x1010;
+  else_arm.statements.push_back(assign_constant("rdx", 1));
+  else_arm.statements.push_back(jump(4));
+  IrBlock entry;
+  entry.address = 0x1000;
+  {
+    IrStatement c;
+    c.op = IrOp::Compare;
+    c.a = IrOperand::register_ref("rdi", 8);
+    c.b = IrOperand::constant_value(0, 8);
+    c.condition = IrCondition::Equal;
+    c.width = 8;
+    entry.statements.push_back(c);
+    IrStatement b;
+    b.op = IrOp::CondBranch;
+    b.condition = IrCondition::Equal;
+    b.a = IrOperand::register_ref("rax", 8);
+    b.b = IrOperand::block_ref(1);
+    b.width = 8;
+    entry.statements.push_back(b);
+  }
+  IrBlock then_arm;
+  then_arm.address = 0x1008;
+  then_arm.statements.push_back(assign_constant("rdx", 2));
+  then_arm.statements.push_back(jump(4));
+  IrBlock join;
+  join.address = 0x1020;
+  {
+    IrStatement r;
+    r.op = IrOp::Return;
+    r.a = IrOperand::register_ref("rdx", 8);
+    r.width = 8;
+    join.statements.push_back(r);
+  }
+  f.blocks = {trampoline, else_arm, entry, then_arm, join};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("loc_"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}

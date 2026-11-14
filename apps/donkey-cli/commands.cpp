@@ -1623,6 +1623,16 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+/// The structure class and rejection reason of a lifted function, as a JSON object (G8 audit).
+std::string structure_json(const IrFunction& function) {
+  const StructureVerdict verdict = classify_structure(function);
+  const char* name = verdict.cls == StructureClass::Structured          ? "structured"
+                     : verdict.cls == StructureClass::Irreducible       ? "irreducible"
+                     : verdict.cls == StructureClass::ReducibleRejected ? "reducible_rejected"
+                                                                        : "other";
+  return "{\"class\": " + quote(name) + ", \"reason\": " + quote(verdict.reason) + "}";
+}
+
 int command_decompile(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -1827,6 +1837,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
              ", \"name\": " + quote(display_name(function->name)) +
              ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
              ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
+             ", \"structure\": " + structure_json(lifted.value()) +
              ", \"pseudocode\": " + quote(pc.full_text) + ", \"source_map\": [";
       for (std::size_t li = 0; li < pc.lines.size(); ++li) {
         out += li == 0 ? "\n" : ",\n";

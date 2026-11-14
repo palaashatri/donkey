@@ -65,6 +65,8 @@ def measure(args):
         wanted = set(entry["addresses"])
         decompiled = json.loads(run([args.cli, "decompile", entry["path"], "--json",
                                      "--max-functions", "1000000"]))
+        classes = {}
+        reasons = {}
         counts = {"sampled": 0, "found": 0, "Complete": 0, "Partial": 0, "Unsupported": 0,
                   "InvalidIR": 0, "call_note": 0, "structure_note": 0}
         for function in decompiled["functions"]:
@@ -77,7 +79,14 @@ def measure(args):
             text = function.get("pseudocode") or ""
             counts["call_note"] += int(CALL_NOTE in text)
             counts["structure_note"] += int(STRUCTURE_NOTE in text)
+            structure = function.get("structure") or {}
+            cls = structure.get("class", "none")
+            classes[cls] = classes.get(cls, 0) + 1
+            if cls in ("reducible_rejected", "other"):
+                reasons[structure.get("reason", "")] = reasons.get(structure.get("reason", ""), 0) + 1
         counts["sampled"] = len(wanted)
+        counts["structure_classes"] = classes
+        counts["rejection_reasons"] = reasons
         result[tag] = counts
         print(tag, counts, flush=True)
     with open(args.out, "w") as handle:

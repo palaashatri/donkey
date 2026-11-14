@@ -176,6 +176,171 @@ struct ForPlan {
   std::size_t step_last = 0;
 };
 
+/// True when the depth-first search from block 0 finds a retreating edge (one into a block on the
+/// current path) whose target does not dominate its source. Such a graph is irreducible: no loop
+/// structure can name the target as a header. A reducible graph has only back edges, whose targets
+/// dominate their sources.
+bool has_irreducible_retreat(const Graph& graph, const std::vector<BitSet>& dominators) {
+  const std::size_t count = graph.successors.size();
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::uint8_t> state(count, 0);  // 0 unvisited, 1 on the path, 2 done
+  std::vector<std::pair<BlockId, std::size_t>> path{{0, 0}};
+  state[0] = 1;
+  while (!path.empty()) {
+    auto& [block, next] = path.back();
+    if (next == graph.successors[block].size()) {
+      state[block] = 2;
+      path.pop_back();
+      continue;
+    }
+    const BlockId successor = graph.successors[block][next++];
+    if (successor >= count) {
+      continue;
+    }
+    if (state[successor] == 1) {
+      if (!dominators[block].test(successor)) {
+        return true;
+      }
+    } else if (state[successor] == 0) {
+      state[successor] = 1;
+      path.emplace_back(successor, 0);
+    }
+  }
+  return false;
+}
+
+/// A copy of the function in reverse postorder from the entry, for structuring when the original
+/// layout fails (printing only; the IR is not changed). Reverse postorder puts a loop's header
+/// before its body and a join after the branches into it, so the structurer's index ranges describe
+/// the regions. Only the copy is reordered: a conditional branch falls through to the next block by
+/// position, so when its fall-through block is no longer next, a block that only branches to it is
+/// inserted right after the conditional branch. The entry block is first; a trampoline (a block at
+/// address 0 that only branches) is not copied: the entry becomes its target. Blocks the entry
+/// cannot reach are left out (the structurer rejects a function with them anyway).
+std::optional<IrFunction> reverse_postorder_copy(const IrFunction& function) {
+  const std::size_t count = function.blocks.size();
+  if (count == 0) {
+    return std::nullopt;
+  }
+  const Graph graph = build_graph(function);
+  if (!graph.valid) {
+    return std::nullopt;
+  }
+  // Entry: block 0, unless it is a trampoline to another block.
+  BlockId entry = 0;
+  while (entry < count && function.blocks[entry].address == 0 &&
+         function.blocks[entry].statements.size() == 1 &&
+         function.blocks[entry].statements.back().op == IrOp::Branch &&
+         function.blocks[entry].statements.back().a.kind == IrOperandKind::Block &&
+         function.blocks[entry].statements.back().a.block < count) {
+    entry = function.blocks[entry].statements.back().a.block;
+    if (entry == 0) {
+      return std::nullopt;
+    }
+  }
+  // Depth-first postorder from the entry; the reverse of it is the layout.
+  std::vector<std::uint8_t> seen(count, 0);
+  std::vector<BlockId> postorder;
+  std::vector<std::pair<BlockId, std::size_t>> path{{entry, 0}};
+  seen[entry] = 1;
+  while (!path.empty()) {
+    auto& [block, next] = path.back();
+    if (next == graph.successors[block].size()) {
+      postorder.push_back(block);
+      path.pop_back();
+      continue;
+    }
+    const BlockId successor = graph.successors[block][next++];
+    if (successor < count && seen[successor] == 0) {
+      seen[successor] = 1;
+      path.emplace_back(successor, 0);
+    }
+  }
+  for (BlockId block = 0; block < count; ++block) {
+    if (seen[block] == 0 && block != 0) {
+      return std::nullopt;  // unreachable: do not guess a layout
+    }
+  }
+  std::vector<BlockId> order(postorder.rbegin(), postorder.rend());
+  // Lay out: each block, then (for a conditional branch whose fall-through is not next) a block
+  // that branches to that fall-through.
+  struct Slot {
+    BlockId original;  // the block copied, or the fall-through it branches to when trampoline
+    bool trampoline;
+  };
+  std::vector<Slot> slots;
+  for (std::size_t k = 0; k < order.size(); ++k) {
+    const BlockId block = order[k];
+    slots.push_back({block, false});
+    const IrStatement& terminator = function.blocks[block].statements.back();
+    if (terminator.op == IrOp::CondBranch) {
+      const BlockId fallthrough = block + 1;
+      const BlockId next_block = k + 1 < order.size() ? order[k + 1] : kNoBlock;
+      if (fallthrough >= count) {
+        return std::nullopt;
+      }
+      if (next_block != fallthrough) {
+        slots.push_back({fallthrough, true});
+      }
+    }
+  }
+  std::vector<std::uint32_t> position(count, 0);
+  std::vector<bool> placed(count, false);
+  for (std::size_t i = 0; i < slots.size(); ++i) {
+    if (!slots[i].trampoline) {
+      position[slots[i].original] = static_cast<std::uint32_t>(i);
+      placed[slots[i].original] = true;
+    }
+  }
+  IrFunction out = function;
+  out.blocks.clear();
+  for (std::size_t i = 0; i < slots.size(); ++i) {
+    IrBlock block;
+    if (slots[i].trampoline) {
+      block.address = function.blocks[slots[i].original].address;
+      IrStatement branch;
+      branch.op = IrOp::Branch;
+      branch.width = function.blocks[slots[i].original].statements.empty()
+                         ? 8
+                         : function.blocks[slots[i].original].statements.back().width;
+      branch.a = IrOperand::block_ref(static_cast<std::uint32_t>(i));  // patched below
+      block.statements.push_back(branch);
+    } else {
+      block = function.blocks[slots[i].original];
+    }
+    out.blocks.push_back(std::move(block));
+  }
+  // Now point every reference at its new position. A trampoline's target is its fall-through block.
+  for (std::size_t i = 0; i < slots.size(); ++i) {
+    IrBlock& block = out.blocks[i];
+    if (slots[i].trampoline) {
+      block.statements.back().a.block = position[slots[i].original];
+      continue;
+    }
+    for (IrStatement& statement : block.statements) {
+      for (IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (operand->kind == IrOperandKind::Block) {
+          if (!placed[operand->block]) {
+            return std::nullopt;
+          }
+          operand->block = position[operand->block];
+        }
+      }
+      for (IrSwitchCase& sc : statement.switch_cases) {
+        if (!placed[sc.target_block]) {
+          return std::nullopt;
+        }
+        sc.target_block = position[sc.target_block];
+      }
+    }
+    // A conditional branch's fall-through is the block after it: the trampoline placed there, or
+    // the block itself when it is next.
+  }
+  return out;
+}
+
 struct Structurer {
   Structurer(const IrFunction& function,
              const std::map<std::uint64_t, std::string>* string_literals)
@@ -184,16 +349,29 @@ struct Structurer {
   std::optional<std::string> run() {
     const std::size_t count = function_.blocks.size();
     if (count == 0) {
-      return std::nullopt;
+      {
+        note("empty function");
+        return std::nullopt;
+      }
     }
     graph_ = build_graph(function_);
     if (!graph_.valid) {
-      return std::nullopt;
+      {
+        note("invalid graph");
+        return std::nullopt;
+      }
     }
     dominators_ = compute_dominators(graph_);
+    if (has_irreducible_retreat(graph_, dominators_)) {
+      note("irreducible control flow");
+      return std::nullopt;
+    }
     for (BlockId block = 1; block < count; ++block) {
       if (graph_.predecessors[block].empty()) {
-        return std::nullopt;  // unreachable block: do not guess a layout
+        {
+          note("unreachable block");
+          return std::nullopt;
+        }  // unreachable block: do not guess a layout
       }
     }
     const std::vector<BitSet> post = compute_post_dominators(graph_);
@@ -203,16 +381,23 @@ struct Structurer {
     }
     plan_for_loops();
     if (!region_closed(0, count)) {
-      return std::nullopt;
+      {
+        note("top-level region not closed");
+        return std::nullopt;
+      }
     }
     emit_range(0, count);
     if (!ok_) {
-      return std::nullopt;
+      {
+        note("emission rejected");
+        return std::nullopt;
+      }
     }
     return out_;
   }
 
   [[nodiscard]] const std::vector<StructuredLine>& lines() const noexcept { return lines_; }
+  [[nodiscard]] const std::string& reason() const noexcept { return reason_; }
 
  private:
   void line(const std::string& text, std::uint64_t source_address = 0) {
@@ -433,11 +618,16 @@ struct Structurer {
     std::unordered_map<BlockId, BitSet> bodies;
     for (BlockId from = 0; from < count; ++from) {
       for (const BlockId to : graph_.successors[from]) {
-        if (to > from) {
+        // A back edge is an edge whose target dominates its source (a natural loop). A graph with
+        // a retreating edge that is not one is rejected in run() as irreducible.
+        if (!dominators_[from].test(to)) {
           continue;
         }
-        if (!dominators_[from].test(to)) {
-          return false;  // irreducible back edge
+        if (to > from) {
+          {
+            note("loop header placed after its latch");
+            return false;
+          }
         }
         auto found = bodies.find(to);
         if (found == bodies.end()) {
@@ -472,7 +662,10 @@ struct Structurer {
         // the blocks the header dominates below that exit belong to the body.
         exit = test_exit(header, body, exits);
         if (exit == kNoBlock) {
-          return false;
+          {
+            note("loop exit not determined");
+            return false;
+          }
         }
         for (BlockId block = header + 1; block < exit; ++block) {
           if (!body.test(block) && dominators_[block].test(header)) {
@@ -480,20 +673,35 @@ struct Structurer {
           }
         }
         if (outside_successors(body) != std::vector<BlockId>{exit}) {
-          return false;
+          {
+            note("loop leaves through several blocks");
+            return false;
+          }
         }
       } else {
-        return false;
+        {
+          note("loop has no exit");
+          return false;
+        }
       }
       if (exit <= header) {
-        return false;
+        {
+          note("loop exit not after its header");
+          return false;
+        }
       }
       if (body.count() != exit - header) {
-        return false;  // non-contiguous loop body: labels/goto are more honest
+        {
+          note("loop body not contiguous");
+          return false;
+        }  // non-contiguous loop body: labels/goto are more honest
       }
       for (BlockId block = header; block < exit; ++block) {
         if (!body.test(block)) {
-          return false;
+          {
+            note("loop body not contiguous");
+            return false;
+          }
         }
       }
 
@@ -501,7 +709,10 @@ struct Structurer {
       loop.header = header;
       loop.exit = exit;
       if (!describe_loop(loop, body, exit)) {
-        return false;
+        {
+          note("loop is not a while or do-while");
+          return false;
+        }
       }
       loops_.emplace(header, loop);
     }
@@ -560,7 +771,10 @@ struct Structurer {
   bool describe_loop(Loop& loop, const BitSet& body, BlockId exit) {
     const IrBlock& header = function_.blocks[loop.header];
     if (header.statements.empty()) {
-      return false;
+      {
+        note("loop header empty");
+        return false;
+      }
     }
     const IrStatement& terminator = header.statements.back();
     if (terminator.op == IrOp::CondBranch) {
@@ -581,15 +795,24 @@ struct Structurer {
     // A loop of one block is its own latch: the block ends in the test that repeats it.
     const BlockId latch = exit - 1;
     if (latch < loop.header) {
-      return false;
+      {
+        note("loop latch before header");
+        return false;
+      }
     }
     const IrBlock& latch_block = function_.blocks[latch];
     if (latch_block.statements.empty()) {
-      return false;
+      {
+        note("loop latch empty");
+        return false;
+      }
     }
     const IrStatement& latch_terminator = latch_block.statements.back();
     if (latch_terminator.op != IrOp::CondBranch) {
-      return false;
+      {
+        note("loop latch not a conditional");
+        return false;
+      }
     }
     if (latch_terminator.b.block == loop.header && latch + 1 == exit) {
       loop.is_do_while = true;
@@ -602,7 +825,10 @@ struct Structurer {
       return true;
     }
     (void)body;
-    return false;
+    {
+      note("loop shape not while or do-while");
+      return false;
+    }
   }
 
   /// A region is closed when every edge inside it stays inside, leaves to
@@ -612,7 +838,10 @@ struct Structurer {
                      BlockId exit_block = kNoBlock) const {
     const std::size_t count = graph_.successors.size();
     if (last > count || first >= last) {
-      return false;
+      {
+        note("region bounds");
+        return false;
+      }
     }
     for (BlockId block = first; block < last; ++block) {
       for (const BlockId successor : graph_.successors[block]) {
@@ -622,14 +851,20 @@ struct Structurer {
         if (successor == last || successor == loop_header || successor == exit_block) {
           continue;
         }
-        return false;
+        {
+          note("region not closed");
+          return false;
+        }
       }
       if (block != first) {
         for (const BlockId predecessor : graph_.predecessors[block]) {
           if (predecessor >= first && predecessor < last) {
             continue;
           }
-          return false;
+          {
+            note("region not closed");
+            return false;
+          }
         }
       }
     }
@@ -653,7 +888,10 @@ struct Structurer {
       const auto loop = loops_.find(index);
       if (loop != loops_.end()) {
         if (!emit_loop(loop->second, last)) {
-          ok_ = false;
+          {
+            note("loop emission rejected");
+            ok_ = false;
+          }
           return;
         }
         index = loop->second.exit;
@@ -694,7 +932,10 @@ struct Structurer {
           const bool leaves = exit.op == IrOp::Return ||
                               (exit.op == IrOp::Branch && join != kNoBlock && exit.a.block == join);
           if (!leaves && end != join) {
-            ok_ = false;  // fallthrough between cases: labels/goto are honest
+            {
+              note("switch case falls into the next");
+              ok_ = false;
+            }  // fallthrough between cases: labels/goto are honest
             return;
           }
         }
@@ -760,7 +1001,10 @@ struct Structurer {
             // Leaving the innermost loop from its body. Inside a switch, `break` would
             // leave the switch instead, so that case is left to labels.
             if (frames_.back().switch_depth > 0) {
-              ok_ = false;
+              {
+                note("break inside a switch inside a loop");
+                ok_ = false;
+              }
               return;
             }
             line("break;");
@@ -773,7 +1017,10 @@ struct Structurer {
             }
           } else if (terminator.a.block != last && terminator.a.block != join_exit &&
                      terminator.a.block != index + 1) {
-            ok_ = false;  // branch to a block outside this region: bail out
+            {
+              note("branch outside the region");
+              ok_ = false;
+            }  // branch to a block outside this region: bail out
             return;
           }
         } else {
@@ -794,14 +1041,35 @@ struct Structurer {
         ++index;
         continue;
       }
+      // A conditional branch to the innermost loop's exit is `if (cond) break;`, and the code after
+      // it continues on the fall-through. Inside a switch, `break` would leave the switch instead.
+      if (!frames_.empty() && target == frames_.back().exit) {
+        if (frames_.back().switch_depth > 0) {
+          {
+            note("break inside a switch inside a loop");
+            ok_ = false;
+          }
+          return;
+        }
+        line("if (" + condition_of(index, false) + ") break;");
+        ++index;
+        continue;
+      }
       const BlockId join = immediate_post_dominator_[index];
       if (join == kNoBlock || join > last) {
-        ok_ = false;
+        {
+          note("if without join");
+          ok_ = false;
+        }
         return;
       }
       if (join == fallthrough) {
-        if (target <= index || target >= join || !region_closed(target, join, loop_header)) {
-          ok_ = false;
+        if (target <= index || target >= join ||
+            !region_closed(target, join, loop_header, innermost_loop_exit())) {
+          {
+            note("if region not closed");
+            ok_ = false;
+          }
           return;
         }
         line("if (" + condition_of(index, false) + ") {");
@@ -814,8 +1082,11 @@ struct Structurer {
       }
       if (join == target) {
         if (fallthrough <= index || fallthrough >= join ||
-            !region_closed(fallthrough, join, loop_header)) {
-          ok_ = false;
+            !region_closed(fallthrough, join, loop_header, innermost_loop_exit())) {
+          {
+            note("if region not closed");
+            ok_ = false;
+          }
           return;
         }
         line("if (" + condition_of(index, true) + ") {");
@@ -827,13 +1098,19 @@ struct Structurer {
         continue;
       }
       if (join <= index || join > last) {
-        ok_ = false;
+        {
+          note("if join order");
+          ok_ = false;
+        }
         return;
       }
       if (fallthrough < target) {
-        if (!region_closed(target, join, loop_header) ||
+        if (!region_closed(target, join, loop_header, innermost_loop_exit()) ||
             !region_closed(fallthrough, target, loop_header, join)) {
-          ok_ = false;
+          {
+            note("if region not closed");
+            ok_ = false;
+          }
           return;
         }
         line("if (" + condition_of(index, false) + ") {");
@@ -846,9 +1123,12 @@ struct Structurer {
         --indent_;
         line("}");
       } else if (target < fallthrough) {
-        if (!region_closed(target, fallthrough, loop_header) ||
-            !region_closed(fallthrough, join, loop_header)) {
-          ok_ = false;
+        if (!region_closed(target, fallthrough, loop_header, innermost_loop_exit()) ||
+            !region_closed(fallthrough, join, loop_header, innermost_loop_exit())) {
+          {
+            note("if region not closed");
+            ok_ = false;
+          }
           return;
         }
         line("if (" + condition_of(index, false) + ") {");
@@ -861,31 +1141,52 @@ struct Structurer {
         --indent_;
         line("}");
       } else {
-        ok_ = false;
+        {
+          note("branch order");
+          ok_ = false;
+        }
         return;
       }
       index = join;
     }
   }
 
+  /// The exit of the innermost loop being emitted: a branch there is a `break`, which a region may
+  /// contain (kNoBlock outside a loop).
+  [[nodiscard]] BlockId innermost_loop_exit() const {
+    return frames_.empty() ? kNoBlock : frames_.back().exit;
+  }
+
   bool emit_loop(const Loop& loop, BlockId last) {
     if (loop.exit > last || !region_closed(loop.header, loop.exit)) {
-      return false;
+      {
+        note("loop region not closed");
+        return false;
+      }
     }
     if (!loop.is_do_while) {
       const BlockId first_body = loop.header + 1;
       if (first_body >= loop.exit) {
-        return false;
+        {
+          note("do-while body");
+          return false;
+        }
       }
       // The header must consist only of the condition that is rendered inline;
       // dropping statements would misrepresent the program.
       const IrBlock& header = function_.blocks[loop.header];
       if (header.statements.size() > 2) {
-        return false;
+        {
+          note("loop header with a test");
+          return false;
+        }
       }
       if (header.statements.size() == 2 && header.statements.front().op != IrOp::Compare &&
           header.statements.front().op != IrOp::Test) {
-        return false;
+        {
+          note("loop header not a test");
+          return false;
+        }
       }
       if (const auto plan = for_plans_.find(loop.header);
           plan != for_plans_.end() && emit_counted_loop(loop, plan->second)) {
@@ -904,13 +1205,19 @@ struct Structurer {
     const BlockId latch = loop.exit - 1;
     const IrBlock& header = function_.blocks[loop.header];
     if (header.statements.empty()) {
-      return false;
+      {
+        note("loop header empty (do-while)");
+        return false;
+      }
     }
     if (latch != loop.header) {
       // A multi-block do-while body enters from the header by falling through.
       const IrStatement& terminator = header.statements.back();
       if (terminator.op != IrOp::Branch || terminator.a.block != loop.header + 1) {
-        return false;
+        {
+          note("loop latch not an exit");
+          return false;
+        }
       }
     }
     line("do {");
@@ -953,22 +1260,92 @@ struct Structurer {
   std::vector<LoopFrame> frames_;
   int indent_ = 1;
   bool ok_ = true;
+  /// The first reason the structurer rejected this function (empty when it did not).
+  mutable std::string reason_;
+  void note(const char* why) const {
+    if (reason_.empty()) {
+      reason_ = why;
+    }
+  }
 };
 
 }  // namespace
 
 std::optional<std::string> format_structured_body(const IrFunction& function) {
-  Structurer structurer(function, nullptr);
-  return structurer.run();
+  // The layout as given first, so a function that structures keeps its output; then the
+  // reverse-postorder copy (printing only).
+  {
+    Structurer structurer(function, nullptr);
+    if (auto body = structurer.run()) {
+      return body;
+    }
+  }
+  if (auto copy = reverse_postorder_copy(function)) {
+    Structurer structurer(*copy, nullptr);
+    if (auto body = structurer.run()) {
+      return body;
+    }
+  }
+  return std::nullopt;
 }
 
 std::optional<std::vector<StructuredLine>> format_structured_body_lines(
     const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals) {
-  Structurer structurer(function, string_literals);
-  if (!structurer.run().has_value()) {
-    return std::nullopt;
+  {
+    Structurer structurer(function, string_literals);
+    if (structurer.run().has_value()) {
+      return structurer.lines();
+    }
   }
-  return structurer.lines();
+  if (auto copy = reverse_postorder_copy(function)) {
+    Structurer structurer(*copy, string_literals);
+    if (structurer.run().has_value()) {
+      return structurer.lines();
+    }
+  }
+  return std::nullopt;
 }
 
 }  // namespace donkey::detail
+
+namespace donkey {
+
+namespace {}  // namespace
+
+StructureVerdict classify_structure(const IrFunction& function) {
+  if (function.blocks.empty()) {
+    return {StructureClass::Other, "empty function"};
+  }
+  const detail::Graph graph = detail::build_graph(function);
+  if (!graph.valid) {
+    return {StructureClass::Other, "invalid graph"};
+  }
+  for (detail::BlockId block = 1; block < function.blocks.size(); ++block) {
+    if (graph.predecessors[block].empty()) {
+      return {StructureClass::Other, "unreachable block"};
+    }
+  }
+  const std::vector<detail::BitSet> dominators = detail::compute_dominators(graph);
+  if (detail::has_irreducible_retreat(graph, dominators)) {
+    return {StructureClass::Irreducible, "a retreating edge's target does not dominate its source"};
+  }
+  std::string reason;
+  {
+    detail::Structurer structurer(function, nullptr);
+    if (structurer.run().has_value()) {
+      return {StructureClass::Structured, ""};
+    }
+    reason = structurer.reason().empty() ? "unclassified" : structurer.reason();
+  }
+  // The last attempt decides, so its reason is the one reported.
+  if (auto copy = detail::reverse_postorder_copy(function)) {
+    detail::Structurer structurer(*copy, nullptr);
+    if (structurer.run().has_value()) {
+      return {StructureClass::Structured, ""};
+    }
+    reason = structurer.reason().empty() ? "unclassified (copy)" : structurer.reason();
+  }
+  return {StructureClass::ReducibleRejected, reason};
+}
+
+}  // namespace donkey

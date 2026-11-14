@@ -346,4 +346,22 @@ struct PseudocodeOptions {
 [[nodiscard]] Result<std::string> format_pseudocode(const IrFunction& function,
                                                     const PseudocodeOptions& options);
 
+/// How the structurer treats a function's control flow (see classify_structure).
+enum class StructureClass : std::uint8_t {
+  Structured,         ///< printed as structured code
+  Irreducible,        ///< the graph has a retreating edge into a block that does not dominate it
+  ReducibleRejected,  ///< the graph is reducible, but the structurer rejects its shape
+  Other,              ///< no structure question: empty, invalid or unreachable blocks
+};
+
+struct StructureVerdict {
+  StructureClass cls = StructureClass::Other;
+  /// The first rejection reason, for ReducibleRejected and Other; empty when Structured.
+  std::string reason;
+};
+
+/// Classifies a function's control flow for the printer: whether it is irreducible, and if it is
+/// reducible but still labelled, the first reason the structurer gave. Used by the audit tools.
+[[nodiscard]] StructureVerdict classify_structure(const IrFunction& function);
+
 }  // namespace donkey
