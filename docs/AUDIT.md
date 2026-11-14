@@ -429,7 +429,9 @@ the commit messages): `Ir.RuleSequencePrintsAFallThroughWithoutGoto`, `Ir.RuleIf
 `Ir.IfWithoutElsePrintsItsComplementedCondition`, `Ir.RuleLoopPrintsANaturalLoopAsWhileOne`,
 `Ir.RuleWhileTestPrintsAPureHeaderAsItsCondition`, `Ir.RuleBreakPrintsALoopExitAsBreak`,
 `Ir.RuleContinuePrintsABackEdgeInTheBodyAsContinue`, `Ir.RuleSwitchPrintsEachArmFromItsTarget`, plus
-`Ir.GotoLeavesALoopByAnExitThatIsNotItsFollow` and `Ir.IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle`.
+`Ir.GotoLeavesALoopByAnExitThatIsNotItsFollow`, `Ir.IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle`
+and `Ir.SwitchInALoopWhoseArmLeavesTheLoopIsAGotoNotABreak` (the switch-join rule: with the old rule
+switched on, its arm prints `break;` and the check refuses it).
 The check's own tests: `Ir.ControlFlowCheck*` (a condition that goes the wrong way, in the tags only and
 in the tags and text together; a break to the wrong block; a block that is not printed).
 
