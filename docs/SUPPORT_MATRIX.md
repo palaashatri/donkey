@@ -23,9 +23,9 @@ What the branch's tests prove, beyond `main`. Nothing here is on `main` until it
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
   (`c_call_*`) are Complete and verified at -O0, -O2, -O3 and -O3-x86-64-v2 (48 vectors each). The
   CLI test `cli.decompile_prints_call_arguments` shows a call with its arguments.
-- Measured on a fixed list of 1,786 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
+- Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported on the final commit (`main` had 25.8% InvalidIR on its sample), 180
-  Complete, 1,317 "not fully structured" (73.7%).
+  Complete, 1,317 "not fully structured" (66.3%).
 - Not done: structuring of irreducible loops (node splitting), the Goal 8 bar; AArch64 calls
   (Partial); Windows x64 calls; .xdata and ARM64 unwind.
 

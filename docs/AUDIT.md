@@ -117,7 +117,7 @@ Population sizes (`.text` function starts, as `donkey-cli functions` reports the
 | `python3.12` | not sampled | 11,416 |
 
 The baseline sampled 1,893 functions (300 per binary, the own binaries included; 12,531 `.text`
-starts across seven binaries). The final list samples 1,786 from the seven system binaries
+starts across seven binaries). The final list samples 1,986 from the seven system binaries
 (300 each, all 186 of `ls`). The unwind-table seeds of G23-T1 and G23-T2 found more function
 starts, so a later run samples from a larger population. Any comparison across that change must
 use the same addresses.
@@ -131,11 +131,11 @@ The seven binaries are `ls`, `openssl`, `bash`, `libsqlite3.so.0`, `libc.so.6`, 
 
 | Commit | Complete | Partial | Unsupported | InvalidIR | "no modelled ABI" note | "not fully structured" note |
 |---|---|---|---|---|---|---|
-| `ed22df5` (before G21) | 155 | 1,369 | 262 | 0 | 1,278 | 1,164 |
-| `c26a9d3` (G21, call arguments) | 167 | 1,357 | 262 | 0 | 1,269 | 1,164 |
-| `665c9e4` (final: G24 block bound, extent) | 180 | 1,606 | 0 | 0 | 1,497 | 1,317 |
+| `ed22df5` (before G21) | 155 | 1,569 | 262 | 0 | 1,278 | 1,164 |
+| `c26a9d3` (G21, call arguments) | 167 | 1,557 | 262 | 0 | 1,269 | 1,164 |
+| `665c9e4` (final: G24 block bound, extent) | 180 | 1,806 | 0 | 0 | 1,497 | 1,317 |
 
-Sampled: 1,786 functions in each row, all found at every commit. Totals are summed from the
+Sampled: 1,986 functions in each row, all found at every commit. Totals are summed from the
 per-binary rows of `tools/audit/results/measure_ed22df5.log`, `measure_c26a9d3.log` and
 `measure_665c9e4.log`; the address list is `tools/audit/results/list_final.json`.
 
@@ -170,7 +170,7 @@ Analysis time and peak memory of the 8.3 MB stripped x86-64 donkey-cli (`functio
 
 ### Structuring (item C)
 
-The "not fully structured" share is 1,317 of 1,786 (73.7%) on the fixed list at `665c9e4`, against a
+The "not fully structured" share is 1,317 of 1,986 (66.3%) on the fixed list at `665c9e4`, against a
 bar of 52% (1,317 is above it). The most frequent defeating shape is irreducible control flow: a
 loop entered at more than one block, which the structurer rejects in `find_loops`. On `ls` after the
 fall-through fix, 115 of the 120 labelled functions fail there; the others fail at `region_closed`
