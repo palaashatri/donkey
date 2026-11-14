@@ -17,7 +17,10 @@
 namespace donkey {
 namespace {
 
-constexpr std::size_t kMaxBlocks = 200'000;
+// The block bound is one block per decoded instruction, with this floor. A block holds at least one
+// instruction, and a function's blocks are built from its own walk, so the bound is linear in the
+// code that was decoded (which the file size limits): a large image is not cut at a fixed size.
+constexpr std::size_t kMinBlockBound = 200'000;
 
 std::string fallback_name(std::uint64_t address) {
   char buffer[32];
@@ -938,6 +941,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
     index_by_address.emplace(instructions[i].address, i);
   }
 
+  const std::size_t block_bound = std::max(kMinBlockBound, instructions.size());
   std::size_t decoded_limit = options.max_instructions;
   // The budget counts distinct instructions reached by any function's walk. Every walk starts from
   // its own seed, so the same code can be reached from many seeds; counting each visit would let
@@ -950,7 +954,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       ++decoded;
     }
   };
-  // Set when a block would exceed kMaxBlocks. Once it is set, no further seed is traversed, so
+  // Set when a block would exceed the bound. Once it is set, no further seed is traversed, so
   // the graph never holds more blocks than the bound.
   bool block_bound_reached = false;
   // Functions whose traversal stopped at the instruction budget. One diagnostic reports them all,
@@ -1178,8 +1182,8 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       const bool is_leader = std::binary_search(leaders.begin(), leaders.end(), address);
       const bool gap = have_previous && previous_end != address;
       if (is_leader || gap || !have_previous) {
-        if (graph.blocks.size() >= kMaxBlocks) {
-          // The bound is checked before the block is made, so the graph holds at most kMaxBlocks.
+        if (graph.blocks.size() >= block_bound) {
+          // The bound is checked before the block is made, so the graph holds at most block_bound.
           // A partial result says why: the block bound is a resource limit, not a decoding failure.
           // The reason is recorded once.
           block_bound_reached = true;

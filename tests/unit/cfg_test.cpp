@@ -413,18 +413,33 @@ TEST(Cfg, RespectsInstructionLimit) {
   EXPECT_EQ(result.value().instructions.size(), 2U);
 }
 
-// A run of two-byte jumps to the next instruction makes a block at every instruction. Past the
-// block bound (200,000) the graph stops, and the result says so once, rather than being partial
-// without a reason.
+// The bound is one block per decoded instruction, with a floor of 200,000. One function's walk
+// cannot exceed the instructions it covers, so the limit is reached only when code is shared. Three
+// exported stubs (each `jmp` into the same run of two-byte jumps, which is no function's start)
+// each make a function whose walk covers the whole run: 3 x 100,000 blocks for 100,003
+// instructions. The graph stops at the bound, and the result says so once. The graph never holds
+// more blocks than the bound allows.
 TEST(Cfg, TheBlockBoundIsReportedOnce) {
-  const std::size_t jumps = 210'000;
+  const std::size_t run = 100'000;
   std::vector<std::byte> data;
-  data.reserve(jumps * 2);
-  for (std::size_t i = 0; i < jumps; ++i) {
+  // Stubs at offsets 0, 2 and 4: jmp to offset 6 (rel8 = 6 - (stub + 2)).
+  for (const std::uint8_t rel : {4, 2, 0}) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(static_cast<std::byte>(rel));
+  }
+  for (std::size_t i = 0; i < run; ++i) {
     data.push_back(std::byte{0xEB});
     data.push_back(std::byte{0x00});
   }
-  const auto image = synthetic_image(data.size());
+  auto image = synthetic_image(data.size());
+  for (const std::size_t at : {std::size_t{0}, std::size_t{2}, std::size_t{4}}) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(at);
+    symbol.address = 0x1000 + at;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
   AnalysisOptions options;
   options.max_instructions = 400'000;
   auto result = donkey::analyze(image, data, options);
@@ -439,7 +454,6 @@ TEST(Cfg, TheBlockBoundIsReportedOnce) {
     }
   }
   EXPECT_EQ(reported, 1U);
-  // The bound is exact: the graph never holds more blocks than the limit.
   EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
 }
 
@@ -481,12 +495,32 @@ std::size_t count_diagnostics(const donkey::ControlFlowGraph& cfg, const char* c
   return count;
 }
 
-// Five functions of 60,000 jumps each. The bound is reached inside the fourth, and the fifth must
-// not add blocks: a graph that checks the bound only after a block is made would still exceed it
-// by one block for each function that follows the limit. The result is reported once.
+// Five exported stubs, each a jump into one run of 60,000 two-byte jumps (no function starts in the
+// run). Each stub's function covers the whole run, so the bound (the floor, 200,000, since the
+// run is shorter) is reached inside the fourth, and the fifth must not add blocks: a graph that
+// checked the bound only after a block is made would exceed it by one block for each function
+// that follows the limit. The result is reported once.
 TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
-  const auto data = call_chain_image(5, 60'000);
-  const auto image = synthetic_image(data.size());
+  const std::size_t run = 60'000;
+  std::vector<std::byte> data;
+  // Stub k at offset 2k jumps to offset 10 (rel8 = 10 - (2k + 2)).
+  for (std::size_t k = 0; k < 5; ++k) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(static_cast<std::byte>(10 - (2 * k + 2)));
+  }
+  for (std::size_t j = 0; j < run; ++j) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(std::byte{0x00});
+  }
+  auto image = synthetic_image(data.size());
+  for (std::size_t k = 0; k < 5; ++k) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(k);
+    symbol.address = 0x1000 + 2 * k;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
   AnalysisOptions options;
   options.max_instructions = 1'000'000;
   auto result = donkey::analyze(image, data, options);
@@ -603,4 +637,33 @@ TEST(Cfg, TailCallIntoAPltStubIsNotCountedAsTheFunctionsBlock) {
   }
   // The jump is still an edge out of tail_fn, so the tail call stays visible.
   EXPECT_NE(edge_between(analysis.cfg, tail + 7, stub), nullptr);
+}
+
+// A block bound that is fixed at 200,000 cuts a large image that is entirely valid code (the
+// AArch64 build of donkey-cli has more than that many blocks: its big functions are real). The
+// bound is one block per decoded instruction, with 200,000 as the floor; this function has 250,000
+// blocks (each `b .+4` ends a block and jumps to the next, then a ret), so it needs the larger
+// bound.
+TEST(Cfg, BlockBoundFollowsTheDecodedInstructionCount) {
+  constexpr std::size_t kBlocks = 250000;
+  std::vector<std::byte> data;
+  data.reserve((kBlocks + 1) * 4);
+  for (std::size_t i = 0; i < kBlocks; ++i) {
+    // b .+4 (0x14000001), little-endian
+    for (const std::uint8_t b : {0x01, 0x00, 0x00, 0x14}) {
+      data.push_back(static_cast<std::byte>(b));
+    }
+  }
+  for (const std::uint8_t b : {0xc0, 0x03, 0x5f, 0xd6}) {  // ret
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  for (const donkey::Diagnostic& diagnostic : result.value().cfg.diagnostics) {
+    EXPECT_NE(diagnostic.code, "analysis.block_limit") << diagnostic.message;
+  }
+  EXPECT_EQ(result.value().cfg.blocks.size(), kBlocks + 1);
+  EXPECT_FALSE(result.value().cfg.partial);
 }
