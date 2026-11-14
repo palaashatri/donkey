@@ -11,8 +11,10 @@ Two modes, both run with `python3 -I`:
       Runs `decompile --json` once per binary (all functions) with the CLI, keeps the listed
       addresses, and records, for each, its status and whether its pseudocode carries the
       notes "outgoing call arguments and return values follow no modelled ABI" (call note) or
-      "control flow not fully structured" (structure note). The same list measured on two
-      commits gives the same functions in both.
+      "control flow not fully structured" (labelled note), and the control-flow fields of the
+      structure object (G04-T5): the class (structured, goto_structured, other), the number of gotos,
+      the candidate structures the control-flow check refused, and whether the printed code is labelled.
+      The same list measured on two commits gives the same functions in both.
 
 Only system binaries are used: their files are identical at every commit, so the population is
 the same by construction. A commit's own donkey-cli is a different file at each commit.
@@ -30,6 +32,7 @@ BINARIES = [
 ]
 CALL_NOTE = "outgoing call arguments and return values follow no modelled ABI"
 STRUCTURE_NOTE = "control flow not fully structured"
+GOTO_NOTE = " goto(s) where control flow has no structured form"
 
 
 def run(args):
@@ -68,7 +71,9 @@ def measure(args):
         classes = {}
         reasons = {}
         counts = {"sampled": 0, "found": 0, "Complete": 0, "Partial": 0, "Unsupported": 0,
-                  "InvalidIR": 0, "call_note": 0, "structure_note": 0}
+                  "InvalidIR": 0, "call_note": 0, "structure_note": 0, "labelled": 0,
+                  "goto_functions": 0, "gotos_total": 0, "gotos_max": 0,
+                  "oracle_rejected_candidates": 0, "functions_with_a_rejected_candidate": 0}
         for function in decompiled["functions"]:
             address = int(function["address"], 16)
             if address not in wanted:
@@ -82,8 +87,20 @@ def measure(args):
             structure = function.get("structure") or {}
             cls = structure.get("class", "none")
             classes[cls] = classes.get(cls, 0) + 1
-            if cls in ("reducible_rejected", "other"):
-                reasons[structure.get("reason", "")] = reasons.get(structure.get("reason", ""), 0) + 1
+            gotos = int(structure.get("gotos", 0))
+            if cls == "other" or STRUCTURE_NOTE in text:
+                counts["labelled"] += 1
+            if gotos > 0:
+                counts["goto_functions"] += 1
+                counts["gotos_total"] += gotos
+                counts["gotos_max"] = max(counts["gotos_max"], gotos)
+            rejected = int(structure.get("oracle_rejections", 0))
+            counts["oracle_rejected_candidates"] += rejected
+            counts["functions_with_a_rejected_candidate"] += int(rejected > 0)
+            # The printed code is checked before it is shown, so a labelled function is the only
+            # printed result that failed the check (the labelled form is not checked).
+            if cls in ("goto_structured", "other") and structure.get("reason"):
+                reasons[structure["reason"]] = reasons.get(structure["reason"], 0) + 1
         counts["sampled"] = len(wanted)
         counts["structure_classes"] = classes
         counts["rejection_reasons"] = reasons

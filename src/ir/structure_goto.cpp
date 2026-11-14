@@ -585,8 +585,10 @@ class Emitter {
     const BlockId fall = block + 1;
     if ((rules_ & kGotoRuleIfElse) == 0) {
       // Without the rule, the taken side is a goto and the fall-through goes on.
+      LineTag jump = make_tag(LineKind::IfJump, block, taken);
+      jump.jump = LineKind::Goto;
       push("if (" + condition_of(block, false) + ") goto " + names_[taken] + ";",
-           function_.blocks[block].address, make_tag(LineKind::IfJump, block, taken));
+           function_.blocks[block].address, jump);
       ++gotos_;
       return decide(fall, ctx);
     }

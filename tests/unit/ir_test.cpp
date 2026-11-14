@@ -5194,3 +5194,272 @@ TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   EXPECT_TRUE(verdict.irreducible);
   EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
 }
+
+// ---- The goto structurer and the control-flow check (G04-T5) ------------------------------------
+
+namespace {
+
+using donkey::detail::check_structured_control_flow;
+using donkey::detail::GotoStructure;
+using donkey::detail::kGotoRuleAll;
+using donkey::detail::StructuredLine;
+using donkey::detail::structure_with_gotos;
+
+std::string printed(const std::vector<StructuredLine>& lines) {
+  std::string text;
+  for (const StructuredLine& line : lines) {
+    if (!line.text.empty()) {
+      text += line.text + "\n";
+    }
+  }
+  return text;
+}
+
+/// The goto structurer's output, with the given rules; the control-flow check must accept it.
+GotoStructure structured_with(const IrFunction& function, std::uint32_t rules) {
+  auto structure = structure_with_gotos(function, nullptr, rules);
+  EXPECT_TRUE(structure.has_value());
+  if (!structure) {
+    return GotoStructure{};
+  }
+  const auto mismatch = check_structured_control_flow(function, structure->lines);
+  EXPECT_FALSE(mismatch.has_value()) << mismatch.value_or("") << "\n" << printed(structure->lines);
+  return *structure;
+}
+
+IrStatement switch_on_rax(std::uint32_t default_block, std::vector<IrSwitchCase> cases) {
+  IrStatement statement;
+  statement.op = IrOp::Switch;
+  statement.dest = IrOperand::register_ref("rax", 8);
+  statement.a = IrOperand::block_ref(default_block);
+  statement.width = 8;
+  statement.switch_cases = std::move(cases);
+  return statement;
+}
+
+constexpr std::uint32_t kWithout(std::uint32_t rule) { return kGotoRuleAll & ~rule; }
+
+}  // namespace
+
+TEST(Ir, RuleSequencePrintsAFallThroughWithoutGoto) {
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {fb_set("rdx", 2), fb_jump(2)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleSequence));
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleIfElsePrintsADiamondAsIfElse) {
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("} else {"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleIfElse));
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, IfWithoutElsePrintsItsComplementedCondition) {
+  // if (rax == 0) { rdx = 1; } return rdx; -- the taken side is the join, so the printed condition is
+  // the complement of the branch's (rax != 0) and the body is the fall-through.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(2)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("if (rax != 0x0) {"), std::string::npos) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("else"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, RuleLoopPrintsANaturalLoopAsWhileOne) {
+  // A header with a statement before its test is not a pure test, so it prints as while (1).
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("while (1) {"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleLoop));
+  EXPECT_EQ(printed(off.lines).find("while ("), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleWhileTestPrintsAPureHeaderAsItsCondition) {
+  // The header is only the test: `while (rax != 0x0)`, its exit is the taken side.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_NE(printed(on.lines).find("while (rax != 0x0) {"), std::string::npos) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("while (1)"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleWhileTest));
+  EXPECT_NE(printed(off.lines).find("while (1) {"), std::string::npos) << printed(off.lines);
+}
+
+TEST(Ir, RuleBreakPrintsALoopExitAsBreak) {
+  // Both exits of the loop (from 1 and from 2) reach block 4, its follow.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("break;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleBreak));
+  EXPECT_EQ(printed(off.lines).find("break;"), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleContinuePrintsABackEdgeInTheBodyAsContinue) {
+  // Block 2 jumps back to the header (taken) while the loop's follow (5) is its join.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 1), fb_compare(), fb_branch(5)},
+      {fb_compare(), fb_branch(1)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("continue;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleContinue));
+  EXPECT_EQ(printed(off.lines).find("continue;"), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleSwitchPrintsEachArmFromItsTarget) {
+  IrFunction f = fb_function({
+      {switch_on_rax(3, {IrSwitchCase{0x1, 1}, IrSwitchCase{0x2, 2}})},
+      {fb_set("rdx", 1), fb_jump(4)},
+      {fb_set("rdx", 2), fb_jump(4)},
+      {fb_set("rdx", 3), fb_jump(4)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("case 0x1:"), std::string::npos) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("default:"), std::string::npos) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("break;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleSwitch));
+  EXPECT_GE(off.gotos, 3u) << printed(off.lines);
+}
+
+TEST(Ir, GotoLeavesALoopByAnExitThatIsNotItsFollow) {
+  // Block 5 is entered from outside the loop as well, so it cannot be printed inside it: the edge
+  // from the loop's body is a goto.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+      {fb_set("rdx", 9), fb_jump(4)},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("goto loc_"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle) {
+  // Blocks 1 and 2 form a cycle that block 0 enters at both ends.
+  IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(2)},
+      {fb_compare(), fb_branch(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("labeled"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, ControlFlowCheckAcceptsTheStructuredFormOfEachRuleFixture) {
+  const IrFunction diamond = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  const auto structure = donkey::detail::structure_function(diamond, nullptr);
+  ASSERT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured);
+  EXPECT_FALSE(check_structured_control_flow(diamond, structure.lines).has_value());
+}
+
+TEST(Ir, ControlFlowCheckRefusesAConditionThatGoesTheWrongWay) {
+  const IrFunction diamond = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(diamond, kGotoRuleAll).lines;
+  bool flipped = false;
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen) {
+      line.tag.negated = !line.tag.negated;  // the printed condition now enters the other arm
+      flipped = true;
+    }
+  }
+  ASSERT_TRUE(flipped);
+  const auto mismatch = check_structured_control_flow(diamond, lines);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("condition"), std::string::npos) << *mismatch;
+}
+
+TEST(Ir, ControlFlowCheckRefusesABreakToTheWrongBlock) {
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  bool changed = false;
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == donkey::detail::LineKind::Break) {
+      line.tag.block = 3;  // the break names a block that is not the loop's end
+      changed = true;
+    }
+  }
+  ASSERT_TRUE(changed);
+  EXPECT_TRUE(check_structured_control_flow(f, lines).has_value());
+}
+
+TEST(Ir, ControlFlowCheckRefusesABlockThatIsNotPrinted) {
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {fb_set("rdx", 2), fb_jump(2)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  std::vector<StructuredLine> without_marker;
+  for (const StructuredLine& line : lines) {
+    if (!(line.tag.kind == donkey::detail::LineKind::Marker && line.tag.block == 1)) {
+      without_marker.push_back(line);
+    }
+  }
+  const auto mismatch = check_structured_control_flow(f, without_marker);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("not printed"), std::string::npos) << *mismatch;
+}

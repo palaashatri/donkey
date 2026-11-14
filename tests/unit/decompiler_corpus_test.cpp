@@ -32,6 +32,7 @@
 #include "donkey/ir/lift.h"
 #include "donkey/ir/prototype.h"
 #include "donkey/project/types.h"
+#include "ir_internal.h"
 #include "lift_internal.h"
 
 #if defined(_WIN32)
@@ -1583,6 +1584,60 @@ TEST(DecompilerCorpus, AppliedPrototypeThatContradictsTheFunctionIsRefused) {
 // Every statement the lifter keeps must be printed, unless it is a flag setter that the printer
 // folds into the branch it feeds. The oracle interprets IR, not the printed text, so a statement
 // dropped by the printer would pass every other test; this check looks at the text.
+TEST(DecompilerCorpus, EveryPrintedFunctionPassesTheControlFlowCheck) {
+  // G04-T5: every function with verified IR is printed, and the printed control flow is the IR's.
+  // The gate in structure_function refuses a candidate that fails the check, so a labelled result
+  // here means that no candidate passed. Gotos are counted, not refused.
+  std::size_t functions = 0;
+  std::size_t labelled = 0;
+  std::size_t with_gotos = 0;
+  std::size_t total_gotos = 0;
+  std::size_t rejections = 0;
+  std::vector<std::string> problems;
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
+    donkey::AnalysisOptions analysis_options;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, analysis_options);
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+    for (const donkey::Function& function : analysis.value().functions) {
+      auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), function);
+      if (!lifted) {
+        continue;
+      }
+      ++functions;
+      const donkey::detail::StructureResult structure =
+          donkey::detail::structure_function(lifted.value(), nullptr);
+      rejections += structure.oracle_rejections;
+      if (structure.outcome == donkey::detail::StructureOutcome::Labelled) {
+        ++labelled;
+        problems.push_back(std::string(library.level) + " " + function.name + ": labelled");
+        continue;
+      }
+      if (structure.gotos > 0) {
+        ++with_gotos;
+        total_gotos += structure.gotos;
+      }
+      const auto mismatch =
+          donkey::detail::check_structured_control_flow(lifted.value(), structure.lines);
+      if (mismatch.has_value()) {
+        problems.push_back(std::string(library.level) + " " + function.name + ": " + *mismatch);
+      }
+    }
+  }
+  EXPECT_GT(functions, 0u);
+  std::string report;
+  for (std::size_t i = 0; i < problems.size() && i < 20; ++i) {
+    report += problems[i] + "\n";
+  }
+  EXPECT_EQ(labelled, 0u) << report;
+  EXPECT_TRUE(problems.empty()) << problems.size() << " problems:\n" << report;
+  RecordProperty("functions", static_cast<int>(functions));
+  RecordProperty("with_gotos", static_cast<int>(with_gotos));
+  RecordProperty("total_gotos", static_cast<int>(total_gotos));
+  RecordProperty("oracle_rejections", static_cast<int>(rejections));
+}
+
 TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
   std::size_t checked = 0;
   std::vector<std::string> missing;
