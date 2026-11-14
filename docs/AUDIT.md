@@ -364,3 +364,38 @@ Pinned clang-format (`cf2018`) passes over every changed file (`src/ir/structure
 
 Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
 
+#### Review fixes and the re-measurement (after goal 8)
+
+Four findings from the review of this branch were fixed, each in its own commit:
+
+1. A callee that reads a stack argument was resolved with its register arguments only, and its
+   caller was Complete with the seventh argument missing (`gcc -O1 -fno-inline`, `caller` printed
+   `rax = sub_1129(rdi, rsi, rdx, rcx, r8, r9);`). `known_callee` now refuses such a callee: a
+   dataflow over the callee's IR tracks each register as an offset from the entry rsp, and any access,
+   lea or call argument at offset 8 or more, or any stack address it cannot follow, refuses the
+   callee. Tests: `Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial` (bytes) and
+   `cli.decompile_stack_argument_caller_is_partial` (fixture `tests/fixtures/calls/stack_argument-x86_64`,
+   with its provenance). Both fail without the check.
+2. An indirect tail jump (`jmp rax`) was lifted as a call to 0 (`ls` 0x6d60 printed
+   `((void (*)(void))0x0)();`). It is now a call through its operand, as an indirect call is. Test:
+   `Ir.IndirectTailJumpCallsItsOperand` (bytes `ff e0`), which fails on the old code. `ls` 0x6d60 now
+   prints `((void (*)(void))rax)();`.
+3. `tests/fixtures/link/libtailcall.so` has its recorded build in `tests/fixtures/link/PROVENANCE.md`:
+   GCC 13.3.0, `gcc -O2 -shared -fPIC -o libtailcall.so tail.c` from a copy named `tail.c`; rebuilt
+   byte-identical. Seeds committed for `fuzz_eh_frame` (`tests/fuzz/corpus/eh_frame`) and `fuzz_pdata`
+   (`tests/fuzz/corpus/pdata`). Each target ran 60 s from a scratch copy of its corpus, exit 0:
+   `fuzz_eh_frame` 3,692,837 runs; `fuzz_pdata` 25,531 runs.
+4. The documents now describe this work as part of `main` once it merges (README, AGENTS, PARITY,
+   SUPPORT_MATRIX, the G04 ledger entry, and DESIGN §17.2).
+
+Re-measurement on the same 1,986 functions, after the fixes (`tools/audit/sample_list.py measure`):
+
+| Structured | Irreducible | Reducible but rejected | Labelled | Share | Complete | InvalidIR | Unsupported |
+|---|---|---|---|---|---|---|---|
+| 990 | 106 | 890 | 996 | 50.2% | 180 (9.1%) | 0 | 0 |
+
+Against the measurement before the fixes (step 2), every binary is unchanged except `python3.12`,
+whose call-note count moved from 235 to 236 (the stack-argument refusal). No function changed its
+verdict. The Complete share is 180 of 1,986 (9.1%); an earlier draft of PARITY row 6 said 10.1%, which
+was wrong and is corrected.
+

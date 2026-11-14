@@ -6,28 +6,34 @@ machines the author could not run are left for CI and marked as such.
 
 ## Platforms
 
-## Branch `claude/funny-meitner-cpc7oc` (not merged, 2026-11-14)
+## Goals 1 to 10 (branch `claude/funny-meitner-cpc7oc`, merged into `main` with this change)
 
-What the branch's tests prove, beyond `main`. Nothing here is on `main` until it is merged.
+What these tests prove, beyond the state of `main` at `1a92abf`.
 
 - Unwind seeds: ELF `.eh_frame` FDEs (`EhFrame.*`, 13 tests, the fixture matches `readelf`) and PE
   x64 `.pdata` entries (`Pdata.*`, 4 tests, the fixture matches `llvm-readobj`). Both fuzzed
-  (`fuzz_eh_frame`, `fuzz_pdata`, 60 s each, clean). Chained `.pdata` entries are skipped and not
-  covered by a fixture.
+  (`fuzz_eh_frame`, `fuzz_pdata`, 60 s each, clean; `tests/fuzz/corpus/eh_frame` and
+  `tests/fuzz/corpus/pdata`). Chained `.pdata` entries are skipped and not covered by a fixture.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`). The CFG block bound is one block per decoded instruction, with a floor of 200,000
-  (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`).
+  (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`). An indirect tail jump (`jmp rax`) is a call
+  through its operand (`Ir.IndirectTailJumpCallsItsOperand`).
 - Calls (G21): a direct call to a same-image integer callee that is Complete is resolved to its
-  inferred arguments and result (x86-64 only). The clobber check and the callee write set are
+  inferred arguments and result (x86-64 only). A callee that reads a stack argument is not resolved,
+  so its caller is Partial (`Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial`,
+  `cli.decompile_stack_argument_caller_is_partial`). The clobber check and the callee write set are
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
   (`c_call_*`) are Complete and verified at -O0, -O2, -O3 and -O3-x86-64-v2 (48 vectors each). The
   CLI test `cli.decompile_prints_call_arguments` shows a call with its arguments.
+- Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
+  `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).
+  Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
+  splitting of irreducible functions (`Ir.*Fallback*`, `Ir.*PostDominator*`, `Ir.*Split*`).
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
-  InvalidIR and 0 Unsupported on the final commit (`main` had 25.8% InvalidIR on its sample), 180
-  Complete, 1,317 "not fully structured" (66.3%).
-- Goal 8 (branch only): 50.2% of the 1,986-function sample is labelled, under the 52% bar; node splitting makes 37 irreducible functions reducible but none is structured; AArch64 calls
-  (Partial); Windows x64 calls; .xdata and ARM64 unwind.
+  InvalidIR and 0 Unsupported, 180 Complete (9.1%), 996 labelled (50.2%, under the 52% bar).
+- Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls; .xdata and ARM64
+  unwind; structured output for the 996 labelled functions (106 irreducible, 890 reducible shapes).
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
 |---|---|---|---|---|
