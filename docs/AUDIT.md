@@ -98,5 +98,69 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
 
 ## After
 
-Filled in by the goals that change these numbers. Each row here is the same measurement as the
-baseline table above.
+Measured on this machine, Release build, the same scoring as the baseline. Each row says which
+commit it is, and what changed since the baseline. Numbers are never copied between populations:
+where the population changed, the table says so.
+
+### Population growth
+
+The baseline sampled 1,893 functions from 12,531 `.text` functions of seven binaries. The
+unwind-table seeds of G23-T1 and G23-T2 found more function starts (for example `ls` went from
+94 to 186 starts, `bash` from 2,073 to 2,343, `python3.12` to 11,416), so a later run samples from
+a larger population. Any comparison across that change must use the same addresses.
+
+### Same-population measurement (`tools/audit/sample_list.py`)
+
+The list was drawn once, from the function starts of the final commit (seed 7, 300 per binary,
+186 for `ls`, all of its starts), and measured on each commit. Only system binaries are used, since
+their files are identical at every commit (an own donkey-cli is a different file at each commit).
+The seven binaries are `ls`, `openssl`, `bash`, `libsqlite3.so.0`, `libc.so.6`, `git`, `python3.12`.
+
+| Commit | Complete | Partial | Unsupported | InvalidIR | "no modelled ABI" note | "not fully structured" note |
+|---|---|---|---|---|---|---|
+| `ed22df5` (before G21) | 155 | 1,369 | 262 | 0 | 1,278 | 1,164 |
+| `c26a9d3` (G21, call arguments) | 167 | 1,357 | 262 | 0 | 1,269 | 1,164 |
+| `665c9e4` (final: G24 block bound, extent) | 180 | 1,606 | 0 | 0 | 1,497 | 1,317 |
+
+Sampled: 1,786 functions in each row, all found at every commit. Totals are summed from the
+per-binary rows of `tools/audit/results/measure_ed22df5.log`, `measure_c26a9d3.log` and
+`measure_665c9e4.log`; the address list is `tools/audit/results/list_final.json`.
+
+- The G21 change alone (`ed22df5` to `c26a9d3`) moves 9 functions off the "no modelled ABI" note
+  and 12 to Complete. The call-argument work resolves few calls in this sample, because most
+  callees are not Complete integer-only functions of the same image.
+- `ed22df5` predates the block-bound fix (commit `48db0fe`); its 262 Unsupported functions are
+  the `git` and `python3.12` functions that the bound cut off. The final row therefore includes
+  that fix, which accounts for most of the difference in the "no modelled ABI" note: those
+  functions now have blocks and print with the note.
+- The "not fully structured" note rose from 1,164 to 1,317. The rise is the functions that gained
+  blocks in the final commit; most of them print labelled. This is the Goal 8 gap (section below).
+
+### Correction to commit `c26a9d3`
+
+Its commit message says that `c_call_loop` at `-O2` and `-O3` is Partial and that two of the ten
+call corpus functions are not Complete. That is wrong. The last corpus report of that commit has
+all six call-heavy functions (`c_call_add2`, `c_call_six`, `c_call_unused`, `c_call_loop`,
+`c_call_wide`, `c_call_chain`) Complete and verified at `-O0`, `-O2`, `-O3` and `-O3-x86-64-v2`,
+48 vectors each. The other remaining Partial corpus rows are pre-existing SIMD statements (`movdqu`,
+`movdqa`, `movd`) at `-O3`. History is not rewritten, so this correction is recorded here.
+
+### Block bound and the AArch64 build (item A)
+
+The cross-built AArch64 donkey-cli has 3,587 functions. Before commit `48db0fe`, 745 of them were
+Unsupported with `lift.no_blocks`: the control-flow graph stopped at a fixed bound of 200,000 blocks.
+The bound is now one block per decoded instruction, with 200,000 as the floor. After it: 0
+Unsupported, Complete 310, Partial 3,277, CFG status Complete with 267,667 blocks.
+
+Analysis time and peak memory of the 8.3 MB stripped x86-64 donkey-cli (`functions --json`):
+2.15 s and 645 MiB peak RSS (measured after the fix; the Goal 5 measurement was 1.81 s).
+
+### Structuring (item C)
+
+The "not fully structured" share is 1,317 of 1,786 (73.7%) on the fixed list at `665c9e4`, against a
+bar of 52% (1,317 is above it). The most frequent defeating shape is irreducible control flow: a
+loop entered at more than one block, which the structurer rejects in `find_loops`. On `ls` after the
+fall-through fix, 115 of the 120 labelled functions fail there; the others fail at `region_closed`
+or in emission. The fix for the dominant shape is node splitting (duplicating loop-body blocks while
+keeping the index layout and fall-throughs consistent). That is not implemented. A tail-duplication
+attempt for shared return blocks was measured and removed: it changed no function in `ls`.
