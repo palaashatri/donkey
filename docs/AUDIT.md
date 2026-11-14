@@ -105,6 +105,37 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
    `rsi` assignment missing from the output). The IR oracle did not catch it because it
    executes the IR, not the printed text. Guard for this class: see goal 8, step 0.
 
+6. **Resource use of the fallback structurer (introduced on this branch, fixed on this branch).**
+   The fallback nested every `if` whose arm returns inside the rest of its region's `else`, so an
+   input of N chained early-return tests recursed N levels deep and indented each line by 2N spaces:
+   memory was quadratic and the recursion unbounded. On a 512 KiB thread (the macOS default for
+   secondary threads) N = 10,000 segfaulted; at N = 5,000 the branch used 438 MiB against main's 41
+   MiB. Fixed by (a) an `if` whose taken arm cannot fall out, when both arms leave by return, closes
+   and the fall-through continues at the same level (a chain stays flat), (b) a nesting bound of 256
+   (`kMaxFallbackNesting`): a deeper candidate is rejected with "nesting deeper than 256 levels" and
+   the next stage or the labelled form prints it, and (c) each structurer attempt is scoped, so its
+   dominator and post-dominator sets (quadratic in the block count) are freed before the next attempt
+   builds its own. Tests: `Ir.EarlyReturnChainPrintsFlatWhenShort`,
+   `Ir.EarlyReturnChainOf5000FormatsOnASmallStack` (512 KiB thread; it segfaults before the fix),
+   `Ir.NestingThatCannotBeFlatIsRejectedNotNested`.
+
+Stress table (`stress N stack_KiB` through `rss.py`, which caps the address space at 1.5 GiB; N
+checks followed by the irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`,
+2N+4 blocks). Peak RSS and wall time:
+
+| N | main `1a92abf` | branch before (cedb9db) | branch after (this fix), 64 MiB stack | branch after, 512 KiB stack |
+|---|---|---|---|---|
+| 2,500 | 16 MiB, 0.1 s | 152 MiB, 0.4 s | 31 MiB, 1.0 s | 31 MiB, 1.0 s |
+| 5,000 | 41 MiB, 0.2 s | 438 MiB, 1.2 s | 78 MiB, 3.6 s | 78 MiB, 3.6 s |
+| 10,000 | 126 MiB | bad_alloc, abort | 209 MiB, 13.5 s | 209 MiB, 13.2 s |
+| 10,000 on 512 KiB | ok | segfault | - | ok (see the row above) |
+
+After the fix the ratio to main is 1.9 at 2,500, 1.9 at 5,000 and 1.7 at 10,000, all within 2x, and
+no run aborts or segfaults. Every run prints the function labelled, with a maximum indentation of 2
+spaces (the labelled form is flat). The "branch before" column is the coordinator's measurement
+(`w1audit`), and the 512 KiB segfault before the fix is reproduced by the test above.
+
+
 ## After
 
 Measured on this machine, Release build, the same scoring as the baseline. Each row says which

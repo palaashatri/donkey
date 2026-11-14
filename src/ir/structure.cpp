@@ -374,8 +374,20 @@ std::optional<IrFunction> split_irreducible(const IrFunction& function, std::str
           position[entries[i].node] = i;
         }
       }
-      IrFunction out = function;
-      out.blocks.clear();
+      // Every field of the function except its blocks, which are rebuilt below. The blocks are not
+      // copied first: a copy of every statement is the largest allocation of the split.
+      IrFunction out;
+      out.address = function.address;
+      out.name = function.name;
+      out.partial = function.partial;
+      out.notes = function.notes;
+      out.parameters = function.parameters;
+      out.return_width = function.return_width;
+      out.return_floating_point = function.return_floating_point;
+      out.signature_inferred = function.signature_inferred;
+      out.local_variables = function.local_variables;
+      out.pointer_structs = function.pointer_structs;
+      out.blocks.reserve(entries.size());
       for (const Entry& entry : entries) {
         IrBlock block;
         if (entry.trampoline) {
@@ -708,6 +720,7 @@ struct Structurer {
   static constexpr std::size_t kReturnCopyMaxStatements = 8;
   static constexpr std::size_t kReturnCopyBudget = 64;
   std::size_t fb_duplicated_ = 0;
+  static constexpr std::size_t kMaxFallbackNesting = 256;
 
   [[nodiscard]] bool fb_is_return_block(BlockId block) const {
     return block < function_.blocks.size() && graph_.successors[block].empty() &&
@@ -929,6 +942,12 @@ struct Structurer {
   // region is dominated by: every block it emits must be dominated by it.
   void fb_region(BlockId start, BlockId stop, BlockId root) {
     const std::size_t count = function_.blocks.size();
+    // Nesting is bounded: recursion and indentation both grow with it, so a deeper candidate is
+    // rejected and the next stage (or the labelled form) prints the function.
+    if (indent_ >= static_cast<int>(kMaxFallbackNesting)) {
+      fb_fail("nesting deeper than 256 levels");
+      return;
+    }
     BlockId block = start;
     for (;;) {
       if (fb_failed_ || block == stop) {
@@ -1011,6 +1030,20 @@ struct Structurer {
           }
           fb_region(target, arm_stop, block);
         };
+        if (join == count && taken != join && fallthrough != join) {
+          // Both arms leave by return (or an edge): the taken arm is an `if` of its own and the
+          // fall-through arm continues at this nesting level, so a chain of such tests stays flat.
+          line("if (" + condition_of(block, false) + ") {");
+          ++indent_;
+          emit_arm(taken, join);
+          --indent_;
+          line("}");
+          if (fb_failed_) {
+            return;
+          }
+          block = fallthrough;
+          continue;
+        }
         if (taken == join) {
           line("if (" + condition_of(block, true) + ") {");
           ++indent_;
@@ -1956,15 +1989,21 @@ std::optional<std::string> format_structured_body(const IrFunction& function) {
       return body;
     }
   }
-  Structurer fallback(function, nullptr);
-  if (auto body = fallback.run_fallback()) {
-    return body;
+  // Each attempt is scoped: its dominator and post-dominator sets (quadratic in the block count)
+  // are freed before the next attempt builds its own.
+  {
+    Structurer fallback(function, nullptr);
+    if (auto body = fallback.run_fallback()) {
+      return body;
+    }
   }
   std::string note;
   if (auto split = split_if_irreducible(function, note)) {
-    Structurer structurer(*split, nullptr);
-    if (auto body = structurer.run()) {
-      return body;
+    {
+      Structurer structurer(*split, nullptr);
+      if (auto body = structurer.run()) {
+        return body;
+      }
     }
     Structurer split_fallback(*split, nullptr);
     return split_fallback.run_fallback();
@@ -1986,15 +2025,19 @@ std::optional<std::vector<StructuredLine>> format_structured_body_lines(
       return structurer.lines();
     }
   }
-  Structurer fallback(function, string_literals);
-  if (fallback.run_fallback().has_value()) {
-    return fallback.lines();
+  {
+    Structurer fallback(function, string_literals);
+    if (fallback.run_fallback().has_value()) {
+      return fallback.lines();
+    }
   }
   std::string note;
   if (auto split = split_if_irreducible(function, note)) {
-    Structurer structurer(*split, string_literals);
-    if (structurer.run().has_value()) {
-      return structurer.lines();
+    {
+      Structurer structurer(*split, string_literals);
+      if (structurer.run().has_value()) {
+        return structurer.lines();
+      }
     }
     Structurer split_fallback(*split, string_literals);
     if (split_fallback.run_fallback().has_value()) {
@@ -2040,9 +2083,11 @@ StructureVerdict classify_structure(const IrFunction& function) {
               note.empty() ? "a retreating edge's target does not dominate its source" : note};
     }
     // Reducible after node splitting: the split function is structured like any other.
-    detail::Structurer structurer(*split, nullptr);
-    if (structurer.run().has_value()) {
-      return {StructureClass::Structured, ""};
+    {
+      detail::Structurer structurer(*split, nullptr);
+      if (structurer.run().has_value()) {
+        return {StructureClass::Structured, ""};
+      }
     }
     detail::Structurer split_fallback(*split, nullptr);
     if (split_fallback.run_fallback().has_value()) {

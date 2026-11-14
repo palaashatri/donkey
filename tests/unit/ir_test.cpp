@@ -5311,3 +5311,152 @@ TEST(Ir, CallerOfAFunctionThatStoresAStackAddressAndReadsItBackIsPartial) {
   ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   EXPECT_TRUE(lifted.value().partial);
 }
+
+// ---- Resource use of the fallback structurer (defect 6) -----------------------------------
+
+namespace {
+
+// N tests in a row, each returning when rax == 0 (the return block is the taken arm), then the
+// irreducible tail of Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks. 2N+4 blocks.
+IrFunction early_return_chain(std::size_t checks) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "chain";
+  f.return_width = 8;
+  const std::size_t total = checks + 4 + checks;
+  for (std::size_t i = 0; i < total; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks + 4 + i))};
+  }
+  f.blocks[checks + 0].statements = {fb_compare(),
+                                     fb_branch(static_cast<std::uint32_t>(checks + 2))};
+  f.blocks[checks + 1].statements = {fb_jump(static_cast<std::uint32_t>(checks + 2))};
+  f.blocks[checks + 2].statements = {fb_compare(),
+                                     fb_branch(static_cast<std::uint32_t>(checks + 1))};
+  f.blocks[checks + 3].statements = {fb_return()};
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[checks + 4 + i].statements = {fb_set("rdx", i), fb_return()};
+  }
+  return f;
+}
+
+}  // namespace
+
+namespace {
+
+// N tests in a row, each returning when rax == 0, ending in a return: reducible (no irreducible
+// tail).
+IrFunction reducible_early_return_chain(std::size_t checks) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "chain";
+  f.return_width = 8;
+  for (std::size_t i = 0; i < 2 * checks + 1; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks + 1 + i))};
+  }
+  f.blocks[checks].statements = {fb_set("rdx", 9), fb_return()};
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[checks + 1 + i].statements = {fb_set("rdx", i), fb_return()};
+  }
+  return f;
+}
+
+}  // namespace
+
+TEST(Ir, EarlyReturnChainPrintsFlatWhenShort) {
+  // Three checks: each `if` returns, so the rest continues at the same level: no `} else {`.
+  const IrFunction f = reducible_early_return_chain(3);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("} else {"), std::string::npos) << text.value();
+}
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+
+namespace {
+
+struct ChainJob {
+  std::size_t checks = 0;
+  bool ok = false;
+  std::size_t deepest_indent = 0;
+  std::string text;
+};
+
+void* format_chain(void* argument) {
+  auto* job = static_cast<ChainJob*>(argument);
+  auto text = donkey::format_pseudocode(early_return_chain(job->checks));
+  job->ok = text.has_value();
+  if (job->ok) {
+    job->text = text.value();
+    std::size_t pos = 0;
+    while (pos < job->text.size()) {
+      std::size_t end = job->text.find('\n', pos);
+      if (end == std::string::npos) {
+        end = job->text.size();
+      }
+      std::size_t spaces = pos;
+      while (spaces < end && job->text[spaces] == ' ') {
+        ++spaces;
+      }
+      job->deepest_indent = std::max(job->deepest_indent, spaces - pos);
+      pos = end + 1;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(Ir, EarlyReturnChainOf5000FormatsOnASmallStack) {
+  // 512 KiB is the macOS default for secondary threads. Before the fix the nested `else` grew the
+  // recursion and the indentation with every check (quadratic memory, unbounded depth).
+  ChainJob job;
+  job.checks = 5000;
+  pthread_attr_t attributes;
+  ASSERT_EQ(pthread_attr_init(&attributes), 0);
+  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
+  pthread_t thread;
+  ASSERT_EQ(pthread_create(&thread, &attributes, format_chain, &job), 0);
+  pthread_join(thread, nullptr);
+  pthread_attr_destroy(&attributes);
+  ASSERT_TRUE(job.ok);
+  // Indentation stays under twice the nesting bound (256 levels) plus a small constant.
+  EXPECT_LE(job.deepest_indent, 2u * 256u + 8u);
+}
+
+#endif
+
+TEST(Ir, NestingThatCannotBeFlatIsRejectedNotNested) {
+  // Each test branches to one join block (its immediate post-dominator), so no `if` closes early:
+  // the rest nests in the fall-through arm. 400 such tests exceed the nesting bound, so the
+  // fallback rejects and the function prints labelled, with no nesting beyond the bound.
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "joined";
+  f.return_width = 8;
+  const std::size_t checks = 400;
+  for (std::size_t i = 0; i <= checks; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks))};
+  }
+  f.blocks[checks].statements = {fb_set("rdx", 1), fb_return()};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos)
+      << "the depth bound must reject";
+}
