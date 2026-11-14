@@ -107,6 +107,11 @@ struct StructuredLine {
   std::uint64_t source_address = 0;
 };
 
+/// The deepest nesting of if, loop and switch statements that the printer and the control-flow
+/// check accept (G04-T5). A candidate deeper than this is refused with a reason, so a crafted
+/// function cannot exhaust the stack of the thread that prints it, and the labelled form is shown.
+inline constexpr std::size_t kMaxStructureNesting = 128;
+
 /// Structured rendering of the function body, or `nullopt` when the control-flow
 /// graph does not match a shape this structurer models. Callers must fall back
 /// to labeled blocks with explicit `goto` when `nullopt` is returned; no guessed

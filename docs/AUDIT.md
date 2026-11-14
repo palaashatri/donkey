@@ -111,13 +111,16 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
    memory was quadratic and the recursion unbounded. On a 512 KiB thread (the macOS default for
    secondary threads) N = 10,000 segfaulted; at N = 5,000 the branch used 438 MiB against main's 41
    MiB. Fixed by (a) an `if` whose taken arm cannot fall out, when both arms leave by return, closes
-   and the fall-through continues at the same level (a chain stays flat), (b) a nesting bound of 256
-   (`kMaxFallbackNesting`): a deeper candidate is rejected with "nesting deeper than 256 levels" and
-   the next stage or the labelled form prints it, and (c) each structurer attempt is scoped, so its
+   and the fall-through continues at the same level (a chain stays flat), (b) a nesting bound of 128
+   (`kMaxStructureNesting`, `ir_internal.h`, used by the fallback and by the layout structurer's
+   `emit_range`): a deeper candidate is rejected with "nesting deeper than 128 levels" and the next
+   stage or the labelled form prints it, and (c) each structurer attempt is scoped, so its
    dominator and post-dominator sets (quadratic in the block count) are freed before the next attempt
    builds its own. Tests: `Ir.EarlyReturnChainPrintsFlatWhenShort`,
    `Ir.EarlyReturnChainOf5000FormatsOnASmallStack` (512 KiB thread; it segfaults before the fix),
-   `Ir.NestingThatCannotBeFlatIsRejectedNotNested`.
+   `Ir.NestingThatCannotBeFlatIsRejectedNotNested`, and
+   `Ir.NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack` (1,000 genuinely nested tests on a 512
+   KiB thread: it segfaults before the bound, and prints labelled after it).
 
 Stress table (`stress N stack_KiB` through `rss.py`, which caps the address space at 1.5 GiB; N
 checks followed by the irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`,
@@ -131,7 +134,9 @@ checks followed by the irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoN
 | 10,000 on 512 KiB | ok | segfault | - | ok (see the row above) |
 
 After the fix the ratio to main is 1.9 at 2,500, 1.9 at 5,000 and 1.7 at 10,000, all within 2x, and
-no run aborts or segfaults. Every run prints the function labelled, with a maximum indentation of 2
+no run aborts or segfaults. The genuinely nested chain (`nest.cpp`, D = 1,000 and 10,000, 512 KiB
+stack) prints labelled: 13 MiB at D = 1,000 and 334 MiB at D = 10,000 (20,001 blocks; memory is the
+block count, not the nesting); main segfaults on the same shape at D = 10,000 on 512 KiB. Every run prints the function labelled, with a maximum indentation of 2
 spaces (the labelled form is flat). The "branch before" column is the coordinator's measurement
 (`w1audit`), and the 512 KiB segfault before the fix is reproduced by the test above.
 

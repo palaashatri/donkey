@@ -641,7 +641,7 @@ struct Structurer {
     emit_range(0, count);
     if (!ok_) {
       {
-        note("emission rejected");
+        note(nesting_refused_ ? "nesting deeper than 128 levels" : "emission rejected");
         return std::nullopt;
       }
     }
@@ -720,7 +720,6 @@ struct Structurer {
   static constexpr std::size_t kReturnCopyMaxStatements = 8;
   static constexpr std::size_t kReturnCopyBudget = 64;
   std::size_t fb_duplicated_ = 0;
-  static constexpr std::size_t kMaxFallbackNesting = 256;
 
   [[nodiscard]] bool fb_is_return_block(BlockId block) const {
     return block < function_.blocks.size() && graph_.successors[block].empty() &&
@@ -944,8 +943,8 @@ struct Structurer {
     const std::size_t count = function_.blocks.size();
     // Nesting is bounded: recursion and indentation both grow with it, so a deeper candidate is
     // rejected and the next stage (or the labelled form) prints the function.
-    if (indent_ >= static_cast<int>(kMaxFallbackNesting)) {
-      fb_fail("nesting deeper than 256 levels");
+    if (indent_ >= static_cast<int>(kMaxStructureNesting)) {
+      fb_fail("nesting deeper than 128 levels");
       return;
     }
     BlockId block = start;
@@ -1581,6 +1580,13 @@ struct Structurer {
 
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
                   BlockId join_exit = kNoBlock) {
+    // Nesting is bounded, as in the fallback: a deeper region is refused and the labelled form
+    // prints.
+    if (indent_ >= static_cast<int>(kMaxStructureNesting)) {
+      nesting_refused_ = true;
+      ok_ = false;
+      return;
+    }
     BlockId index = first;
     while (index < last) {
       if (!ok_) {
@@ -1963,6 +1969,7 @@ struct Structurer {
   std::vector<LoopFrame> frames_;
   int indent_ = 1;
   bool ok_ = true;
+  bool nesting_refused_ = false;
   /// The first reason the structurer rejected this function (empty when it did not).
   mutable std::string reason_;
   void note(const char* why) const {

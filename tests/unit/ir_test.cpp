@@ -5460,3 +5460,66 @@ TEST(Ir, NestingThatCannotBeFlatIsRejectedNotNested) {
   EXPECT_NE(text.value().find("labeled blocks"), std::string::npos)
       << "the depth bound must reject";
 }
+
+namespace {
+
+// A genuinely nested chain (G04-T5): blocks 2k test rax == 0 and go to 2k+2, blocks 2k+1 assign and
+// jump to the return 2D. Each test nests the rest of the chain in its fall-through.
+IrFunction nested_chain(std::size_t depth) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "nested";
+  f.return_width = 8;
+  for (std::size_t i = 0; i <= 2 * depth; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t k = 0; k < depth; ++k) {
+    f.blocks[2 * k].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(2 * k + 2))};
+    f.blocks[2 * k + 1].statements = {fb_set("rdx", k),
+                                      fb_jump(static_cast<std::uint32_t>(2 * depth))};
+  }
+  f.blocks[2 * depth].statements = {fb_return()};
+  return f;
+}
+
+}  // namespace
+
+#if defined(__unix__) || defined(__APPLE__)
+namespace {
+
+struct NestedJob {
+  std::size_t depth = 0;
+  bool ok = false;
+  std::string text;
+};
+
+void* format_nested(void* argument) {
+  auto* job = static_cast<NestedJob*>(argument);
+  auto text = donkey::format_pseudocode(nested_chain(job->depth));
+  job->ok = text.has_value();
+  if (job->ok) {
+    job->text = text.value();
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(Ir, NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack) {
+  // 1,000 nested tests on a 512 KiB thread: deeper than kMaxStructureNesting, so both structurers
+  // refuse it and the labelled form is printed. Without the bound this recursed a thousand levels.
+  NestedJob job;
+  job.depth = 1000;
+  pthread_attr_t attributes;
+  ASSERT_EQ(pthread_attr_init(&attributes), 0);
+  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
+  pthread_t thread;
+  ASSERT_EQ(pthread_create(&thread, &attributes, format_nested, &job), 0);
+  pthread_join(thread, nullptr);
+  pthread_attr_destroy(&attributes);
+  ASSERT_TRUE(job.ok);
+  EXPECT_NE(job.text.find("labeled blocks"), std::string::npos);
+}
+#endif
