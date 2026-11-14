@@ -41,17 +41,24 @@ void append_u64(std::vector<std::byte>& out, std::uint64_t value) {
 /// Its id is 0, and the record is 17 bytes: length, id, version, "zR", alignments, the return
 /// register, the augmentation length and the encoding.
 std::vector<std::byte> cie_record(std::uint8_t encoding) {
-  std::vector<std::byte> body = bytes_of({0x00, 0x00, 0x00, 0x00,  // CIE id
-                                          0x01,                    // version
-                                          'z', 'R', 0x00,          // augmentation "zR"
-                                          0x01,                    // code alignment (uleb)
-                                          0x78,                    // data alignment (sleb -8)
-                                          0x10,                    // return register
-                                          0x01,                    // augmentation data length
-                                          encoding});
+  // The length is written first and patched once the body is in place, so the record is built with
+  // single-element appends only (a range copy into this vector trips GCC's -Wstringop-overflow).
   std::vector<std::byte> out;
-  append_u32(out, static_cast<std::uint32_t>(body.size()));
-  out.insert(out.end(), body.begin(), body.end());
+  append_u32(out, 0);
+  for (const unsigned value : {0x00U, 0x00U, 0x00U, 0x00U,  // CIE id
+                               0x01U,                       // version
+                               0x7AU, 0x52U, 0x00U,         // augmentation "zR"
+                               0x01U,                       // code alignment (uleb)
+                               0x78U,                       // data alignment (sleb -8)
+                               0x10U,                       // return register
+                               0x01U,                       // augmentation data length
+                               static_cast<unsigned>(encoding)}) {
+    out.push_back(static_cast<std::byte>(value & 0xFFU));
+  }
+  const auto length = static_cast<std::uint32_t>(out.size() - 4);
+  for (std::size_t i = 0; i < 4; ++i) {
+    out[i] = static_cast<std::byte>((length >> (8 * i)) & 0xFFU);
+  }
   return out;
 }
 
@@ -72,7 +79,9 @@ std::vector<std::byte> fde_record(std::uint32_t id, std::uint32_t start_field,
 std::vector<std::byte> concat(std::initializer_list<std::vector<std::byte>> parts) {
   std::vector<std::byte> out;
   for (const auto& part : parts) {
-    out.insert(out.end(), part.begin(), part.end());
+    for (const std::byte b : part) {
+      out.push_back(b);
+    }
   }
   return out;
 }
