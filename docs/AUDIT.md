@@ -104,10 +104,23 @@ where the population changed, the table says so.
 
 ### Population growth
 
-The baseline sampled 1,893 functions from 12,531 `.text` functions of seven binaries. The
-unwind-table seeds of G23-T1 and G23-T2 found more function starts (for example `ls` went from
-94 to 186 starts, `bash` from 2,073 to 2,343, `python3.12` to 11,416), so a later run samples from
-a larger population. Any comparison across that change must use the same addresses.
+Population sizes (`.text` function starts, as `donkey-cli functions` reports them):
+
+| Binary | Baseline (`sample.py`, `1a92abf`) | Final (`665c9e4`, fixed list) |
+|---|---|---|
+| `ls` | 94 | 186 |
+| `openssl` | 299 | 535 |
+| `bash` | 2,073 | 2,343 |
+| `libsqlite3.so.0` | 2,128 | 2,773 |
+| `libc.so.6` | 3,026 | 3,786 |
+| `git` | not sampled | 4,473 |
+| `python3.12` | not sampled | 11,416 |
+
+The baseline sampled 1,893 functions (300 per binary, the own binaries included; 12,531 `.text`
+starts across seven binaries). The final list samples 1,786 from the seven system binaries
+(300 each, all 186 of `ls`). The unwind-table seeds of G23-T1 and G23-T2 found more function
+starts, so a later run samples from a larger population. Any comparison across that change must
+use the same addresses.
 
 ### Same-population measurement (`tools/audit/sample_list.py`)
 
