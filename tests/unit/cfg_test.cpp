@@ -9,6 +9,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/plt.h"
 #include "test_io.h"
 
 namespace {
@@ -521,3 +522,85 @@ TEST(Cfg, TheInstructionLimitIsReportedOnceForAllFunctions) {
 }
 
 }  // namespace
+
+// Goal 4, cause: a direct jump from one function to another function's start is a tail call. The
+// target's blocks belong to that function. Before the fix, the walk of the entry followed the jump
+// and counted the target's blocks as the entry's, so the entry's IR contained another function.
+TEST(Cfg, TailCallToAnotherFunctionStartIsNotCountedAsItsBlock) {
+  // call 0x1010; jmp 0x1010 (a tail call); padding; 0x1010: ret
+  const std::vector<std::uint8_t> raw = {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xe9, 0x06, 0x00, 0x00,
+                                         0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xc3};
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  const auto image = synthetic_image(data.size());
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& analysis = result.value();
+
+  const donkey::Function* entry = nullptr;
+  const donkey::Function* callee = nullptr;
+  for (const donkey::Function& function : analysis.functions) {
+    if (function.address == 0x1000) {
+      entry = &function;
+    }
+    if (function.address == 0x1010) {
+      callee = &function;
+    }
+  }
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(callee, nullptr);
+  // The callee's own block is its; the entry does not own it.
+  const auto* target = block_at(analysis.cfg, 0x1010);
+  ASSERT_NE(target, nullptr);
+  EXPECT_EQ(target->function, callee->id);
+  // The tail-call jump is still an edge out of the entry, so it stays visible.
+  EXPECT_NE(edge_between(analysis.cfg, 0x1005, 0x1010), nullptr);
+  for (const donkey::BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == entry->id) {
+      EXPECT_NE(block.address, 0x1010U);
+    }
+  }
+}
+
+// Goal 4, cause: a direct jump from a function into a PLT import stub is a tail call. The stub is
+// not a function start in this image (nothing calls it), so only the import-stub rule keeps it out
+// of the function's blocks. tests/fixtures/link/libtailcall.so is built from libtailcall.c with
+// gcc -O2 -shared -fPIC; its tail_fn ends with `jmp imported_add@plt`.
+TEST(Cfg, TailCallIntoAPltStubIsNotCountedAsTheFunctionsBlock) {
+  auto loaded = donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/link/libtailcall.so");
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  const auto stubs = donkey::plt_stub_imports(loaded.value().image, loaded.value().data);
+  std::uint64_t stub = 0;
+  for (const auto& [address, name] : stubs) {
+    if (name == "imported_add") {
+      stub = address;
+    }
+  }
+  ASSERT_NE(stub, 0U) << "no PLT stub for imported_add";
+  std::uint64_t tail = 0;
+  for (const donkey::Symbol& symbol : loaded.value().image.symbols) {
+    if (symbol.exported && symbol.name == "tail_fn") {
+      tail = symbol.address;
+    }
+  }
+  ASSERT_NE(tail, 0U);
+  auto result = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& analysis = result.value();
+  const donkey::Function* function = nullptr;
+  for (const donkey::Function& candidate : analysis.functions) {
+    if (candidate.address == tail) {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  for (const donkey::BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == function->id) {
+      EXPECT_NE(block.address, stub) << "the stub's block is counted as tail_fn's";
+    }
+  }
+  // The jump is still an edge out of tail_fn, so the tail call stays visible.
+  EXPECT_NE(edge_between(analysis.cfg, tail + 7, stub), nullptr);
+}

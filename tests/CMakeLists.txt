@@ -181,6 +181,8 @@ add_executable(donkey_unit_tests
   unit/session_test.cpp
 )
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
+# Internal lifter declarations (src/ir/lift_internal.h) are unit-tested directly.
+target_include_directories(donkey_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/ir)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
   DONKEY_SIGNATURE_DIR="${PROJECT_SOURCE_DIR}/signatures"

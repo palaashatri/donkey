@@ -19,6 +19,7 @@
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "lift_internal.h"
 #include "test_io.h"
 
 namespace {
@@ -4469,4 +4470,120 @@ TEST(Ir, X86_64ReturnRegisterNoteNamesRax) {
     }
   }
   EXPECT_TRUE(noted);
+}
+
+namespace {
+
+/// Lifts the function that starts at `entry_offset` into the raw bytes, which are mapped at the
+/// synthetic image's base. Code below the entry is part of the image too.
+bool lift_raw_x86_64_at_entry(const std::vector<std::uint8_t>& raw, std::uint64_t entry_offset,
+                              donkey::IrFunction& out) {
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  image.entry_point = 0x1000 + entry_offset;
+  auto analyzed = donkey::analyze(image, data);
+  if (!analyzed.has_value()) {
+    return false;
+  }
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address != image.entry_point) {
+      continue;
+    }
+    auto lifted = donkey::lift_function(image, analyzed.value(), function);
+    if (!lifted.has_value()) {
+      return false;
+    }
+    out = std::move(lifted.value());
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+// Goal 4, cause 1: the entry is not the lowest block, and a block below it is reached from it
+// (here `ret` at offset 0, reached by `jmp 0` from the entry at offset 2). The verifier starts at
+// block 0, so the entry used to be unreachable. The lifter now puts a trampoline at block 0 that
+// branches to the entry, and the function verifies.
+TEST(Ir, EntryBelowAReachableBlockGetsATrampolineAndVerifies) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64_at_entry({0xc3, 0x90, 0xeb, 0xfc}, 2, f));
+  ASSERT_GE(f.blocks.size(), 2U);
+  // Block 0 is the trampoline: it only branches to the block at the entry address.
+  const donkey::IrBlock& trampoline = f.blocks[0];
+  ASSERT_EQ(trampoline.statements.size(), 1U);
+  ASSERT_EQ(trampoline.statements[0].op, IrOp::Branch);
+  const std::uint32_t target = trampoline.statements[0].a.block;
+  ASSERT_LT(target, f.blocks.size());
+  EXPECT_EQ(f.blocks[target].address, 0x1002U);
+  auto verified = donkey::verify_ir(f);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+}
+
+// Goal 4, cause: a block the entry cannot reach is removed, not shown, and the function is Partial
+// with a note giving its address range. Hand-built IR: the entry at 0x1000 branches to 0x1004 and
+// the block at 0x1010 is reached from nothing. The entry is block 0 here, so no trampoline is made.
+TEST(Ir, BlockNotReachedFromTheEntryIsDroppedWithANote) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "sub_1000";
+  f.return_width = 8;
+  donkey::IrBlock entry;
+  entry.address = 0x1000;
+  IrStatement branch;
+  branch.op = IrOp::Branch;
+  branch.a = IrOperand::block_ref(1);
+  branch.width = 8;
+  branch.source_address = 0x1000;
+  entry.statements.push_back(branch);
+  donkey::IrBlock next;
+  next.address = 0x1004;
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  ret.source_address = 0x1004;
+  next.statements.push_back(ret);
+  donkey::IrBlock orphan;
+  orphan.address = 0x1010;
+  orphan.statements.push_back(ret);
+  f.blocks = {entry, next, orphan};
+
+  donkey::AnalysisResult analysis;
+  donkey::BasicBlock b0;
+  b0.function = donkey::FunctionId{7};
+  b0.address = 0x1000;
+  b0.end_address = 0x1004;
+  donkey::BasicBlock b1 = b0;
+  b1.address = 0x1004;
+  b1.end_address = 0x1008;
+  donkey::BasicBlock b2 = b0;
+  b2.address = 0x1010;
+  b2.end_address = 0x1014;
+  analysis.cfg.blocks = {b0, b1, b2};
+
+  auto changed = donkey::internal::keep_reachable_blocks(f, analysis, donkey::FunctionId{7}, 8);
+  ASSERT_TRUE(changed.has_value()) << changed.diagnostic().message;
+  EXPECT_TRUE(changed.value());
+  ASSERT_EQ(f.blocks.size(), 2U);
+  EXPECT_EQ(f.blocks[0].address, 0x1000U);
+  // The branch now names the kept block at index 1.
+  EXPECT_EQ(f.blocks[0].statements[0].a.block, 1U);
+  EXPECT_TRUE(f.partial);
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    if (note.find("1 block(s) are not reached") != std::string::npos &&
+        note.find("0x1010..0x1014") != std::string::npos) {
+      noted = true;
+    }
+  }
+  EXPECT_TRUE(noted);
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
 }

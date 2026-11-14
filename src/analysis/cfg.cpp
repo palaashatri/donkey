@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
+#include "donkey/binary/plt.h"
 
 namespace donkey {
 namespace {
@@ -947,6 +948,16 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
   std::size_t truncated_functions = 0;
   std::uint64_t first_truncated = 0;
 
+  // Every known function start. A direct unconditional jump to another function's start is a tail
+  // call out of this function: its target's code is that function's, not this one's blocks.
+  std::unordered_set<std::uint64_t> function_starts;
+  function_starts.reserve(seeds.size() * 2);
+  for (const Function& seed : seeds) {
+    function_starts.insert(seed.address);
+  }
+  // Import stubs (PLT entries whose imported name is known) are functions of their own too.
+  const std::map<std::uint64_t, std::string> import_stubs = plt_stub_imports(image, file);
+
   for (std::size_t seed_index = 0; seed_index < seeds.size(); ++seed_index) {
     if (block_bound_reached) {
       break;
@@ -1047,7 +1058,13 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             continue;
           case InstructionClass::Jump:
             if (instruction.direct_target.has_value()) {
-              worklist.push_back(instruction.direct_target.value());
+              const std::uint64_t target = instruction.direct_target.value();
+              // A jump to another function's start leaves this function (a tail call): the target
+              // is not followed, so its blocks are not counted as this function's.
+              if (target == function.address ||
+                  (!function_starts.contains(target) && !import_stubs.contains(target))) {
+                worklist.push_back(target);
+              }
             } else if (auto table =
                            resolve_jump_table(image, file, instructions, run, index_by_address)) {
               for (const std::uint64_t target : table->targets) {

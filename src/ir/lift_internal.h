@@ -16,4 +16,12 @@ namespace donkey::internal {
 /// write, or a high-byte write, is an explicit merge. x86-64 and AArch64 only.
 void canonicalise_registers(IrFunction& function, Architecture architecture);
 
+/// Keeps the blocks reachable from the function's entry, puts a trampoline in front of an entry
+/// that is not block 0, and notes the blocks left out. Returns false when nothing changed. See
+/// lift.cpp for the rules. `function_id` is the CFG function the blocks came from.
+[[nodiscard]] Result<bool> keep_reachable_blocks(IrFunction& function,
+                                                 const AnalysisResult& analysis,
+                                                 FunctionId function_id,
+                                                 std::uint8_t pointer_width);
+
 }  // namespace donkey::internal

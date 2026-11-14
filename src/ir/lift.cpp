@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
+#include <map>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -1984,11 +1986,197 @@ void mark_mixed_parameters(IrFunction& function) {
   }
 }
 
+namespace {
+
+/// Keeps only the blocks reachable from the function's entry by the modelled control flow, puts
+/// the entry first, and states what was left out (G-audit Goal 4).
+///
+/// Two things made some functions fail the verifier with ir.unreachable_block. The CFG assigns a
+/// function every block it reaches by a direct jump that stays inside it, and the lifter emits
+/// them in address order. First, a jump that leaves the function is lifted as a tail call (a call
+/// and a return, with no edge), so the code it reaches is not connected to the entry; those blocks
+/// are removed here and the function is Partial, with their address ranges in a note. Second, the
+/// verifier starts at block 0, but the entry is not always the lowest block: a block below it can
+/// be reached from the entry (a PLT stub the CFG counts as part of the function). Then the entry
+/// is placed behind a trampoline, a block at address 0 whose only statement branches to the entry.
+/// The trampoline changes no state, so it does not make the function Partial.
+///
+/// Removing unreachable blocks keeps the fall-through of a conditional branch intact: a reachable
+/// block's fall-through block is reachable, so it is never removed, and the two stay adjacent.
+Result<bool> keep_blocks_reachable_from_entry(IrFunction& function, const AnalysisResult& analysis,
+                                              FunctionId function_id, std::uint8_t pointer_width) {
+  const std::size_t count = function.blocks.size();
+  std::size_t entry = count;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (function.blocks[i].address == function.address) {
+      entry = i;
+      break;
+    }
+  }
+  if (entry == count) {
+    return false;  // nothing to do: the verifier reports a missing entry
+  }
+  std::vector<bool> reachable(count, false);
+  std::vector<std::size_t> work = {entry};
+  reachable[entry] = true;
+  const auto visit = [&](std::size_t target) {
+    if (target < count && !reachable[target]) {
+      reachable[target] = true;
+      work.push_back(target);
+    }
+  };
+  while (!work.empty()) {
+    const std::size_t index = work.back();
+    work.pop_back();
+    const auto& statements = function.blocks[index].statements;
+    if (statements.empty()) {
+      continue;
+    }
+    const IrStatement& terminator = statements.back();
+    switch (terminator.op) {
+      case IrOp::Branch:
+        if (terminator.a.kind == IrOperandKind::Block) {
+          visit(terminator.a.block);
+        }
+        break;
+      case IrOp::CondBranch:
+        if (terminator.b.kind == IrOperandKind::Block) {
+          visit(terminator.b.block);
+        }
+        visit(index + 1);  // the fall-through is the next block
+        break;
+      case IrOp::Switch:
+        if (terminator.a.kind == IrOperandKind::Block) {
+          visit(terminator.a.block);
+        }
+        for (const IrSwitchCase& sc : terminator.switch_cases) {
+          visit(sc.target_block);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  std::size_t removed = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    removed += reachable[i] ? 0 : 1;
+  }
+  // The printer and the evaluator start at block 0, so an entry that is not block 0 needs the
+  // trampoline; a function whose entry is block 0 and has nothing unreachable is unchanged.
+  if (removed == 0 && entry == 0) {
+    return false;
+  }
+
+  // Ranges of the blocks left out, from the CFG's block ends.
+  const auto hex_text = [](std::uint64_t value) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+  std::map<std::uint64_t, std::uint64_t> ends;
+  for (const BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == function_id) {
+      ends[block.address] = block.end_address;
+    }
+  }
+  std::vector<std::string> left_out;
+  constexpr std::size_t kNamedRanges = 8;
+  for (std::size_t i = 0; i < count && removed > 0; ++i) {
+    if (reachable[i]) {
+      continue;
+    }
+    const std::uint64_t start = function.blocks[i].address;
+    const auto end = ends.find(start);
+    if (left_out.size() < kNamedRanges) {
+      left_out.push_back(end != ends.end() && end->second > start
+                             ? "0x" + hex_text(start) + "..0x" + hex_text(end->second)
+                             : "0x" + hex_text(start));
+    }
+  }
+
+  // New indices: the trampoline (when there is one) is block 0, and the reachable blocks follow
+  // in their original order.
+  const std::uint32_t offset = entry == 0 ? 0 : 1;
+  std::vector<std::uint32_t> new_index(count, 0);
+  std::uint32_t next = offset;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (reachable[i]) {
+      new_index[i] = next++;
+    }
+  }
+  std::vector<IrBlock> kept;
+  if (offset == 1) {
+    IrBlock trampoline;
+    trampoline.address = 0;  // no code lives at 0, so its label is unique
+    IrStatement branch;
+    branch.op = IrOp::Branch;
+    branch.a = IrOperand::block_ref(new_index[entry]);
+    branch.width = pointer_width;
+    branch.source_address = function.address;
+    trampoline.statements.push_back(std::move(branch));
+    kept.push_back(std::move(trampoline));
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (!reachable[i]) {
+      continue;
+    }
+    IrBlock block = std::move(function.blocks[i]);
+    for (IrStatement& statement : block.statements) {
+      // An out-of-range reference is left as it is; the verifier reports it.
+      for (IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (operand->kind == IrOperandKind::Block && operand->block < count) {
+          operand->block = new_index[operand->block];
+        }
+      }
+      for (IrSwitchCase& sc : statement.switch_cases) {
+        if (sc.target_block < count) {
+          sc.target_block = new_index[sc.target_block];
+        }
+      }
+    }
+    kept.push_back(std::move(block));
+  }
+  function.blocks = std::move(kept);
+  if (removed > 0) {
+    function.partial = true;
+    std::string list;
+    for (const std::string& range : left_out) {
+      list += (list.empty() ? "" : ", ") + range;
+    }
+    if (removed > left_out.size()) {
+      list += ", and " + std::to_string(removed - left_out.size()) + " more";
+    }
+    function.notes.push_back(
+        std::to_string(removed) +
+        " block(s) are not reached by modelled control flow from the entry and are not shown "
+        "(a jump out of the function is a tail call, so the code it reaches is not included): " +
+        list);
+  }
+  return true;
+}
+
+}  // namespace
+
+namespace internal {
+
+Result<bool> keep_reachable_blocks(IrFunction& function, const AnalysisResult& analysis,
+                                   FunctionId function_id, std::uint8_t pointer_width) {
+  return keep_blocks_reachable_from_entry(function, analysis, function_id, pointer_width);
+}
+
+}  // namespace internal
+
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
     if (lifted) {
+      if (auto kept = keep_blocks_reachable_from_entry(lifted.value(), analysis, function.id, 8);
+          !kept) {
+        return make_error<IrFunction>(kept.diagnostic().status, kept.diagnostic().code,
+                                      kept.diagnostic().message, function.address);
+      }
       resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
       internal::canonicalise_registers(lifted.value(), image.architecture);
       if (options.run_passes) {
@@ -2385,6 +2573,12 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   const ReturnRegisters return_registers = image.architecture == Architecture::AArch64
                                                ? ReturnRegisters{"x0", "v0", true}
                                                : ReturnRegisters{"rax", "xmm0", false};
+  if (auto kept =
+          keep_blocks_reachable_from_entry(lifter.out, analysis, function.id, lifter.pointer_width);
+      !kept) {
+    return make_error<IrFunction>(kept.diagnostic().status, kept.diagnostic().code,
+                                  kept.diagnostic().message, function.address);
+  }
   resolve_return_registers(lifter.out, return_registers);
   internal::canonicalise_registers(lifter.out, image.architecture);
   if (options.run_passes) {
