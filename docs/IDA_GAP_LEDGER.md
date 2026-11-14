@@ -877,6 +877,56 @@ for Partial functions.
   decompiler also spells integer types by width (`u32`), not by their C names; the name is
   the debug information's and the type spelling is the decompiler's.
 
+**G04-T5 Goto structuring: no whole-function labels** (depends: G04-T3 and the goal 8 work in
+`docs/AUDIT.md`; W1 branch `agent/ir/G04-T5-goto-structuring`)
+
+- **Goal:** a function with verified IR prints as structured C. A `goto` is printed only for an
+  edge that no structured form can express, and the printer says how many there are. A second
+  oracle checks the printed control flow against the IR, edge for edge.
+- **Why a dominator-based emitter and not region collapsing:** the brief allows a better design
+  with an explanation. Collapsing a graph by rules needs a second graph rewrite each time a goto
+  is chosen, and its termination depends on the rewrite. An emitter that prints each block once,
+  with gotos as the only escape, terminates by construction (recursion is bounded by the block
+  count), and its output is checked by the oracle below, so a wrong choice is caught either way.
+- **Files:** `src/ir/structure.cpp` (tagged lines; the goto structurer as the last stage),
+  `src/ir/ir_internal.h` (line tags), `src/ir/structure_check.cpp` and `src/ir/structure_check.h`
+  (new; the oracle, listed in `src/ir/CMakeLists` explicitly), `src/ir/ir.cpp` (the note),
+  `apps/donkey-cli/commands.cpp` (the class name), `tests/unit/ir_test.cpp`,
+  `tests/unit/decompiler_corpus_test.cpp`, `tools/audit/sample_list.py`.
+- **Steps:**
+  1. Tag every printed line with its structural role: statement of block b, if/else open or
+     close (with the block and whether the printed condition is the complement of the IR
+     condition), while or for open, switch open, case, default, break, continue, return, goto,
+     label. The text is unchanged; `DecompilerCorpus.*` and `Ir.*` must stay green.
+  2. The oracle: rebuild the control flow from the tags (sequence, if/else, while, break,
+     continue, return, goto, switch with C fall-through between case arms) and compare each
+     block's successors with the IR's, edge for edge, including which arm a condition's true
+     side enters. Run it on every corpus function and, in the measurement, on all 1,986.
+  3. The goto structurer, tried after the existing structurers (so a function that structures
+     today keeps its goto-free output): an emitter that prints each block once. A branch to the
+     next block by fall-through, to the innermost loop's header as `continue`, or to its follow
+     as `break` is structured; anything else is `goto` to a label on the target. A conditional
+     branch becomes if/else at its immediate post-dominator. A loop is the natural loop of its
+     back edges, printed as `while (test)` when its header is a pure test, else `while (1)`.
+     The rules are switchable for the tests (one bit each).
+  4. The note: a function printed with gotos says `N goto(s) where control flow has no
+     structured form`; a function printed without gotos has no structure note. The labelled
+     whole-function form is kept only for invalid graphs, which verified IR does not produce.
+- **Tests (each rule has one that fails with the rule switched off; the failure is shown once in
+  a commit message):** a fall-through rule, if/else, if without else, while, while with a
+  pure-test header, break, continue, switch, goto forward into a join with several predecessors,
+  goto out of a loop, goto into a loop body (irreducible). `Ir.FallsBackToLabelsForIrreducibleControlFlow`
+  is replaced by a test of the new note and gotos (it asserted the labelled form, which goal 4
+  removes). The oracle has a test that fails on a deliberately broken rule (shown once).
+- **Measurement:** the same 1,986 functions (`tools/audit/results/list_final.json`), Release
+  build, before and after: whole-function labelled count (target 0), goto-free functions (must
+  not drop), functions with gotos, total gotos and the largest per function, oracle mismatches
+  (target 0), and the runtime (structuring may not make decompilation more than 25% slower).
+- **Done when:** the measurement in `docs/AUDIT.md` (W1 section) shows the numbers above, the
+  three build trees and the desktop UI suite pass, and the PARITY, SUPPORT_MATRIX and DESIGN
+  §17.2 rows agree with the evidence.
+- **Status:** IN PROGRESS. The plan is this entry; the steps are in the W1 commits.
+
 ### G05 Type system and user types
 
 **G05-T1 Type store** (depends: none)
