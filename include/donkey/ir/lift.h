@@ -15,6 +15,10 @@ struct LiftOptions {
   /// Run run_ir_passes on the lifted function (the default). Tests set this to
   /// false to see the lifter's output and run the passes themselves.
   bool run_passes = true;
+  /// Resolve a direct call to a function of the same image: its inferred integer signature gives
+  /// the arguments and the result (G21). A lifter that is lifting a callee for its signature sets
+  /// this to false, so calls are not followed more than one level.
+  bool resolve_calls = true;
 };
 
 /// Lift one function's basic blocks into IR. The lifters model a documented

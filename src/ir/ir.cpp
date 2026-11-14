@@ -377,11 +377,25 @@ class Renderer {
         return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Store:
         return operand(statement.a) + " = " + operand(statement.b) + ";";
-      case IrOp::Call:
-        if (statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0) {
-          return "sub_" + hex(statement.a.constant) + "();";
+      case IrOp::Call: {
+        // `r = f(a, b);` when the result is used; the arguments are the callee's inferred ones.
+        std::string target =
+            statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0
+                ? "sub_" + hex(statement.a.constant)
+                : "((void (*)(void))" + operand(statement.a) + ")";
+        std::string arguments;
+        for (const IrOperand& argument : statement.call_arguments) {
+          arguments += (arguments.empty() ? "" : ", ") + operand(argument);
         }
-        return "((void (*)(void))" + operand(statement.a) + ")();";
+        std::string line =
+            (statement.dest.kind == IrOperandKind::Register ? destination(statement.dest) + " = "
+                                                            : std::string()) +
+            target + "(" + arguments + ");";
+        if (statement.signature_inferred && !statement.call_arguments.empty()) {
+          line += " /* arguments inferred from callee */";
+        }
+        return line;
+      }
       case IrOp::Return:
         if (statement.a.kind == IrOperandKind::None) {
           return "return;";
@@ -1198,6 +1212,22 @@ Result<bool> verify_ir(const IrFunction& function) {
         case IrOp::Call:
           if (statement.a.kind == IrOperandKind::None) {
             return fail("ir.malformed_call", "call needs a target");
+          }
+          if (statement.dest.kind != IrOperandKind::None &&
+              statement.dest.kind != IrOperandKind::Register) {
+            return fail("ir.malformed_call", "a call's result must be a register");
+          }
+          // Arguments come from a known signature only (G21-T2): an unknown one has none.
+          if (!statement.call_arguments.empty() && !statement.signature_inferred) {
+            return fail("ir.call_signature", "call arguments need a signature");
+          }
+          for (const IrOperand& argument : statement.call_arguments) {
+            if ((argument.kind != IrOperandKind::Register &&
+                 argument.kind != IrOperandKind::Constant) ||
+                argument.width == 0 || argument.width > 8) {
+              return fail("ir.call_signature",
+                          "a call argument must be a register or constant of 1 to 8 bytes");
+            }
           }
           break;
         case IrOp::Return:

@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
 #include <span>
@@ -30,6 +31,7 @@
 #include "donkey/ir/lift.h"
 #include "donkey/ir/prototype.h"
 #include "donkey/project/types.h"
+#include "lift_internal.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -90,6 +92,12 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_point_move", 'v', "Si"},
     {"c_switch_dense", 'i', "i"},
     {"c_switch_sparse", 'i', "i"},
+    {"c_call_add2", 'i', "ii"},
+    {"c_call_six", 'i', "iiiiii"},
+    {"c_call_unused", 'i', "i"},
+    {"c_call_loop", 'i', "n"},
+    {"c_call_wide", 'l', "ll"},
+    {"c_call_chain", 'i', "ii"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
     {"c_add128_hi", 'U', "UUUU"},
@@ -457,6 +465,27 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     donkey::IrEvalOptions eval_options;
     eval_options.architecture = loaded.value().image.architecture;
     eval_options.convention = host_convention();
+    // The callees of a call-heavy function, lifted on demand from this library (G21-T1). The
+    // interpreter runs the callee's own IR; the native call runs the compiled code.
+    std::map<std::uint64_t, donkey::IrFunction> callee_ir;
+    const std::function<const donkey::IrFunction*(std::uint64_t)> resolve_callee =
+        [&](std::uint64_t address) -> const donkey::IrFunction* {
+      if (const auto known = callee_ir.find(address); known != callee_ir.end()) {
+        return &known->second;
+      }
+      for (const donkey::Function& candidate : analysis.value().functions) {
+        if (candidate.address == address) {
+          auto lifted_callee =
+              donkey::lift_function(loaded.value().image, analysis.value(), candidate);
+          if (!lifted_callee) {
+            return nullptr;
+          }
+          return &(callee_ir[address] = std::move(lifted_callee.value()));
+        }
+      }
+      return nullptr;
+    };
+    eval_options.callees = &resolve_callee;
 
     for (const CorpusFunction& entry : kCorpus) {
       Outcome outcome;
@@ -824,6 +853,10 @@ TEST(DecompilerCorpus, StatementPassesShortenThePseudocode) {
       };
       donkey::IrFunction piped = raw.value();
       donkey::run_ir_passes(piped, pass_options);
+      // The call-clobber check runs after the passes in lift_function, so it runs here too.
+      if (loaded.value().image.architecture == donkey::Architecture::X86_64) {
+        donkey::internal::check_call_clobbers(piped);
+      }
 
       // Statement lines: the lines of the body that hold a C statement. Headers, notes,
       // labels and braces are not counted, so the measure does not depend on them.
@@ -913,6 +946,10 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       };
       donkey::IrFunction piped = raw.value();
       donkey::run_ir_passes(piped, pass_options);
+      // The call-clobber check runs after the passes in lift_function, so it runs here too.
+      if (loaded.value().image.architecture == donkey::Architecture::X86_64) {
+        donkey::internal::check_call_clobbers(piped);
+      }
 
       std::vector<std::string> passes;
       for (const PassSnapshot& version : versions) {

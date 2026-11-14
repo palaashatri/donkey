@@ -633,6 +633,14 @@ add_test(NAME cli.decompile_macho_aarch64
 set_tests_properties(cli.decompile_macho_aarch64 PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"_main\".*\"pseudocode\":.*sp - 0x10")
 
+# G21: a direct call to a same-image helper prints its inferred arguments and result. The fixture is
+# tests/fixtures/calls/calls.c built with gcc -O0; caller_add passes its two arguments to add2.
+add_test(NAME cli.decompile_prints_call_arguments
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/calls/calls-x86_64)
+set_tests_properties(cli.decompile_prints_call_arguments PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "// caller_add\n[^\n]*\n[^\n]*\n[^\n]*\n.*rax = sub_[0-9a-f]+\\(\\(u32\\)rdi, \\(u32\\)rsi\\); /\\* arguments inferred from callee \\*/")
+
 add_test(NAME cli.decompile_elf_i386
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
 set_tests_properties(cli.decompile_elf_i386 PROPERTIES

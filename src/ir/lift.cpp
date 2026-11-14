@@ -3,10 +3,12 @@
 #include "donkey/ir/abi.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdio>
 #include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -1716,6 +1718,80 @@ struct Lifter {
     push(block, std::move(increment));
   }
 
+  /// The lifted callee of a direct call to a function of this image, when its signature is known
+  /// (G21-T2): the callee lifts Complete (not partial), takes integer arguments in the System V
+  /// registers, and returns an integer. Otherwise nothing is returned and the call stays unknown.
+  struct KnownCallee {
+    IrFunction signature;             // the callee's lift with passes: parameters and result
+    std::vector<std::string> writes;  // every register family its code writes (no passes)
+  };
+
+  std::optional<KnownCallee> known_callee(const Instruction& instruction) const {
+    if (image.architecture != Architecture::X86_64 || !options.resolve_calls ||
+        !instruction.direct_target.has_value()) {
+      return std::nullopt;
+    }
+    const std::uint64_t target = instruction.direct_target.value();
+    const Function* callee = nullptr;
+    for (const Function& candidate : analysis.functions) {
+      if (candidate.address == target) {
+        callee = &candidate;
+        break;
+      }
+    }
+    if (callee == nullptr) {
+      return std::nullopt;
+    }
+    LiftOptions nested = options;
+    nested.resolve_calls = false;  // one level only: the callee's own calls stay unknown
+    // The callee's signature must not depend on how the caller is lifted: always with passes.
+    nested.run_passes = true;
+    auto lifted = lift_function(image, analysis, *callee, nested);
+    if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
+      return std::nullopt;
+    }
+    static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+    for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
+      if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
+        return std::nullopt;
+      }
+    }
+    // The passes remove a register write that nothing reads (dead-register removal), but the
+    // compiled callee still makes it, so the write set comes from the callee's lift without
+    // passes: every write its instructions make.
+    LiftOptions unoptimised = nested;
+    unoptimised.run_passes = false;
+    auto raw = lift_function(image, analysis, *callee, unoptimised);
+    if (!raw || raw.value().partial) {
+      return std::nullopt;
+    }
+    KnownCallee known;
+    known.signature = std::move(lifted.value());
+    for (const IrBlock& block : raw.value().blocks) {
+      for (const IrStatement& written : block.statements) {
+        if (written.dest.kind == IrOperandKind::Register && !written.dest.reg.empty()) {
+          known.writes.push_back(internal::register_family(written.dest.reg));
+        }
+      }
+    }
+    return known;
+  }
+
+  /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
+  /// call, in the callee's ABI order, and the result is rax at the callee's return width. Reads
+  /// after the call are checked by check_call_clobbers, not assumed here.
+  static void resolve_call_statement(IrStatement& statement, const KnownCallee& callee) {
+    for (const IrParameter& parameter : callee.signature.parameters) {
+      statement.call_arguments.push_back(IrOperand::register_ref(
+          parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
+    }
+    if (callee.signature.return_width > 0) {
+      statement.dest = IrOperand::register_ref("rax", callee.signature.return_width);
+    }
+    statement.signature_inferred = true;
+    statement.call_writes = callee.writes;
+  }
+
   void lift_call(IrBlock& block, const Instruction& instruction) {
     IrStatement statement;
     statement.op = IrOp::Call;
@@ -1728,6 +1804,11 @@ struct Lifter {
           to_ir_operand(instruction.structured_operands.front(), instruction, pointer_width);
     } else {
       statement.a = IrOperand::constant_value(0, pointer_width);
+    }
+    if (const auto callee = known_callee(instruction)) {
+      resolve_call_statement(statement, *callee);
+      push(block, std::move(statement));
+      return;
     }
     push(block, std::move(statement));
     // The callee's effects on registers and memory are not modelled, so the
@@ -1825,6 +1906,16 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
                                                     const ReturnRegisters& regs) {
   for (std::size_t s = end; s-- > 0;) {
     const IrStatement& statement = block.statements[s];
+    // A resolved call (G21) that returns a value defines the integer return register: its result.
+    // Any other call, and an unsupported statement, may define either register: unknown.
+    if (statement.op == IrOp::Call && statement.signature_inferred &&
+        statement.dest.kind == IrOperandKind::Register &&
+        internal::register_family(statement.dest.reg) == regs.integer_family) {
+      ReturnDefinition out;
+      out.found = true;
+      out.width = statement.dest.width;
+      return out;
+    }
     if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
       return unknown_definition();
     }
@@ -2159,7 +2250,145 @@ Result<bool> keep_blocks_reachable_from_entry(IrFunction& function, const Analys
 
 }  // namespace
 
+namespace {
+
+/// The register families a statement reads: its register operands, the base and index of its
+/// memory operands, and its call arguments.
+void collect_reads(const IrStatement& statement, std::vector<std::string>& out) {
+  const auto add = [&](const IrOperand& operand) {
+    if (operand.kind == IrOperandKind::Register && !operand.reg.empty()) {
+      out.push_back(internal::register_family(operand.reg));
+    } else if (operand.kind == IrOperandKind::Memory) {
+      if (!operand.reg.empty()) out.push_back(internal::register_family(operand.reg));
+      if (!operand.index.empty()) out.push_back(internal::register_family(operand.index));
+    }
+  };
+  if (statement.dest.kind == IrOperandKind::Memory) {
+    add(statement.dest);  // a store's address is read; a register destination is only written
+  }
+  add(statement.a);
+  add(statement.b);
+  add(statement.c);
+  for (const IrOperand& argument : statement.call_arguments) {
+    add(argument);
+  }
+}
+
+/// Checks that no caller-saved register is read after a call without a definition since that call
+/// (G21-T1). A call clobbers them; the one register a call defines is its result. The check is a
+/// forward dataflow over the blocks (a register is clobbered on a path if some path reaches the
+/// read clobbered). A read of a clobbered register makes the function partial, with a note naming
+/// the register. A function without calls is unchanged.
+void check_call_clobbers_impl(IrFunction& function) {
+  const std::size_t count = function.blocks.size();
+  bool has_call = false;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      has_call = has_call || statement.op == IrOp::Call;
+    }
+  }
+  if (!has_call || count == 0) {
+    return;
+  }
+  using State = std::set<std::string>;
+  // Successor blocks of each block, as the verifier's graph has them.
+  std::vector<std::vector<std::size_t>> successors(count);
+  for (std::size_t b = 0; b < count; ++b) {
+    const auto& statements = function.blocks[b].statements;
+    if (statements.empty()) {
+      continue;
+    }
+    const IrStatement& terminator = statements.back();
+    if (terminator.op == IrOp::Branch && terminator.a.kind == IrOperandKind::Block) {
+      successors[b].push_back(terminator.a.block);
+    } else if (terminator.op == IrOp::CondBranch) {
+      if (terminator.b.kind == IrOperandKind::Block) successors[b].push_back(terminator.b.block);
+      if (b + 1 < count) successors[b].push_back(b + 1);
+    } else if (terminator.op == IrOp::Switch) {
+      if (terminator.a.kind == IrOperandKind::Block) successors[b].push_back(terminator.a.block);
+      for (const IrSwitchCase& sc : terminator.switch_cases)
+        successors[b].push_back(sc.target_block);
+    }
+  }
+  // Simulates one block from `state`; with `report`, the first read of a clobbered register is
+  // returned.
+  const auto simulate = [&](const IrBlock& block, State& state,
+                            std::optional<std::string>* report) {
+    for (const IrStatement& statement : block.statements) {
+      std::vector<std::string> reads;
+      collect_reads(statement, reads);
+      if (report != nullptr && !report->has_value()) {
+        for (const std::string& family : reads) {
+          if (state.count(family) != 0) {
+            *report = family;
+            break;
+          }
+        }
+      }
+      if (statement.op == IrOp::Call) {
+        // A call clobbers the caller-saved families. A resolved call (its callee's IR is known and
+        // complete) clobbers only the caller-saved families that callee writes; an unknown call
+        // clobbers all of them. Then the call defines its result.
+        static const std::set<std::string> kCallerSaved = [] {
+          std::set<std::string> families = {"rax", "rcx", "rdx", "rsi", "rdi",
+                                            "r8",  "r9",  "r10", "r11"};
+          for (int n = 0; n < 16; ++n) {
+            families.insert("xmm" + std::to_string(n));
+          }
+          return families;
+        }();
+        if (statement.signature_inferred) {
+          for (const std::string& family : statement.call_writes) {
+            if (kCallerSaved.count(family) != 0) {
+              state.insert(family);
+            }
+          }
+        } else {
+          state.insert(kCallerSaved.begin(), kCallerSaved.end());
+        }
+        if (statement.dest.kind == IrOperandKind::Register) {
+          state.erase(internal::register_family(statement.dest.reg));
+        }
+      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
+        state.erase(internal::register_family(statement.dest.reg));
+      }
+    }
+  };
+  std::vector<State> in(count);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t b = 0; b < count; ++b) {
+      State out = in[b];
+      simulate(function.blocks[b], out, nullptr);
+      for (const std::size_t successor : successors[b]) {
+        const std::size_t before = in[successor].size();
+        in[successor].insert(out.begin(), out.end());
+        changed = changed || in[successor].size() != before;
+      }
+    }
+  }
+  for (std::size_t b = 0; b < count; ++b) {
+    State state = in[b];
+    std::optional<std::string> report;
+    simulate(function.blocks[b], state, &report);
+    if (report.has_value()) {
+      function.partial = true;
+      function.notes.push_back("register " + *report +
+                               " is read after a call that does not define it; the value is not "
+                               "the caller's, so the function is not Complete");
+      return;
+    }
+  }
+}
+
+}  // namespace
+
 namespace internal {
+
+void check_call_clobbers(IrFunction& function) {
+  check_call_clobbers_impl(function);
+}
 
 Result<bool> keep_reachable_blocks(IrFunction& function, const AnalysisResult& analysis,
                                    FunctionId function_id, std::uint8_t pointer_width) {
@@ -2392,8 +2621,18 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                        ? IrOperand::constant_value(instruction.direct_target.value(),
                                                    lifter.pointer_width)
                        : IrOperand::constant_value(0, lifter.pointer_width);
-          lifter.push(out_block, std::move(call));
-          lifter.mark_partial("jump leaves the function; treated as a tail call");
+          if (const auto callee = lifter.known_callee(instruction)) {
+            // A tail call to a function of the image with a known signature: the callee runs with
+            // the caller's argument registers, and its result is what this function returns.
+            Lifter::resolve_call_statement(call, *callee);
+            lifter.push(out_block, std::move(call));
+            lifter.out.notes.push_back(
+                "a jump to a known function is lifted as a call with its inferred arguments and "
+                "result, followed by a return");
+          } else {
+            lifter.push(out_block, std::move(call));
+            lifter.mark_partial("jump leaves the function; treated as a tail call");
+          }
           IrStatement tail;
           tail.op = IrOp::Return;
           tail.source_address = instruction.address;
@@ -2585,6 +2824,11 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   if (options.run_passes) {
     run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
     mark_mixed_parameters(lifter.out);
+    // After the passes: copy propagation changes which registers a statement reads, so the check
+    // is only sound on the final IR. Tests that lift without passes see the lifter's output as is.
+    if (image.architecture == Architecture::X86_64) {
+      internal::check_call_clobbers(lifter.out);
+    }
   }
   return lifter.out;
 }

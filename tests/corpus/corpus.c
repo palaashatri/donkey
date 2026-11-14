@@ -1,8 +1,9 @@
 /* Decompiler differential corpus (M8). Built by the test suite at -O0, -O2
  * and -O3 with the host C compiler; each function is lifted from the built
  * library, run in the IR interpreter and compared with calling the compiled
- * function itself. Integer-only and call-free by design: calls, floating
- * point and SIMD are outside the decompiler's supported subset.
+ * function itself. Integer-only: floating point and SIMD are outside the
+ * decompiler's supported subset. The calls section at the end calls helpers of
+ * the same library (G21).
  *
  * Every function is exported, which also keeps compilers from cloning or
  * specialising it (an exported symbol can be interposed). */
@@ -343,4 +344,61 @@ CORPUS unsigned long long c_bswap64(unsigned long long x) {
 }
 CORPUS int c_bit_test(unsigned long long x, unsigned int n) {
   return (int)((x >> (n & 63U)) & 1U);
+}
+
+/* ---- calls (G21) ----
+ * The helpers are static and noinline: each call in a caller is direct (not through the PLT), and
+ * the helper is a function of the same library, so the decompiler can take its signature. The
+ * callers are exported like the rest of the corpus. */
+#define CORPUS_HELPER static __attribute__((noinline, used))
+
+CORPUS_HELPER int k_add2(int a, int b) {
+  return a + b;
+}
+
+CORPUS_HELPER int k_six(int a, int b, int c, int d, int e, int f) {
+  return a * 1 + b * 2 + c * 3 + d * 4 + e * 5 + f * 6;
+}
+
+CORPUS_HELPER int k_triple(int a) {
+  return a * 3;
+}
+
+CORPUS_HELPER long k_wide(long a, long b) {
+  return a * 7 - b;
+}
+
+/* The caller's result is the helper's result. */
+CORPUS int c_call_add2(int a, int b) {
+  return k_add2(a, b);
+}
+
+/* Six arguments, all in registers on System V. */
+CORPUS int c_call_six(int a, int b, int c, int d, int e, int f) {
+  return k_six(a, b, c, d, e, f) + 1;
+}
+
+/* The helper's result is not used: the caller's value comes from its own arithmetic. */
+CORPUS int c_call_unused(int a) {
+  (void)k_triple(a);
+  return a + 2;
+}
+
+/* A call inside a loop, whose argument changes on each iteration. */
+CORPUS int c_call_loop(int n) {
+  int s = 0;
+  for (int i = 0; i < n; ++i) {
+    s = k_add2(s, i);
+  }
+  return s;
+}
+
+/* A 64-bit helper with two arguments and a 64-bit result. */
+CORPUS long c_call_wide(long a, long b) {
+  return k_wide(a, b) + k_wide(b, a);
+}
+
+/* A call whose result feeds a second call: the second call's argument is the first's result. */
+CORPUS int c_call_chain(int a, int b) {
+  return k_triple(k_add2(a, b));
 }

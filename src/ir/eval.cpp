@@ -962,9 +962,42 @@ class Machine {
               return 0;
             }
             return value_of(s.a);
-          case IrOp::Call:
-            fail("ir.eval_call", "calls are not interpreted");
-            return std::nullopt;
+          case IrOp::Call: {
+            // A direct call (G21-T1): the callee's own IR runs with the argument values, on this
+            // call's stack, and its result is the destination. Without a callee the call fails.
+            constexpr unsigned kMaxCallDepth = 8;
+            const auto target = value_of(s.a);
+            const IrFunction* callee = nullptr;
+            if (target && options_.callees != nullptr && *options_.callees &&
+                options_.call_depth < kMaxCallDepth) {
+              callee = (*options_.callees)(*target);
+            }
+            if (callee == nullptr) {
+              fail("ir.eval_call", "the call has no callee IR to run");
+              return std::nullopt;
+            }
+            std::vector<std::uint64_t> args;
+            for (const IrOperand& argument : s.call_arguments) {
+              const auto v = value_of(argument);
+              if (!v) {
+                fail("ir.eval_call", "a call argument has no value");
+                return std::nullopt;
+              }
+              args.push_back(*v);
+            }
+            const std::uint64_t sp = read_register("rsp", 8);
+            IrEvalOptions nested = options_;
+            nested.call_depth = options_.call_depth + 1;
+            nested.call_stack_pointer = sp - 8;  // the return address the callee's entry expects
+            auto result = evaluate_ir(*callee, args, memory_, nested);
+            if (!result) {
+              fail(result.diagnostic().code, result.diagnostic().message);
+              return std::nullopt;
+            }
+            ok = s.dest.kind != IrOperandKind::Register ||
+                 assign(s.dest, w, result.value().return_value);
+            break;
+          }
           case IrOp::Unsupported:
             fail("ir.eval_unsupported", "unsupported statement: " + s.text);
             return std::nullopt;
@@ -1285,13 +1318,16 @@ Result<IrEvalResult> evaluate_ir(const IrFunction& function,
                                  const IrEvalOptions& options) {
   const NearestRounding nearest;
   const std::uint64_t stack_base = options.stack_top - options.stack_size;
-  if (!memory.add_region(stack_base, std::vector<std::uint8_t>(options.stack_size, 0xCC))) {
+  // A nested call (call_depth > 0) runs on the stack of its caller, whose region already exists.
+  if (options.call_depth == 0 &&
+      !memory.add_region(stack_base, std::vector<std::uint8_t>(options.stack_size, 0xCC))) {
     return make_error<IrEvalResult>(Status::InvalidInput, "ir.eval_stack",
                                     "the stack region overlaps another region");
   }
   Machine machine(function, memory, options);
   // Leave room above the entry stack pointer for stack arguments.
-  std::uint64_t sp = options.stack_top - 1024;
+  std::uint64_t sp =
+      options.call_depth == 0 ? options.stack_top - 1024 : options.call_stack_pointer;
   const char* const sysv[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
   const char* const win64[] = {"rcx", "rdx", "r8", "r9"};
   std::size_t in_registers = 0;

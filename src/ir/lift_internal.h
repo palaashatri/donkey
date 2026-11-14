@@ -16,6 +16,11 @@ namespace donkey::internal {
 /// write, or a high-byte write, is an explicit merge. x86-64 and AArch64 only.
 void canonicalise_registers(IrFunction& function, Architecture architecture);
 
+/// Checks that no caller-saved register is read after a call without the call defining it (G21-T1),
+/// and marks the function partial when one is (see lift.cpp). The lifter runs it after the passes
+/// on x86-64 functions; the corpus test runs it on its replayed passes, so both see the same IR.
+void check_call_clobbers(IrFunction& function);
+
 /// Keeps the blocks reachable from the function's entry, puts a trampoline in front of an entry
 /// that is not block 0, and notes the blocks left out. Returns false when nothing changed. See
 /// lift.cpp for the rules. `function_id` is the CFG function the blocks came from.

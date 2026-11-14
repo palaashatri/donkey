@@ -198,6 +198,16 @@ struct IrStatement {
   /// as they were, so the next carry reader reads the same carry. Every other statement sets
   /// flags (or may, when the IR does not model that).
   bool writes_flags = true;
+  /// Only for Call (G21): the argument operands, in ABI order, each read at the call. Empty for a
+  /// call whose signature is not known. The result, when the callee returns a value, is `dest`.
+  std::vector<IrOperand> call_arguments;
+  /// Only for Call (G21): the argument list and the result come from the callee's signature as
+  /// this lifter inferred it from the callee's register use (an inference, not debug information).
+  bool signature_inferred = false;
+  /// Only for a resolved Call: the register families the callee's own IR writes. The callee is
+  /// Complete and makes no calls, so these are every register it can change; a caller-saved
+  /// register outside this set keeps its value across the call (the clobber check uses this).
+  std::vector<std::string> call_writes;
 };
 
 struct IrBlock {

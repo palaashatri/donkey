@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <span>
 #include <string>
 #include <vector>
@@ -52,6 +53,14 @@ struct IrEvalOptions {
   std::size_t max_steps = 1'000'000;
   std::uint64_t stack_top = 0x7fff'f000'0000ULL;
   std::size_t stack_size = 64 * 1024;
+  /// The callee IR for a call to a function address, or null when the caller cannot provide it.
+  /// A call with no callee, or nested deeper than the evaluator's call depth limit, fails with
+  /// ir.eval_call. Set by the differential oracle (G21-T1).
+  const std::function<const IrFunction*(std::uint64_t)>* callees = nullptr;
+  /// Internal: the depth of this evaluation below the top-level call, and the stack pointer a
+  /// nested call starts from (the caller's stack pointer minus a return address).
+  unsigned call_depth = 0;
+  std::uint64_t call_stack_pointer = 0;
 };
 
 struct IrEvalResult {

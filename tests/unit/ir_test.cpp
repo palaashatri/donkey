@@ -2918,13 +2918,33 @@ TEST(Ir, X86BitTestCarriesTheSelectedBit) {
   EXPECT_EQ(run_x86_64(immediate_index, {4}) & 0xffU, 0U);
 }
 
-TEST(Ir, FunctionWithADirectCallIsNotComplete) {
-  // call +0; mov eax, 1; ret. The call's effects are not modelled, so the result
-  // must be Partial even though every instruction lifts.
+TEST(Ir, FunctionWithADirectCallToAnUnknownTargetIsNotComplete) {
+  // call +0x100; mov eax, 1; ret. The target (0x1105) is outside the image, so no signature is
+  // known: the call's effects are not modelled and the result must be Partial, even though every
+  // instruction lifts. (A call to a known function of the image is resolved; see the next test.)
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0xe8, 0x00, 0x01, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+}
+
+// G21-T2: a direct call to a function of the image whose signature is known is resolved, so the
+// call is not a reason for Partial by itself. Here the target is the next instruction, which is a
+// function start with no arguments and a 4-byte result in eax.
+TEST(Ir, DirectCallToAKnownCalleeIsNotPartial) {
   donkey::IrFunction f;
   ASSERT_TRUE(
       lift_raw_x86_64({0xe8, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
-  EXPECT_TRUE(f.partial);
+  EXPECT_FALSE(f.partial);
+  bool resolved = false;
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call) {
+        resolved = resolved || statement.signature_inferred;
+      }
+    }
+  }
+  EXPECT_TRUE(resolved);
 }
 
 TEST(Ir, VerifierRejectsADivisorTemporaryThatIsNeverDefined) {
@@ -4603,4 +4623,80 @@ TEST(Ir, MovsxdWithA32BitDestinationIsUnsupportedNotAnExtend) {
   }
   auto verified = donkey::verify_ir(f);
   EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
+
+// G21: a direct call to a same-image callee carries the callee's inferred arguments and result.
+// Layout: 0x1000 mov edi, 5; 0x1005 call 0x100b; 0x100a ret; 0x100b mov rax, rdi; ret.
+TEST(Ir, CallCarriesItsArgumentsFromTheCalleeSignature) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0xbf, 0x05, 0x00, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x48, 0x89, 0xf8, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  const donkey::IrStatement* call = nullptr;
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call) {
+        call = &statement;
+      }
+    }
+  }
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  ASSERT_EQ(call->call_arguments.size(), 1U);
+  EXPECT_EQ(call->call_arguments[0].reg, "rdi");
+  EXPECT_EQ(call->dest.reg, "rax");
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rax = sub_100b(rdi); /* arguments inferred from callee */"),
+            std::string::npos)
+      << text.value();
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
+
+// Layout: 0x1000 call 0x1009; 0x1005 mov rax, rdx; ret; 0x1009 mov rdx, rdi; mov rax, rdx; ret.
+// The callee writes rdx (caller-saved), so the value the caller read there is gone after the call.
+TEST(Ir, CallerSavedRegistersAreUnknownAfterACall) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0xe8, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0xd0, 0xc3, 0x48, 0x89,
+                               0xfa, 0x48, 0x89, 0xd0, 0xc3},
+                              f));
+  EXPECT_TRUE(f.partial);
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    noted = noted || note.find("register rdx is read after a call") != std::string::npos;
+  }
+  EXPECT_TRUE(noted);
+}
+
+// Layout: 0x1000 call 0x1009; 0x1005 mov rax, rdx; ret; 0x1009 mov rax, rdi; ret.
+// The callee writes only rax, so rdx keeps the caller's value across the call: not Partial.
+TEST(Ir, CallerSavedRegistersTheCalleeDoesNotWriteSurviveACall) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0xe8, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0xd0, 0xc3, 0x48, 0x89, 0xf8, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+}
+
+TEST(Ir, VerifierRejectsACallWithArgumentsButNoSignature) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  donkey::IrBlock block;
+  donkey::IrStatement call;
+  call.op = donkey::IrOp::Call;
+  call.a = donkey::IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  call.call_arguments.push_back(donkey::IrOperand::register_ref("rdi", 8));
+  call.signature_inferred = false;
+  block.statements.push_back(call);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::none();
+  ret.width = 8;
+  block.statements.push_back(ret);
+  f.blocks.push_back(block);
+  auto verified = donkey::verify_ir(f);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.call_signature");
 }
