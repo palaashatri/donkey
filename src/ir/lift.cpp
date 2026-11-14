@@ -405,10 +405,11 @@ struct Lifter {
     }
     const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
     const IrOperand source = to_ir_operand(operands[1], instruction, pointer_width);
-    if (destination.kind != IrOperandKind::Register || destination.width < source.width ||
+    if (destination.kind != IrOperandKind::Register || destination.width <= source.width ||
         source.width == 0) {
-      // movsxd from a 64-bit source is a plain copy; anything else that does
-      // not widen is not modelled rather than silently mis-typed.
+      // An extend must widen: the verifier requires a destination strictly wider than its
+      // source. movsxd with a 32-bit destination from a 32-bit source (found by the PE fuzzer,
+      // ir.malformed_extend) is not a widening, so it is not modelled rather than mis-typed.
       unsupported(block, instruction);
       return;
     }

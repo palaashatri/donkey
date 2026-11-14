@@ -1,6 +1,7 @@
 #include "donkey/analysis/analysis.h"
 
 #include "donkey/binary/eh_frame.h"
+#include "donkey/binary/pdata.h"
 
 #include <algorithm>
 #include <iterator>
@@ -501,6 +502,17 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     }
   } else {
     result.diagnostics.push_back(frames.diagnostic());
+  }
+  // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
+  if (auto pdata = read_pdata_of_image(image, file); pdata) {
+    for (const PdataFunction& frame : pdata.value().functions) {
+      if (executable_contains(image, frame.start)) {
+        seeds.insert(frame.start);
+        unwind_starts.insert(frame.start);
+      }
+    }
+  } else {
+    result.diagnostics.push_back(pdata.diagnostic());
   }
   std::set<std::uint64_t> user_defined;
   for (const std::uint64_t address : options.user_function_starts) {

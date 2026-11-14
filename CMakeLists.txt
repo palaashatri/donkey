@@ -75,6 +75,7 @@ add_library(donkey_binary STATIC
   src/binary/image.cpp
   src/binary/isolation.cpp
   src/binary/macho.cpp
+  src/binary/pdata.cpp
   src/binary/pe.cpp
   src/binary/demangle.cpp
   src/binary/demangle_msvc.cpp
@@ -337,6 +338,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_minidump PRIVATE cxx_std_20)
   target_compile_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_minidump PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_pdata fuzz/fuzz_pdata.cpp)
+  target_link_libraries(fuzz_pdata PRIVATE donkey::binary)
+  target_compile_features(fuzz_pdata PRIVATE cxx_std_20)
+  target_compile_options(fuzz_pdata PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_pdata PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_eh_frame fuzz/fuzz_eh_frame.cpp)
   target_link_libraries(fuzz_eh_frame PRIVATE donkey::binary)
   target_compile_features(fuzz_eh_frame PRIVATE cxx_std_20)

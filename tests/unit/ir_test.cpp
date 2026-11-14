@@ -4587,3 +4587,20 @@ TEST(Ir, BlockNotReachedFromTheEntryIsDroppedWithANote) {
   auto verified = donkey::verify_ir(f);
   EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
 }
+
+// Found by fuzz_binary on a mutated PE: `63 61 6c` decodes as movsxd esp, dword ptr [rcx + 0x6c].
+// A 32-bit destination from a 32-bit source does not widen, so the lifter must not emit an extend
+// for it (the verifier rejects one, ir.malformed_extend). It is Unsupported and the function is
+// Partial, and the lifted IR verifies.
+TEST(Ir, MovsxdWithA32BitDestinationIsUnsupportedNotAnExtend) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x63, 0x61, 0x6c, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      EXPECT_NE(statement.op, donkey::IrOp::SignExtend);
+    }
+  }
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
