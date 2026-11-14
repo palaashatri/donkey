@@ -4841,3 +4841,24 @@ TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
   EXPECT_EQ(text.value().find("loc_"), std::string::npos) << text.value();
   EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
+
+TEST(Ir, StatementsInTheBranchingBlockArePrintedBeforeTheIf) {
+  // Block 0 assigns rsi, then compares rax and branches. The assignment must
+  // print before the if; before the fix the structured emitter dropped it.
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(assign_register_statement("rsi", 9));
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("rdx", 2));
+  function.blocks[1].statements.push_back(branch_statement(3));
+  function.blocks[2].statements.push_back(assign_register_statement("rcx", 1));
+  function.blocks[2].statements.push_back(branch_statement(3));
+  function.blocks[3].statements.push_back(return_statement());
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const auto assign = text.value().find("rsi = 0x9;");
+  const auto guard = text.value().find("if (");
+  ASSERT_NE(assign, std::string::npos) << text.value();
+  ASSERT_NE(guard, std::string::npos) << text.value();
+  EXPECT_LT(assign, guard) << text.value();
+}

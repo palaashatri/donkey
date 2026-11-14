@@ -412,14 +412,28 @@ struct Structurer {
     return (static_cast<std::uint64_t>(block) << 32U) | static_cast<std::uint64_t>(index);
   }
 
-  void emit_statements(BlockId block, bool include_terminator) {
+  void emit_statements(BlockId block, bool include_terminator, bool fold_flags = false) {
     const IrBlock& body = function_.blocks[block];
     const std::size_t limit = include_terminator || body.statements.empty()
                                   ? body.statements.size()
                                   : body.statements.size() - 1;
+    // With fold_flags, the compare that sets the block's branch flags is not printed: the branch
+    // condition already says it.
+    // The flag setter is the statement right before the branch (an integer or a scalar float
+    // compare).
+    const IrStatement* folded = nullptr;
+    if (fold_flags && body.statements.size() >= 2) {
+      const IrStatement& setter = body.statements[body.statements.size() - 2];
+      if (setter.op == IrOp::Compare || setter.op == IrOp::Test || setter.op == IrOp::FCompare) {
+        folded = &setter;
+      }
+    }
     for (std::size_t index = 0; index < limit; ++index) {
       if (in_header_.count(statement_key(block, index)) != 0) {
         continue;  // printed in the header of the `for` loop it steps
+      }
+      if (folded != nullptr && &body.statements[index] == folded) {
+        continue;
       }
       const IrStatement* previous = flags_producer(body, index);
       const std::string text =
@@ -1032,6 +1046,8 @@ struct Structurer {
 
       const BlockId target = terminator.b.block;
       const BlockId fallthrough = index + 1;
+      // The block's own statements run before its test: emit them first, or they are dropped.
+      emit_statements(index, false, /*fold_flags=*/true);
       // A conditional branch back to the enclosing loop header skips the rest
       // of the iteration, which is exactly `continue`. Branches to the region
       // exit are handled as an if-guard below, never skipped: dropping them
