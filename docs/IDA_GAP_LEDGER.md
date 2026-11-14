@@ -931,7 +931,7 @@ for Partial functions.
   passes the control-flow check, on the corpus and on the list (0 candidates refused). Structured
   without goto: 990 before, 989 after. Two functions left that set (`openssl` `0xa9b70`, `libc`
   `0x97ec0`): their old output printed a switch's case blocks a second time, which the check now
-  refuses; one function joined it (`libsqlite3`). Gotos: 997 functions, 16,476 in all, largest 394.
+  refuses; one function joined it (`libsqlite3`). Gotos: 997 functions, 16,364 in all, largest 409.
   The open decision is whether to copy small shared blocks and recover compound conditions to remove
   most of them (owner decision; not made here).
 - **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two

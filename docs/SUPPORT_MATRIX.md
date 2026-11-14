@@ -28,7 +28,7 @@ What the branch's tests prove, beyond `main`. Nothing here is on `main` until it
   Complete, 1,317 "not fully structured" (66.3%).
 - Structuring (G04-T5, branch only): on the same 1,986 functions no function is printed as labelled
   blocks (1,317 labelled before the structuring work; 996 on the branch before G04-T5). 989 print
-  without a goto and 997 with gotos (16,476 in all; the largest function has 394). Every printed
+  without a goto and 997 with gotos (16,364 in all; the largest function has 409). Every printed
   structure is checked edge by edge against the IR before it is shown (no candidate was refused on
   the sample). The gotos are the open part: most go to a block that is already printed (shared
   joins), and removing them needs owner decisions (`docs/AUDIT.md`, W1).

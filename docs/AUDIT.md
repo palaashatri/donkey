@@ -367,7 +367,7 @@ Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
 ### W1: goto structuring (G04-T5)
 
 Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,
-1,986 functions) with the Release build of the branch head (`c101de2`) and the baseline build from
+1,986 functions) with the Release build of the branch head (`14b94a4`) and the baseline build from
 `5162f62` (the plan commit, no code change; the same list). The measurement is
 `sample_list.py measure`, extended with the goto and refusal counts.
 
@@ -376,8 +376,8 @@ Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/au
 | Printed as labelled blocks (whole function) | 996 (50.2%) | **0** |
 | Structured, no goto | 990 | 989 |
 | Structured with gotos | 0 | 997 |
-| Gotos, total | 0 | 16,476 |
-| Gotos, largest in one function | 0 | 394 (`git`) |
+| Gotos, total | 0 | 16,364 |
+| Gotos, largest in one function | 0 | 409 (`git`) |
 | Candidate structures refused by the control-flow check | not checked | 0 |
 | Complete / InvalidIR / Unsupported | 180 / 0 / 0 | 180 / 0 / 0 |
 
@@ -385,13 +385,13 @@ Per binary (after; before in brackets is the labelled count):
 
 | Binary (sampled) | Labelled | No goto | With gotos | Gotos | Largest |
 |---|---|---|---|---|---|
-| ls (186) | 0 (96) | 90 | 96 | 1,649 | 239 |
-| openssl (300) | 0 (169) | 130 | 170 | 3,385 | 292 |
-| bash (300) | 0 (130) | 170 | 130 | 2,031 | 235 |
-| libsqlite3 (300) | 0 (124) | 177 | 123 | 1,754 | 126 |
-| libc (300) | 0 (122) | 177 | 123 | 1,423 | 101 |
-| git (300) | 0 (199) | 101 | 199 | 3,751 | 394 |
-| python3.12 (300) | 0 (156) | 144 | 156 | 2,483 | 392 |
+| ls (186) | 0 (96) | 90 | 96 | 1,656 | 240 |
+| openssl (300) | 0 (169) | 130 | 170 | 3,329 | 291 |
+| bash (300) | 0 (130) | 170 | 130 | 2,003 | 230 |
+| libsqlite3 (300) | 0 (124) | 177 | 123 | 1,734 | 125 |
+| libc (300) | 0 (122) | 177 | 123 | 1,403 | 102 |
+| git (300) | 0 (199) | 101 | 199 | 3,749 | 409 |
+| python3.12 (300) | 0 (156) | 144 | 156 | 2,490 | 392 |
 
 **Goto-free functions dropped by 1 (990 to 989), and this is a correctness fix, not a regression.**
 Per function, two functions left the goto-free set and one joined it (`libsqlite3`). The two that left
@@ -440,17 +440,64 @@ kept statements); the rendering of conditions and operands (the check renders co
 own function, so a wrong rendering is not caught); and the choice of which side is the then-arm beyond
 the tags (the text of each control line is checked against its tag).
 
-Timing: whole-binary `decompile --json`, one process at a time, two runs of each binary, baseline and
-branch alternating (wall time, seconds):
+Timing (branch head `14b94a4`): whole-binary `decompile --json`, one process at a time on an idle
+machine, baseline and branch alternating (wall time, seconds):
 
 | Binary | Baseline | Branch | Difference |
 |---|---|---|---|
-| openssl | 6.25, 7.41 | 7.61, 8.43 | +22%, +14% |
-| git | 246.9, 248.2 | 248.9, 261.0 | +1%, +5% |
+| openssl, four pairs | 5.64, 5.93, 5.69, 5.90 | 7.91, 6.38, 6.54, 6.21 | +40%, +8%, +15%, +5% (median +11%) |
+| git, two pairs | 223.6, 222.3 | 229.2, 230.2 | +2.5%, +3.6% |
 
-Both are under the 25% bar. The `openssl` runs vary by about 15% on this machine between repeats of the
-same binary, so the small figure is the one to read. Structuring runs once per candidate, and the CLI
-also classifies each function (a second run of the structurers), so most of the added cost is the check.
+Both are under the 25% bar. The openssl repeats vary by about 15% between runs of the same binary, so
+the first pair (+40%) is treated as noise, and the median is the figure to read. The earlier timing of
+`c101de2` (openssl +22%/+14%, git +1%/+5%) is superseded by these numbers. Structuring runs once per candidate, and the
+CLI also classifies each function (a second run of the structurers), so most of the added cost is the check.
+
+### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
+
+A stress driver (`w1audit/stress`, not committed) builds N checks `if (rax == 0) return i;` followed by the
+irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`, and formats the function on a
+thread with a given stack size. The memory of each run is the peak RSS (`rss.py`, address space capped at 1.5 GiB),
+one run at a time. `main` is `1a92abf` (the reference binary has no goto structurer).
+
+| N | Stack | main: RSS, time, output | branch: RSS, time, output | ratio (RSS) |
+|---|---|---|---|---|
+| 2,500 | 64 MiB | 16 MiB, 0.1 s, labelled, 275 KB | 31 MiB, 0.1 s, structured, 142 KB | 1.9 |
+| 2,500 | 512 KiB | 16 MiB, 0.1 s | 31 MiB, 0.1 s | 1.9 |
+| 5,000 | 64 MiB | 41 MiB, 0.2 s, labelled, 557 KB | 70 MiB, 0.3 s, structured, 286 KB | 1.7 |
+| 5,000 | 512 KiB | 41 MiB, 0.2 s | 70 MiB, 0.3 s | 1.7 |
+| 10,000 | 64 MiB | 126 MiB, 0.7 s, labelled, 1.1 MB | 184 MiB, 0.8 s, structured, 576 KB | 1.5 |
+| 10,000 | 512 KiB | 126 MiB, 0.7 s | 184 MiB, 1.0 s | 1.5 |
+
+Every run completes on both stacks: no abort and no segfault. Memory is within 2x of main at every N.
+Before the fixes, the same driver overflowed the 512 KiB stack at N=1,000 and hit `std::bad_alloc`
+at N=10,000 with 175 MB of output and indentation of 10,004 columns at N=5,000 (the old quadratic output).
+
+What changed:
+- An arm that jumps closes its `if`, and the other arm continues at the same level in the caller's loop.
+  A chain of checks is walked iteratively, not by one recursion per check, and it prints flat (`Ir.ThreeCheckChainPrintsFlatWithoutElse`).
+- The post-dominators are computed with the iterative dominator algorithm on the reversed graph, not with
+  bit sets. The old immediate-post-dominator scan was quadratic in the block count, and it ran on
+  every candidate that reached the goto structurer.
+- Empty markers print no indentation, and no printed line is only spaces (`Ir.NoPrintedLineIsOnlyWhitespace`).
+- Nesting bound `kMaxStructureNesting = 128`. The emitter, the legacy structurer and each recursive routine
+  of the control-flow check refuse a deeper nesting with a reason, and the labelled form prints.
+  The bound is 128, not the 256 first proposed: a nested `if`/`else` chain of depth 200 runs on a
+  512 KiB stack, depth 250 overflows it (about 2 KB of stack per level), so 256 would overflow the stack
+  it is meant to protect. Depths 128, 200 and 300 now print labelled without a crash.
+- Tests: `Ir.LongCheckChainFormatsOnASmallStackWithBoundedNesting` (5,000 checks on a 512 KiB pthread,
+  indentation within 2 x bound + 16), `Ir.ThreeCheckChainPrintsFlatWithoutElse`, `Ir.NoPrintedLineIsOnlyWhitespace`,
+  `Ir.ControlFlowCheckRefusesNestingDeeperThanTheBound`. Each was run against the previous code: the 5,000 check
+  chain segfaults on the 512 KiB stack, the three-check chain prints `} else {`, the blank-line test finds
+  whitespace-only lines, and the nesting test gets no refusal.
+
+Measurement on the fixed list at `14b94a4` (the same binary as the table above): labelled 0, structured
+without goto 989, with gotos 997, 16,364 gotos in all, largest 409 (`git`), 0 candidates refused,
+Complete 180, InvalidIR 0. The 990 to 989 drop in goto-free functions is unchanged from the previous
+measurement (see the paragraph above).
+
+Matrix at `14b94a4`: GCC headless 809/809; Clang headless 809/809 with no warnings; Release 810/810;
+desktop UI under Xvfb 836/836; pinned clang-format 20.1.8 over include, src, apps and tests: clean.
 
 Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
 arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
