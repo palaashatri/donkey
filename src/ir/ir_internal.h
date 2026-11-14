@@ -199,8 +199,13 @@ StructureResult structure_function(const IrFunction& function,
 /// IR's, edge for edge: which block each arm of a condition enters, and where each goto, break and
 /// continue goes. Returns the first mismatch, or nullopt when the lines describe the function's
 /// control flow exactly.
-std::optional<std::string> check_structured_control_flow(const IrFunction& function,
-                                                         const std::vector<StructuredLine>& lines);
+///
+/// It also checks the text of each control line against the tag: a printed condition is rendered
+/// again from the IR and must match the tag's block and complement, and a case label must print the
+/// tag's value. `string_literals` is the printer's table, when the printer had one.
+std::optional<std::string> check_structured_control_flow(
+    const IrFunction& function, const std::vector<StructuredLine>& lines,
+    const std::map<std::uint64_t, std::string>* string_literals = nullptr);
 
 /// Structured rendering of the function body, or `nullopt` when the control-flow
 /// graph does not match a shape this structurer models. Callers must fall back

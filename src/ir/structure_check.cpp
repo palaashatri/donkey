@@ -757,12 +757,140 @@ class Checker {
   }
 };
 
+
+/// The condition the printer shows for the branch of `block` (complemented when `negated`), rendered
+/// again here; empty when the block does not end in a conditional branch.
+std::string expected_condition(const IrFunction& function, BlockId block, bool negated,
+                               const std::map<std::uint64_t, std::string>* literals) {
+  const IrBlock& ir = function.blocks[block];
+  if (ir.statements.empty() || ir.statements.back().op != IrOp::CondBranch) {
+    return std::string();
+  }
+  const IrStatement* previous = flags_producer(ir, ir.statements.size() - 1);
+  return render_condition(function, ir.statements.back(), previous, negated, literals);
+}
+
+std::string hex_value(std::uint64_t value) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof buffer, "0x%llx", static_cast<unsigned long long>(value));
+  return buffer;
+}
+
+/// The text of each control line must say what its tag says: the condition of a branch, the value
+/// of a case, and the keyword of a jump. Statements are not checked here.
+std::optional<std::string> check_control_text(const IrFunction& function,
+                                              const std::vector<StructuredLine>& lines,
+                                              const std::map<std::uint64_t, std::string>* literals) {
+  const std::size_t count = function.blocks.size();
+  for (std::size_t index = 0; index < lines.size(); ++index) {
+    const StructuredLine& line = lines[index];
+    const LineTag& tag = line.tag;
+    // A loop header may carry its label in front: "loc_X: while (...) {".
+    std::string text = trimmed(line.text);
+    if (starts_with(text, "loc_") && text.find(": ") != std::string::npos) {
+      text = text.substr(text.find(": ") + 2);
+    }
+    const std::string where = describe(line, index);
+    const auto wrong = [&](const std::string& expected) {
+      return std::optional<std::string>(where + ": printed as '" + text + "', the tag says '" +
+                                        expected + "'");
+    };
+    const auto block_ok = [&](BlockId block) { return block < count; };
+    switch (tag.kind) {
+      case LineKind::IfOpen: {
+        if (!block_ok(tag.block)) return wrong("a block the function does not have");
+        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        if (text != "if (" + condition + ") {") return wrong("if (" + condition + ") {");
+        break;
+      }
+      case LineKind::IfJump: {
+        if (!block_ok(tag.block)) return wrong("a block the function does not have");
+        const std::string condition = expected_condition(function, tag.block, false, literals);
+        const std::string prefix = "if (" + condition + ") ";
+        if (!starts_with(text, prefix)) return wrong(prefix + "...;");
+        const std::string jump = text.substr(prefix.size());
+        const std::string expected = tag.jump == LineKind::Break      ? "break;"
+                                     : tag.jump == LineKind::Continue ? "continue;"
+                                                                      : "goto ";
+        if (tag.jump == LineKind::Goto ? !starts_with(jump, expected) : jump != expected) {
+          return wrong(prefix + expected);
+        }
+        break;
+      }
+      case LineKind::WhileOpen: {
+        if (tag.pure) {
+          if (!block_ok(tag.block)) return wrong("a block the function does not have");
+          const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+          if (!starts_with(text, "while (" + condition + ") {")) {
+            return wrong("while (" + condition + ") {");
+          }
+        } else if (text != "while (1) {") {
+          return wrong("while (1) {");
+        }
+        break;
+      }
+      case LineKind::ForOpen: {
+        if (!block_ok(tag.block)) return wrong("a block the function does not have");
+        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        if (!starts_with(text, "for (") || text.find("; " + condition + "; ") == std::string::npos) {
+          return wrong("for (...; " + condition + "; ...) {");
+        }
+        break;
+      }
+      case LineKind::DoOpen:
+        if (text != "do {") return wrong("do {");
+        break;
+      case LineKind::DoClose: {
+        if (!block_ok(tag.block)) return wrong("a block the function does not have");
+        const std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        if (text != "} while (" + condition + ");") return wrong("} while (" + condition + ");");
+        break;
+      }
+      case LineKind::Case:
+        if (text != "case " + hex_value(tag.value) + ":") return wrong("case " + hex_value(tag.value) + ":");
+        break;
+      case LineKind::Default:
+        if (text != "default:") return wrong("default:");
+        break;
+      case LineKind::Break:
+        if (text != "break;") return wrong("break;");
+        break;
+      case LineKind::Continue:
+        if (text != "continue;") return wrong("continue;");
+        break;
+      case LineKind::Goto:
+        if (!starts_with(text, "goto ") || !ends_with(text, ";")) return wrong("goto ...;");
+        break;
+      case LineKind::Else:
+        if (text != "} else {") return wrong("} else {");
+        break;
+      case LineKind::Close:
+        if (text != "}") return wrong("}");
+        break;
+      case LineKind::SwitchOpen:
+        if (!starts_with(text, "switch (") || !ends_with(text, "{")) return wrong("switch (...) {");
+        break;
+      case LineKind::Return:
+        if (!starts_with(text, "return") || !ends_with(text, ";")) return wrong("return ...;");
+        break;
+      case LineKind::Plain:
+      case LineKind::Marker:
+        break;
+    }
+  }
+  return std::nullopt;
+}
+
 }  // namespace
 
-std::optional<std::string> check_structured_control_flow(const IrFunction& function,
-                                                         const std::vector<StructuredLine>& lines) {
+std::optional<std::string> check_structured_control_flow(
+    const IrFunction& function, const std::vector<StructuredLine>& lines,
+    const std::map<std::uint64_t, std::string>* string_literals) {
   if (!build_graph(function).valid) {
     return std::string("the control-flow graph is not valid");
+  }
+  if (auto mismatch = check_control_text(function, lines, string_literals)) {
+    return mismatch;
   }
   std::vector<Node> tree;
   std::string error;

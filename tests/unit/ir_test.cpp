@@ -5412,18 +5412,32 @@ TEST(Ir, ControlFlowCheckRefusesAConditionThatGoesTheWrongWay) {
       {fb_set("rdx", 2), fb_jump(3)},
       {fb_return()},
   });
-  std::vector<StructuredLine> lines = structured_with(diamond, kGotoRuleAll).lines;
+  // The tag and the printed condition disagree: the text check refuses it.
+  std::vector<StructuredLine> tag_only = structured_with(diamond, kGotoRuleAll).lines;
   bool flipped = false;
-  for (StructuredLine& line : lines) {
+  for (StructuredLine& line : tag_only) {
     if (line.tag.kind == donkey::detail::LineKind::IfOpen) {
-      line.tag.negated = !line.tag.negated;  // the printed condition now enters the other arm
+      line.tag.negated = !line.tag.negated;
       flipped = true;
     }
   }
   ASSERT_TRUE(flipped);
-  const auto mismatch = check_structured_control_flow(diamond, lines);
-  ASSERT_TRUE(mismatch.has_value());
-  EXPECT_NE(mismatch->find("condition"), std::string::npos) << *mismatch;
+  const auto text_mismatch = check_structured_control_flow(diamond, tag_only);
+  ASSERT_TRUE(text_mismatch.has_value());
+  EXPECT_NE(text_mismatch->find("printed as"), std::string::npos) << *text_mismatch;
+
+  // Both changed consistently: the then-arm now runs when the IR's fall-through is taken, so the
+  // edge check refuses it.
+  std::vector<StructuredLine> both = structured_with(diamond, kGotoRuleAll).lines;
+  for (StructuredLine& line : both) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen) {
+      line.tag.negated = !line.tag.negated;
+      line.text = "  if (rax != 0x0) {";
+    }
+  }
+  const auto edge_mismatch = check_structured_control_flow(diamond, both);
+  ASSERT_TRUE(edge_mismatch.has_value());
+  EXPECT_NE(edge_mismatch->find("printed condition"), std::string::npos) << *edge_mismatch;
 }
 
 TEST(Ir, ControlFlowCheckRefusesABreakToTheWrongBlock) {
