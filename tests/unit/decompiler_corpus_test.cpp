@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -1577,6 +1578,74 @@ TEST(DecompilerCorpus, AppliedPrototypeThatContradictsTheFunctionIsRefused) {
   donkey::IrPrototype bad_name = good;
   bad_name.parameters[0].name = "p q";
   refused(bad_name, "ir.prototype_name");
+}
+
+// Every statement the lifter keeps must be printed, unless it is a flag setter that the printer
+// folds into the branch it feeds. The oracle interprets IR, not the printed text, so a statement
+// dropped by the printer would pass every other test; this check looks at the text.
+TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
+  std::size_t checked = 0;
+  std::vector<std::string> missing;
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
+    donkey::AnalysisOptions analysis_options;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, analysis_options);
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+    for (const donkey::Function& function : analysis.value().functions) {
+      auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), function);
+      if (!lifted) {
+        continue;
+      }
+      auto printed = donkey::format_pseudocode_lines(lifted.value());
+      if (!printed) {
+        continue;
+      }
+      std::set<std::uint64_t> printed_addresses;
+      for (const donkey::PseudocodeLine& line : printed.value().lines) {
+        printed_addresses.insert(line.source_address);
+      }
+      // The step of a counted loop is printed in the `for (...)` header, with its operand
+      // temporaries folded into it, and the header line carries only the address of the init
+      // statement. The exemption is the whole latch block of a back edge, and only in a function
+      // that prints a `for (` header; every other unprinted statement is reported.
+      const bool prints_for_header = printed.value().full_text.find("for (") != std::string::npos;
+      for (std::size_t block_index = 0; block_index < lifted.value().blocks.size(); ++block_index) {
+        const donkey::IrBlock& block = lifted.value().blocks[block_index];
+        bool loop_latch = false;
+        if (prints_for_header && !block.statements.empty()) {
+          const donkey::IrStatement& last = block.statements.back();
+          loop_latch = (last.op == donkey::IrOp::Branch && last.a.block <= block_index) ||
+                       (last.op == donkey::IrOp::CondBranch && last.b.block <= block_index);
+        }
+        for (std::size_t i = 0; i < block.statements.size(); ++i) {
+          const donkey::IrStatement& statement = block.statements[i];
+          if (loop_latch || statement.source_address == 0 ||
+              statement.op == donkey::IrOp::Compare || statement.op == donkey::IrOp::Test ||
+              statement.op == donkey::IrOp::FCompare || statement.op == donkey::IrOp::Branch ||
+              statement.op == donkey::IrOp::CondBranch || statement.op == donkey::IrOp::Switch ||
+              statement.op == donkey::IrOp::Return) {
+            continue;
+          }
+          ++checked;
+          if (printed_addresses.count(statement.source_address) == 0) {
+            char buffer[128];
+            std::snprintf(buffer, sizeof buffer, "%s %s@0x%llx op=%d", library.level,
+                          function.name.c_str(),
+                          static_cast<unsigned long long>(statement.source_address),
+                          static_cast<int>(statement.op));
+            missing.emplace_back(buffer);
+          }
+        }
+      }
+    }
+  }
+  EXPECT_GT(checked, 0u);
+  std::string report;
+  for (std::size_t i = 0; i < missing.size() && i < 20; ++i) {
+    report += missing[i] + "\n";
+  }
+  EXPECT_TRUE(missing.empty()) << missing.size() << " kept statements are not printed:\n" << report;
 }
 
 }  // namespace

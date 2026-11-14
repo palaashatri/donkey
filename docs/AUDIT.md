@@ -95,6 +95,15 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
 4. **Wrong register in a note.** On AArch64 the note "the returned register is not determined
    ...; rax is assumed" names `rax` (Goal 3). The audit log shows it 430 times on the AArch64
    binary.
+5. **Statements of a branching block omitted from pseudocode (found after goal 8, step 1).**
+   The structured emitter printed a block's terminator-test `if` without first printing the
+   block's own statements, so statements that run before a conditional branch were missing
+   from the output. The shipped text on `main` could omit them. Introduced in `1915c3c`
+   ("structure reducible control flow into if/else and loops", on `main`). Fixed in
+   `7cfddc2` on `claude/funny-meitner-cpc7oc`; regression test
+   `Ir.StatementsInTheBranchingBlockArePrintedBeforeTheIf` (fails without the fix, with the
+   `rsi` assignment missing from the output). The IR oracle did not catch it because it
+   executes the IR, not the printed text. Guard for this class: see goal 8, step 0.
 
 ## After
 
