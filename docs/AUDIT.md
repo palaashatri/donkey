@@ -177,3 +177,41 @@ fall-through fix, 115 of the 120 labelled functions fail there; the others fail 
 or in emission. The fix for the dominant shape is node splitting (duplicating loop-body blocks while
 keeping the index layout and fall-throughs consistent). That is not implemented. A tail-duplication
 attempt for shared return blocks was measured and removed: it changed no function in `ls`.
+
+### Goal 8: structuring, measured on the fixed 1,986-function list
+
+Classification (`classify_structure`, `ir.h`): a function is **structured** (printed without labels),
+**irreducible** (an iterative depth-first search from the entry finds a retreating edge whose target
+does not dominate its source), **reducible but rejected** (reducible, and the structurer rejects the
+shape: the reason is the last attempt's), or **other** (empty, invalid or unreachable blocks). The
+measurement is `tools/audit/sample_list.py measure` on `tools/audit/results/list_final.json`.
+
+| Commit | Structured | Irreducible | Reducible but rejected | Labelled (note) | Share |
+|---|---|---|---|---|---|
+| `665c9e4` (before the structuring work) | 669 | 143 | 1,174 | 1,317 | 66.3% |
+| `9b49613` (dominance loops, reverse-postorder copy, break rules) | 715 | 143 | 1,128 | 1,271 | 64.0% |
+
+The bar is at most 52% of the list (at most 1,032 functions labelled). It is **not met**: 1,271 (64.0%).
+
+What each rule changed:
+- Loops are natural loops (a back edge is an edge whose target dominates its source), and
+  irreducibility is checked first in `run()`. The rejection `back edge by index not dominated by its
+  target` (1,032 functions) was a reducible join block below its predecessor taken for a loop. It is
+  gone; the functions moved to later checks and none became structured by this rule alone.
+- A reverse-postorder copy of the function (printing only), tried after the layout as given fails.
+  The entry is first, a conditional branch whose fall-through is no longer next gets an explicit
+  branch block, and a trampoline is not copied. 669 to 715 structured.
+- A conditional branch to the innermost loop's exit prints as `if (cond) break;` (a rejection inside a
+  switch), and an `if` inside a loop may contain its break edge. No count change on the list; covered
+  by `Ir.ConditionalBranchToTheLoopExitPrintsAsBreak`.
+- Tried and removed: a loop-contiguous layout (each natural loop's body as one run). It structured no
+  additional function, so it was not kept.
+
+Remaining rejections (last attempt, 1,128 reducible functions): region not closed 596, loop exit not
+determined 169, loop leaves through several blocks 168, if without join 100, loop body not contiguous
+63, loop latch not a conditional 16, loop latch not an exit 13, switch case falls into the next 2, loop
+header with a test 1. In the failing regions the edges are: a block in a region branching to a block
+before it with no enclosing loop, and a join block with a predecessor outside its region. Those need
+region construction that does not depend on index ranges. Irreducible (143 functions) needs node
+splitting with a bound on the duplicated code; neither is implemented.
+
