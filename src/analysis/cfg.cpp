@@ -939,7 +939,17 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
   }
 
   std::size_t decoded_limit = options.max_instructions;
+  // The budget counts distinct instructions reached by any function's walk. Every walk starts from
+  // its own seed, so the same code can be reached from many seeds; counting each visit would let
+  // many small functions exhaust the budget that a single large one could use (G24-T2 seeds made
+  // this visible). Distinct instructions are bounded by the decoded instruction list.
   std::size_t decoded = 0;
+  std::unordered_set<std::uint64_t> reached_anywhere;
+  const auto count_distinct = [&](std::uint64_t address) {
+    if (reached_anywhere.insert(address).second) {
+      ++decoded;
+    }
+  };
   // Set when a block would exceed kMaxBlocks. Once it is set, no further seed is traversed, so
   // the graph never holds more blocks than the bound.
   bool block_bound_reached = false;
@@ -1012,7 +1022,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         }
         visited.insert(address);
         reached.push_back(address);
-        ++decoded;
+        count_distinct(address);
         run.push_back(found->second);
         if (run.size() > 64) {
           run.erase(run.begin());
@@ -1044,7 +1054,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           }
           visited.insert(next);
           reached.push_back(next);
-          ++decoded;
+          count_distinct(next);
           run.push_back(slot->second);
           next += delay.length;
         }
