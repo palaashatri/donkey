@@ -26,7 +26,7 @@ What the branch's tests prove, beyond `main`. Nothing here is on `main` until it
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported on the final commit (`main` had 25.8% InvalidIR on its sample), 180
   Complete, 1,317 "not fully structured" (66.3%).
-- Not done: structuring of irreducible loops (node splitting), the Goal 8 bar; AArch64 calls
+- Goal 8 (branch only): 50.2% of the 1,986-function sample is labelled, under the 52% bar; node splitting makes 37 irreducible functions reducible but none is structured; AArch64 calls
   (Partial); Windows x64 calls; .xdata and ARM64 unwind.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |

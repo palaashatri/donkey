@@ -338,7 +338,7 @@ same shapes):
 |---|---|---|
 | node-splitting bound reached (16 per split, 64 per function) | `ls` 0x4da0 (irreducible region at 0x60f0) | splitting duplicates the whole target block; a loop with a large body exceeds the bound |
 | a terminator the splitter does not model (switch) | `ls` 0x11f70 | the splitter's successor model has branches and conditional branches only; a switch has case edges |
-| reducible after the split, the loop header has two entries | the test `Ir.SplitsAnIrreducibleFunctionIntoAReducibleOne` (shape of `ls` 0x7c50-class functions) | a single-entry loop is needed; copying the loop per entry is beyond the bound |
+| reducible after the split, the loop header has two entries | the test `Ir.SplitsAnIrreducibleFunctionIntoAReducibleOne` (no sampled address checked for this shape) | a single-entry loop is needed; copying the loop per entry is beyond the bound |
 | a block is reached twice (not a return) | `ls` 0x7c50 | a join reached from two arms with no common join needs node copies beyond return blocks |
 | a branch leaves its region | `ls` 0x6ea0 | a jump into a block that belongs to another region; the regions are built from the dominator trees and do not cover it |
 | an if joins outside its region | `ls` 0x8090 | the if's join is the post-dominator of an arm that reaches the exit separately |
@@ -347,4 +347,20 @@ same shapes):
 Tests: `Ir.SplitsAnIrreducibleFunctionIntoAReducibleOne` (the verdict is ReducibleRejected rather
 than Irreducible; fails with splitting disabled) and `Ir.NodeSplittingKeepsItsPerNodeBound` (the
 verdict is Irreducible and names the bound; fails with the per-node bound removed).
+
+#### Verification (code at `f2e194a`; this section is the only change after it)
+
+| Tree | Compiler and preset | Result |
+|---|---|---|
+| `build/headless-linux` | GCC 13.3, headless | 789 of 789 pass (includes the corpus oracle, `DecompilerCorpus.EveryKeptStatementIsPrinted`, and the pass-preservation tests) |
+| `build/clang-headless` | Clang, headless | 789 of 789 pass |
+| `build/release-headless` | Release, headless | 790 of 790 pass |
+| `build/dev-linux` | desktop shell, UI smoke tests under `xvfb-run -a -s "-screen 0 1600x1000x24"` | 816 of 816 pass |
+| `build/cross-a64` | AArch64 under `qemu-aarch64 -L /usr/aarch64-linux-gnu` (the tree's ctest launcher) | 242 tests; 241 pass; 1 skipped (`DecompilerCorpus.FrameSlotsTakeTheNamesOfTheDebugInformation`, a platform skip that predates goal 8) |
+
+Pinned clang-format (`cf2018`) passes over every changed file (`src/ir/structure.cpp`,
+`src/ir/ir.cpp`, `src/ir/ir_internal.h`, `tests/unit/ir_test.cpp`,
+`tests/unit/decompiler_corpus_test.cpp`).
+
+Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
 
