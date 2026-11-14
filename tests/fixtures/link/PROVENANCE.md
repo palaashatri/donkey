@@ -37,3 +37,16 @@ The same sources, built for AArch64 with Branch Target Identification, with no C
 
 Under lld 18 the stubs in `.plt` are 24 bytes apart (each starts with an `adrp`), not 16, so the
 two imports of `libconsumer.so` sit at offsets that a 16-byte scan misses.
+
+## `libtailcall.so`
+
+`libtailcall.c` is written for this repository: `tail_fn` ends in a tail call to an imported
+function. The committed binary was built from a copy of the source named `tail.c` (its `FILE`
+symbol records that name), with GCC 13.3.0 (Ubuntu 13.3.0-6ubuntu2~24.04.1) on x86-64 Linux:
+
+    cp libtailcall.c tail.c
+    gcc -O2 -shared -fPIC -o libtailcall.so tail.c
+
+Rebuilt that way the output is byte-identical to the committed file (SHA-256
+`9d27869e1c4d6e142263a0fe739ce0686a879051ef068eef1aa83962b2b7dd87`). Built from a file named
+`libtailcall.c`, the bytes differ only in the `.strtab` size, through that one symbol name.
