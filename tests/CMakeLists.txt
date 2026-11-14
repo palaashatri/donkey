@@ -766,6 +766,11 @@ add_test(NAME cli.decompile_stack_argument_caller_is_partial
 set_tests_properties(cli.decompile_stack_argument_caller_is_partial PROPERTIES
   PASS_REGULAR_EXPRESSION "// caller  \\[partial\\]\n// note: x86-64 subset[^\n]*\n// note: outgoing call arguments")
 
+add_test(NAME cli.decompile_lea_stack_argument_caller_is_partial
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/calls/lea_stack_argument-x86_64)
+set_tests_properties(cli.decompile_lea_stack_argument_caller_is_partial PROPERTIES
+  PASS_REGULAR_EXPRESSION "// caller  \\[partial\\]\n// note: x86-64 subset[^\n]*\n// note: outgoing call arguments")
+
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64)

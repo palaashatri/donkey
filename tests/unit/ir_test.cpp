@@ -5238,3 +5238,76 @@ TEST(Ir, IndirectTailJumpCallsItsOperand) {
   EXPECT_EQ(call->a.kind, IrOperandKind::Register);
   EXPECT_EQ(call->a.reg, "rax");
 }
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentThroughALeaIsPartial) {
+  // caller (0x1000): push 7; call 0x100c; add rsp, 8; ret.  callee (0x100c): sub rsp, 24;
+  // lea rax, [rsp+8]; mov rax, [rax+32]; add rsp, 24; ret. The lea takes the address of the first
+  // stack argument and the load reads entry rsp + 16, an incoming argument, through the register.
+  const std::uint8_t bytes[] = {
+      0x6a, 0x07,                    // 0x1000: push 7
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1002: call 0x100c
+      0x48, 0x83, 0xc4, 0x08,        // 0x1007: add rsp, 8
+      0xc3,                          // 0x100b: ret
+      0x48, 0x83, 0xec, 0x18,        // 0x100c: sub rsp, 24
+      0x48, 0x8d, 0x44, 0x24, 0x08,  // 0x1010: lea rax, [rsp+8]
+      0x48, 0x8b, 0x40, 0x20,        // 0x1015: mov rax, [rax+32]
+      0x48, 0x83, 0xc4, 0x18,        // 0x1019: add rsp, 24
+      0xc3,                          // 0x101d: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+TEST(Ir, CallerOfAFunctionThatStoresAStackAddressAndReadsItBackIsPartial) {
+  // caller (0x1000): push 7; call 0x100c; add rsp, 8; ret.  callee (0x100c): sub rsp, 24;
+  // lea rax, [rsp+8]; mov [rsp-8], rax; mov rcx, [rsp-8]; mov rax, [rcx+32]; add rsp, 24; ret.
+  // The stack address (entry rsp + 8 - 24 = -16) is stored and read back, so the load through the
+  // reloaded value reaches the incoming argument at entry rsp + 16, which the tracking cannot
+  // follow through memory. The store itself must refuse. (Without the sub the lea's own offset is 8
+  // and every version refuses it, so the sub keeps the store as the case under test.)
+  const std::uint8_t bytes[] = {
+      0x6a, 0x07,                    // 0x1000: push 7
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1002: call 0x100c
+      0x48, 0x83, 0xc4, 0x08,        // 0x1007: add rsp, 8
+      0xc3,                          // 0x100b: ret
+      0x48, 0x83, 0xec, 0x18,        // 0x100c: sub rsp, 24
+      0x48, 0x8d, 0x44, 0x24, 0x08,  // 0x1010: lea rax, [rsp+8]
+      0x48, 0x89, 0x44, 0x24, 0xf8,  // 0x1015: mov [rsp-8], rax
+      0x48, 0x8b, 0x4c, 0x24, 0xf8,  // 0x101a: mov rcx, [rsp-8]
+      0x48, 0x8b, 0x41, 0x20,        // 0x101f: mov rax, [rcx+32]
+      0x48, 0x83, 0xc4, 0x18,        // 0x1023: add rsp, 24
+      0xc3,                          // 0x1027: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}

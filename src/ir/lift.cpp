@@ -91,11 +91,28 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
     check_memory(statement.a, values);
     check_memory(statement.b, values);
     check_memory(statement.c, values);
+    auto tracked = [&](const IrOperand& operand) {
+      return operand.kind == IrOperandKind::Register &&
+             values.count(internal::register_family(operand.reg)) != 0;
+    };
     if (statement.op == IrOp::Call) {
       for (const IrOperand& argument : statement.call_arguments) {
-        if (argument.kind == IrOperandKind::Register &&
-            values.count(internal::register_family(argument.reg)) != 0) {
+        if (tracked(argument)) {
           refused = true;  // a stack address escapes into the callee
+        }
+      }
+    }
+    // The statements the tracking models: a move, an add or subtract of a constant, a lea, a load
+    // and a call. Any other statement that reads a stack address (including a store of one, which
+    // would let a later load read it back) is not followed: it is refused.
+    const bool modelled = statement.op == IrOp::Assign || statement.op == IrOp::Lea ||
+                          statement.op == IrOp::Load || statement.op == IrOp::Call ||
+                          ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+                           statement.b.kind == IrOperandKind::Constant);
+    if (!modelled) {
+      for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (tracked(*operand)) {
+          refused = true;
         }
       }
     }
@@ -103,10 +120,11 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
       return;
     }
     const std::string dest = internal::register_family(statement.dest.reg);
-    // The value the statement gives the destination, when it is a stack address.
-    std::optional<std::optional<std::int64_t>> result;  // outer: is a stack address
-    auto source_value =
-        [&](const IrOperand& operand) -> std::optional<std::optional<std::int64_t>> {
+    // The value the statement gives the destination: outer optional: is it a stack address; inner:
+    // its offset from the entry rsp, when known.
+    using StackAddress = std::optional<std::optional<std::int64_t>>;
+    StackAddress result;
+    auto source_value = [&](const IrOperand& operand) -> StackAddress {
       if (operand.kind != IrOperandKind::Register) {
         return std::nullopt;
       }
@@ -129,13 +147,23 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
           result = statement.op == IrOp::Add ? **source + amount : **source - amount;
         }
       }
-    } else if (statement.op != IrOp::Load && statement.op != IrOp::Lea &&
-               statement.op != IrOp::Call && statement.op != IrOp::Return) {
-      // A write the tracking does not model: a stack address written into the destination by an
-      // arithmetic or other operation is no longer followed.
-      for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
-        if (source_value(*operand).has_value()) {
-          refused = true;
+    } else if (statement.op == IrOp::Lea && statement.a.kind == IrOperandKind::Memory) {
+      // The address of a memory operand. With an index register the offset is not known: refuse
+      // when the index or the base is a stack address; otherwise the base and displacement give it.
+      const bool index_tracked = !statement.a.index.empty() &&
+                                 values.count(internal::register_family(statement.a.index)) != 0;
+      const auto base = statement.a.reg.empty()
+                            ? values.end()
+                            : values.find(internal::register_family(statement.a.reg));
+      const bool base_tracked = base != values.end();
+      if (index_tracked || (base_tracked && !statement.a.index.empty())) {
+        refused = true;
+      } else if (base_tracked) {
+        if (!base->second.has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto displacement = static_cast<std::int64_t>(statement.a.constant);
+          result = *base->second + displacement;
         }
       }
     }
