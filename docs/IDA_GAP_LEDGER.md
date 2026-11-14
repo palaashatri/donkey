@@ -1725,6 +1725,72 @@ corpus has call-heavy functions verified by execution.
 Label it as one (`signature_inferred`) and never print it as certain. A wrong
 prototype must fail the oracle, not print plausible code.
 
+#### G21-T0 task-level plan (written 2026-11-14, before any G21 code)
+
+Checked against: `src/ir/lift.cpp` (`lift_call`, the Call handling that marks the function Partial
+with "outgoing call arguments and return values follow no modelled ABI"), `src/ir/eval.cpp` (the
+`IrOp::Call` case, which fails with "calls are not interpreted"), `src/ir/ir.cpp` (verifier and
+printer), `src/ir/abi.cpp` (ABI register tables), and `tests/unit/decompiler_corpus_test.cpp`
+(the oracle; `tests/corpus/corpus.c` holds 3 files today).
+
+**IR change.** `IrStatement` gains `std::vector<IrOperand> call_arguments` (in ABI order) and
+`IrOperand call_result` (a register, or `None` when the callee's return is not used). A `Call`
+keeps `a` as the target. The statement's `signature_inferred` flag (new bool) is set when the
+argument count comes from the callee's inferred parameters rather than from a debug or type
+source. Every printed call names the inference when it is one.
+
+**Lifter (x86-64 SysV first).** `lift_call` resolves a direct target T to a function of the same
+image in the CFG (a jump-stub or import is not resolved). It lifts T once with calls to other
+functions not resolved (depth 1; the callee's own calls stay Partial), reads T's inferred
+`parameters` (ABI register names) and its return width and return register, and emits the call
+with those operands. Calls with an unresolved target keep today's form and stay Partial.
+
+**Clobber model (T1).** After any call, caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11,
+xmm0-15) are unknown. Callee-saved (rbx, rbp, rsp, r12-r15) are preserved. A later read of an
+unknown register marks the function Partial, not Complete. Windows x64 is a second table (T1
+second step).
+
+**Verifier rules.** Every argument operand has a width matching its ABI register; `call_result`
+is a register that the clobber model defines; a call with arguments but no resolved signature is
+rejected (`ir.call_signature`). A call's arguments are reads: the verifier checks that they are
+defined on every path (an undefined argument marks the function Partial, it does not fail).
+
+**Interpreter (the oracle's part).** `eval.cpp`'s Call case evaluates the callee's IR recursively
+with the arguments, up to a depth of 8, and returns its result; a depth or an unresolved callee
+fails with `ir.eval_call` as today. This is what lets the differential harness execute a caller.
+
+**Printer.** `r = f(a, b);` when a result is used, `f(a, b);` otherwise, with the callee's name
+from the function table. A `signature_inferred` call prints a trailing comment
+`/* arguments inferred from callee */`.
+
+**Corpus (T2 oracle).** At least six call-heavy functions added to `tests/corpus/corpus.c`:
+arguments of 0 to 6 integer or pointer values, a result used and unused, a call inside a loop,
+a call chain of depth 2, a recursive call (must stay Partial), and a call through a function
+pointer (must stay Partial). The oracle compiles them at -O0 and -O2 on x86-64. A corpus function
+is Complete only when the interpreter's result equals the compiled code's on every input.
+
+**Tests (names to add).**
+- `Ir.CallCarriesItsArgumentsFromTheCalleeSignature` (unit, from bytes: a caller of a two-argument
+  callee in the same image)
+- `Ir.CallToAnUnresolvedTargetStaysPartial` (unit)
+- `Ir.CallerSavedRegistersAreUnknownAfterACall` (unit: a read of rax after a call is Partial)
+- `Ir.VerifierRejectsACallWithoutASignature` (unit, hand-built IR)
+- `DecompilerCorpus.CallHeavyFunctionsAgreeWithTheCompiledCode` (oracle, -O0 and -O2)
+- `cli.decompile_prints_call_arguments` (CLI, a committed fixture with a two-argument call)
+
+**Done when.** (1) the six corpus functions verify (Complete: executed and equal) at -O0 and -O2;
+(2) every existing corpus result still agrees with the compiled code; (3) the CLI test prints a
+call with arguments; (4) the count of sampled functions carrying "outgoing call arguments and
+return values follow no modelled ABI" is measured before and after with `tools/audit`, both in
+the PR. A function that still calls an unknown or recursive callee is Partial, and that is
+reported as such.
+
+**Pitfalls.** An argument count from register use is an inference: label it, never print it as
+certain (`signature_inferred`). A wrong signature must fail the oracle, not print plausible code:
+the oracle must run each call-heavy function with several inputs. The clobber model must not let
+a value that a call changed be printed as the old one. Do not widen the subset by guessing at
+callee-saved registers. Mutual recursion stops at depth 1 in the lifter, so the cost is bounded.
+
 ### G22 Type libraries (P1)
 
 **Why.** IDA Pro's type libraries and Ghidra's data type archives give every
