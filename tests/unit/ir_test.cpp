@@ -19,6 +19,7 @@
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "ir_internal.h"
 #include "lift_internal.h"
 #include "test_io.h"
 
@@ -612,9 +613,11 @@ TEST(Ir, StructuresDoWhileLoop) {
 }
 
 TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
+  // Blocks 1 and 2 form a cycle that block 0 enters at both ends (0 -> 1 and 0 -> 2), so the
+  // retreating edge 2 -> 1 does not have a dominating target: irreducible, and labelled.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
-  function.blocks[0].statements.push_back(conditional_branch_statement(1));
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
   function.blocks[1].statements.push_back(branch_statement(2));
   function.blocks[2].statements.push_back(compare_zero_statement());
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
@@ -4777,10 +4780,10 @@ TEST(Ir, ConditionalBranchToTheLoopExitPrintsAsBreak) {
 // branches to the entry 2, which tests rdi and branches to 1 or falls through to 3; both join at 4,
 // a return.
 TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
-  // Block 0 is a synthetic entry trampoline (address 0) that jumps to block 2, the real entry.
-  // The original layout cannot structure this (the trampoline is a branch to a block that is not
-  // next), so the reverse-postorder copy must be used, and it must start at block 2, not at the
-  // trampoline. Without that entry rule the output contains a labelled goto.
+  // Output regression, not a discriminating test: block 0 is a synthetic entry trampoline (address
+  // 0) that jumps to block 2, and the printed output has no goto. It does not discriminate because
+  // the original layout already structures this shape, with or without the trampoline rule
+  // (removed from reverse_postorder_copy; see AUDIT, goal 8).
   donkey::IrFunction f;
   f.address = 0x1000;
   f.name = "trampoline";
@@ -4865,4 +4868,220 @@ TEST(Ir, StatementsInTheBranchingBlockArePrintedBeforeTheIf) {
   ASSERT_NE(assign, std::string::npos) << text.value();
   ASSERT_NE(guard, std::string::npos) << text.value();
   EXPECT_LT(assign, guard) << text.value();
+}
+
+// ---- Post-dominators and the fallback structurer (goal 8, step 1) ------------------------
+
+namespace {
+
+IrStatement fb_jump(std::uint32_t target) {
+  IrStatement statement;
+  statement.op = IrOp::Branch;
+  statement.a = IrOperand::block_ref(target);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_branch(std::uint32_t taken) {
+  IrStatement statement;
+  statement.op = IrOp::CondBranch;
+  statement.condition = IrCondition::Equal;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::block_ref(taken);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_compare() {
+  IrStatement statement;
+  statement.op = IrOp::Compare;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::constant_value(0, 8);
+  statement.condition = IrCondition::Equal;
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_set(const std::string& reg, std::uint64_t value) {
+  IrStatement statement;
+  statement.op = IrOp::Assign;
+  statement.dest = IrOperand::register_ref(reg, 8);
+  statement.a = IrOperand::constant_value(value, 8);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_return() {
+  IrStatement statement;
+  statement.op = IrOp::Return;
+  statement.a = IrOperand::register_ref("rdx", 8);
+  statement.width = 8;
+  return statement;
+}
+
+IrFunction fb_function(std::vector<std::vector<IrStatement>> blocks) {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "fallback";
+  function.return_width = 8;
+  std::uint64_t address = 0x1000;
+  for (auto& statements : blocks) {
+    IrBlock block;
+    block.address = address;
+    block.statements = std::move(statements);
+    function.blocks.push_back(std::move(block));
+    address += 0x10;
+  }
+  return function;
+}
+
+}  // namespace
+
+TEST(Ir, PostDominatorsOfADiamondJoinAtTheMerge) {
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_jump(3)},
+      {fb_jump(3)},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 4u);
+  EXPECT_EQ(immediate[0], 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 3u);
+}
+
+TEST(Ir, EveryReturnFeedsTheVirtualExit) {
+  // Two returns have no block in common after the branch: the join is the virtual exit, whose
+  // index is the block count (4).
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_return()},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 3u);
+  EXPECT_EQ(immediate[0], 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 3u);
+}
+
+TEST(Ir, ATailCallFeedsTheVirtualExit) {
+  // Block 1 is a tail call (a call followed by a return, as the lifter emits it). Its exit is the
+  // virtual exit, so the branch above it has no join among the blocks.
+  IrStatement call;
+  call.op = IrOp::Call;
+  call.dest = IrOperand::register_ref("rax", 8);
+  call.a = IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {call, fb_return()},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[0], 3u);
+}
+
+TEST(Ir, PostDominatorsOfAWhileLoopLeaveTheHeaderToItsExit) {
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(3)},
+      {fb_jump(1)},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 4u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 1u);
+  EXPECT_EQ(immediate[0], 1u);
+}
+
+TEST(Ir, SyntheticEntryTrampolineInAnIfWithTwoReturnsDoesNotPrintAsGoto) {
+  // Output regression, not a discriminating test: the shape of libc's sub_191770, a synthetic
+  // entry (block 0, address 0) that jumps to block 2, which branches to two returns with no join.
+  // It does not discriminate: the output is the same with or without the trampoline rule, which
+  // was removed from reverse_postorder_copy (AUDIT, goal 8).
+  IrFunction f = fb_function({
+      {fb_jump(2)},
+      {fb_return()},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 3), fb_return()},
+  });
+  f.blocks[0].address = 0;
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
+namespace {
+
+// A loop with two exits: the header leaves to the follow block 4 (which returns), and the
+// body's test leaves to block 5, a return block of its own. The layout-based structurer rejects
+// it (two exit blocks), so only the fallback can structure it.
+IrFunction fb_two_exit_loop() {
+  // Block 4 is the follow (not itself a return), so the header's exit to it prints as break.
+  return fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_set("rdx", 7), fb_jump(6)},
+      {fb_set("rdx", 9), fb_return()},
+      {fb_return()},
+  });
+}
+
+}  // namespace
+
+TEST(Ir, FallbackPrintsALoopExitToTheFollowAsBreak) {
+  const IrFunction f = fb_two_exit_loop();
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x1;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x7;"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackPrintsALoopExitToAReturnBlockInPlace) {
+  // Block 3 leaves the loop with an unconditional branch to the return block 5. The loop's follow
+  // is block 4, so the return is the only exit that is not the follow.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 9), fb_jump(5)},
+      {fb_set("rdx", 7), fb_jump(6)},
+      {fb_return()},
+      {fb_return()},
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rdx = 0x9;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackJoinsAnIfAtItsPostDominator) {
+  // The layout-based structurer rejects this loop (ReducibleRejected without the fallback). Block
+  // 2 is an if whose arms are block 3 and the join 4, the immediate post-dominator of block 2;
+  // block 3 continues to the header, and the header's exit is block 5.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(5)},
+      {fb_compare(), fb_branch(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 2), fb_jump(1)},
+      {fb_set("rdx", 7), fb_return()},
+  });
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rdx = 0x2;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x7;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
 }

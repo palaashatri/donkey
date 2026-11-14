@@ -96,6 +96,12 @@ std::string render_condition(const IrFunction& function, const IrStatement& stat
 /// condition would then read as if it tested the new value).
 const IrStatement* flags_producer(const IrBlock& block, std::size_t index);
 
+/// Immediate post-dominator of every block (goal 8, step 1). A block that ends in a return flows
+/// into a virtual exit whose index is the block count; a tail call is lifted as a return, so it
+/// does too. The entry is `count` for a block whose paths reach the exit with no block in common
+/// after it. An empty result means the graph is not valid.
+std::vector<BlockId> immediate_post_dominators(const IrFunction& function);
+
 struct StructuredLine {
   std::string text;
   std::uint64_t source_address = 0;
