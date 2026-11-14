@@ -667,3 +667,36 @@ TEST(Cfg, BlockBoundFollowsTheDecodedInstructionCount) {
   EXPECT_EQ(result.value().cfg.blocks.size(), kBlocks + 1);
   EXPECT_FALSE(result.value().cfg.partial);
 }
+
+// Falling through into another function's start ends the function (G24). Layout: 0x1000 call
+// 0x1010; 0x1005 ret (a function: the call at 0x1010 targets it); 0x1010 call 0x1005; 0x1015 ret.
+// The caller at 0x1000 falls through its call into 0x1005, so it ends at 0x1005, not at its ret
+// after that. A call to the next instruction (the call-next idiom) does not end a function; see the
+// fixture test.
+TEST(Cfg, CallThatFallsIntoAnotherFunctionEndsTheCaller) {
+  const std::vector<std::byte> data = [] {
+    std::vector<std::byte> out;
+    for (const std::uint8_t b :
+         {0xe8, 0x0b, 0x00, 0x00, 0x00,                                // 0x1000: call 0x1010
+          0xc3,                                                        // 0x1005: ret
+          0xc3, 0xc3, 0xc3, 0xc3, 0xc3,                                // padding to 0x1010
+          0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xe8, 0xf0, 0xff, 0xff, 0xff,  // 0x1010: call 0x1005
+          0xc3}) {                                                     // 0x1015: ret
+      out.push_back(static_cast<std::byte>(b));
+    }
+    return out;
+  }();
+  const auto image = synthetic_image(data.size());
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : result.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_TRUE(caller->has_extent);
+  EXPECT_EQ(caller->end_address, 0x1005U);
+  EXPECT_EQ(caller->block_count, 1U);
+}

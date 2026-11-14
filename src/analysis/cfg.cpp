@@ -1063,13 +1063,22 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           next += delay.length;
         }
         switch (instruction.classification) {
-          case InstructionClass::Call:
+          case InstructionClass::Call: {
             if (instruction.direct_target.has_value()) {
               graph.edges.push_back(
                   CfgEdge{address, instruction.direct_target.value(), CfgEdgeKind::Call});
             }
+            // Falling through into another function's start ends this function (G24). A call to the
+            // next instruction (the call-next idiom, which reads the program counter) is not a
+            // boundary: its target is part of this function.
+            const bool call_next =
+                instruction.direct_target.has_value() && instruction.direct_target.value() == next;
+            if (!call_next && next != function.address && function_starts.contains(next)) {
+              break;
+            }
             address = next;
             continue;
+          }
           case InstructionClass::Jump:
             if (instruction.direct_target.has_value()) {
               const std::uint64_t target = instruction.direct_target.value();
@@ -1100,6 +1109,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             } else {
               indirect = true;
             }
+            // Falling through into another function's start: this function ends here (G24).
+            if (next != function.address && function_starts.contains(next)) {
+              break;
+            }
             address = next;
             continue;
           case InstructionClass::Return:
@@ -1107,6 +1120,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             break;
           case InstructionClass::Unknown:
           case InstructionClass::Other:
+            // Falling through into another function's start: this function ends here (G24).
+            if (next != function.address && function_starts.contains(next)) {
+              break;
+            }
             address = next;
             continue;
         }
