@@ -364,3 +364,95 @@ Pinned clang-format (`cf2018`) passes over every changed file (`src/ir/structure
 
 Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
 
+### W1: goto structuring (G04-T5)
+
+Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,
+1,986 functions) with the Release build of the branch head (`c101de2`) and the baseline build from
+`5162f62` (the plan commit, no code change; the same list). The measurement is
+`sample_list.py measure`, extended with the goto and refusal counts.
+
+| | Before | After |
+|---|---|---|
+| Printed as labelled blocks (whole function) | 996 (50.2%) | **0** |
+| Structured, no goto | 990 | 989 |
+| Structured with gotos | 0 | 997 |
+| Gotos, total | 0 | 16,476 |
+| Gotos, largest in one function | 0 | 394 (`git`) |
+| Candidate structures refused by the control-flow check | not checked | 0 |
+| Complete / InvalidIR / Unsupported | 180 / 0 / 0 | 180 / 0 / 0 |
+
+Per binary (after; before in brackets is the labelled count):
+
+| Binary (sampled) | Labelled | No goto | With gotos | Gotos | Largest |
+|---|---|---|---|---|---|
+| ls (186) | 0 (96) | 90 | 96 | 1,649 | 239 |
+| openssl (300) | 0 (169) | 130 | 170 | 3,385 | 292 |
+| bash (300) | 0 (130) | 170 | 130 | 2,031 | 235 |
+| libsqlite3 (300) | 0 (124) | 177 | 123 | 1,754 | 126 |
+| libc (300) | 0 (122) | 177 | 123 | 1,423 | 101 |
+| git (300) | 0 (199) | 101 | 199 | 3,751 | 394 |
+| python3.12 (300) | 0 (156) | 144 | 156 | 2,483 | 392 |
+
+**Goto-free functions dropped by 1 (990 to 989), and this is a correctness fix, not a regression.**
+Per function, two functions left the goto-free set and one joined it (`libsqlite3`). The two that left
+(`openssl` `0xa9b70`, `libc` `0x97ec0`) printed a switch whose join lies outside the region of the
+enclosing `if`. The layout-based structurer accepted that by walking on to the next block, which printed
+the case blocks a second time: `return rax;` appeared 22 times in `0x97ec0` and `rax = (u64)(0xbacc6);` 103
+times in `0xa9b70` (their outputs had 230 and 539 lines; now 139 and 203). The switch rule now rejects
+that shape (`switch join outside its region`), and the goto structurer prints the two functions with
+gotos (one in `0xa9b70`, two in `0x97ec0`). Net goto-free count: 990 before, 989 after.
+
+Where the gotos are. Counted on `openssl` (all its functions, both runs of the goto structurer, so each
+decision counted twice; shares are what matter):
+
+| Target of the goto | Share | Note |
+|---|---|---|
+| a block already printed earlier in the function | 60% | 59% of these blocks have at most 4 statements: short-circuit conditions (`a && b` joins a block printed in the first arm) and switch arms that share a block |
+| a block the region does not dominate | 28% | a join reached from an arm, not the arm's own join |
+| the stop of an arm, not printable there | 12% | an `if` whose join is already printed or is a loop's follow |
+| a loop header from outside its loop | 3% | multi-entry loops (irreducible) |
+| return blocks (any target above) | 5% | copying returns would remove little |
+
+Copying small blocks into each arm that reaches them would remove the first group (not measured; it is
+the candidate for the owner decision below, because it grows the output). It is not done.
+
+Control-flow check. Every candidate structure (the layout-based ones, their reverse-postorder copy,
+the fallback, the split function, and the goto structurer) is rebuilt from its tags and compared with the
+IR edge by edge; a candidate that fails is refused and the next one is tried. Across the 1,986 functions:
+0 refusals. The check found two bugs of its own kind during the work: the switch join rule (above), and a
+goto emitted for a break whose join was already printed (`libc` `sub_e7870`, `sub_ea0b0`, `confstr`: refused
+until the fix, now `goto_structured` with 0 refusals). The corpus test
+`DecompilerCorpus.EveryPrintedFunctionPassesTheControlFlowCheck` runs the same check on every corpus function.
+
+Rules and tests (each rule switched off in the emitter fails its test; checked by hand, failures shown in
+the commit messages): `Ir.RuleSequencePrintsAFallThroughWithoutGoto`, `Ir.RuleIfElsePrintsADiamondAsIfElse`,
+`Ir.IfWithoutElsePrintsItsComplementedCondition`, `Ir.RuleLoopPrintsANaturalLoopAsWhileOne`,
+`Ir.RuleWhileTestPrintsAPureHeaderAsItsCondition`, `Ir.RuleBreakPrintsALoopExitAsBreak`,
+`Ir.RuleContinuePrintsABackEdgeInTheBodyAsContinue`, `Ir.RuleSwitchPrintsEachArmFromItsTarget`, plus
+`Ir.GotoLeavesALoopByAnExitThatIsNotItsFollow` and `Ir.IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle`.
+The check's own tests: `Ir.ControlFlowCheck*` (a condition that goes the wrong way, in the tags only and
+in the tags and text together; a break to the wrong block; a block that is not printed).
+
+What the check does not cover: statement text (`DecompilerCorpus.EveryKeptStatementIsPrinted` does, for
+kept statements); the rendering of conditions and operands (the check renders conditions with the printer's
+own function, so a wrong rendering is not caught); and the choice of which side is the then-arm beyond
+the tags (the text of each control line is checked against its tag).
+
+Timing: whole-binary `decompile --json`, one process at a time, two runs of each binary, baseline and
+branch alternating (wall time, seconds):
+
+| Binary | Baseline | Branch | Difference |
+|---|---|---|---|
+| openssl | 6.25, 7.41 | 7.61, 8.43 | +22%, +14% |
+| git | 246.9, 248.2 | 248.9, 261.0 | +1%, +5% |
+
+Both are under the 25% bar. The `openssl` runs vary by about 15% on this machine between repeats of the
+same binary, so the small figure is the one to read. Structuring runs once per candidate, and the CLI
+also classifies each function (a second run of the structurers), so most of the added cost is the check.
+
+Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
+arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
+compound conditions (`a && b`) are recovered as one `if` with a combined condition, which needs a
+multi-block condition in the tags and a check of its rendering; (3) whether 997 functions with gotos is
+acceptable as the decompiler's state for irreducible and shared-join control flow until (1) or (2) is
+decided.

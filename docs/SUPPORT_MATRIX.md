@@ -26,6 +26,12 @@ What the branch's tests prove, beyond `main`. Nothing here is on `main` until it
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported on the final commit (`main` had 25.8% InvalidIR on its sample), 180
   Complete, 1,317 "not fully structured" (66.3%).
+- Structuring (G04-T5, branch only): on the same 1,986 functions no function is printed as labelled
+  blocks (1,317 labelled before the structuring work; 996 on the branch before G04-T5). 989 print
+  without a goto and 997 with gotos (16,476 in all; the largest function has 394). Every printed
+  structure is checked edge by edge against the IR before it is shown (no candidate was refused on
+  the sample). The gotos are the open part: most go to a block that is already printed (shared
+  joins), and removing them needs owner decisions (`docs/AUDIT.md`, W1).
 - Goal 8 (branch only): 50.2% of the 1,986-function sample is labelled, under the 52% bar; node splitting makes 37 irreducible functions reducible but none is structured; AArch64 calls
   (Partial); Windows x64 calls; .xdata and ARM64 unwind.
 
@@ -102,8 +108,10 @@ itself is printed as `do { ... } while (...)`, and a branch to the next block is
 fall-through. A function with an early return therefore prints an if/else around the
 loop instead of labelled blocks with `goto`. Not done: the `for (init; cond; step)`
 form (a bottom-tested loop cannot be rewritten into it without a proof from the entry
-guard), `break`, `continue`, and the integer comparison simplification. Shapes the
-structurer does not recognise keep the labelled-block form.
+guard). `break` and `continue` are done. Shapes the structurer does not recognise are
+printed with `goto` for the edges that have no structured form (G04-T5), with a note
+that counts them; a structured function with no goto has no note. The printed control
+flow of every corpus function is checked against the IR (`DecompilerCorpus.EveryPrintedFunctionPassesTheControlFlowCheck`).
 
 `tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
