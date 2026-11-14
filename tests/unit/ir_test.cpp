@@ -612,11 +612,12 @@ TEST(Ir, StructuresDoWhileLoop) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
-TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
+TEST(Ir, IrreducibleControlFlowPrintsGotoNotLabelledBlocks) {
   // Blocks 1 and 2 form a cycle that block 0 enters at both ends (0 -> 1 and 0 -> 2), so the
   // retreating edge 2 -> 1 does not have a dominating target: irreducible. Node splitting makes it
   // reducible, but the loop header then has two entries from outside, which the structurer does
-  // not model, so the output stays labelled (see SplitsAnIrreducibleFunctionIntoAReducibleOne).
+  // not model. The goto structurer prints the function with one goto for the edge into the
+  // cycle, and no whole-function labelled form (G04-T5, goal 4 of AUDIT goal 8).
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -629,9 +630,11 @@ TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
   auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   const std::string& code = text.value();
-  EXPECT_NE(code.find("control flow not fully structured"), std::string::npos) << code;
-  EXPECT_NE(code.find("goto loc_"), std::string::npos) << code;
-  EXPECT_NE(code.find("loc_1000:"), std::string::npos) << code;
+  EXPECT_NE(code.find("// note: 1 goto(s) where control flow has no structured form"),
+            std::string::npos)
+      << code;
+  EXPECT_NE(code.find("goto loc_1008;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("labeled blocks"), std::string::npos) << code;
 }
 
 TEST(Ir, InfersX86_64IntegerArgumentsAndReturn) {
@@ -1102,10 +1105,10 @@ TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
   EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
 }
 
-TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
+TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
   // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
-  // return rax. A `break` inside the switch would leave the switch, not the loop, so
-  // the body is refused and the function is shown with labels.
+  // return rax. A `break` inside the switch would leave the switch, not the loop, so the leave is a
+  // goto, and the loop's own structure is kept (G04-T5: no whole-function labelled form).
   IrFunction function;
   function.address = 0x4000;
   function.name = "switch_exit";
@@ -1141,7 +1144,12 @@ TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
 
   const auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
-  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("// note: 2 goto(s) where control flow has no structured form"),
+            std::string::npos)
+      << text.value();
+  EXPECT_NE(text.value().find("case 0x1:\n          goto loc_4010;"), std::string::npos)
+      << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
 
 TEST(Ir, SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto) {
@@ -5150,9 +5158,9 @@ TEST(Ir, FallbackStopsCopyingAtTheFunctionBudget) {
 }
 
 TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
-  // The shape of FallsBackToLabelsForIrreducibleControlFlow. Without node splitting the verdict is
-  // Irreducible; with it the split function is reducible (ReducibleRejected: the structurer does
-  // not model a loop header with two entries from outside).
+  // The shape of IrreducibleControlFlowPrintsGotoNotLabelledBlocks. The function is irreducible, and
+  // the split makes it reducible, but the structurer still rejects the split (a loop header with two
+  // entries from outside), so the printed form is the goto structurer's: one goto, no labelled form.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5160,13 +5168,17 @@ TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
   function.blocks[2].statements.push_back(compare_zero_statement());
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
   function.blocks[3].statements.push_back(return_statement());
-  EXPECT_EQ(donkey::classify_structure(function).cls, donkey::StructureClass::ReducibleRejected);
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::GotoStructured);
+  EXPECT_TRUE(verdict.irreducible);
+  EXPECT_EQ(verdict.gotos, 1u);
+  EXPECT_FALSE(verdict.reason.empty());
 }
 
 TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   // The split target (block 2) has a body of twenty statements: one copy costs twenty more, over
-  // the per-node bound of sixteen, so the function stays Irreducible and the verdict names the
-  // region.
+  // the per-node bound of sixteen, so the function is not split. It is still printed (with gotos),
+  // and the verdict names the region whose split was refused.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5178,6 +5190,7 @@ TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
   function.blocks[3].statements.push_back(return_statement());
   const auto verdict = donkey::classify_structure(function);
-  EXPECT_EQ(verdict.cls, donkey::StructureClass::Irreducible);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::GotoStructured);
+  EXPECT_TRUE(verdict.irreducible);
   EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
 }

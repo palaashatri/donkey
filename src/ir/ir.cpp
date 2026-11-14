@@ -1562,18 +1562,24 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
   // Prefer structured control flow. When the graph does not match a shape the
   // structurer models, fall back to labeled blocks with explicit `goto`; the
   // fallback is still verified IR, never guessed structure.
-  if (auto structured = detail::format_structured_body_lines(function, &options.string_literals);
-      structured.has_value()) {
-    for (const auto& sline : structured.value()) {
-      append_line(sline.text, sline.source_address);
+  const detail::StructureResult structure =
+      detail::structure_function(function, &options.string_literals);
+  if (structure.outcome != detail::StructureOutcome::Labelled) {
+    if (structure.gotos > 0) {
+      append_line("// note: " + std::to_string(structure.gotos) +
+                  " goto(s) where control flow has no structured form");
+    }
+    for (const auto& sline : structure.lines) {
+      if (!sline.text.empty()) {  // markers carry a block's start, not text
+        append_line(sline.text, sline.source_address);
+      }
     }
     append_line("}");
     return out;
   }
 
   append_line("// note: control flow not fully structured; showing labeled blocks");
-  if (const StructureVerdict verdict = classify_structure(function);
-      verdict.cls == StructureClass::Irreducible) {
+  if (const StructureVerdict verdict = classify_structure(function); !verdict.reason.empty()) {
     append_line("// note: " + verdict.reason);
   }
   for (std::size_t index = 0; index < function.blocks.size(); ++index) {

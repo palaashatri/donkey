@@ -346,22 +346,28 @@ struct PseudocodeOptions {
 [[nodiscard]] Result<std::string> format_pseudocode(const IrFunction& function,
                                                     const PseudocodeOptions& options);
 
-/// How the structurer treats a function's control flow (see classify_structure).
+/// How the printer shows a function's control flow (see classify_structure).
 enum class StructureClass : std::uint8_t {
-  Structured,         ///< printed as structured code
-  Irreducible,        ///< the graph has a retreating edge into a block that does not dominate it
-  ReducibleRejected,  ///< the graph is reducible, but the structurer rejects its shape
-  Other,              ///< no structure question: empty, invalid or unreachable blocks
+  Structured,      ///< printed as structured code, with no goto
+  GotoStructured,  ///< printed as structured code, with goto for the edges no structure expresses
+  Other,           ///< not printed as structured code: an invalid graph (labelled form)
 };
 
 struct StructureVerdict {
   StructureClass cls = StructureClass::Other;
-  /// The first rejection reason, for ReducibleRejected and Other; empty when Structured.
+  /// Why the layout-based structurer rejected the function (GotoStructured), or why the graph is
+  /// irreducible and could not be split (when that is the case), or the reason for Other.
   std::string reason;
+  bool irreducible = false;  ///< a retreating edge enters a block that does not dominate it
+  std::size_t gotos = 0;     ///< goto statements printed
+  /// Candidate structures the control-flow check refused before the printed one passed.
+  std::size_t oracle_rejections = 0;
+  /// The first refusal of the control-flow check, or empty.
+  std::string oracle_detail;
 };
 
-/// Classifies a function's control flow for the printer: whether it is irreducible, and if it is
-/// reducible but still labelled, the first reason the structurer gave. Used by the audit tools.
+/// Classifies a function's printed control flow (G04-T5): structured, structured with gotos, or not
+/// structured. Used by the printer note and by the audit tools.
 [[nodiscard]] StructureVerdict classify_structure(const IrFunction& function);
 
 }  // namespace donkey

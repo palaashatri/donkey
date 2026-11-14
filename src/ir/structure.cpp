@@ -581,6 +581,19 @@ std::optional<IrFunction> reverse_postorder_copy(const IrFunction& function) {
   return out;
 }
 
+LineTag case_tag(std::uint64_t value) {
+  LineTag tag = make_tag(LineKind::Case);
+  tag.value = value;
+  return tag;
+}
+
+/// The tag of `if (C) <jump>;`: `block` is the tested block, `follow` the block the jump names.
+LineTag ifjump_tag(BlockId test, LineKind jump, BlockId target) {
+  LineTag tag = make_tag(LineKind::IfJump, test, target);
+  tag.jump = jump;
+  return tag;
+}
+
 struct Structurer {
   Structurer(const IrFunction& function,
              const std::map<std::uint64_t, std::string>* string_literals)
@@ -886,11 +899,11 @@ struct Structurer {
     if (!fb_active_.empty()) {
       const FbLoop& inner = *fb_active_.back();
       if (target == inner.header) {
-        line("continue;");
+        line("continue;", 0, make_tag(LineKind::Continue, inner.header));
         return FbEdge::End;
       }
       if (inner.has_follow && target == inner.follow) {
-        line("break;");
+        line("break;", 0, make_tag(LineKind::Break, inner.follow));
         return FbEdge::End;
       }
       for (std::size_t outer = 0; outer + 1 < fb_active_.size(); ++outer) {
@@ -916,13 +929,13 @@ struct Structurer {
   }
 
   void fb_emit_loop(FbLoop& loop) {
-    line("while (1) {");
+    line("while (1) {", 0, make_tag(LineKind::WhileOpen, loop.header, loop.has_follow ? loop.follow : kNoBlock));
     ++indent_;
     fb_active_.push_back(&loop);
     fb_region(loop.header, kNoBlock, loop.header);
     fb_active_.pop_back();
     --indent_;
-    line("}");
+    line("}", 0, make_tag(LineKind::Close));
   }
 
   // Emits the blocks from `start` until `stop`, in control-flow order. `root` is the block the
@@ -1012,27 +1025,27 @@ struct Structurer {
           fb_region(target, arm_stop, block);
         };
         if (taken == join) {
-          line("if (" + condition_of(block, true) + ") {");
+          line("if (" + condition_of(block, true) + ") {", 0, make_tag(LineKind::IfOpen, block, kNoBlock, true));
           ++indent_;
           emit_arm(fallthrough, join);
           --indent_;
-          line("}");
+          line("}", 0, make_tag(LineKind::Close));
         } else if (fallthrough == join) {
-          line("if (" + condition_of(block, false) + ") {");
+          line("if (" + condition_of(block, false) + ") {", 0, make_tag(LineKind::IfOpen, block));
           ++indent_;
           emit_arm(taken, join);
           --indent_;
-          line("}");
+          line("}", 0, make_tag(LineKind::Close));
         } else {
-          line("if (" + condition_of(block, false) + ") {");
+          line("if (" + condition_of(block, false) + ") {", 0, make_tag(LineKind::IfOpen, block));
           ++indent_;
           emit_arm(taken, join);
           --indent_;
-          line("} else {");
+          line("} else {", 0, make_tag(LineKind::Else));
           ++indent_;
           emit_arm(fallthrough, join);
           --indent_;
-          line("}");
+          line("}", 0, make_tag(LineKind::Close));
         }
         if (fb_failed_ || join == count) {
           return;  // both arms leave by return
@@ -1054,12 +1067,16 @@ struct Structurer {
   }
 
  private:
-  void line(const std::string& text, std::uint64_t source_address = 0) {
+  void line(const std::string& text, std::uint64_t source_address = 0, LineTag tag = {}) {
+    if (text.empty()) {  // a marker: zero width, printed nowhere
+      lines_.push_back(StructuredLine{std::string(), source_address, tag});
+      return;
+    }
     std::string indented(static_cast<std::size_t>(indent_) * 2, ' ');
     indented += text;
     out_ += indented;
     out_ += '\n';
-    lines_.push_back(StructuredLine{std::move(indented), source_address});
+    lines_.push_back(StructuredLine{std::move(indented), source_address, tag});
   }
 
   static std::uint64_t statement_key(BlockId block, std::size_t index) {
@@ -1082,6 +1099,7 @@ struct Structurer {
         folded = &setter;
       }
     }
+    line("", 0, make_tag(LineKind::Marker, block));
     for (std::size_t index = 0; index < limit; ++index) {
       if (in_header_.count(statement_key(block, index)) != 0) {
         continue;  // printed in the header of the `for` loop it steps
@@ -1093,7 +1111,9 @@ struct Structurer {
       const std::string text =
           render_statement(function_, body.statements[index], previous, string_literals_);
       if (!text.empty()) {
-        line(text, body.statements[index].source_address);
+        const LineKind kind =
+            body.statements[index].op == IrOp::Return ? LineKind::Return : LineKind::Plain;
+        line(text, body.statements[index].source_address, make_tag(kind, block));
         line_of_[statement_key(block, index)] = lines_.size() - 1;
       }
     }
@@ -1242,19 +1262,21 @@ struct Structurer {
     lines_.pop_back();
     out_.clear();
     for (const StructuredLine& emitted : lines_) {
-      out_ += emitted.text;
-      out_ += '\n';
+      if (!emitted.text.empty()) {
+        out_ += emitted.text;
+        out_ += '\n';
+      }
     }
     for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
       in_header_.insert(statement_key(plan.latch, index));
     }
-    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address);
+    line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address, make_tag(LineKind::ForOpen, loop.header, loop.exit, loop.negate_condition, true));
     ++indent_;
     frames_.push_back(LoopFrame{loop.exit, 0});
     emit_range(loop.header + 1, loop.exit, loop.header);
     frames_.pop_back();
     --indent_;
-    line("}");
+    line("}", 0, make_tag(LineKind::Close));
     for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
       in_header_.erase(statement_key(plan.latch, index));
     }
@@ -1611,13 +1633,13 @@ struct Structurer {
         if (!frames_.empty()) {
           ++frames_.back().switch_depth;
         }
-        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {");
+        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {", 0, make_tag(LineKind::SwitchOpen, index, join));
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
           char val_buf[32];
           std::snprintf(val_buf, sizeof(val_buf), "0x%llx",
                         static_cast<unsigned long long>(sc.value));
-          line("case " + std::string(val_buf) + ":");
+          line("case " + std::string(val_buf) + ":", 0, case_tag(sc.value));
           ++indent_;
           const bool ends_return =
               sc.target_block < function_.blocks.size() &&
@@ -1629,12 +1651,12 @@ struct Structurer {
             emit_statements(sc.target_block, true);
           }
           if (!ends_return) {
-            line("break;");
+            line("break;", 0, make_tag(LineKind::Break, join));
           }
           --indent_;
         }
         if (terminator.a.kind == IrOperandKind::Block) {
-          line("default:");
+          line("default:", 0, make_tag(LineKind::Default));
           ++indent_;
           const bool ends_return =
               terminator.a.block < function_.blocks.size() &&
@@ -1646,20 +1668,25 @@ struct Structurer {
             emit_statements(terminator.a.block, true);
           }
           if (!ends_return) {
-            line("break;");
+            line("break;", 0, make_tag(LineKind::Break, join));
           }
           --indent_;
         }
         --indent_;
-        line("}");
+        line("}", 0, make_tag(LineKind::Close));
         if (!frames_.empty()) {
           --frames_.back().switch_depth;
         }
-        if (join != kNoBlock && join <= last) {
-          index = join;
-        } else {
-          ++index;
+        // The arms leave to the join, so the region continues there. A join outside the region, or
+        // none, would make the next block a case block that is already printed.
+        if (join == kNoBlock || join > last) {
+          {
+            note("switch join outside its region");
+            ok_ = false;
+          }
+          return;
         }
+        index = join;
         continue;
       }
       if (terminator.op != IrOp::CondBranch) {
@@ -1675,13 +1702,13 @@ struct Structurer {
               }
               return;
             }
-            line("break;");
+            line("break;", 0, make_tag(LineKind::Break, frames_.back().exit));
             ++index;
             continue;
           }
           if (terminator.a.block == loop_header) {
             if (index + 1 != last) {
-              line("continue;");
+              line("continue;", 0, make_tag(LineKind::Continue, loop_header));
             }
           } else if (terminator.a.block != last && terminator.a.block != join_exit &&
                      terminator.a.block != index + 1) {
@@ -1707,7 +1734,7 @@ struct Structurer {
       // exit are handled as an if-guard below, never skipped: dropping them
       // would make the following blocks run unconditionally.
       if (loop_header != kNoBlock && target == loop_header) {
-        line("if (" + condition_of(index, false) + ") continue;");
+        line("if (" + condition_of(index, false) + ") continue;", 0, ifjump_tag(index, LineKind::Continue, loop_header));
         ++index;
         continue;
       }
@@ -1721,7 +1748,7 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") break;");
+        line("if (" + condition_of(index, false) + ") break;", 0, ifjump_tag(index, LineKind::Break, frames_.back().exit));
         ++index;
         continue;
       }
@@ -1742,11 +1769,11 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {");
+        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
         ++indent_;
         emit_range(target, join, loop_header);
         --indent_;
-        line("}");
+        line("}", 0, make_tag(LineKind::Close));
         index = join;
         continue;
       }
@@ -1759,11 +1786,11 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, true) + ") {");
+        line("if (" + condition_of(index, true) + ") {", 0, make_tag(LineKind::IfOpen, index, kNoBlock, true));
         ++indent_;
         emit_range(fallthrough, join, loop_header);
         --indent_;
-        line("}");
+        line("}", 0, make_tag(LineKind::Close));
         index = join;
         continue;
       }
@@ -1783,15 +1810,15 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {");
+        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
         ++indent_;
         emit_range(target, join, loop_header);
         --indent_;
-        line("} else {");
+        line("} else {", 0, make_tag(LineKind::Else));
         ++indent_;
         emit_range(fallthrough, target, loop_header, join);
         --indent_;
-        line("}");
+        line("}", 0, make_tag(LineKind::Close));
       } else if (target < fallthrough) {
         if (!region_closed(target, fallthrough, loop_header, innermost_loop_exit()) ||
             !region_closed(fallthrough, join, loop_header, innermost_loop_exit())) {
@@ -1801,15 +1828,15 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {");
+        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
         ++indent_;
         emit_range(target, fallthrough, loop_header);
         --indent_;
-        line("} else {");
+        line("} else {", 0, make_tag(LineKind::Else));
         ++indent_;
         emit_range(fallthrough, join, loop_header);
         --indent_;
-        line("}");
+        line("}", 0, make_tag(LineKind::Close));
       } else {
         {
           note("branch order");
@@ -1862,13 +1889,13 @@ struct Structurer {
           plan != for_plans_.end() && emit_counted_loop(loop, plan->second)) {
         return true;
       }
-      line("while (" + condition_of(loop.header, loop.negate_condition) + ") {");
+      line("while (" + condition_of(loop.header, loop.negate_condition) + ") {", 0, make_tag(LineKind::WhileOpen, loop.header, loop.exit, loop.negate_condition, true));
       ++indent_;
       frames_.push_back(LoopFrame{loop.exit, 0});
       emit_range(first_body, loop.exit, loop.header);
       frames_.pop_back();
       --indent_;
-      line("}");
+      line("}", 0, make_tag(LineKind::Close));
       return true;
     }
 
@@ -1890,7 +1917,7 @@ struct Structurer {
         }
       }
     }
-    line("do {");
+    line("do {", 0, make_tag(LineKind::DoOpen, loop.header, loop.exit));
     ++indent_;
     frames_.push_back(LoopFrame{loop.exit, 0});
     if (latch == loop.header) {
@@ -1902,7 +1929,7 @@ struct Structurer {
     }
     frames_.pop_back();
     --indent_;
-    line("} while (" + condition_of(latch, loop.negate_condition) + ");");
+    line("} while (" + condition_of(latch, loop.negate_condition) + ");", 0, make_tag(LineKind::DoClose, latch, kNoBlock, loop.negate_condition));
     return true;
   }
 
@@ -1942,66 +1969,103 @@ struct Structurer {
 }  // namespace
 
 std::optional<std::string> format_structured_body(const IrFunction& function) {
-  // The layout as given first, so a function that structures keeps its output; then the
-  // reverse-postorder copy (printing only).
-  {
-    Structurer structurer(function, nullptr);
-    if (auto body = structurer.run()) {
-      return body;
+  StructureResult result = structure_function(function, nullptr);
+  if (result.outcome == StructureOutcome::Labelled) {
+    return std::nullopt;
+  }
+  std::string text;
+  for (const StructuredLine& line : result.lines) {
+    if (!line.text.empty()) {
+      text += line.text + "\n";
     }
   }
-  if (auto copy = reverse_postorder_copy(function)) {
-    Structurer structurer(*copy, nullptr);
-    if (auto body = structurer.run()) {
-      return body;
-    }
-  }
-  Structurer fallback(function, nullptr);
-  if (auto body = fallback.run_fallback()) {
-    return body;
-  }
-  std::string note;
-  if (auto split = split_if_irreducible(function, note)) {
-    Structurer structurer(*split, nullptr);
-    if (auto body = structurer.run()) {
-      return body;
-    }
-    Structurer split_fallback(*split, nullptr);
-    return split_fallback.run_fallback();
-  }
-  return std::nullopt;
+  return text;
 }
 
 std::optional<std::vector<StructuredLine>> format_structured_body_lines(
     const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals) {
+  StructureResult result = structure_function(function, string_literals);
+  if (result.outcome == StructureOutcome::Labelled) {
+    return std::nullopt;
+  }
+  return std::move(result.lines);
+}
+
+StructureResult structure_function(const IrFunction& function,
+                                   const std::map<std::uint64_t, std::string>* string_literals) {
+  StructureResult result;
+  // A candidate is accepted only when the control-flow check agrees with the IR. Each candidate is
+  // checked against the function it was built from (a reordered copy or a split function has its
+  // own blocks).
+  const auto accept = [&result](const IrFunction& candidate, const Structurer& structurer) {
+    if (auto mismatch = check_structured_control_flow(candidate, structurer.lines())) {
+      ++result.oracle_rejections;
+      if (result.oracle_detail.empty()) {
+        result.oracle_detail = *mismatch;
+      }
+      return false;
+    }
+    result.lines = structurer.lines();
+    return true;
+  };
+  // The layout as given first, so a function that structures keeps its output; then the
+  // reverse-postorder copy, then the fallback, then the split of an irreducible function.
   {
     Structurer structurer(function, string_literals);
-    if (structurer.run().has_value()) {
-      return structurer.lines();
+    if (structurer.run().has_value() && accept(function, structurer)) {
+      result.outcome = StructureOutcome::Structured;
+      return result;
     }
+    result.legacy_reason = structurer.reason();
   }
   if (auto copy = reverse_postorder_copy(function)) {
     Structurer structurer(*copy, string_literals);
-    if (structurer.run().has_value()) {
-      return structurer.lines();
+    if (structurer.run().has_value() && accept(*copy, structurer)) {
+      result.outcome = StructureOutcome::Structured;
+      return result;
     }
+    result.legacy_reason = structurer.reason();
   }
-  Structurer fallback(function, string_literals);
-  if (fallback.run_fallback().has_value()) {
-    return fallback.lines();
+  {
+    Structurer fallback(function, string_literals);
+    if (fallback.run_fallback().has_value() && accept(function, fallback)) {
+      result.outcome = StructureOutcome::Structured;
+      return result;
+    }
+    result.legacy_reason = fallback.reason();
   }
   std::string note;
   if (auto split = split_if_irreducible(function, note)) {
     Structurer structurer(*split, string_literals);
-    if (structurer.run().has_value()) {
-      return structurer.lines();
+    if (structurer.run().has_value() && accept(*split, structurer)) {
+      result.outcome = StructureOutcome::Structured;
+      return result;
     }
     Structurer split_fallback(*split, string_literals);
-    if (split_fallback.run_fallback().has_value()) {
-      return split_fallback.lines();
+    if (split_fallback.run_fallback().has_value() && accept(*split, split_fallback)) {
+      result.outcome = StructureOutcome::Structured;
+      return result;
+    }
+    result.legacy_reason = split_fallback.reason();
+  }
+  // Last, the goto structurer: every valid graph is printed as structured code with gotos for the
+  // edges no structure expresses. It is checked like the candidates above.
+  if (auto goto_structure = structure_with_gotos(function, string_literals)) {
+    if (auto mismatch = check_structured_control_flow(function, goto_structure->lines)) {
+      ++result.oracle_rejections;
+      if (result.oracle_detail.empty()) {
+        result.oracle_detail = *mismatch;
+      }
+    } else {
+      result.lines = std::move(goto_structure->lines);
+      result.gotos = goto_structure->gotos;
+      result.outcome = result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
+      return result;
     }
   }
-  return std::nullopt;
+  result.lines.clear();
+  result.outcome = StructureOutcome::Labelled;
+  return result;
 }
 
 std::vector<BlockId> immediate_post_dominators(const IrFunction& function) {
@@ -2019,60 +2083,42 @@ namespace donkey {
 namespace {}  // namespace
 
 StructureVerdict classify_structure(const IrFunction& function) {
+  StructureVerdict verdict;
   if (function.blocks.empty()) {
-    return {StructureClass::Other, "empty function"};
+    verdict.reason = "empty function";
+    return verdict;
   }
   const detail::Graph graph = detail::build_graph(function);
   if (!graph.valid) {
-    return {StructureClass::Other, "invalid graph"};
+    verdict.reason = "invalid graph";
+    return verdict;
   }
-  for (detail::BlockId block = 1; block < function.blocks.size(); ++block) {
-    if (graph.predecessors[block].empty()) {
-      return {StructureClass::Other, "unreachable block"};
-    }
+  verdict.irreducible = detail::has_irreducible_retreat(graph, detail::compute_dominators(graph));
+  const detail::StructureResult result = detail::structure_function(function, nullptr);
+  verdict.gotos = result.gotos;
+  verdict.oracle_rejections = result.oracle_rejections;
+  verdict.oracle_detail = result.oracle_detail;
+  switch (result.outcome) {
+    case detail::StructureOutcome::Structured:
+      verdict.cls = StructureClass::Structured;
+      break;
+    case detail::StructureOutcome::WithGotos:
+      verdict.cls = StructureClass::GotoStructured;
+      verdict.reason = result.legacy_reason;
+      break;
+    case detail::StructureOutcome::Labelled:
+      verdict.cls = StructureClass::Other;
+      verdict.reason = "no structure passes the control-flow check";
+      break;
   }
-  const std::vector<detail::BitSet> dominators = detail::compute_dominators(graph);
-  if (detail::has_irreducible_retreat(graph, dominators)) {
+  if (verdict.irreducible) {
+    // A split that is over its bounds is the reason an irreducible function stays unsplit.
     std::string note;
-    const auto split = detail::split_irreducible(function, note);
-    if (!split) {
-      return {StructureClass::Irreducible,
-              note.empty() ? "a retreating edge's target does not dominate its source" : note};
+    if (!detail::split_irreducible(function, note)) {
+      verdict.reason = note;
     }
-    // Reducible after node splitting: the split function is structured like any other.
-    detail::Structurer structurer(*split, nullptr);
-    if (structurer.run().has_value()) {
-      return {StructureClass::Structured, ""};
-    }
-    detail::Structurer split_fallback(*split, nullptr);
-    if (split_fallback.run_fallback().has_value()) {
-      return {StructureClass::Structured, ""};
-    }
-    return {StructureClass::ReducibleRejected,
-            split_fallback.reason().empty() ? "unclassified (split)" : split_fallback.reason()};
   }
-  std::string reason;
-  {
-    detail::Structurer structurer(function, nullptr);
-    if (structurer.run().has_value()) {
-      return {StructureClass::Structured, ""};
-    }
-    reason = structurer.reason().empty() ? "unclassified" : structurer.reason();
-  }
-  // The last attempt decides, so its reason is the one reported.
-  if (auto copy = detail::reverse_postorder_copy(function)) {
-    detail::Structurer structurer(*copy, nullptr);
-    if (structurer.run().has_value()) {
-      return {StructureClass::Structured, ""};
-    }
-    reason = structurer.reason().empty() ? "unclassified (copy)" : structurer.reason();
-  }
-  detail::Structurer fallback(function, nullptr);
-  if (fallback.run_fallback().has_value()) {
-    return {StructureClass::Structured, ""};
-  }
-  reason = fallback.reason().empty() ? "unclassified (fallback)" : fallback.reason();
-  return {StructureClass::ReducibleRejected, reason};
+  return verdict;
 }
 
 }  // namespace donkey

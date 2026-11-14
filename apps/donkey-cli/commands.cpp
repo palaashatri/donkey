@@ -1623,14 +1623,17 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
-/// The structure class and rejection reason of a lifted function, as a JSON object (G8 audit).
+/// The structure class and reasons of a lifted function, as a JSON object (G8 and G04-T5 audit).
 std::string structure_json(const IrFunction& function) {
   const StructureVerdict verdict = classify_structure(function);
-  const char* name = verdict.cls == StructureClass::Structured          ? "structured"
-                     : verdict.cls == StructureClass::Irreducible       ? "irreducible"
-                     : verdict.cls == StructureClass::ReducibleRejected ? "reducible_rejected"
-                                                                        : "other";
-  return "{\"class\": " + quote(name) + ", \"reason\": " + quote(verdict.reason) + "}";
+  const char* name = verdict.cls == StructureClass::Structured       ? "structured"
+                     : verdict.cls == StructureClass::GotoStructured ? "goto_structured"
+                                                                     : "other";
+  return "{\"class\": " + quote(name) + ", \"reason\": " + quote(verdict.reason) +
+         ", \"irreducible\": " + (verdict.irreducible ? "true" : "false") +
+         ", \"gotos\": " + std::to_string(verdict.gotos) +
+         ", \"oracle_rejections\": " + std::to_string(verdict.oracle_rejections) +
+         ", \"oracle_detail\": " + quote(verdict.oracle_detail) + "}";
 }
 
 int command_decompile(const std::vector<std::string_view>& arguments) {
