@@ -5506,3 +5506,149 @@ TEST(Ir, SwitchInALoopWhoseArmLeavesTheLoopIsAGotoNotABreak) {
   ASSERT_NE(next, std::string::npos) << text;
   EXPECT_EQ(text.substr(arm, next - arm).find("break;"), std::string::npos) << text;
 }
+
+// ---- Stack, nesting and blank lines (W1 audit) ------------------------------------------------
+
+namespace {
+
+/// The shape of the stress driver: `checks` checks `if (rax == 0) return i;` in a row, then the
+/// four-block irreducible tail of IrreducibleControlFlowPrintsGotoNotLabelledBlocks.
+IrFunction check_chain(unsigned checks) {
+  std::vector<std::vector<IrStatement>> blocks;
+  for (unsigned i = 0; i < checks; ++i) {
+    blocks.push_back({fb_compare(), fb_branch(checks + 4 + i)});
+  }
+  blocks.push_back({fb_compare(), fb_branch(checks + 2)});
+  blocks.push_back({fb_jump(checks + 2)});
+  blocks.push_back({fb_compare(), fb_branch(checks + 1)});
+  blocks.push_back({fb_return()});
+  for (unsigned i = 0; i < checks; ++i) {
+    blocks.push_back({fb_set("rax", i), fb_return()});
+  }
+  return fb_function(blocks);
+}
+
+/// The widest indentation of a printed line, in columns.
+std::size_t widest_indent(const std::string& text) {
+  std::size_t widest = 0;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    std::size_t end = text.find('\n', start);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    std::size_t column = start;
+    while (column < end && text[column] == ' ') {
+      ++column;
+    }
+    widest = std::max(widest, column - start);
+    start = end + 1;
+  }
+  return widest;
+}
+
+}  // namespace
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+
+namespace {
+
+struct ChainOnThread {
+  const IrFunction* function = nullptr;
+  bool ok = false;
+  std::string text;
+  std::string error;
+};
+
+void* format_chain_on_thread(void* argument) {
+  auto* job = static_cast<ChainOnThread*>(argument);
+  auto text = donkey::format_pseudocode(*job->function);
+  job->ok = text.has_value();
+  if (text) {
+    job->text = text.value();
+  } else {
+    job->error = text.diagnostic().message;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(Ir, LongCheckChainFormatsOnASmallStackWithBoundedNesting) {
+  // A chain of 5,000 checks used to nest one level deeper per check and to recurse once per check:
+  // on a 512 KiB thread (the macOS default for secondary threads) it overflowed the stack, and
+  // the output was quadratic in size. The checks now print flat and the walk continues in a loop.
+  constexpr unsigned kChecks = 5000;
+  const IrFunction f = check_chain(kChecks);
+  ChainOnThread job;
+  job.function = &f;
+  pthread_attr_t attributes;
+  ASSERT_EQ(pthread_attr_init(&attributes), 0);
+  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
+  pthread_t thread;
+  ASSERT_EQ(pthread_create(&thread, &attributes, format_chain_on_thread, &job), 0);
+  ASSERT_EQ(pthread_join(thread, nullptr), 0);
+  pthread_attr_destroy(&attributes);
+  ASSERT_TRUE(job.ok) << job.error;
+  EXPECT_LE(widest_indent(job.text), 2 * donkey::detail::kMaxStructureNesting + 16)
+      << job.text.substr(0, 400);
+  EXPECT_NE(job.text.find("goto loc_"), std::string::npos);
+}
+
+#else
+
+TEST(Ir, LongCheckChainFormatsOnASmallStackWithBoundedNesting) {
+  GTEST_SKIP()
+      << "the test sets a pthread stack size of 512 KiB; this platform has no pthread stacks";
+}
+
+#endif
+
+TEST(Ir, ThreeCheckChainPrintsFlatWithoutElse) {
+  // Each check is an `if` that returns, so the rest of the chain follows at the same level.
+  const IrFunction f = check_chain(3);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("} else {"), std::string::npos) << text.value();
+  EXPECT_LE(widest_indent(text.value()), 4u) << text.value();
+}
+
+TEST(Ir, NoPrintedLineIsOnlyWhitespace) {
+  // A marker with no label prints nothing; it must not print a line of indentation.
+  const std::vector<IrFunction> fixtures = {
+      check_chain(3),
+      fb_function({{fb_compare(), fb_branch(2)},
+                   {fb_set("rdx", 1), fb_jump(3)},
+                   {fb_set("rdx", 2), fb_jump(3)},
+                   {fb_return()}}),
+      fb_two_exit_loop(),
+  };
+  for (const IrFunction& f : fixtures) {
+    const auto structure = donkey::detail::structure_function(f, nullptr);
+    ASSERT_NE(structure.outcome, donkey::detail::StructureOutcome::Labelled) << f.name;
+    for (const StructuredLine& line : structure.lines) {
+      if (!line.text.empty()) {
+        EXPECT_NE(line.text.find_first_not_of(' '), std::string::npos)
+            << f.name << ": a whitespace-only line";
+      }
+    }
+  }
+}
+
+TEST(Ir, ControlFlowCheckRefusesNestingDeeperThanTheBound) {
+  // The guard runs before the check recurses: a file nested past the bound is refused.
+  const IrFunction f = check_chain(3);
+  std::vector<StructuredLine> lines;
+  const std::size_t depth = donkey::detail::kMaxStructureNesting + 8;
+  for (std::size_t i = 0; i < depth; ++i) {
+    lines.push_back(
+        StructuredLine{"if (rax == 0x0) {", 0, make_tag(donkey::detail::LineKind::IfOpen, 0)});
+  }
+  for (std::size_t i = 0; i < depth; ++i) {
+    lines.push_back(StructuredLine{"}", 0, make_tag(donkey::detail::LineKind::Close)});
+  }
+  const auto mismatch = check_structured_control_flow(f, lines);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("nests deeper"), std::string::npos) << *mismatch;
+}

@@ -106,55 +106,98 @@ std::vector<BitSet> compute_dominators(const Graph& graph) {
 
 namespace {
 
-/// Post-dominators over a virtual exit node. Every block without successors (a
-/// return) flows into the exit node.
-std::vector<BitSet> compute_post_dominators(const Graph& graph) {
+/// Immediate post-dominator of every block: the block that every path from it to the exit passes
+/// first, with the exit (`count`) for a block that only the exit post-dominates. Computed with the
+/// iterative dominator algorithm of Cooper, Harvey and Kennedy on the reversed graph, rooted at a
+/// virtual exit that every return block feeds. A block that cannot reach the exit gets the exit.
+/// Linear in the graph size per pass (no bit sets), so the cost does not grow with the square of
+/// the block count.
+std::vector<BlockId> immediate_post_dominators_of(const Graph& graph) {
   const std::size_t count = graph.successors.size();
-  std::vector<BitSet> post(count + 1, BitSet::full(count + 1));
-  post[count] = BitSet(count + 1);
-  post[count].set(count);
-
+  const BlockId exit = count;
+  // In the reversed graph the predecessors of a block are its successors, and a block with no
+  // successors is preceded by the exit.
+  const std::vector<BlockId> preceded_by_exit{exit};
+  // Postorder over the reversed graph from the exit (its successors are the return blocks).
+  std::vector<BlockId> postorder;
+  std::vector<bool> seen(count + 1, false);
+  std::vector<std::pair<BlockId, std::size_t>> path{{exit, 0}};
+  seen[exit] = true;
+  const auto reversed_successors = [&](BlockId node) -> std::vector<BlockId> {
+    if (node == exit) {
+      std::vector<BlockId> returns;
+      for (BlockId block = 0; block < count; ++block) {
+        if (graph.successors[block].empty()) {
+          returns.push_back(block);
+        }
+      }
+      return returns;
+    }
+    return graph.predecessors[node];
+  };
+  std::vector<std::vector<BlockId>> reversed_succ_cache(count + 1);
+  reversed_succ_cache[exit] = reversed_successors(exit);
+  while (!path.empty()) {
+    const BlockId node = path.back().first;
+    const std::size_t next = path.back().second;
+    if (next == reversed_succ_cache[node].size()) {
+      postorder.push_back(node);
+      path.pop_back();
+      continue;
+    }
+    path.back().second = next + 1;
+    const BlockId successor = reversed_succ_cache[node][next];
+    if (!seen[successor]) {
+      seen[successor] = true;
+      reversed_succ_cache[successor] = reversed_successors(successor);
+      path.emplace_back(successor, 0);
+    }
+  }
+  std::vector<std::size_t> rank(count + 1, 0);
+  std::vector<BlockId> order(postorder.rbegin(), postorder.rend());  // reverse postorder
+  for (std::size_t index = 0; index < order.size(); ++index) {
+    rank[order[index]] = index;
+  }
+  std::vector<BlockId> idom(count + 1, kNoBlock);
+  idom[exit] = exit;
+  const auto intersect = [&](BlockId a, BlockId b) {
+    while (a != b) {
+      while (rank[a] > rank[b]) {
+        a = idom[a];
+      }
+      while (rank[b] > rank[a]) {
+        b = idom[b];
+      }
+    }
+    return a;
+  };
   bool changed = true;
   while (changed) {
     changed = false;
-    for (BlockId index = 0; index < count; ++index) {
-      BitSet next = BitSet::full(count + 1);
-      if (graph.successors[index].empty()) {
-        next.intersect(post[count]);
-      } else {
-        for (const BlockId successor : graph.successors[index]) {
-          next.intersect(post[successor]);
-        }
+    for (const BlockId node : order) {
+      if (node == exit) {
+        continue;
       }
-      next.set(index);
-      if (!next.equals(post[index])) {
-        post[index] = std::move(next);
+      BlockId next = kNoBlock;
+      const std::vector<BlockId>& predecessors =
+          graph.successors[node].empty() ? preceded_by_exit : graph.successors[node];
+      for (const BlockId predecessor : predecessors) {
+        if (idom[predecessor] == kNoBlock) {
+          continue;  // not processed yet
+        }
+        next = next == kNoBlock ? predecessor : intersect(predecessor, next);
+      }
+      if (next != idom[node]) {
+        idom[node] = next;
         changed = true;
       }
     }
   }
-  return post;
-}
-
-/// Immediate post-dominator of each block, or the virtual exit index when the
-/// block can reach the exit by more than one path.
-std::vector<BlockId> compute_immediate_post_dominators(const std::vector<BitSet>& post) {
-  const std::size_t count = post.size() - 1;  // exclude the virtual exit
-  std::vector<BlockId> immediate(count, kNoBlock);
-  for (BlockId index = 0; index < count; ++index) {
-    BlockId best = kNoBlock;
-    std::size_t best_count = 0;
-    for (BlockId candidate = 0; candidate <= count; ++candidate) {
-      if (candidate == index || !post[index].test(candidate)) {
-        continue;
-      }
-      const std::size_t candidate_count = post[candidate].count();
-      if (candidate_count > best_count) {
-        best_count = candidate_count;
-        best = candidate;
-      }
+  std::vector<BlockId> immediate(count, exit);
+  for (BlockId block = 0; block < count; ++block) {
+    if (idom[block] != kNoBlock && idom[block] != exit) {
+      immediate[block] = idom[block];
     }
-    immediate[index] = best;
   }
   return immediate;
 }
@@ -594,6 +637,17 @@ LineTag ifjump_tag(BlockId test, LineKind jump, BlockId target) {
   return tag;
 }
 
+/// Counts one level of recursion for its lifetime.
+struct NestScope {
+  explicit NestScope(int& depth) : depth_(depth) { ++depth_; }
+  ~NestScope() { --depth_; }
+  NestScope(const NestScope&) = delete;
+  NestScope& operator=(const NestScope&) = delete;
+
+ private:
+  int& depth_;
+};
+
 struct Structurer {
   Structurer(const IrFunction& function,
              const std::map<std::uint64_t, std::string>* string_literals)
@@ -627,8 +681,7 @@ struct Structurer {
         }  // unreachable block: do not guess a layout
       }
     }
-    const std::vector<BitSet> post = compute_post_dominators(graph_);
-    immediate_post_dominator_ = compute_immediate_post_dominators(post);
+    immediate_post_dominator_ = immediate_post_dominators_of(graph_);
     if (!find_loops()) {
       return std::nullopt;
     }
@@ -691,8 +744,7 @@ struct Structurer {
         return std::nullopt;
       }
     }
-    post_ = compute_post_dominators(graph_);
-    immediate_post_dominator_ = compute_immediate_post_dominators(post_);
+    immediate_post_dominator_ = immediate_post_dominators_of(graph_);
     fb_find_loops();
     fb_emitted_.assign(count, false);
     fb_failed_ = false;
@@ -713,7 +765,6 @@ struct Structurer {
  private:
   enum class FbEdge : std::uint8_t { Continue, End, Reject };
 
-  std::vector<BitSet> post_;
   std::vector<bool> fb_emitted_;
   bool fb_failed_ = false;
   // Return blocks are copied rather than rejected when reached twice: at most this many statements
@@ -942,6 +993,11 @@ struct Structurer {
   // Emits the blocks from `start` until `stop`, in control-flow order. `root` is the block the
   // region is dominated by: every block it emits must be dominated by it.
   void fb_region(BlockId start, BlockId stop, BlockId root) {
+    NestScope scope(nest_);
+    if (nest_ > static_cast<int>(kMaxStructureNesting)) {
+      fb_fail("control flow nests too deeply");
+      return;
+    }
     const std::size_t count = function_.blocks.size();
     BlockId block = start;
     for (;;) {
@@ -1573,6 +1629,12 @@ struct Structurer {
 
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
                   BlockId join_exit = kNoBlock) {
+    NestScope scope(nest_);
+    if (nest_ > static_cast<int>(kMaxStructureNesting)) {
+      note("control flow nests too deeply");
+      ok_ = false;
+      return;
+    }
     BlockId index = first;
     while (index < last) {
       if (!ok_) {
@@ -1966,6 +2028,8 @@ struct Structurer {
   std::vector<LoopFrame> frames_;
   int indent_ = 1;
   bool ok_ = true;
+  /// The nesting of the regions being emitted (kMaxStructureNesting bounds the recursion).
+  int nest_ = 0;
   /// The first reason the structurer rejected this function (empty when it did not).
   mutable std::string reason_;
   void note(const char* why) const {
@@ -2059,7 +2123,9 @@ StructureResult structure_function(const IrFunction& function,
   }
   // Last, the goto structurer: every valid graph is printed as structured code with gotos for the
   // edges no structure expresses. It is checked like the candidates above.
-  if (auto goto_structure = structure_with_gotos(function, string_literals)) {
+  std::string refusal;
+  if (auto goto_structure =
+          structure_with_gotos(function, string_literals, kGotoRuleAll, &refusal)) {
     if (auto mismatch = check_structured_control_flow(function, goto_structure->lines)) {
       ++result.oracle_rejections;
       if (result.oracle_detail.empty()) {
@@ -2072,6 +2138,8 @@ StructureResult structure_function(const IrFunction& function,
           result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
       return result;
     }
+  } else {
+    result.refusal = refusal;
   }
   result.lines.clear();
   result.outcome = StructureOutcome::Labelled;
@@ -2083,7 +2151,7 @@ std::vector<BlockId> immediate_post_dominators(const IrFunction& function) {
   if (!graph.valid) {
     return {};
   }
-  return compute_immediate_post_dominators(compute_post_dominators(graph));
+  return immediate_post_dominators_of(graph);
 }
 
 }  // namespace donkey::detail
@@ -2118,7 +2186,9 @@ StructureVerdict classify_structure(const IrFunction& function) {
       break;
     case detail::StructureOutcome::Labelled:
       verdict.cls = StructureClass::Other;
-      verdict.reason = "no structure passes the control-flow check";
+      verdict.reason = result.refusal.empty()
+                           ? std::string("no structure passes the control-flow check")
+                           : result.refusal;
       break;
   }
   if (verdict.irreducible) {

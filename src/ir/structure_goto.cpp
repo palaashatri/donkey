@@ -36,6 +36,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -112,14 +113,15 @@ class Emitter {
       return false;
     }
     names_.resize(count);
+    // Blocks that share an address get the block index in their label too.
+    std::unordered_map<std::uint64_t, std::size_t> per_address;
+    for (BlockId block = 0; block < count; ++block) {
+      ++per_address[function_.blocks[block].address];
+    }
     for (BlockId block = 0; block < count; ++block) {
       const std::uint64_t address = function_.blocks[block].address;
-      std::size_t same = 0;
-      for (BlockId other = 0; other < count; ++other) {
-        same += function_.blocks[other].address == address ? 1 : 0;
-      }
       char buffer[64];
-      if (same > 1) {
+      if (per_address[address] > 1) {
         std::snprintf(buffer, sizeof buffer, "loc_%llx_%zu",
                       static_cast<unsigned long long>(address), static_cast<std::size_t>(block));
       } else {
@@ -132,8 +134,12 @@ class Emitter {
     loop_of_.assign(count, -1);
     find_loops();
     order_ = reverse_postorder();
+    std::vector<bool> in_order(count, false);
+    for (const BlockId block : order_) {
+      in_order[block] = true;
+    }
     for (BlockId block = 0; block < count; ++block) {
-      if (std::find(order_.begin(), order_.end(), block) == order_.end()) {
+      if (!in_order[block]) {
         order_.push_back(block);  // unreachable: printed after the reachable code
       }
     }
@@ -150,6 +156,11 @@ class Emitter {
         region(block, Ctx{block, kNoBlock, false});
       }
     }
+    if (too_deep_) {
+      refusal_ =
+          "control flow nests deeper than " + std::to_string(kMaxStructureNesting) + " levels";
+      return false;
+    }
     for (BlockId block = 0; block < count; ++block) {
       if (!emitted_[block]) {
         return false;  // a block with no printed code: internal error, never printed silently
@@ -157,6 +168,8 @@ class Emitter {
     }
     return true;
   }
+
+  [[nodiscard]] const std::string& refusal() const { return refusal_; }
 
   [[nodiscard]] const std::vector<StructuredLine>& lines() const { return lines_; }
   [[nodiscard]] std::size_t gotos() const { return gotos_; }
@@ -188,6 +201,8 @@ class Emitter {
   std::vector<bool> emitted_;
   std::vector<int> loop_of_;
   std::vector<LoopInfo> loops_;
+  bool too_deep_ = false;
+  std::string refusal_;
   std::vector<BlockId> order_;
   std::vector<Frame> frames_;
   std::vector<StructuredLine> lines_;
@@ -349,23 +364,36 @@ class Emitter {
 
   // ---- emission helpers ----------------------------------------------------------------------
 
+  /// Appends a line at the current depth. An empty text is an empty line (a marker that prints
+  /// nothing): it gets no indentation, so no printed line is only spaces.
   std::size_t push(const std::string& text, std::uint64_t address, LineTag tag) {
-    lines_.push_back(StructuredLine{std::string(static_cast<std::size_t>(depth_) * 2, ' ') + text,
-                                    address, tag});
+    if (depth_ > static_cast<int>(kMaxStructureNesting)) {
+      too_deep_ = true;
+    }
+    lines_.push_back(
+        StructuredLine{text.empty() ? std::string()
+                                    : std::string(static_cast<std::size_t>(depth_) * 2, ' ') + text,
+                       address, tag});
     return lines_.size() - 1;
   }
 
-  /// Takes the lines printed since `mark`, out of the output.
-  std::vector<StructuredLine> take(std::size_t mark) {
-    std::vector<StructuredLine> taken(lines_.begin() + static_cast<std::ptrdiff_t>(mark),
-                                      lines_.end());
-    lines_.resize(mark);
-    return taken;
+  /// Inserts a line before `position`, indented for `depth`.
+  void insert_line(std::size_t position, const std::string& text, std::uint64_t address,
+                   LineTag tag, int depth) {
+    StructuredLine line{
+        text.empty() ? std::string() : std::string(static_cast<std::size_t>(depth) * 2, ' ') + text,
+        address, tag};
+    lines_.insert(lines_.begin() + static_cast<std::ptrdiff_t>(position), std::move(line));
   }
 
-  void put(std::vector<StructuredLine>&& taken) {
-    lines_.insert(lines_.end(), std::make_move_iterator(taken.begin()),
-                  std::make_move_iterator(taken.end()));
+  /// Takes two columns of indentation off every line from `first` on.
+  void dedent_from(std::size_t first) {
+    for (std::size_t index = first; index < lines_.size(); ++index) {
+      std::string& text = lines_[index].text;
+      if (text.compare(0, 2, "  ") == 0) {
+        text.erase(0, 2);
+      }
+    }
   }
 
   void emit_goto(BlockId target) {
@@ -459,6 +487,9 @@ class Emitter {
 
   /// The decision for an edge from the code being printed to `target` (rules 1 to 5 above).
   Next decide(BlockId target, const Ctx& ctx) {
+    if (too_deep_) {
+      return done(Outcome::Jumps);  // refused: print nothing more
+    }
     if (ctx.stop != kNoBlock && target == ctx.stop && ctx.stop_falls) {
       return done(Outcome::Falls);
     }
@@ -542,6 +573,9 @@ class Emitter {
   }
 
   Next emit_block(BlockId block, const Ctx& ctx) {
+    if (too_deep_) {
+      return done(Outcome::Jumps);
+    }
     if ((rules_ & kGotoRuleLoop) != 0 && loop_of_[block] >= 0 && !emitted_[block] &&
         !loop_active(block)) {
       return emit_loop(loops_[static_cast<std::size_t>(loop_of_[block])], ctx);
@@ -591,6 +625,22 @@ class Emitter {
     return walkable(join, ctx);
   }
 
+  /// Whether an arm starting at `start` is short: a return, or an edge that prints as a jump (it is
+  /// not walked here). Such an arm is printed first, so that the other arm, the rest of the region,
+  /// continues in the caller's loop instead of nesting inside the first arm's recursion.
+  [[nodiscard]] bool short_arm(BlockId start, const Ctx& ctx) const {
+    const IrBlock& block = function_.blocks[start];
+    if (!block.statements.empty() && block.statements.back().op == IrOp::Return) {
+      return true;
+    }
+    return !walkable(start, ctx);
+  }
+
+  /// An if on the condition of `block`. Its two arms are printed one level deeper. When an arm
+  /// jumps (it never falls out), the `if` closes after that arm and the other arm continues at the
+  /// level of the `if`, as the rest of the region: `if (c) { jump }` and then the rest. So a chain
+  /// of checks does not nest deeper with each check, and it is walked by the caller's loop, not by
+  /// recursion. Only when both arms fall out to the join is there an `else`.
   Next conditional(BlockId block, const Ctx& ctx) {
     const IrStatement& branch = function_.blocks[block].statements.back();
     const BlockId taken = branch.b.block;
@@ -607,54 +657,78 @@ class Emitter {
     const BlockId join = ipdom_[block];
     const bool has_join = join != kNoBlock && join < function_.blocks.size();
     const bool falls = falls_to_join(join, ctx);
-    const Ctx taken_ctx{taken, has_join ? join : kNoBlock, falls};
-    const Ctx fall_ctx{fall, has_join ? join : kNoBlock, falls};
+    const BlockId arm_stop = has_join ? join : kNoBlock;
+    const Ctx taken_ctx{taken, arm_stop, falls};
+    const Ctx fall_ctx{fall, arm_stop, falls};
     const std::uint64_t address = function_.blocks[block].address;
+    const int depth = depth_;
 
-    std::size_t mark = lines_.size();
-    ++depth_;
-    const Outcome taken_outcome = arm(taken, taken_ctx);
-    std::vector<StructuredLine> taken_lines = take(mark);
-    mark = lines_.size();
-    const Outcome fall_outcome = arm(fall, fall_ctx);
-    std::vector<StructuredLine> fall_lines = take(mark);
-    --depth_;
+    // The arm printed first: a short one, when the other one is not short.
+    const bool fall_first = short_arm(fall, fall_ctx) && !short_arm(taken, taken_ctx);
+    const BlockId first = fall_first ? fall : taken;
+    const BlockId second = fall_first ? taken : fall;
+    const Ctx& first_ctx = fall_first ? fall_ctx : taken_ctx;
+    const Ctx& second_ctx = fall_first ? taken_ctx : fall_ctx;
+    // Whether an arm is the fall-through (its printed condition is the complement of the branch's).
+    const auto is_fall = [&](BlockId arm_block) { return arm_block == fall; };
+    const auto arm_open = [&](BlockId arm_block) {
+      return "if (" + condition_of(block, is_fall(arm_block)) + ") {";
+    };
+    const auto arm_tag = [&](BlockId arm_block) {
+      return make_tag(LineKind::IfOpen, block, kNoBlock, is_fall(arm_block));
+    };
 
-    const bool taken_empty = taken_lines.empty() && taken_outcome == Outcome::Falls;
-    const bool fall_empty = fall_lines.empty() && fall_outcome == Outcome::Falls;
-    if (!taken_empty || !fall_empty) {
-      if (taken_empty) {
-        push("if (" + condition_of(block, true) + ") {", address,
-             make_tag(LineKind::IfOpen, block, kNoBlock, true));
-        ++depth_;
-        put(std::move(fall_lines));
-        --depth_;
-        push("}", 0, make_tag(LineKind::Close));
-      } else if (fall_empty) {
-        push("if (" + condition_of(block, false) + ") {", address,
-             make_tag(LineKind::IfOpen, block, kNoBlock, false));
-        ++depth_;
-        put(std::move(taken_lines));
-        --depth_;
-        push("}", 0, make_tag(LineKind::Close));
-      } else {
-        push("if (" + condition_of(block, false) + ") {", address,
-             make_tag(LineKind::IfOpen, block, kNoBlock, false));
-        ++depth_;
-        put(std::move(taken_lines));
-        --depth_;
-        push("} else {", 0, make_tag(LineKind::Else));
-        ++depth_;
-        put(std::move(fall_lines));
-        --depth_;
-        push("}", 0, make_tag(LineKind::Close));
-      }
+    const std::size_t first_begin = lines_.size();
+    depth_ = depth + 1;
+    const Outcome first_outcome = arm(first, first_ctx);
+    depth_ = depth;
+    const std::size_t first_end = lines_.size();
+
+    if (first_outcome == Outcome::Jumps) {
+      // The first arm never falls out: `if (cond) { first }`, then the second arm is the rest here.
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      push("}", 0, make_tag(LineKind::Close));
+      return decide(second, ctx);
     }
-    const bool fell = taken_outcome == Outcome::Falls || fall_outcome == Outcome::Falls;
-    if (!fell || !has_join) {
+
+    // The first arm falls out. The second arm is emitted too, one level deeper.
+    depth_ = depth + 1;
+    const Outcome second_outcome = arm(second, second_ctx);
+    depth_ = depth;
+    const std::size_t second_end = lines_.size();
+    const std::size_t second_length = second_end - first_end;
+    const bool first_empty = first_end == first_begin;
+    const bool second_empty = second_length == 0;
+
+    if (second_outcome == Outcome::Jumps) {
+      // The second arm jumps: `if (cond) { second }`, and the first arm, which falls out, follows
+      // at the level of the `if`. The second arm is moved in front of the first.
+      if (!first_empty) {
+        std::rotate(lines_.begin() + static_cast<std::ptrdiff_t>(first_begin),
+                    lines_.begin() + static_cast<std::ptrdiff_t>(first_end),
+                    lines_.begin() + static_cast<std::ptrdiff_t>(second_end));
+      }
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      insert_line(first_begin + 1 + second_length, "}", 0, make_tag(LineKind::Close), depth);
+      dedent_from(first_begin + 2 + second_length);
+    } else if (first_empty && second_empty) {
+      // Both arms are empty: nothing to print.
+    } else if (first_empty) {
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      push("}", 0, make_tag(LineKind::Close));
+    } else if (second_empty) {
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      push("}", 0, make_tag(LineKind::Close));
+    } else {
+      // Both arms fall out: `if (cond) { first } else { second }`, with the first printed first.
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_end + 1, "} else {", 0, make_tag(LineKind::Else), depth);
+      push("}", 0, make_tag(LineKind::Close));
+    }
+    // The first arm fell out, so the join is next.
+    if (!has_join) {
       return done(Outcome::Jumps);
     }
-    // Only an arm that falls out lets control reach the join, and then the join is printed next.
     return decide(join, ctx);
   }
 
@@ -724,14 +798,21 @@ class Emitter {
 
 std::optional<GotoStructure> structure_with_gotos(
     const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals,
-    std::uint32_t rules) {
+    std::uint32_t rules, std::string* refusal) {
   // The first run finds the labels; the second prints them. The structure is the same in both.
   Emitter first(function, string_literals, rules, {});
   if (!first.prepare() || !first.run()) {
+    if (refusal != nullptr) {
+      *refusal = first.refusal().empty() ? std::string("the graph is not valid") : first.refusal();
+    }
     return std::nullopt;
   }
   Emitter second(function, string_literals, rules, first.goto_targets());
   if (!second.prepare() || !second.run()) {
+    if (refusal != nullptr) {
+      *refusal =
+          second.refusal().empty() ? std::string("the graph is not valid") : second.refusal();
+    }
     return std::nullopt;
   }
   GotoStructure result;

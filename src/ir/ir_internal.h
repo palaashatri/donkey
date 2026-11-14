@@ -168,6 +168,9 @@ struct StructureResult {
   std::string oracle_detail;
   /// Why the layout-based structurer rejected the function (empty when it accepted it).
   std::string legacy_reason;
+  /// Why the goto structurer refused the function (empty when it did not), for example a nesting
+  /// deeper than kMaxStructureNesting.
+  std::string refusal;
 };
 
 /// Rules of the goto structurer (G04-T5, src/ir/structure_goto.cpp). Each can be switched off, so a
@@ -187,11 +190,16 @@ struct GotoStructure {
   std::size_t gotos = 0;
 };
 
+/// The deepest nesting of if, loop and switch statements that the printer and the control-flow
+/// check accept (G04-T5). A candidate deeper than this is refused with a reason, so a crafted
+/// function cannot exhaust the stack of the thread that prints it, and the labelled form is shown.
+inline constexpr std::size_t kMaxStructureNesting = 128;
+
 /// The goto structurer: structured lines for any valid graph, with `goto` only for the edges that
 /// no enabled rule expresses. Nullopt only when the graph is not valid.
 std::optional<GotoStructure> structure_with_gotos(
     const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals,
-    std::uint32_t rules = kGotoRuleAll);
+    std::uint32_t rules = kGotoRuleAll, std::string* refusal = nullptr);
 
 /// The structure the printer uses for a function, after the control-flow check has accepted it.
 StructureResult structure_function(const IrFunction& function,

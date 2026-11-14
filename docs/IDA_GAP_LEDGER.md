@@ -934,6 +934,10 @@ for Partial functions.
   refuses; one function joined it (`libsqlite3`). Gotos: 997 functions, 16,476 in all, largest 394.
   The open decision is whether to copy small shared blocks and recover compound conditions to remove
   most of them (owner decision; not made here).
+- **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two
+  gotos for one exit: `case 0x1: goto loc_4010;`, where `loc_4010` only jumps on to the loop's exit.
+  The goto to the block that only jumps should go straight to the jump's target, or the block should
+  be copied where it is small. Same family as the shared-join gotos above; part of the owner decision.
 
 ### G05 Type system and user types
 

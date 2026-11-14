@@ -110,7 +110,21 @@ class TagParser {
   }
 
   /// Statements until a tag that closes or separates the enclosing construct (not consumed).
+  /// Statements until a tag that closes or separates the enclosing construct. Each nested construct
+  /// is one level deeper; a file nested deeper than kMaxStructureNesting is refused before it
+  /// recurses.
   bool sequence(std::vector<Node>& out) {
+    if (depth_ >= kMaxStructureNesting) {
+      return fail("control flow nests deeper than " + std::to_string(kMaxStructureNesting) +
+                  " levels");
+    }
+    ++depth_;
+    const bool ok = sequence_body(out);
+    --depth_;
+    return ok;
+  }
+
+  bool sequence_body(std::vector<Node>& out) {
     while (pos_ < lines_.size()) {
       const StructuredLine& current = lines_[pos_];
       const LineTag& tag = current.tag;
@@ -263,6 +277,7 @@ class TagParser {
   const std::vector<StructuredLine>& lines_;
   std::size_t pos_ = 0;
   std::string error_;
+  std::size_t depth_ = 0;  ///< the nesting of the sequence being parsed
 };
 
 /// One operation of the lowered code. A Block op is the start of an IR block's code (a copy of it
@@ -297,16 +312,25 @@ class Lowerer {
   std::string error;
 
   bool lower(const std::vector<Node>& nodes) {
+    if (depth_ >= kMaxStructureNesting) {
+      return fail("control flow nests deeper than " + std::to_string(kMaxStructureNesting) +
+                  " levels");
+    }
+    ++depth_;
+    bool ok = true;
     for (const Node& node : nodes) {
       if (!lower_node(node)) {
-        return false;
+        ok = false;
+        break;
       }
     }
-    return true;
+    --depth_;
+    return ok;
   }
 
  private:
   std::vector<Frame> frames_;
+  std::size_t depth_ = 0;  ///< the nesting of the tree being lowered
 
   std::size_t new_label() {
     label_pos.push_back(kUnplaced);
@@ -543,6 +567,10 @@ class Checker {
     for (std::size_t pos = 0; pos < ops_.size(); ++pos) {
       if (ops_[pos].kind == Op::Kind::Block) {
         if (auto mismatch = check_block(pos, ops_[pos].block)) {
+          if (too_deep_) {
+            return "control flow nests deeper than " + std::to_string(kMaxStructureNesting) +
+                   " levels";
+          }
           return mismatch;
         }
       }
@@ -555,6 +583,7 @@ class Checker {
   std::vector<Op>& ops_;
   const std::vector<std::size_t>& label_pos_;
   std::vector<std::size_t> first_block_;
+  mutable bool too_deep_ = false;  ///< set by reach when the walk would nest too deeply
 
   /// Resolves every label to a position, and every goto to the first printed copy of its target.
   std::optional<std::string> resolve() {
@@ -594,7 +623,8 @@ class Checker {
 
   /// The blocks and exits that control reaches first from `pos`.
   void reach(std::size_t pos, Reach& out, std::size_t depth) const {
-    if (depth > ops_.size() + 2) {
+    if (depth > kMaxStructureNesting) {
+      too_deep_ = true;  // refused before the recursion goes deeper
       out.cycle = true;
       return;
     }
