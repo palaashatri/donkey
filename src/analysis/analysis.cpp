@@ -560,18 +560,23 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     it = in_user_data(user_data, *it) ? seeds.erase(it) : std::next(it);
   }
 
+  // The symbol that names each address: the first one in the image's order. One pass over the
+  // symbols, not one per seed (unwind tables can give tens of thousands of seeds).
+  std::unordered_map<std::uint64_t, const Symbol*> naming_symbol;
+  for (const Symbol& symbol : image.symbols) {
+    if (!symbol.imported && !symbol.name.empty() &&
+        (symbol.kind == SymbolKind::Function || symbol.exported)) {
+      naming_symbol.emplace(symbol.address, &symbol);
+    }
+  }
   for (const std::uint64_t address : seeds) {
     Function seed;
     seed.address = address;
     seed.from_symbol = named.count(address) != 0;
     seed.from_unwind = unwind_starts.count(address) != 0;
-    for (const Symbol& symbol : image.symbols) {
-      if (!symbol.imported && !symbol.name.empty() && symbol.address == address &&
-          (symbol.kind == SymbolKind::Function || symbol.exported)) {
-        seed.name = symbol.name;
-        seed.exported = symbol.exported;
-        break;
-      }
+    if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
+      seed.name = symbol->second->name;
+      seed.exported = symbol->second->exported;
     }
     if (seed.name.empty()) {
       seed.name = synthetic_function_name(address);
@@ -590,15 +595,19 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       result.diagnostics.push_back(graph.diagnostic());
     } else {
       result.cfg = std::move(graph.value());
+      // Each graph function updates the first function at its address, found through an index
+      // (a search per function was quadratic in the number of functions).
+      std::unordered_map<std::uint64_t, std::size_t> function_at;
+      for (std::size_t index = 0; index < result.functions.size(); ++index) {
+        function_at.emplace(result.functions[index].address, index);
+      }
       for (const Function& function : result.cfg.functions) {
-        for (Function& existing : result.functions) {
-          if (existing.address == function.address) {
-            existing.end_address = function.end_address;
-            existing.block_count = function.block_count;
-            existing.has_extent = function.has_extent;
-            existing.estimated = function.estimated;
-            break;
-          }
+        if (const auto found = function_at.find(function.address); found != function_at.end()) {
+          Function& existing = result.functions[found->second];
+          existing.end_address = function.end_address;
+          existing.block_count = function.block_count;
+          existing.has_extent = function.has_extent;
+          existing.estimated = function.estimated;
         }
       }
       result.call_graph = build_call_graph(result.cfg, result.instructions);

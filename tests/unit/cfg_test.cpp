@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
@@ -822,4 +823,34 @@ TEST(Cfg, CallThatFallsIntoAnotherFunctionEndsTheCaller) {
                     edge.kind == donkey::CfgEdgeKind::ConditionalFalse);
   }
   EXPECT_TRUE(kept);
+}
+
+TEST(Cfg, ManyFunctionsAreNamedAndMergedInLinearTime) {
+  // 100,000 one-instruction functions, each named by a symbol. Naming each seed by a search of the
+  // symbols, and merging each graph function by a search of the functions, were quadratic: 10^10
+  // comparisons each. Both now go through an index.
+  constexpr std::size_t kFunctions = 100'000;
+  std::vector<std::byte> data(kFunctions, std::byte{0xc3});  // ret
+  BinaryImage image = synthetic_image(data.size());
+  image.symbols.reserve(kFunctions);
+  for (std::size_t n = 0; n < kFunctions; ++n) {
+    donkey::Symbol symbol;
+    symbol.name = "f" + std::to_string(n);
+    symbol.address = image.entry_point + n;
+    symbol.kind = donkey::SymbolKind::Function;
+    image.symbols.push_back(std::move(symbol));
+  }
+  const auto started = std::chrono::steady_clock::now();
+  auto analysis = donkey::analyze(image, data);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  ASSERT_EQ(analysis.value().functions.size(), kFunctions);
+  for (const std::size_t n : {std::size_t{0}, kFunctions / 2, kFunctions - 1}) {
+    const donkey::Function& function = analysis.value().functions[n];
+    EXPECT_EQ(function.name, "f" + std::to_string(function.address - image.entry_point));
+    EXPECT_EQ(function.block_count, 1U) << function.name;
+    EXPECT_EQ(function.end_address, function.address + 1) << function.name;
+  }
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 60)
+      << "analysis took longer than a minute";
 }
