@@ -641,11 +641,12 @@ TEST(Ir, StructuresDoWhileLoop) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
-TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
+TEST(Ir, IrreducibleControlFlowPrintsGotoNotLabelledBlocks) {
   // Blocks 1 and 2 form a cycle that block 0 enters at both ends (0 -> 1 and 0 -> 2), so the
   // retreating edge 2 -> 1 does not have a dominating target: irreducible. Node splitting makes it
   // reducible, but the loop header then has two entries from outside, which the structurer does
-  // not model, so the output stays labelled (see SplitsAnIrreducibleFunctionIntoAReducibleOne).
+  // not model. The goto structurer prints the function with one goto for the edge into the
+  // cycle, and no whole-function labelled form (G04-T5, goal 4 of AUDIT goal 8).
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -658,9 +659,11 @@ TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
   auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   const std::string& code = text.value();
-  EXPECT_NE(code.find("control flow not fully structured"), std::string::npos) << code;
-  EXPECT_NE(code.find("goto loc_"), std::string::npos) << code;
-  EXPECT_NE(code.find("loc_1000:"), std::string::npos) << code;
+  EXPECT_NE(code.find("// note: 1 goto(s) where control flow has no structured form"),
+            std::string::npos)
+      << code;
+  EXPECT_NE(code.find("goto loc_1008;"), std::string::npos) << code;
+  EXPECT_EQ(code.find("labeled blocks"), std::string::npos) << code;
 }
 
 TEST(Ir, InfersX86_64IntegerArgumentsAndReturn) {
@@ -1131,10 +1134,10 @@ TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
   EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
 }
 
-TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
+TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
   // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
-  // return rax. A `break` inside the switch would leave the switch, not the loop, so
-  // the body is refused and the function is shown with labels.
+  // return rax. A `break` inside the switch would leave the switch, not the loop, so the leave is a
+  // goto, and the loop's own structure is kept (G04-T5: no whole-function labelled form).
   IrFunction function;
   function.address = 0x4000;
   function.name = "switch_exit";
@@ -1170,7 +1173,12 @@ TEST(Ir, LeavingTheLoopFromInsideASwitchIsNotStructured) {
 
   const auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
-  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("// note: 2 goto(s) where control flow has no structured form"),
+            std::string::npos)
+      << text.value();
+  EXPECT_NE(text.value().find("case 0x1:\n          goto loc_4010;"), std::string::npos)
+      << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
 
 TEST(Ir, SelfLoopWithAnEarlyReturnIsStructuredWithoutGoto) {
@@ -5371,7 +5379,8 @@ TEST(Ir, ALoopWithManyReturnExitsChoosesItsFollowInBoundedTime) {
 
 TEST(Ir, ACycleTheEntryDoesNotReachIsUnreachable) {
   // Block 0 returns; blocks 1 and 2 branch to each other. Both have a predecessor, but neither is
-  // reached from the entry, so the verdict is Other (unreachable), not a rejected structure.
+  // reached from the entry: the structurers refuse the function as unreachable (not as a rejected
+  // shape), and the goto structurer places the cycle after the reachable code.
   IrFunction function;
   function.address = 0x1000;
   function.blocks.push_back(make_block(0x1000));
@@ -5381,8 +5390,11 @@ TEST(Ir, ACycleTheEntryDoesNotReachIsUnreachable) {
   function.blocks[1].statements = {branch_statement(2)};
   function.blocks[2].statements = {branch_statement(1)};
   const auto verdict = donkey::classify_structure(function);
-  EXPECT_EQ(verdict.cls, donkey::StructureClass::Other);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::GotoStructured);
   EXPECT_EQ(verdict.reason, "unreachable block");
+  // The verifier refuses IR with an unreachable block, so such a function is never printed; the
+  // verdict is what classify_structure reports about it.
+  EXPECT_FALSE(donkey::verify_ir(function).has_value());
 }
 
 TEST(Ir, SplittingATargetWithASelfLoopGivesEachCopyItsOwnLoop) {
@@ -5414,9 +5426,10 @@ TEST(Ir, SplittingATargetWithASelfLoopGivesEachCopyItsOwnLoop) {
 }
 
 TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
-  // The shape of FallsBackToLabelsForIrreducibleControlFlow. Without node splitting the verdict is
-  // Irreducible; with it the split function is reducible (ReducibleRejected: the structurer does
-  // not model a loop header with two entries from outside).
+  // The shape of IrreducibleControlFlowPrintsGotoNotLabelledBlocks. The function is irreducible,
+  // and the split makes it reducible, but the structurer still rejects the split (a loop header
+  // with two entries from outside), so the printed form is the goto structurer's: one goto, no
+  // labelled form.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5424,13 +5437,17 @@ TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
   function.blocks[2].statements.push_back(compare_zero_statement());
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
   function.blocks[3].statements.push_back(return_statement());
-  EXPECT_EQ(donkey::classify_structure(function).cls, donkey::StructureClass::ReducibleRejected);
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::GotoStructured);
+  EXPECT_TRUE(verdict.irreducible);
+  EXPECT_EQ(verdict.gotos, 1u);
+  EXPECT_FALSE(verdict.reason.empty());
 }
 
 TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   // The split target (block 2) has a body of twenty statements: one copy costs twenty more, over
-  // the per-node bound of sixteen, so the function stays Irreducible and the verdict names the
-  // region.
+  // the per-node bound of sixteen, so the function is not split. It is still printed (with gotos),
+  // and the verdict names the region whose split was refused.
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
   function.blocks[0].statements.push_back(conditional_branch_statement(2));
@@ -5442,8 +5459,717 @@ TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
   function.blocks[3].statements.push_back(return_statement());
   const auto verdict = donkey::classify_structure(function);
-  EXPECT_EQ(verdict.cls, donkey::StructureClass::Irreducible);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::GotoStructured);
+  EXPECT_TRUE(verdict.irreducible);
   EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
+}
+
+// ---- The goto structurer and the control-flow check (G04-T5) ------------------------------------
+
+namespace {
+
+using donkey::detail::check_structured_control_flow;
+using donkey::detail::GotoStructure;
+using donkey::detail::kGotoRuleAll;
+using donkey::detail::structure_with_gotos;
+using donkey::detail::StructuredLine;
+
+std::string printed(const std::vector<StructuredLine>& lines) {
+  std::string text;
+  for (const StructuredLine& line : lines) {
+    if (!line.text.empty()) {
+      text += line.text + "\n";
+    }
+  }
+  return text;
+}
+
+/// The goto structurer's output, with the given rules; the control-flow check must accept it.
+GotoStructure structured_with(const IrFunction& function, std::uint32_t rules) {
+  auto structure = structure_with_gotos(function, nullptr, rules);
+  EXPECT_TRUE(structure.has_value());
+  if (!structure) {
+    return GotoStructure{};
+  }
+  const auto mismatch = check_structured_control_flow(function, structure->lines);
+  EXPECT_FALSE(mismatch.has_value()) << mismatch.value_or("") << "\n" << printed(structure->lines);
+  return *structure;
+}
+
+IrStatement switch_on_rax(std::uint32_t default_block, std::vector<IrSwitchCase> cases) {
+  IrStatement statement;
+  statement.op = IrOp::Switch;
+  statement.dest = IrOperand::register_ref("rax", 8);
+  statement.a = IrOperand::block_ref(default_block);
+  statement.width = 8;
+  statement.switch_cases = std::move(cases);
+  return statement;
+}
+
+constexpr std::uint32_t kWithout(std::uint32_t rule) {
+  return kGotoRuleAll & ~rule;
+}
+
+}  // namespace
+
+TEST(Ir, RuleSequencePrintsAFallThroughWithoutGoto) {
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {fb_set("rdx", 2), fb_jump(2)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleSequence));
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleIfElsePrintsADiamondAsIfElse) {
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("} else {"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleIfElse));
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, IfWithoutElsePrintsItsComplementedCondition) {
+  // if (rax == 0) { rdx = 1; } return rdx; -- the taken side is the join, so the printed condition
+  // is the complement of the branch's (rax != 0) and the body is the fall-through.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(2)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("if (rax != 0x0) {"), std::string::npos) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("else"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, RuleLoopPrintsANaturalLoopAsWhileOne) {
+  // A header with a statement before its test is not a pure test, so it prints as while (1).
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("while (1) {"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleLoop));
+  EXPECT_EQ(printed(off.lines).find("while ("), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleWhileTestPrintsAPureHeaderAsItsCondition) {
+  // The header is only the test: `while (rax != 0x0)`, its exit is the taken side.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_NE(printed(on.lines).find("while (rax != 0x0) {"), std::string::npos) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("while (1)"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleWhileTest));
+  EXPECT_NE(printed(off.lines).find("while (1) {"), std::string::npos) << printed(off.lines);
+}
+
+TEST(Ir, RuleBreakPrintsALoopExitAsBreak) {
+  // Both exits of the loop (from 1 and from 2) reach block 4, its follow.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("break;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleBreak));
+  EXPECT_EQ(printed(off.lines).find("break;"), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleContinuePrintsABackEdgeInTheBodyAsContinue) {
+  // Block 2 jumps back to the header (taken) while the loop's follow (5) is its join.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 1), fb_compare(), fb_branch(5)},
+      {fb_compare(), fb_branch(1)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("continue;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleContinue));
+  EXPECT_EQ(printed(off.lines).find("continue;"), std::string::npos) << printed(off.lines);
+  EXPECT_GT(off.gotos, 0u) << printed(off.lines);
+}
+
+TEST(Ir, RuleSwitchPrintsEachArmFromItsTarget) {
+  IrFunction f = fb_function({
+      {switch_on_rax(3, {IrSwitchCase{0x1, 1}, IrSwitchCase{0x2, 2}})},
+      {fb_set("rdx", 1), fb_jump(4)},
+      {fb_set("rdx", 2), fb_jump(4)},
+      {fb_set("rdx", 3), fb_jump(4)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("case 0x1:"), std::string::npos) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("default:"), std::string::npos) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("break;"), std::string::npos) << printed(on.lines);
+  const GotoStructure off = structured_with(f, kWithout(donkey::detail::kGotoRuleSwitch));
+  EXPECT_GE(off.gotos, 3u) << printed(off.lines);
+}
+
+TEST(Ir, GotoLeavesALoopByAnExitThatIsNotItsFollow) {
+  // Block 5 is entered from outside the loop as well, so it cannot be printed inside it: the edge
+  // from the loop's body is a goto.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+      {fb_set("rdx", 9), fb_jump(4)},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("goto loc_"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle) {
+  // Blocks 1 and 2 form a cycle that block 0 enters at both ends.
+  IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(2)},
+      {fb_compare(), fb_branch(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_EQ(printed(on.lines).find("labeled"), std::string::npos) << printed(on.lines);
+}
+
+TEST(Ir, ControlFlowCheckAcceptsTheStructuredFormOfEachRuleFixture) {
+  const IrFunction diamond = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  const auto structure = donkey::detail::structure_function(diamond, nullptr);
+  ASSERT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured);
+  EXPECT_FALSE(check_structured_control_flow(diamond, structure.lines).has_value());
+}
+
+TEST(Ir, ControlFlowCheckRefusesAConditionThatGoesTheWrongWay) {
+  const IrFunction diamond = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  // The tag and the printed condition disagree: the text check refuses it.
+  std::vector<StructuredLine> tag_only = structured_with(diamond, kGotoRuleAll).lines;
+  bool flipped = false;
+  for (StructuredLine& line : tag_only) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen) {
+      line.tag.negated = !line.tag.negated;
+      flipped = true;
+    }
+  }
+  ASSERT_TRUE(flipped);
+  const auto text_mismatch = check_structured_control_flow(diamond, tag_only);
+  ASSERT_TRUE(text_mismatch.has_value());
+  EXPECT_NE(text_mismatch->find("printed as"), std::string::npos) << *text_mismatch;
+
+  // Both changed consistently: the then-arm now runs when the IR's fall-through is taken, so the
+  // edge check refuses it.
+  std::vector<StructuredLine> both = structured_with(diamond, kGotoRuleAll).lines;
+  for (StructuredLine& line : both) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen) {
+      line.tag.negated = !line.tag.negated;
+      line.text = "  if (rax != 0x0) {";
+    }
+  }
+  const auto edge_mismatch = check_structured_control_flow(diamond, both);
+  ASSERT_TRUE(edge_mismatch.has_value());
+  EXPECT_NE(edge_mismatch->find("printed condition"), std::string::npos) << *edge_mismatch;
+}
+
+TEST(Ir, ControlFlowCheckRefusesABreakToTheWrongBlock) {
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  bool changed = false;
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == donkey::detail::LineKind::Break) {
+      line.tag.block = 3;  // the break names a block that is not the loop's end
+      changed = true;
+    }
+  }
+  ASSERT_TRUE(changed);
+  EXPECT_TRUE(check_structured_control_flow(f, lines).has_value());
+}
+
+TEST(Ir, ControlFlowCheckRefusesABlockThatIsNotPrinted) {
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {fb_set("rdx", 2), fb_jump(2)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  std::vector<StructuredLine> without_marker;
+  for (const StructuredLine& line : lines) {
+    if (!(line.tag.kind == donkey::detail::LineKind::Marker && line.tag.block == 1)) {
+      without_marker.push_back(line);
+    }
+  }
+  const auto mismatch = check_structured_control_flow(f, without_marker);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("not printed"), std::string::npos) << *mismatch;
+}
+namespace {
+
+using donkey::detail::LineKind;
+
+/// How many lines define `label` (a marker `label:` or a loop opener `label: while (...)`).
+std::size_t label_definitions(const std::vector<StructuredLine>& lines, const std::string& label) {
+  std::size_t count = 0;
+  for (const StructuredLine& line : lines) {
+    const std::size_t first = line.text.find_first_not_of(' ');
+    if (first != std::string::npos &&
+        line.text.compare(first, label.size() + 1, label + ":") == 0) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+}  // namespace
+
+TEST(Ir, ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry) {
+  // Block 1 is printed first and returns; block 0 follows and jumps back to it. Each block's own
+  // edges are right, but the printed function returns without running block 0.
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {fb_return()},
+  });
+  const std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  std::vector<StructuredLine> first;   // block 0's lines
+  std::vector<StructuredLine> second;  // block 1's lines
+  for (const StructuredLine& line : lines) {
+    if (line.tag.kind == LineKind::Marker && line.tag.block == 1) {
+      second.push_back(line);
+      second.back().text = "loc_1010:";
+    } else if (second.empty()) {
+      first.push_back(line);
+    } else {
+      second.push_back(line);
+    }
+  }
+  ASSERT_FALSE(first.empty());
+  ASSERT_FALSE(second.empty());
+  std::vector<StructuredLine> reordered = second;
+  reordered.insert(reordered.end(), first.begin(), first.end());
+  reordered.push_back(StructuredLine{"goto loc_1010;", 0, make_tag(LineKind::Goto, 1), {}});
+  const auto mismatch = check_structured_control_flow(f, reordered);
+  ASSERT_TRUE(mismatch.has_value()) << printed(reordered);
+  EXPECT_NE(mismatch->find("does not start at the entry"), std::string::npos) << *mismatch;
+}
+
+TEST(Ir, ControlFlowCheckRefusesATestThatNoBlockEndsIn) {
+  // Block 1 is a switch with no case (only its default, block 2). A second copy of its switch, with
+  // a default arm only, is wrapped around the printed code: before block 0, and then between block
+  // 0 and block 1. Each arm reaches exactly the block the IR expects, but the printed code
+  // evaluates a switch that the IR does not have there.
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {switch_on_rax(2, {})},
+      {fb_set("rdx", 2), fb_return()},
+  });
+  const auto verified = donkey::verify_ir(f);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+  const std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  const auto wrapped = [&](donkey::detail::BlockId from) {
+    std::vector<StructuredLine> out;
+    bool opened = false;
+    for (const StructuredLine& line : lines) {
+      if (!opened && line.tag.kind == LineKind::Marker && line.tag.block == from) {
+        out.push_back(StructuredLine{"switch (rax) {", 0, make_tag(LineKind::SwitchOpen, 1), {}});
+        out.push_back(StructuredLine{"default:", 0, make_tag(LineKind::Default), {}});
+        opened = true;
+      }
+      out.push_back(line);
+    }
+    out.push_back(StructuredLine{"}", 0, make_tag(LineKind::Close), {}});
+    EXPECT_TRUE(opened);
+    return out;
+  };
+  const std::vector<StructuredLine> before_entry = wrapped(0);
+  const auto entry = check_structured_control_flow(f, before_entry);
+  ASSERT_TRUE(entry.has_value()) << printed(before_entry);
+  EXPECT_NE(entry->find("block #0"), std::string::npos) << *entry;
+
+  const std::vector<StructuredLine> between = wrapped(1);
+  const auto middle = check_structured_control_flow(f, between);
+  ASSERT_TRUE(middle.has_value()) << printed(between);
+  EXPECT_NE(middle->find("block #1"), std::string::npos) << *middle;
+}
+
+TEST(Ir, ControlFlowCheckRefusesASwitchWhoseCaseValuesAreSwapped) {
+  // Cases 1 and 2 swap their values; the arms keep their bodies. The set of arm targets is the
+  // same, but the printed switch sends 1 to block 2 and 2 to block 1.
+  const IrFunction f = fb_function({
+      {switch_on_rax(3, {IrSwitchCase{0x1, 1}, IrSwitchCase{0x2, 2}})},
+      {fb_set("rdx", 1), fb_jump(4)},
+      {fb_set("rdx", 2), fb_jump(4)},
+      {fb_set("rdx", 3), fb_jump(4)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  int swapped = 0;
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == LineKind::Case && (line.tag.value == 1 || line.tag.value == 2)) {
+      line.tag.value = line.tag.value == 1 ? 2 : 1;
+      line.text.replace(line.text.find("case "), std::string::npos,
+                        line.tag.value == 1 ? "case 0x1:" : "case 0x2:");
+      ++swapped;
+    }
+  }
+  ASSERT_EQ(swapped, 2);
+  const auto mismatch = check_structured_control_flow(f, lines);
+  ASSERT_TRUE(mismatch.has_value()) << printed(lines);
+  EXPECT_NE(mismatch->find("case 0x"), std::string::npos) << *mismatch;
+}
+
+TEST(Ir, ControlFlowCheckRefusesASwitchOnAnotherOperand) {
+  const IrFunction f = fb_function({
+      {switch_on_rax(3, {IrSwitchCase{0x1, 1}, IrSwitchCase{0x2, 2}})},
+      {fb_set("rdx", 1), fb_jump(4)},
+      {fb_set("rdx", 2), fb_jump(4)},
+      {fb_set("rdx", 3), fb_jump(4)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  bool changed = false;
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == LineKind::SwitchOpen) {
+      line.text.replace(line.text.find("switch ("), std::string::npos, "switch (rcx) {");
+      changed = true;
+    }
+  }
+  ASSERT_TRUE(changed);
+  const auto mismatch = check_structured_control_flow(f, lines);
+  ASSERT_TRUE(mismatch.has_value()) << printed(lines);
+  EXPECT_NE(mismatch->find("switch (rax)"), std::string::npos) << *mismatch;
+}
+
+TEST(Ir, ControlFlowCheckFollowsTheLabelAGotoPrints) {
+  // The goto structurer's output for a goto out of a loop, then the same lines with the goto's
+  // printed label changed: to a label no line defines, and to the label of another block.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+      {fb_set("rdx", 9), fb_jump(4)},
+  });
+  const std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  const auto with_goto_text = [&](const std::string& text) {
+    std::vector<StructuredLine> changed = lines;
+    bool found = false;
+    for (StructuredLine& line : changed) {
+      if (line.tag.kind == LineKind::Goto && line.tag.block == 5) {
+        line.text.replace(line.text.find("goto "), std::string::npos, text);
+        found = true;
+      }
+    }
+    EXPECT_TRUE(found) << printed(lines);
+    return changed;
+  };
+  const auto missing = check_structured_control_flow(f, with_goto_text("goto loc_dead;"));
+  ASSERT_TRUE(missing.has_value());
+  EXPECT_NE(missing->find("loc_dead"), std::string::npos) << *missing;
+
+  // Block 4's marker gets a label of its own; the goto names it while its tag still says block 5.
+  std::vector<StructuredLine> other = with_goto_text("goto loc_1040;");
+  for (StructuredLine& line : other) {
+    if (line.tag.kind == LineKind::Marker && line.tag.block == 4) {
+      line.text = "loc_1040:";
+    }
+  }
+  const auto wrong = check_structured_control_flow(f, other);
+  ASSERT_TRUE(wrong.has_value()) << printed(other);
+  EXPECT_NE(wrong->find("loc_1040"), std::string::npos) << *wrong;
+
+  // The same for the goto form of a conditional branch (`if (c) goto L;`).
+  const IrFunction diamond = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_jump(3)},
+      {fb_set("rdx", 2), fb_jump(3)},
+      {fb_return()},
+  });
+  std::vector<StructuredLine> jumps =
+      structured_with(diamond, kWithout(donkey::detail::kGotoRuleIfElse)).lines;
+  bool found = false;
+  for (StructuredLine& line : jumps) {
+    if (line.tag.kind == LineKind::IfJump && line.tag.jump == LineKind::Goto) {
+      line.text.replace(line.text.find("goto "), std::string::npos, "goto loc_dead;");
+      found = true;
+    }
+  }
+  ASSERT_TRUE(found);
+  const auto if_goto = check_structured_control_flow(diamond, jumps);
+  ASSERT_TRUE(if_goto.has_value()) << printed(jumps);
+  EXPECT_NE(if_goto->find("loc_dead"), std::string::npos) << *if_goto;
+}
+
+TEST(Ir, ControlFlowCheckRefusesALabelPrintedTwice) {
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_return()},
+      {fb_set("rdx", 9), fb_jump(4)},
+  });
+  std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  ASSERT_EQ(label_definitions(lines, "loc_1050"), 1u) << printed(lines);
+  for (StructuredLine& line : lines) {
+    if (line.tag.kind == LineKind::Marker && line.tag.block == 4) {
+      line.text = "loc_1050:";  // block 4 gets block 5's label as well
+    }
+  }
+  const auto mismatch = check_structured_control_flow(f, lines);
+  ASSERT_TRUE(mismatch.has_value()) << printed(lines);
+  EXPECT_NE(mismatch->find("loc_1050"), std::string::npos) << *mismatch;
+}
+
+TEST(Ir, ALoopHeaderThatAGotoNamesIsLabelledOnce) {
+  // Outer loop: header 1 (not a pure test: it sets rcx), exit to 6. Inner loop: header 2, latch
+  // 4. Block 3 goes back to the outer header from inside the inner loop: a continue would name the
+  // inner loop, so it is a goto to block 1, whose label is printed once (on its marker, inside the
+  // `while (1)`).
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 1), fb_compare(), fb_branch(6)},
+      {fb_set("rdx", 2), fb_compare(), fb_branch(5)},
+      {fb_compare(), fb_branch(1)},
+      {fb_jump(2)},
+      {fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_NE(printed(on.lines).find("goto loc_1010;"), std::string::npos) << printed(on.lines);
+  EXPECT_EQ(label_definitions(on.lines, "loc_1010"), 1u) << printed(on.lines);
+}
+
+TEST(Ir, ABranchWhoseTwoTargetsAreTheNextBlockKeepsItsTest) {
+  // The taken target is the fall-through: both arms are empty, and the block's test is still
+  // printed (an empty if), so the control-flow check accepts the goto structurer's output.
+  const IrFunction f = fb_function({
+      {fb_set("rdx", 1), fb_compare(), fb_branch(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_EQ(on.gotos, 0u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("if ("), std::string::npos) << printed(on.lines);
+  const auto structure = donkey::detail::structure_function(f, nullptr);
+  EXPECT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured);
+}
+
+TEST(Ir, SwitchInALoopWhoseArmLeavesTheLoopIsAGotoNotABreak) {
+  // A loop (header 1, body 1..5) whose only exit is block 6, the switch's join. Case 1 (block 4)
+  // leaves to 6 when rax == 0 and goes back to the header otherwise. A `break` in the switch would
+  // leave only the switch, so the leave is a goto (G04-T5: a switch's join is never a break
+  // target).
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_set("rcx", 5), fb_compare(), fb_branch(6)},
+      {switch_on_rax(3, {IrSwitchCase{0x1, 4}})},
+      {fb_set("rdx", 1), fb_jump(5)},
+      {fb_compare(), fb_branch(6)},
+      {fb_set("rdx", 3), fb_jump(1)},
+      {fb_return()},
+  });
+  const GotoStructure on = structured_with(f, kGotoRuleAll);
+  EXPECT_GE(on.gotos, 1u) << printed(on.lines);
+  EXPECT_NE(printed(on.lines).find("case 0x1:"), std::string::npos) << printed(on.lines);
+  // The case arm itself does not break: its leave is the goto. (The loop's own exit from its test
+  // block is a break, which is correct.)
+  const std::string text = printed(on.lines);
+  const std::size_t arm = text.find("case 0x1:");
+  const std::size_t next = text.find("default:", arm);
+  ASSERT_NE(arm, std::string::npos) << text;
+  ASSERT_NE(next, std::string::npos) << text;
+  EXPECT_EQ(text.substr(arm, next - arm).find("break;"), std::string::npos) << text;
+}
+
+// ---- Stack, nesting and blank lines (W1 audit) ------------------------------------------------
+
+namespace {
+
+/// The shape of the stress driver: `checks` checks `if (rax == 0) return i;` in a row, then the
+/// four-block irreducible tail of IrreducibleControlFlowPrintsGotoNotLabelledBlocks.
+IrFunction check_chain(unsigned checks) {
+  std::vector<std::vector<IrStatement>> blocks;
+  for (unsigned i = 0; i < checks; ++i) {
+    blocks.push_back({fb_compare(), fb_branch(checks + 4 + i)});
+  }
+  blocks.push_back({fb_compare(), fb_branch(checks + 2)});
+  blocks.push_back({fb_jump(checks + 2)});
+  blocks.push_back({fb_compare(), fb_branch(checks + 1)});
+  blocks.push_back({fb_return()});
+  for (unsigned i = 0; i < checks; ++i) {
+    blocks.push_back({fb_set("rax", i), fb_return()});
+  }
+  return fb_function(blocks);
+}
+
+/// The widest indentation of a printed line, in columns.
+std::size_t widest_indent(const std::string& text) {
+  std::size_t widest = 0;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    std::size_t end = text.find('\n', start);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    std::size_t column = start;
+    while (column < end && text[column] == ' ') {
+      ++column;
+    }
+    widest = std::max(widest, column - start);
+    start = end + 1;
+  }
+  return widest;
+}
+
+}  // namespace
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+
+namespace {
+
+struct ChainOnThread {
+  const IrFunction* function = nullptr;
+  bool ok = false;
+  std::string text;
+  std::string error;
+};
+
+void* format_chain_on_thread(void* argument) {
+  auto* job = static_cast<ChainOnThread*>(argument);
+  auto text = donkey::format_pseudocode(*job->function);
+  job->ok = text.has_value();
+  if (text) {
+    job->text = text.value();
+  } else {
+    job->error = text.diagnostic().message;
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+TEST(Ir, LongCheckChainFormatsOnASmallStackWithBoundedNesting) {
+  // A chain of 5,000 checks used to nest one level deeper per check and to recurse once per check:
+  // on a 512 KiB thread (the macOS default for secondary threads) it overflowed the stack, and
+  // the output was quadratic in size. The checks now print flat and the walk continues in a loop.
+  constexpr unsigned kChecks = 5000;
+  const IrFunction f = check_chain(kChecks);
+  ChainOnThread job;
+  job.function = &f;
+  pthread_attr_t attributes;
+  ASSERT_EQ(pthread_attr_init(&attributes), 0);
+  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
+  pthread_t thread;
+  ASSERT_EQ(pthread_create(&thread, &attributes, format_chain_on_thread, &job), 0);
+  ASSERT_EQ(pthread_join(thread, nullptr), 0);
+  pthread_attr_destroy(&attributes);
+  ASSERT_TRUE(job.ok) << job.error;
+  EXPECT_LE(widest_indent(job.text), 2 * donkey::detail::kMaxStructureNesting + 16)
+      << job.text.substr(0, 400);
+  EXPECT_NE(job.text.find("goto loc_"), std::string::npos);
+}
+
+#else
+
+TEST(Ir, LongCheckChainFormatsOnASmallStackWithBoundedNesting) {
+  GTEST_SKIP()
+      << "the test sets a pthread stack size of 512 KiB; this platform has no pthread stacks";
+}
+
+#endif
+
+TEST(Ir, ThreeCheckChainPrintsFlatWithoutElse) {
+  // Each check is an `if` that returns, so the rest of the chain follows at the same level.
+  const IrFunction f = check_chain(3);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("} else {"), std::string::npos) << text.value();
+  EXPECT_LE(widest_indent(text.value()), 4u) << text.value();
+}
+
+TEST(Ir, NoPrintedLineIsOnlyWhitespace) {
+  // A marker with no label prints nothing; it must not print a line of indentation.
+  const std::vector<IrFunction> fixtures = {
+      check_chain(3),
+      fb_function({{fb_compare(), fb_branch(2)},
+                   {fb_set("rdx", 1), fb_jump(3)},
+                   {fb_set("rdx", 2), fb_jump(3)},
+                   {fb_return()}}),
+      fb_two_exit_loop(),
+  };
+  for (const IrFunction& f : fixtures) {
+    const auto structure = donkey::detail::structure_function(f, nullptr);
+    ASSERT_NE(structure.outcome, donkey::detail::StructureOutcome::Labelled) << f.name;
+    for (const StructuredLine& line : structure.lines) {
+      if (!line.text.empty()) {
+        EXPECT_NE(line.text.find_first_not_of(' '), std::string::npos)
+            << f.name << ": a whitespace-only line";
+      }
+    }
+  }
+}
+
+TEST(Ir, ControlFlowCheckRefusesNestingDeeperThanTheBound) {
+  // The guard runs before the check recurses: a file nested past the bound is refused.
+  const IrFunction f = check_chain(3);
+  std::vector<StructuredLine> lines;
+  const std::size_t depth = donkey::detail::kMaxStructureNesting + 8;
+  for (std::size_t i = 0; i < depth; ++i) {
+    lines.push_back(
+        StructuredLine{"if (rax == 0x0) {", 0, make_tag(donkey::detail::LineKind::IfOpen, 0), {}});
+  }
+  for (std::size_t i = 0; i < depth; ++i) {
+    lines.push_back(StructuredLine{"}", 0, make_tag(donkey::detail::LineKind::Close), {}});
+  }
+  const auto mismatch = check_structured_control_flow(f, lines);
+  ASSERT_TRUE(mismatch.has_value());
+  EXPECT_NE(mismatch->find("nests deeper"), std::string::npos) << *mismatch;
 }
 
 TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentIsPartial) {
@@ -6051,4 +6777,136 @@ TEST(Ir, LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat) {
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
   EXPECT_NE(text.value().find("continue;"), std::string::npos) << text.value();
+}
+
+namespace {
+
+/// The follow choice as both structurers made it before it was shared: for each exit, a search from
+/// each body block (cubic). The reference for Ir.LoopFollowChoiceMatchesTheSearchPerExit.
+donkey::detail::BlockId follow_by_search(const donkey::detail::Graph& graph,
+                                         const std::vector<bool>& body,
+                                         const std::vector<std::size_t>& rank) {
+  using donkey::detail::BlockId;
+  using donkey::detail::kNoBlock;
+  const std::size_t count = graph.successors.size();
+  const auto reaches = [&](BlockId start, BlockId follow) {
+    std::vector<bool> seen(count, false);
+    std::vector<BlockId> stack{start};
+    seen[start] = true;
+    while (!stack.empty()) {
+      const BlockId block = stack.back();
+      stack.pop_back();
+      if (block == follow) {
+        continue;
+      }
+      if (!body[block]) {
+        if (!graph.successors[block].empty()) {
+          return false;
+        }
+        continue;
+      }
+      for (const BlockId successor : graph.successors[block]) {
+        if (!seen[successor]) {
+          seen[successor] = true;
+          stack.push_back(successor);
+        }
+      }
+    }
+    return true;
+  };
+  std::vector<BlockId> exits;
+  for (BlockId block = 0; block < count; ++block) {
+    if (!body[block]) {
+      continue;
+    }
+    for (const BlockId successor : graph.successors[block]) {
+      if (!body[successor]) {
+        exits.push_back(successor);
+      }
+    }
+  }
+  std::sort(exits.begin(), exits.end());
+  exits.erase(std::unique(exits.begin(), exits.end()), exits.end());
+  BlockId best = kNoBlock;
+  std::size_t best_count = 0;
+  for (const BlockId exit : exits) {
+    std::size_t reach = 0;
+    for (BlockId block = 0; block < count; ++block) {
+      if (body[block] && reaches(block, exit)) {
+        ++reach;
+      }
+    }
+    if (reach > best_count ||
+        (reach == best_count && best != kNoBlock && rank[exit] < rank[best])) {
+      best_count = reach;
+      best = exit;
+    }
+  }
+  return best_count > 0 ? best : kNoBlock;
+}
+
+}  // namespace
+
+TEST(Ir, LoopFollowChoiceMatchesTheSearchPerExit) {
+  // The shared follow choice (one backward labelling per loop) against the search it replaced, on
+  // random graphs and random bodies: the same follow every time.
+  using donkey::detail::BlockId;
+  std::uint64_t state = 0x9e3779b97f4a7c15ULL;
+  const auto next = [&state](std::uint64_t bound) {
+    state = state * 6364136223846793005ULL + 1442695040888963407ULL;
+    return (state >> 33U) % bound;
+  };
+  std::size_t with_follow = 0;
+  for (int round = 0; round < 20000; ++round) {
+    const std::size_t count = 2 + next(13);
+    donkey::detail::Graph graph;
+    graph.successors.resize(count);
+    graph.predecessors.resize(count);
+    for (BlockId from = 0; from < count; ++from) {
+      const std::size_t edges = next(3);
+      for (std::size_t edge = 0; edge < edges; ++edge) {
+        const auto to = static_cast<BlockId>(next(count));
+        if (std::find(graph.successors[from].begin(), graph.successors[from].end(), to) ==
+            graph.successors[from].end()) {
+          graph.successors[from].push_back(to);
+          graph.predecessors[to].push_back(from);
+        }
+      }
+    }
+    std::vector<bool> body(count, false);
+    body[next(count)] = true;
+    for (BlockId block = 0; block < count; ++block) {
+      if (next(2) == 0) {
+        body[block] = true;
+      }
+    }
+    std::vector<std::size_t> rank(count);
+    for (std::size_t index = 0; index < count; ++index) {
+      rank[index] = index;
+    }
+    for (std::size_t index = count - 1; index > 0; --index) {
+      std::swap(rank[index], rank[next(index + 1)]);
+    }
+    const BlockId expected = follow_by_search(graph, body, rank);
+    ASSERT_EQ(donkey::detail::choose_loop_follow(graph, body, rank), expected) << "round " << round;
+    if (expected != donkey::detail::kNoBlock) {
+      ++with_follow;
+    }
+  }
+  EXPECT_GT(with_follow, 1000u);
+}
+
+TEST(Ir, AStructureBuiltOnTheReorderedCopyNamesTheCopysBlocks) {
+  // Block 2 is laid out after block 1 but runs before it: 0 -> {2, 1}, 2 -> 1, 1 returns. The
+  // structure is built on the reverse-postorder copy, so its tags name the copy's blocks: the
+  // result carries that copy, and the lines are checked against it.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_return()},
+      {fb_set("rdx", 2), fb_jump(1)},
+  });
+  const auto structure = donkey::detail::structure_function(f, nullptr);
+  ASSERT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured) << structure.refusal;
+  ASSERT_NE(structure.described, nullptr) << "the layout structured it: pick another layout";
+  EXPECT_FALSE(check_structured_control_flow(*structure.described, structure.lines).has_value());
 }

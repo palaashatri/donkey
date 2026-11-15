@@ -536,3 +536,219 @@ Per binary (Complete, labelled): ls 14, 96; openssl 17, 169; bash 28, 130; libsq
 122; git 15, 199; python3.12 25, 145. 1,491 functions carry the call note (python3.12 234, from 236).
 The counts at `09d585e` were the same, binary for binary; the change from the first round's table
 (990 structured, 180 Complete) is all in `python3.12`, from `09d585e` (item 1).
+### W1: goto structuring (G04-T5)
+
+Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,
+1,986 functions) with the Release build of the branch at `d5e9350` (after it merged
+`claude/funny-meitner-cpc7oc` up to `8322ece`), and again at `443a2da` (after it merged phase A up to
+`5309774`, which adds the stack-argument fixes of `e2c078c`): the two measurements are the same,
+binary for binary. The baseline is phase A at `e2c078c`, measured the same way.
+The measurement is `sample_list.py measure`, extended with the goto and refusal counts. (The first
+measurement, at `14b94a4` against `5162f62`, had 996 labelled before and 989 goto-free, 997 with gotos
+and 16,364 gotos after; the review fixes of phase A changed the baseline, see "Second and third review
+rounds".)
+
+| | Before (phase A, `e2c078c`) | After (W1, `443a2da`) |
+|---|---|---|
+| Printed as labelled blocks (whole function) | 985 (49.6%) | **0** |
+| Structured, no goto | 1,001 | 1,000 |
+| Structured with gotos | 0 | 986 |
+| Gotos, total | 0 | 16,232 |
+| Gotos, largest in one function | 0 | 409 (`git`) |
+| Candidate structures refused by the control-flow check | not checked | 0 |
+| Complete / InvalidIR / Unsupported | 183 / 0 / 0 | 183 / 0 / 0 |
+
+Per binary (after; before in brackets is the labelled count):
+
+| Binary (sampled) | Labelled | No goto | With gotos | Gotos | Largest |
+|---|---|---|---|---|---|
+| ls (186) | 0 (96) | 90 | 96 | 1,648 | 240 |
+| openssl (300) | 0 (169) | 130 | 170 | 3,326 | 291 |
+| bash (300) | 0 (130) | 170 | 130 | 1,997 | 230 |
+| libsqlite3 (300) | 0 (124) | 177 | 123 | 1,734 | 125 |
+| libc (300) | 0 (122) | 177 | 123 | 1,362 | 102 |
+| git (300) | 0 (199) | 101 | 199 | 3,749 | 409 |
+| python3.12 (300) | 0 (145) | 155 | 145 | 2,416 | 392 |
+
+**Goto-free functions: 1,001 before, 1,000 after, and the drop is a correctness fix, not a regression.**
+Per function, two functions left the goto-free set and one joined it (`libsqlite3` `0xa5c40`, which the
+fallback rejected with "an if joins outside its region"). The two that left (`openssl` `0xa9b70`, `libc`
+`0x97ec0`) print a switch whose join lies outside the region of the enclosing `if`. The layout-based
+structurer accepts that by walking on to the next block, which prints the case blocks a second time: at
+`e2c078c`, `return rax;` appears 22 times in `0x97ec0` and `rax = (u64)(0xbacc6);` 103 times in
+`0xa9b70` (outputs of 230 and 539 lines). The switch rule now rejects that shape (`switch join outside
+its region`), and the goto structurer prints the two functions with one goto each (126 and 184 lines;
+the statement appears 9 times and once). These are the same three functions as at `14b94a4`.
+
+Where the gotos are. Counted on `openssl` at `14b94a4` (all its functions, both runs of the goto
+structurer, so each decision counted twice; shares are what matter):
+
+| Target of the goto | Share | Note |
+|---|---|---|
+| a block already printed earlier in the function | 60% | 59% of these blocks have at most 4 statements: short-circuit conditions (`a && b` joins a block printed in the first arm) and switch arms that share a block |
+| a block the region does not dominate | 28% | a join reached from an arm, not the arm's own join |
+| the stop of an arm, not printable there | 12% | an `if` whose join is already printed or is a loop's follow |
+| a loop header from outside its loop | 3% | multi-entry loops (irreducible) |
+| return blocks (any target above) | 5% | copying returns would remove little |
+
+Copying small blocks into each arm that reaches them would remove the first group (not measured; it is
+the candidate for the owner decision below, because it grows the output). It is not done.
+
+Control-flow check. Every candidate structure (the layout-based ones, their reverse-postorder copy,
+the fallback, the split function, and the goto structurer) is rebuilt from its tags and compared with the
+IR edge by edge; a candidate that fails is refused and the next one is tried. Across the 1,986 functions:
+0 refusals. The check found two bugs of its own kind during the work: the switch join rule (above), and a
+goto emitted for a break whose join was already printed (`libc` `sub_e7870`, `sub_ea0b0`, `confstr`: refused
+until the fix, now `goto_structured` with 0 refusals). The corpus test
+`DecompilerCorpus.EveryPrintedFunctionPassesTheControlFlowCheck` runs the same check on every corpus function.
+
+Rules and tests (each rule switched off in the emitter fails its test; checked by hand, failures shown in
+the commit messages): `Ir.RuleSequencePrintsAFallThroughWithoutGoto`, `Ir.RuleIfElsePrintsADiamondAsIfElse`,
+`Ir.IfWithoutElsePrintsItsComplementedCondition`, `Ir.RuleLoopPrintsANaturalLoopAsWhileOne`,
+`Ir.RuleWhileTestPrintsAPureHeaderAsItsCondition`, `Ir.RuleBreakPrintsALoopExitAsBreak`,
+`Ir.RuleContinuePrintsABackEdgeInTheBodyAsContinue`, `Ir.RuleSwitchPrintsEachArmFromItsTarget`, plus
+`Ir.GotoLeavesALoopByAnExitThatIsNotItsFollow`, `Ir.IrreducibleControlFlowIsPrintedWithAGotoIntoTheCycle`
+and `Ir.SwitchInALoopWhoseArmLeavesTheLoopIsAGotoNotABreak` (the switch-join rule: with the old rule
+switched on, its arm prints `break;` and the check refuses it).
+The check's own tests: `Ir.ControlFlowCheck*` (a condition that goes the wrong way, in the tags only and
+in the tags and text together; a break to the wrong block; a block that is not printed).
+
+What the check does not cover: statement text (`DecompilerCorpus.EveryKeptStatementIsPrinted` does, for
+kept statements); the rendering of conditions and operands (the check renders conditions with the printer's
+own function, so a wrong rendering is not caught); and the choice of which side is the then-arm beyond
+the tags (the text of each control line is checked against its tag).
+
+Timing (branch head `14b94a4`): whole-binary `decompile --json`, one process at a time on an idle
+machine, baseline and branch alternating (wall time, seconds):
+
+| Binary | Baseline | Branch | Difference |
+|---|---|---|---|
+| openssl, four pairs | 5.64, 5.93, 5.69, 5.90 | 7.91, 6.38, 6.54, 6.21 | +40%, +8%, +15%, +5% (median +11%) |
+| git, two pairs | 223.6, 222.3 | 229.2, 230.2 | +2.5%, +3.6% |
+
+Both are under the 25% bar. The openssl repeats vary by about 15% between runs of the same binary, so
+the first pair (+40%) is treated as noise, and the median is the figure to read. The earlier timing of
+`c101de2` (openssl +22%/+14%, git +1%/+5%) is superseded by these numbers. Structuring runs once per candidate, and the
+CLI also classifies each function (a second run of the structurers), so most of the added cost is the check.
+
+### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
+
+A stress driver (`w1audit/stress`, not committed) builds N checks `if (rax == 0) return i;` followed by the
+irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`, and formats the function on a
+thread with a given stack size. The memory of each run is the peak RSS (`rss.py`, address space capped at 1.5 GiB),
+one run at a time. `main` is `1a92abf` (the reference binary has no goto structurer).
+
+| N | Stack | main: RSS, time, output | branch: RSS, time, output | ratio (RSS) |
+|---|---|---|---|---|
+| 2,500 | 64 MiB | 16 MiB, 0.1 s, labelled, 275 KB | 31 MiB, 0.1 s, structured, 142 KB | 1.9 |
+| 2,500 | 512 KiB | 16 MiB, 0.1 s | 31 MiB, 0.1 s | 1.9 |
+| 5,000 | 64 MiB | 41 MiB, 0.2 s, labelled, 557 KB | 70 MiB, 0.3 s, structured, 286 KB | 1.7 |
+| 5,000 | 512 KiB | 41 MiB, 0.2 s | 70 MiB, 0.3 s | 1.7 |
+| 10,000 | 64 MiB | 126 MiB, 0.7 s, labelled, 1.1 MB | 184 MiB, 0.8 s, structured, 576 KB | 1.5 |
+| 10,000 | 512 KiB | 126 MiB, 0.7 s | 184 MiB, 1.0 s | 1.5 |
+
+Every run completes on both stacks: no abort and no segfault. Memory is within 2x of main at every N.
+Before the fixes, the same driver overflowed the 512 KiB stack at N=1,000 and hit `std::bad_alloc`
+at N=10,000 with 175 MB of output and indentation of 10,004 columns at N=5,000 (the old quadratic output).
+
+What changed:
+- An arm that jumps closes its `if`, and the other arm continues at the same level in the caller's loop.
+  A chain of checks is walked iteratively, not by one recursion per check, and it prints flat (`Ir.ThreeCheckChainPrintsFlatWithoutElse`).
+- The post-dominators are computed with the iterative dominator algorithm on the reversed graph, not with
+  bit sets. The old immediate-post-dominator scan was quadratic in the block count, and it ran on
+  every candidate that reached the goto structurer.
+- Empty markers print no indentation, and no printed line is only spaces (`Ir.NoPrintedLineIsOnlyWhitespace`).
+- Nesting bound `kMaxStructureNesting = 128`. The emitter, the legacy structurer and each recursive routine
+  of the control-flow check refuse a deeper nesting with a reason, and the labelled form prints.
+  The bound is 128, not the 256 first proposed: a nested `if`/`else` chain of depth 200 runs on a
+  512 KiB stack, depth 250 overflows it (about 2 KB of stack per level), so 256 would overflow the stack
+  it is meant to protect. Depths 128, 200 and 300 now print labelled without a crash.
+- Tests: `Ir.LongCheckChainFormatsOnASmallStackWithBoundedNesting` (5,000 checks on a 512 KiB pthread,
+  indentation within 2 x bound + 16), `Ir.ThreeCheckChainPrintsFlatWithoutElse`, `Ir.NoPrintedLineIsOnlyWhitespace`,
+  `Ir.ControlFlowCheckRefusesNestingDeeperThanTheBound`. Each was run against the previous code: the 5,000 check
+  chain segfaults on the 512 KiB stack, the three-check chain prints `} else {`, the blank-line test finds
+  whitespace-only lines, and the nesting test gets no refusal.
+
+Measurement on the fixed list at `14b94a4` (before the merge of phase A's review rounds): labelled 0,
+structured without goto 989, with gotos 997, 16,364 gotos in all, largest 409 (`git`), 0 candidates
+refused, Complete 180, InvalidIR 0. At `d5e9350` and `443a2da`, after the merges, the numbers are those of the
+table at the top of this section.
+
+Matrix at `14b94a4`: GCC headless 809/809; Clang headless 809/809 with no warnings; Release 810/810;
+desktop UI under Xvfb 836/836; pinned clang-format 20.1.8 over include, src, apps and tests: clean.
+
+#### W1: merging phase A's review rounds (`2a613ff`, `d5e9350`)
+
+Phase A's review fixes touched the same structurer. The merge needed three changes beyond the conflicts:
+
+1. **The loop follow.** The goto structurer chose a loop's follow by a search from every body block for
+   every exit, the cubic pattern the review found in the fallback. Phase A's test
+   `Ir.ALoopWithManyReturnExitsChoosesItsFollowInBoundedTime` (2,000 exits) ran for more than eleven
+   minutes on the merged tree before it was stopped. Both structurers now call one helper,
+   `choose_loop_follow` (`ir_internal.h`), which labels each body block once with the non-return exits it
+   reaches: the test takes 0.37 s. `Ir.LoopFollowChoiceMatchesTheSearchPerExit` compares the helper with
+   the old search on 20,000 random graphs and bodies (two mutations of the helper, a reversed tie rule and
+   a worklist that does not propagate, fail it at rounds 15 and 60).
+2. **Phase A's flat early-return `if`** in the fallback printed its lines without the control-flow tags
+   W1 adds, so the check refused every fallback candidate that used it, and the goto structurer printed
+   those functions instead (`Ir.FallbackPrintsALoopExitToTheFollowAsBreak` and
+   `Ir.FallbackCopiesASmallReturnBlockReachedTwice` failed). The flat form is tagged as an `if` without
+   an else.
+3. **An unreachable cycle** (`Ir.ACycleTheEntryDoesNotReachIsUnreachable`) is classified
+   `GotoStructured` with the reason "unreachable block" on this branch (the goto structurer places such
+   blocks after the reachable code); the verifier refuses such IR, so it is never printed.
+
+The nesting bound is W1's recursion counter, which also bounds the indentation, with phase A's reason
+text ("nesting deeper than 128 levels").
+
+4. **Stack per nesting level.** Phase A's `Ir.NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack`
+   (1,000 nested tests on a 512 KiB thread) crashed in the Clang Debug build of the merged tree: the
+   layout structurer's `emit_range` frame was 4,104 bytes there (`-fstack-usage`), and 128 levels need
+   525 KB. Its lines are now built by small helpers whose frames are gone before it recurses: 792
+   bytes. The output is unchanged (libc's whole `decompile --json`, 63 MB, is byte-identical before and
+   after), and the test passes under GCC and Clang.
+
+#### W1: first review round on PR #59 (`cf4e6f5`, `6948cef`)
+
+The control-flow check left four things unchecked. Each fix has a test that fails without it:
+
+1. **Where the printed function starts, and where each test is.** Code that printed block 1 (a return)
+   first and block 0 after it, jumping back, passed: every block's own edges were right. A switch with
+   only a default arm, wrapped around the code before block 0 or between two blocks, passed too: its one
+   arm reaches the right block. The first operation must now be the entry block's code, and every
+   condition and switch must come right after the code of the block it tests
+   (`Ir.ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry`, `Ir.ControlFlowCheckRefusesATestThatNoBlockEndsIn`).
+2. **The value each switch arm is entered for.** Only the set of arm targets was compared, so swapped
+   case values passed. Each arm now carries its value, and every value is compared: each IR case (the
+   last case with that value, as the evaluator takes it), each printed case the IR does not have (it
+   must reach the IR's default), and the default (`Ir.ControlFlowCheckRefusesASwitchWhoseCaseValuesAreSwapped`).
+3. **The switch selector.** Any `switch (...) {` passed; the text is now compared with the selector
+   rendered from the dispatch block's operand (`Ir.ControlFlowCheckRefusesASwitchOnAnotherOperand`).
+4. **Goto labels.** A goto was resolved from its tag, not from the label it prints. It now goes to the
+   line that defines that label, the label must be on the tagged block, and a label printed twice is
+   refused (`Ir.ControlFlowCheckFollowsTheLabelAGotoPrints`, `Ir.ControlFlowCheckRefusesALabelPrintedTwice`).
+
+The label check found a bug in the goto structurer: a loop header that is not a pure test and is a
+goto target printed its label twice, on the `while (1)` and on its marker, which is not valid C. The
+label is now on the marker only (`Ir.ALoopHeaderThatAGotoNamesIsLabelledOnce`). Before the fix, 144 of the 1,986 sampled functions
+printed a label twice (`ls` 15, `openssl` 22, `bash` 18, `libsqlite3` 24, `libc` 19, `git` 36,
+`python3.12` 10). The goto
+structurer also printed no test for a conditional branch whose two targets are the same block, which
+the check refuses; it now prints an empty `if` (`Ir.ABranchWhoseTwoTargetsAreTheNextBlockKeepsItsTest`).
+`sample_list.py` counted a structured function as labelled when a string literal quoted the note; the
+class decides now, and without a class only the whole note line counts. A graph that nests deeper than
+`kMaxStructureNesting` prints as labelled blocks, which `AGENTS.md`, `DESIGN.md` §17.2 and the ledger now
+say.
+
+Re-measurement on the fixed list at `6948cef`, and again with the test-placement rule: every count of
+every binary is the same as before this round (0 labelled, 1,000 without goto, 986 with gotos, 16,232 gotos, largest 409, 0 candidates refused,
+Complete 183, InvalidIR 0). The printed text of each sampled function was compared before and after:
+it changed for exactly the 144 functions with a doubled label, none prints a label twice now, and no
+sampled function prints the new empty `if`.
+
+Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
+arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
+compound conditions (`a && b`) are recovered as one `if` with a combined condition, which needs a
+multi-block condition in the tags and a check of its rendering; (3) whether 986 functions with gotos is
+acceptable as the decompiler's state for irreducible and shared-join control flow until (1) or (2) is
+decided.

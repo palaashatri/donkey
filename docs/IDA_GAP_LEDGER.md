@@ -159,7 +159,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample: 49.6% (985; bar 52%, met). 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL; T5 DONE with one open decision: no function of the 1,986 list is printed as labelled blocks, 986 are printed with gotos, see G04-T5. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample before T5: 49.6% (985; bar 52%, met); with T5, 0. 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
@@ -876,6 +876,72 @@ for Partial functions.
   the frame-local names are not shown, and nested lexical blocks are not read. The
   decompiler also spells integer types by width (`u32`), not by their C names; the name is
   the debug information's and the type spelling is the decompiler's.
+
+**G04-T5 Goto structuring: no whole-function labels** (depends: G04-T3 and the goal 8 work in
+`docs/AUDIT.md`; W1 branch `agent/ir/G04-T5-goto-structuring`)
+
+- **Goal:** a function with verified IR prints as structured C. A `goto` is printed only for an
+  edge that no structured form can express, and the printer says how many there are. A second
+  oracle checks the printed control flow against the IR, edge for edge.
+- **Why a dominator-based emitter and not region collapsing:** the brief allows a better design
+  with an explanation. Collapsing a graph by rules needs a second graph rewrite each time a goto
+  is chosen, and its termination depends on the rewrite. An emitter that prints each block once,
+  with gotos as the only escape, terminates by construction (recursion is bounded by the block
+  count), and its output is checked by the oracle below, so a wrong choice is caught either way.
+- **Files:** `src/ir/structure.cpp` (tagged lines; the gate on the candidates),
+  `src/ir/structure_goto.cpp` (new; the goto structurer, the last stage), `src/ir/structure_check.cpp`
+  (new; the control-flow check), `src/ir/ir_internal.h` (line tags; the rule bits), the source list
+  in the top-level `CMakeLists.txt` (explicit), `src/ir/ir.cpp` (the note),
+  `apps/donkey-cli/commands.cpp` (the class name), `tests/unit/ir_test.cpp`,
+  `tests/unit/decompiler_corpus_test.cpp`, `tools/audit/sample_list.py`.
+- **Steps:**
+  1. Tag every printed line with its structural role: statement of block b, if/else open or
+     close (with the block and whether the printed condition is the complement of the IR
+     condition), while or for open, switch open, case, default, break, continue, return, goto,
+     label. The text is unchanged; `DecompilerCorpus.*` and `Ir.*` must stay green.
+  2. The oracle: rebuild the control flow from the tags (sequence, if/else, while, break,
+     continue, return, goto, switch with C fall-through between case arms) and compare each
+     block's successors with the IR's, edge for edge, including which arm a condition's true
+     side enters. Run it on every corpus function and, in the measurement, on all 1,986.
+  3. The goto structurer, tried after the existing structurers (so a function that structures
+     today keeps its goto-free output): an emitter that prints each block once. A branch to the
+     next block by fall-through, to the innermost loop's header as `continue`, or to its follow
+     as `break` is structured; anything else is `goto` to a label on the target. A conditional
+     branch becomes if/else at its immediate post-dominator. A loop is the natural loop of its
+     back edges, printed as `while (test)` when its header is a pure test, else `while (1)`.
+     The rules are switchable for the tests (one bit each).
+  4. The note: a function printed with gotos says `N goto(s) where control flow has no
+     structured form`; a function printed without gotos has no structure note. The labelled
+     whole-function form is kept for invalid graphs, which verified IR does not produce, and
+     for graphs that nest deeper than `kMaxStructureNesting` (128 levels); none of the 1,986
+     sampled functions is labelled.
+- **Tests (each rule has one that fails with the rule switched off; the failure is shown once in
+  a commit message):** a fall-through rule, if/else, if without else, while, while with a
+  pure-test header, break, continue, switch, goto forward into a join with several predecessors,
+  goto out of a loop, goto into a loop body (irreducible). `Ir.FallsBackToLabelsForIrreducibleControlFlow`
+  is replaced by a test of the new note and gotos (it asserted the labelled form, which goal 4
+  removes). The oracle has a test that fails on a deliberately broken rule (shown once).
+- **Measurement:** the same 1,986 functions (`tools/audit/results/list_final.json`), Release
+  build, before and after: whole-function labelled count (target 0), goto-free functions (must
+  not drop), functions with gotos, total gotos and the largest per function, oracle mismatches
+  (target 0), and the runtime (structuring may not make decompilation more than 25% slower).
+- **Done when:** the measurement in `docs/AUDIT.md` (W1 section) shows the numbers above, the
+  three build trees and the desktop UI suite pass, and the PARITY, SUPPORT_MATRIX and DESIGN
+  §17.2 rows agree with the evidence.
+- **Status:** DONE with one open decision, measured in `docs/AUDIT.md` (W1). No function of the
+  fixed 1,986-function list is printed as labelled blocks (985 before), and every printed structure
+  passes the control-flow check, on the corpus and on the list (0 candidates refused). Structured
+  without goto: 1,001 before, 1,000 after. Two functions left that set (`openssl` `0xa9b70`, `libc`
+  `0x97ec0`): their old output printed a switch's case blocks a second time, which the switch rule now
+  refuses; one function joined it (`libsqlite3` `0xa5c40`). Gotos: 986 functions, 16,232 in all,
+  largest 409. Measured at `d5e9350` and again at `443a2da`, after the merges of phase A's
+  review rounds (the same counts).
+  The open decision is whether to copy small shared blocks and recover compound conditions to remove
+  most of them (owner decision; not made here).
+- **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two
+  gotos for one exit: `case 0x1: goto loc_4010;`, where `loc_4010` only jumps on to the loop's exit.
+  The goto to the block that only jumps should go straight to the jump's target, or the block should
+  be copied where it is small. Same family as the shared-join gotos above; part of the owner decision.
 
 ### G05 Type system and user types
 

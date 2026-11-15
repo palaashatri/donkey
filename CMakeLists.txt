@@ -144,6 +144,8 @@ add_library(donkey_ir STATIC
   src/ir/optimize.cpp
   src/ir/prototype.cpp
   src/ir/structure.cpp
+  src/ir/structure_check.cpp
+  src/ir/structure_goto.cpp
 )
 add_library(donkey::ir ALIAS donkey_ir)
 target_include_directories(donkey_ir

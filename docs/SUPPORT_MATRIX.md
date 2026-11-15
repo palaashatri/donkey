@@ -33,9 +33,14 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
   splitting of irreducible functions (`Ir.*Fallback*`, `Ir.*PostDominator*`, `Ir.*Split*`).
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
-  InvalidIR and 0 Unsupported, 183 Complete (9.2%), 985 labelled (49.6%, under the 52% bar).
+  InvalidIR and 0 Unsupported, 183 Complete (9.2%); before G04-T5, 985 labelled (49.6%, under the 52% bar).
+- Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
+  blocks (985 before G04-T5). 1,000 print without a goto and 986 with gotos (16,232 in all; the
+  largest function has 409). Every printed structure is checked edge by edge against the IR before it
+  is shown (no candidate was refused on the sample). The gotos are the open part: most go to a block
+  that is already printed (shared joins), and removing them needs owner decisions (`docs/AUDIT.md`, W1).
 - Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
-  unwind; structured output for the 985 labelled functions (106 irreducible, 879 reducible shapes).
+  unwind; structured output without gotos for the 986 functions that G04-T5 prints with gotos.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
 |---|---|---|---|---|
@@ -110,8 +115,10 @@ itself is printed as `do { ... } while (...)`, and a branch to the next block is
 fall-through. A function with an early return therefore prints an if/else around the
 loop instead of labelled blocks with `goto`. Not done: the `for (init; cond; step)`
 form (a bottom-tested loop cannot be rewritten into it without a proof from the entry
-guard), `break`, `continue`, and the integer comparison simplification. Shapes the
-structurer does not recognise keep the labelled-block form.
+guard). `break` and `continue` are done. Shapes the structurer does not recognise are
+printed with `goto` for the edges that have no structured form (G04-T5), with a note
+that counts them; a structured function with no goto has no note. The printed control
+flow of every corpus function is checked against the IR (`DecompilerCorpus.EveryPrintedFunctionPassesTheControlFlowCheck`).
 
 `tests/corpus/corpus.c` has 59 integer functions: arithmetic, branches,
 loops, arrays, structs, dense and sparse switches, stack arguments, narrow
