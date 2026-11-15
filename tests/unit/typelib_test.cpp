@@ -613,6 +613,57 @@ TEST(TypeLib, RefusesATypeSetThatDoesNotValidate) {
                  donkey::Status::InvalidInput, known);
 }
 
+TEST(TypeLib, KnownTypedefsDoNotChangeTheLibrarysTypes) {
+  // The known table has a typedef named like a built-in type, to a signed 64-bit integer. The
+  // library's `uint32_t` is still the built-in unsigned 32-bit integer, and its ids start after
+  // the known table's.
+  donkey::TypeTable known;
+  donkey::TypeDefinition wide;
+  wide.id = donkey::TypeId(1);
+  wide.kind = donkey::TypeKind::Integer;
+  wide.name = "long";
+  wide.size = 8;
+  wide.is_signed = true;
+  known.put(wide);
+  donkey::TypeDefinition shadow;
+  shadow.id = donkey::TypeId(2);
+  shadow.kind = donkey::TypeKind::Typedef;
+  shadow.name = "uint32_t";
+  shadow.target = donkey::TypeId(1);
+  known.put(shadow);
+
+  const auto result = donkey::read_type_library(valid_file("uint32_t width(void);\n"), known);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().code << ": "
+                                  << result.diagnostic().message;
+  const auto& types = result.value().types;
+  const donkey::TypeDefinition* function = named(types, "width");
+  ASSERT_NE(function, nullptr);
+  const donkey::TypeDefinition* returned = nullptr;
+  for (const donkey::TypeDefinition& definition : types) {
+    EXPECT_GE(definition.id.value(), known.next_id().value()) << definition.name;
+    if (definition.id == function->target) {
+      returned = &definition;
+    }
+  }
+  ASSERT_NE(returned, nullptr) << "the return type is one of the library's own types";
+  EXPECT_EQ(returned->kind, donkey::TypeKind::Integer);
+  EXPECT_EQ(returned->size, 4U);
+  EXPECT_FALSE(returned->is_signed);
+}
+
+TEST(TypeLib, RefusesATypedefOfAnUntaggedStructAndAFunctionWithOneName) {
+  // `typedef struct { ... } item;` declares the ordinary name `item` (the struct takes the
+  // typedef's name), so a function `item` collides with it, in either order.
+  expect_refused(valid_file("typedef struct { int32_t x; } item;\nint32_t item(void);\n"),
+                 "typelib.type_and_function");
+  expect_refused(valid_file("int32_t item(void);\ntypedef struct { int32_t x; } item;\n"),
+                 "typelib.type_and_function");
+  // A tagged struct and a function with one name stay apart (`struct stat` and `stat`).
+  const auto apart =
+      donkey::read_type_library(valid_file("struct item { int32_t x; };\nint32_t item(void);\n"));
+  EXPECT_TRUE(apart.has_value()) << apart.diagnostic().code;
+}
+
 TEST(TypeLib, PassesTheParsersSizeBoundThrough) {
   // A body over the parser's 1 MiB bound is refused by the parser, with its own code. The file is
   // under the 4 MiB file bound.

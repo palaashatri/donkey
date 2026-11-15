@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <fstream>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -587,73 +588,66 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   options.long_size = lib.long_size;
   options.char_is_signed = lib.char_is_signed;
 
-  // A library must parse on its own, against the built-in names only. Its declared count is that
-  // parse's count, so the file means the same thing whatever table it is read with.
-  auto standalone = parse_c_declarations(body, TypeTable{}, options);
-  if (!standalone) {
-    return passthrough<Out>(standalone.diagnostic(), separator_line);
+  // A library parses on its own, against the built-in names only, so the table it is read into
+  // cannot change what its text means (a typedef there could otherwise shadow a built-in name).
+  // Its declared count is that parse's count.
+  std::vector<CDeclaredName> declared;
+  auto parsed = parse_c_declarations(body, TypeTable{}, options, &declared);
+  if (!parsed) {
+    return passthrough<Out>(parsed.diagnostic(), separator_line);
   }
-  if (standalone.value().size() != lib.declarations) {
+  std::vector<TypeDefinition> types = std::move(parsed.value());
+  if (types.size() != lib.declarations) {
     return refuse<Out>(Status::InvalidInput, "typelib.declaration_count",
                        line_text(header.line[static_cast<std::size_t>(Key::Declarations)]) +
                            ": the header declares " + std::to_string(lib.declarations) +
-                           " but the C text has " + std::to_string(standalone.value().size()));
+                           " but the C text has " + std::to_string(types.size()));
   }
 
-  // The types take their ids from `known`, so they do not collide with the table they join.
-  std::vector<TypeDefinition> types;
-  if (known.size() == 0) {
-    types = std::move(standalone.value());
-  } else {
-    auto parsed = parse_c_declarations(body, known, options);
-    if (!parsed) {
-      return passthrough<Out>(parsed.diagnostic(), separator_line);
+  // The types are moved up to take their ids from `known.next_id()`, so they do not collide with
+  // the table they join. Every id the parse returns (and every reference, except 0 for void) lies
+  // in the run it allocated from an empty table.
+  const std::uint64_t base = TypeTable{}.next_id().value();
+  const std::uint64_t first = known.next_id().value();
+  if (first < base || first > std::numeric_limits<std::uint64_t>::max() - types.size()) {
+    return refuse<Out>(Status::InvalidInput, "typelib.invalid_types",
+                       "the type table has no room for the library's type ids");
+  }
+  const auto rebase = [&](TypeId id) {
+    return id.valid() ? TypeId(id.value() - base + first) : id;
+  };
+  for (TypeDefinition& definition : types) {
+    definition.id = rebase(definition.id);
+    definition.target = rebase(definition.target);
+    for (TypeField& field : definition.fields) {
+      field.type = rebase(field.type);
     }
-    types = std::move(parsed.value());
   }
 
-  // C keeps two name spaces apart here: the tags of structs, unions and enums, and the ordinary
-  // names of typedefs and functions. One spelling may be a tag and an ordinary name at once
-  // (`struct stat` and the function `stat`, or `typedef struct point point`). Within one name
-  // space a name is declared once: a typedef and a function with one name is
-  // typelib.type_and_function, and any other repeat is typelib.duplicate_name. Scalar, pointer
-  // and array types are not declarations (scalars carry the built-in names), so they are not
-  // checked here.
+  // C keeps two name spaces apart: the tags of structs, unions and enums, and the ordinary names
+  // of typedefs and functions. One spelling may be a tag and an ordinary name at once (`struct
+  // stat` and the function `stat`, or `typedef struct point point`). Within one name space a name
+  // is declared once: a typedef and a function with one name is typelib.type_and_function, and
+  // any other repeat is typelib.duplicate_name. The parser lists each declared name with its name
+  // space, so a typedef that names an untagged struct (whose type takes the typedef's name) is an
+  // ordinary name, not a tag.
   std::map<std::string, TypeKind> tags;
   std::map<std::string, TypeKind> ordinary;
-  for (const TypeDefinition& definition : types) {
-    if (definition.name.empty()) {
-      continue;
-    }
-    std::map<std::string, TypeKind>* space = nullptr;
-    switch (definition.kind) {
-      case TypeKind::Struct:
-      case TypeKind::Union:
-      case TypeKind::Enum:
-        space = &tags;
-        break;
-      case TypeKind::Typedef:
-      case TypeKind::Function:
-        space = &ordinary;
-        break;
-      default:
-        break;
-    }
-    if (space == nullptr) {
-      continue;
-    }
-    const auto [entry, inserted] = space->emplace(definition.name, definition.kind);
+  for (const CDeclaredName& name : declared) {
+    std::map<std::string, TypeKind>& space = name.space == CNameSpace::Tag ? tags : ordinary;
+    const auto [entry, inserted] = space.emplace(name.name, name.kind);
     if (inserted) {
       continue;
     }
-    const bool function = definition.kind == TypeKind::Function;
-    if (space == &ordinary && (entry->second == TypeKind::Function) != function) {
+    if (name.space == CNameSpace::Ordinary &&
+        (entry->second == TypeKind::Function) != (name.kind == TypeKind::Function)) {
       return refuse<Out>(Status::InvalidInput, "typelib.type_and_function",
-                         "'" + definition.name + "' is used both as a typedef and as a function");
+                         "'" + name.name + "' is used both as a typedef and as a function");
     }
-    return refuse<Out>(Status::InvalidInput, "typelib.duplicate_name",
-                       "'" + definition.name + "' is declared more than once" +
-                           (space == &tags ? " as a struct, union or enum tag" : ""));
+    return refuse<Out>(
+        Status::InvalidInput, "typelib.duplicate_name",
+        "'" + name.name + "' is declared more than once" +
+            (name.space == CNameSpace::Tag ? " as a struct, union or enum tag" : ""));
   }
 
   TypeTable check = known;
@@ -791,6 +785,12 @@ Result<TypeLibrary> load_type_library(const std::filesystem::path& path) {
   std::string text(static_cast<std::size_t>(size) + 1, '\0');
   in.read(text.data(), static_cast<std::streamsize>(text.size()));
   const auto count = static_cast<std::size_t>(in.gcount());
+  // A read of size + 1 bytes from a file of exactly `size` bytes sets eofbit and failbit, so only
+  // badbit and a short count mean the file could not be read.
+  if (in.bad() || count < size) {
+    return refuse<TypeLibrary>(Status::InvalidInput, "typelib.io",
+                               "the type library could not be read completely");
+  }
   if (count > size) {
     return refuse<TypeLibrary>(Status::ResourceLimit, "typelib.too_large",
                                "the library grew while it was read; it was refused");

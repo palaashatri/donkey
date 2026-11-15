@@ -119,9 +119,10 @@ struct TypeLibrary {
   std::vector<TypeDefinition> types;
 };
 
-/// Reads a type library from `text`, with no file access. The C text must parse on its own, with
-/// the built-in names only. `known` is the table the library joins: the library's types take their
-/// ids from `known.next_id()` upwards, and the result is checked as a whole with `known`.
+/// Reads a type library from `text`, with no file access. The C text is parsed once, on its own,
+/// with the built-in names only, so `known` cannot change what it means. `known` is the table the
+/// library joins: the library's types are moved up to take their ids from `known.next_id()`, and
+/// the result is checked as a whole with `known`.
 ///
 /// Refusals (InvalidInput unless noted):
 ///   typelib.format                 missing or malformed format line, a header line without

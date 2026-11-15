@@ -1307,6 +1307,36 @@ void expect_located_error(std::string_view text, const char* code, std::string_v
 
 }  // namespace
 
+TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
+  // A tag the first time it is named (here by a forward reference in a prototype, then its
+  // definition, which is not listed again), a typedef that names an untagged struct, a plain
+  // typedef and a prototype.
+  std::vector<donkey::CDeclaredName> names;
+  const auto parsed = donkey::parse_c_declarations(
+      "int32_t area(const struct box *b);\n"
+      "struct box { int32_t w; int32_t h; };\n"
+      "typedef struct { int32_t x; } item;\n"
+      "typedef int32_t count_t;\n"
+      "enum mode { MODE_A = 1 };\n",
+      donkey::TypeTable{}, {}, &names);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  ASSERT_EQ(names.size(), 5U);
+  EXPECT_EQ(names[0].name, "box");
+  EXPECT_EQ(names[0].space, donkey::CNameSpace::Tag);
+  EXPECT_EQ(names[0].kind, donkey::TypeKind::Struct);
+  EXPECT_EQ(names[1].name, "area");
+  EXPECT_EQ(names[1].space, donkey::CNameSpace::Ordinary);
+  EXPECT_EQ(names[1].kind, donkey::TypeKind::Function);
+  EXPECT_EQ(names[2].name, "item");
+  EXPECT_EQ(names[2].space, donkey::CNameSpace::Ordinary);
+  EXPECT_EQ(names[2].kind, donkey::TypeKind::Typedef);
+  EXPECT_EQ(names[3].name, "count_t");
+  EXPECT_EQ(names[3].kind, donkey::TypeKind::Typedef);
+  EXPECT_EQ(names[4].name, "mode");
+  EXPECT_EQ(names[4].space, donkey::CNameSpace::Tag);
+  EXPECT_EQ(names[4].kind, donkey::TypeKind::Enum);
+}
+
 TEST(Types, ParsesCDeclarations) {
   const char* text = R"(
 typedef unsigned char u8;
