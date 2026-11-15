@@ -353,7 +353,8 @@ struct PseudocodeOptions {
 enum class StructureClass : std::uint8_t {
   Structured,      ///< printed as structured code, with no goto
   GotoStructured,  ///< printed as structured code, with goto for the edges no structure expresses
-  Other,           ///< not printed as structured code: an invalid graph (labelled form)
+  Other,  ///< not printed as structured code (labelled form): an invalid graph, or one that nests
+          ///< deeper than the structurer's bound of 128 levels
 };
 
 struct StructureVerdict {

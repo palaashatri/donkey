@@ -708,6 +708,41 @@ text ("nesting deeper than 128 levels").
    bytes. The output is unchanged (libc's whole `decompile --json`, 63 MB, is byte-identical before and
    after), and the test passes under GCC and Clang.
 
+#### W1: first review round on PR #59 (`cf4e6f5`, `6948cef`)
+
+The control-flow check left four things unchecked. Each fix has a test that fails without it:
+
+1. **Where the printed function starts.** Code that printed block 1 (a return) first and block 0 after
+   it, jumping back, passed: every block's own edges were right. The first block control reaches must
+   now be the entry (`Ir.ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry`).
+2. **The value each switch arm is entered for.** Only the set of arm targets was compared, so swapped
+   case values passed. Each arm now carries its value, and every value is compared: each IR case (the
+   last case with that value, as the evaluator takes it), each printed case the IR does not have (it
+   must reach the IR's default), and the default (`Ir.ControlFlowCheckRefusesASwitchWhoseCaseValuesAreSwapped`).
+3. **The switch selector.** Any `switch (...) {` passed; the text is now compared with the selector
+   rendered from the dispatch block's operand (`Ir.ControlFlowCheckRefusesASwitchOnAnotherOperand`).
+4. **Goto labels.** A goto was resolved from its tag, not from the label it prints. It now goes to the
+   line that defines that label, the label must be on the tagged block, and a label printed twice is
+   refused (`Ir.ControlFlowCheckFollowsTheLabelAGotoPrints`, `Ir.ControlFlowCheckRefusesALabelPrintedTwice`).
+
+The label check found a bug in the goto structurer: a loop header that is not a pure test and is a
+goto target printed its label twice, on the `while (1)` and on its marker, which is not valid C. The
+label is now on the marker only (`Ir.ALoopHeaderThatAGotoNamesIsLabelledOnce`). Before the fix, 144 of the 1,986 sampled functions
+printed a label twice (`ls` 15, `openssl` 22, `bash` 18, `libsqlite3` 24, `libc` 19, `git` 36,
+`python3.12` 10). The goto
+structurer also printed no test for a conditional branch whose two targets are the same block, which
+the check refuses; it now prints an empty `if` (`Ir.ABranchWhoseTwoTargetsAreTheNextBlockKeepsItsTest`).
+`sample_list.py` counted a structured function as labelled when a string literal quoted the note; the
+class decides now, and without a class only the whole note line counts. A graph that nests deeper than
+`kMaxStructureNesting` prints as labelled blocks, which `AGENTS.md`, `DESIGN.md` §17.2 and the ledger now
+say.
+
+Re-measurement on the fixed list at `6948cef`: every count of every binary is the same as before this
+round (0 labelled, 1,000 without goto, 986 with gotos, 16,232 gotos, largest 409, 0 candidates refused,
+Complete 183, InvalidIR 0). The printed text of each sampled function was compared before and after:
+it changed for exactly the 144 functions with a doubled label, none prints a label twice now, and no
+sampled function prints the new empty `if`.
+
 Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
 arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
 compound conditions (`a && b`) are recovered as one `if` with a combined condition, which needs a

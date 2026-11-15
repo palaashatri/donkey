@@ -912,7 +912,9 @@ for Partial functions.
      The rules are switchable for the tests (one bit each).
   4. The note: a function printed with gotos says `N goto(s) where control flow has no
      structured form`; a function printed without gotos has no structure note. The labelled
-     whole-function form is kept only for invalid graphs, which verified IR does not produce.
+     whole-function form is kept for invalid graphs, which verified IR does not produce, and
+     for graphs that nest deeper than `kMaxStructureNesting` (128 levels); none of the 1,986
+     sampled functions is labelled.
 - **Tests (each rule has one that fails with the rule switched off; the failure is shown once in
   a commit message):** a fall-through rule, if/else, if without else, while, while with a
   pure-test header, break, continue, switch, goto forward into a join with several predecessors,
