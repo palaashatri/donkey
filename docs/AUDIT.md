@@ -122,23 +122,43 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
    `Ir.NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack` (1,000 genuinely nested tests on a 512
    KiB thread: it segfaults before the bound, and prints labelled after it).
 
+   Follow-up (`6af21ee`). As first written, the flat form also fired when the fall-through was an
+   edge rather than a block to print next: in a loop body whose `if` returns on one side and goes
+   back to the loop header on the other (openssl `sub_a9c60`), the walk reached the header a second
+   time and the function was rejected with "a block is reached twice" instead of printing
+   `continue;`. Nine functions of the fixed list became labelled (openssl 2, libsqlite3 1, libc 1,
+   git 5; on the whole binaries, 71). The flat form now applies only when the fall-through is not
+   the region's stop, not a block already printed, and not the innermost loop's header or follow;
+   otherwise the nested form prints it as before. Test:
+   `Ir.LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat` (the openssl shape; fails with the
+   guard removed). Checked on every function of openssl, libsqlite3, libc and git (13,472
+   functions, `decompile --json`): the structure class of each one is the same at `6af21ee` as at
+   `cedb9db` (7,496 structured before and after; none lost, none gained), so the fixed-list counts
+   are those of step 2 of goal 8 (990 structured, 996 labelled).
+
 Stress table (`stress N stack_KiB` through `rss.py`, which caps the address space at 1.5 GiB; N
 checks followed by the irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`,
 2N+4 blocks). Peak RSS and wall time:
 
-| N | main `1a92abf` | branch before (cedb9db) | branch after (this fix), 64 MiB stack | branch after, 512 KiB stack |
-|---|---|---|---|---|
-| 2,500 | 16 MiB, 0.1 s | 152 MiB, 0.4 s | 31 MiB, 1.0 s | 31 MiB, 1.0 s |
-| 5,000 | 41 MiB, 0.2 s | 438 MiB, 1.2 s | 78 MiB, 3.6 s | 78 MiB, 3.6 s |
-| 10,000 | 126 MiB | bad_alloc, abort | 209 MiB, 13.5 s | 209 MiB, 13.2 s |
-| 10,000 on 512 KiB | ok | segfault | - | ok (see the row above) |
+| N | main `1a92abf` | branch before (`cedb9db`) | branch after (`6af21ee`), 512 KiB stack |
+|---|---|---|---|
+| 2,500 | 16 MiB, 0.1 s | 152 MiB, 0.4 s | 31 MiB, 0.2 s |
+| 5,000 | 41 MiB, 0.2 s | 438 MiB, 1.2 s | 77 MiB, 0.8 s |
+| 10,000 | 126 MiB, 0.7 s | bad_alloc, abort | 209 MiB, 3.0 s |
+| 10,000 on 512 KiB | ok | segfault | ok (the row above) |
 
-After the fix the ratio to main is 1.9 at 2,500, 1.9 at 5,000 and 1.7 at 10,000, all within 2x, and
-no run aborts or segfaults. The genuinely nested chain (`nest.cpp`, D = 1,000 and 10,000, 512 KiB
-stack) prints labelled: 13 MiB at D = 1,000 and 334 MiB at D = 10,000 (20,001 blocks; memory is the
-block count, not the nesting); main segfaults on the same shape at D = 10,000 on 512 KiB. Every run prints the function labelled, with a maximum indentation of 2
-spaces (the labelled form is flat). The "branch before" column is the coordinator's measurement
-(`w1audit`), and the 512 KiB segfault before the fix is reproduced by the test above.
+All runs are Release builds of the IR library linked into the stress driver, one at a time on an
+otherwise idle machine. After the fix the ratio to main is 1.9 at 2,500, 1.9 at 5,000 and 1.7 at
+10,000, all within 2x, and no run aborts or segfaults. Every run prints the function labelled (the
+tail is irreducible), with a maximum indentation of 2 spaces. The genuinely nested chain (`nest.cpp`:
+block 2k tests and branches to 2k+2, block 2k+1 jumps to the return block; 512 KiB stack) prints
+labelled: 13 MiB and 0.1 s at D = 1,000, and 334 MiB and 5.5 s at D = 10,000 (20,001 blocks). Main
+segfaults on that shape at D = 10,000 on a 512 KiB stack.
+
+Not fixed here, and also on main: the dominator sets are bit sets, quadratic in the block count.
+At D = 50,000 (100,001 blocks) main and this branch both end in `std::bad_alloc` under a 1.5 GiB
+address-space cap, and the CFG bound allows 200,000 blocks. Replacing the sets with an immediate
+dominator tree and interval queries is the next task for this defect class.
 
 
 ## After
@@ -146,6 +166,29 @@ spaces (the labelled form is flat). The "branch before" column is the coordinato
 Measured on this machine, Release build, the same scoring as the baseline. Each row says which
 commit it is, and what changed since the baseline. Numbers are never copied between populations:
 where the population changed, the table says so.
+
+### Function starts at `6af21ee`
+
+Same scoring as the baseline table (`.cold` fragments ignored), Release build. `donkey-cli functions
+--json` on each binary.
+
+| Binary | Ground truth | Baseline recall / precision | `6af21ee` recall / precision |
+|---|---|---|---|
+| own `donkey-cli`, stripped, vs symbols | 2,077 symbols (this build) | 85.8 / 100.0 (1,973 symbols) | 99.9 / 99.9 |
+| `/usr/bin/ls` | 185 FDEs | 50.3 / 98.9 | 100.0 / 99.5 |
+| `/usr/bin/openssl` | 534 FDEs | 55.8 / 99.7 | 100.0 / 99.8 |
+| `/usr/bin/bash` | 2,342 FDEs | 88.5 / 100.0 | 100.0 / 100.0 |
+| `libsqlite3.so.0` | 2,772 FDEs | 76.7 / 100.0 | 100.0 / 100.0 |
+| `libc.so.6` | 3,785 FDEs | 79.9 / 100.0 | 100.0 / 100.0 |
+| `/usr/bin/git` | 4,472 FDEs | 68.9 / 100.0 | 100.0 / 100.0 |
+| `/usr/bin/python3.12` | 11,415 FDEs | 33.0 / 100.0 | 100.0 / 100.0 |
+
+The rows scored against `.eh_frame` are no longer independent: since G23-T1, Donkey seeds function
+starts from the same FDEs, so 100% recall there shows that the seeds are read, not that discovery
+finds functions. The independent check is the stripped own binary scored against the symbols of
+its unstripped copy: 99.9% recall and 99.9% precision. Donkey also lists 549 `.cold` fragments of
+that binary as functions of their own (each has its own FDE); they are ignored in the scores, as
+in the baseline. A binary without unwind tables (G24) is not measured here.
 
 ### Population growth
 
@@ -397,6 +440,19 @@ verdict is Irreducible and names the bound; fails with the per-node bound remove
 Pinned clang-format (`cf2018`) passes over every changed file (`src/ir/structure.cpp`,
 `src/ir/ir.cpp`, `src/ir/ir_internal.h`, `tests/unit/ir_test.cpp`,
 `tests/unit/decompiler_corpus_test.cpp`).
+
+#### Verification at `6af21ee` (the head of the branch before this section)
+
+| Tree | Compiler and preset | Result |
+|---|---|---|
+| `build/headless-linux` | GCC 13.3, headless | 800 of 800 pass; 0 build warnings |
+| `build/clang-headless` | Clang, headless | 800 of 800 pass; 0 build warnings |
+| `build/release-headless` | Release, headless | 801 of 801 pass |
+| `build/dev-linux` | desktop shell, UI smoke tests under `xvfb-run -a -s "-screen 0 1600x1000x24"` | 827 of 827 pass (3 platform skips: process isolation unavailable, a refused attach, an unsupported host) |
+| `build/cross-a64` | AArch64 under `qemu-aarch64` (the tree's ctest launcher), whole suite | 769 of 795 pass; the 26 that fail need what qemu-user does not give: 18 native-debugger tests launch an AArch64 child under ptrace (the x86-64 kernel cannot exec it, exit status 126), and 8 CLI and Python script tests run the AArch64 `donkey-cli` directly rather than through the launcher (no binfmt handler, so `/bin/sh` reads the ELF file). Earlier rounds ran the decompiler subset only (DecompilerCorpus, Ir, Cfg), which passes. |
+
+The CI format command (`find include src apps tests -type f \( -name '*.h' -o -name '*.cpp' \) |
+xargs clang-format --dry-run --Werror`, pinned 20.1.8) is clean over the whole tree.
 
 Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
 
