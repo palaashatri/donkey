@@ -1963,7 +1963,8 @@ and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/p
   256 bytes and at most 4,096 of them (the repeated `source_file` and `skipped` records
   can be many). Nesting stays at `kMaxCDeclarationNesting` (64).
 - *The reader refuses* (each with a stable `typelib.` code and the line where it can be located):
-  a missing or other format line; an unknown or duplicate key; a missing required key; a platform,
+  a missing or other format line; an unknown key; a single key given twice (the repeated records
+  `source_file`, `macro`, `skipped` and `note` may repeat); a missing required key; a platform,
   architecture, ABI or data model outside its enum; a `pointer_size` or `long_size` other than 4 or 8;
   a data model that contradicts the ABI (LLP64 with `long_size` 8, for example); a `body_sha256` that
   does not match the C text; a `declarations` count that does not match the parsed count; a file or
