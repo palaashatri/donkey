@@ -2199,28 +2199,23 @@ precision in the same run.
 
 #### G24-T0 task-level plan (written 2026-11-15, before any G24-T3 code)
 
-**Measured on the analysis code of `origin/main`.** The numbers come from `donkey-cli decompile --json` over the fixed sample
-of 1,986 functions in `tools/audit/results/list_final.json` (seven system binaries, [`AUDIT.md`](AUDIT.md)). The binary
-is `/home/user/donkey-wt/W3/build/release-headless/apps/donkey-cli/donkey-cli`, built at `39f630b`. That commit is not
-an ancestor of `origin/main`, but `git diff --name-only 39f630b origin/main -- src include apps` lists only
-`include/donkey/project/typelib.h` and `src/project/typelib.cpp`. No file under `src/analysis`, `src/binary` or
-`src/ir` differs, so the analysis is the same as on `main`. The counting script is not in the repository; its
-method is below each number.
+**Measured on `main` at `7bba838`.** The numbers come from `python3 -I tools/audit/import_calls.py
+tools/audit/results/list_final.json OUT.json` (added with this plan), run with a Release `donkey-cli` built from the
+analysis code of `main` at `7bba838`, over the fixed sample of 1,986 functions (seven system binaries,
+[`AUDIT.md`](AUDIT.md)). The tool checks each binary's SHA-256 against the list, as `sample_list.py` does.
 
-Method. For each sampled function, the script reads the pseudocode and counts direct calls printed as `sub_<hex>(`
+Method. For each sampled function, the tool reads the pseudocode and counts direct calls printed as `sub_<hex>(`
 (not comment lines, not the function header). A target is a stub when its address is inside `.plt`, `.plt.sec` or
-`.plt.got` (`readelf -SW`). The stub's import name is the `objdump -d` label `<name@plt>` at that address, which is an
-independent oracle for the names. No-return names are matched on that name. Commands:
-`python3 -I measure.py` (scratchpad `g24/measure.py`, with the decompile JSON in `g24/out/`).
+`.plt.got` (`readelf -SW`). The stub's import name is the `objdump -d` label `<name@plt>` at that address, an oracle
+independent of Donkey's own stub reader. No-return names are matched on that name.
 
 - (a) 9,272 call sites print a stub as `sub_<hex>(`, in 1,054 of the 1,986 functions. 0 stub addresses lack an
   objdump name. Calls through a GOT slot (`*(u64 *)(0x...)`) into `.got`/`.got.plt`: 1 site (`__libc_start_main`).
 - (b) Top 20 stubs by call sites (name: sites / functions):
   `BIO_printf` 1042/133, `free` 730/225, `__stack_chk_fail` 409/407, `strcmp` 383/125, `strlen` 367/174,
   `dcgettext` 356/99, `malloc` 227/113, `ERR_print_errors` 155/73, `CRYPTO_free` 152/54, `__errno_location` 142/87,
-  `BIO_puts` 121/-, `__printf_chk` 112/33, `memcpy` 94/62, `strdup` 84/30, `OPENSSL_sk_num` 76/34,
-  `OPENSSL_sk_value` 74/35, `BIO_free` 70/34, `BIO_ctrl` 65/28, `__fprintf_chk` 64/-, `__strcpy_chk` 59/35.
-  (The per-function count for `BIO_puts` and `__fprintf_chk` is outside the top 20 list in the output, so it is shown as `-`.)
+  `BIO_puts` 121/27, `__printf_chk` 112/33, `memcpy` 94/62, `strdup` 84/30, `OPENSSL_sk_num` 76/34,
+  `OPENSSL_sk_value` 74/35, `BIO_free` 70/34, `BIO_ctrl` 65/28, `__fprintf_chk` 64/23, `__strcpy_chk` 59/35.
 - (c) No-return imports in the sample, call sites (functions): `__stack_chk_fail` 409 (407), `__assert_fail` 25 (21),
   `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3). Total functions with a no-return call: 440.
   `error` (not counted above, argument not checked): 14 sites. The other names on the list (`err`, `verr`,
@@ -2303,8 +2298,8 @@ requires.
   from the GOT slot of a `-fno-plt` call) and on a same-image symbol name. The list is the one in (c) above, without
   `error`. `error` is a no-return only when its first argument is nonzero, so it stays a normal call (its argument is
   not modelled). Each mark carries provenance: `known-name:<name>`.
-- *Propagation.* A same-image function is no-return when every path from its entry reaches a no-return call or a halt
-  It is bounded by a fixed iteration count and a
+- *Propagation.* A same-image function is no-return when every path from its entry reaches a no-return call (or an
+  instruction that never falls through, such as `ud2` or `hlt`). It is bounded by a fixed iteration count and a
   depth limit. It uses only marks already proven, and a function whose analysis is Partial for an unrelated reason
   keeps its ordinary call semantics. Propagation is an owner decision (below).
 - *CFG effect.* In the Call case (cfg.cpp 1093-1107), a call to a no-return function `break`s the walk instead of
@@ -2318,9 +2313,15 @@ requires.
   return is never counted as returning. The printer prints `abort();` with no `return` after it.
 - *Still Partial, and why.* A no-return call is still an import call. Its arguments and its ABI effects are not
   modelled, so a function that calls one keeps the "outgoing call arguments" note (`lift.cpp` 2137 for x86-64,
-  `lift_aarch64.cpp` 2202 for AArch64). T3 removes only the rax note and the synthetic return. A function is Complete only if the oracle
-  executes it and compares the returning paths with the compiled code. Paths through a no-return call are not compared,
-  because the real program does not return from them.
+  `lift_aarch64.cpp` 2202 for AArch64). T3 removes only the rax note and the synthetic return. Whether such a function
+  may become Complete is owner decision 3 below; until it is decided, it stays Partial. A function is Complete only if
+  the oracle executes it and compares the returning paths with the compiled code.
+- *Stack-protector checks.* 407 of the 440 functions with a no-return call call `__stack_chk_fail`. Their canary load
+  is `mov %fs:0x28, %rax`. On `main` the decoder drops the `fs` override and the lifter prints it as
+  `rax = *(u64 *)(0x28);`, a read of address 0x28. That defect is fixed separately (branch `agent/decode/fs-gs-segment-soundness`: the lifter refuses an
+  `fs`- or `gs`-relative access as Unsupported). So a canary function stays Partial after T3 until thread-local reads
+  are modelled: the canary is read twice from one slot that the function does not write, and the evaluator would need
+  that slot as an opaque value. That model is a later step, not part of T3.
 - *Pitfalls.* A wrong no-return mark deletes real code (the bytes after the call become unreachable). Prevention: only
   exact names from the fixed list, provenance on every mark, propagation only from proven marks, and the CFG keeps bytes
   that another path reaches. Test: a function that calls `abort` on one path and returns on another.
@@ -2340,7 +2341,7 @@ requires.
 - *Measurement.* Before (this plan, above): 469 no-return call sites, 322 followed by a printed `return`, 288
   functions with the rax note that call a no-return import. Target after T3: 0 no-return sites followed by a printed
   `return`, and the count in (d) falls. Functions that are still Partial are reported with the reason that remains.
-  Measured with `measure.py` over the same 1,986 functions, and the numbers go in the PR.
+  Measured with `tools/audit/import_calls.py` over the same 1,986 functions, and the numbers go in the PR.
 - *Relation to G21-T5.* G21-T5 ("a call to a no-return function ends the block") is the IR-side part of this task.
   It depends on T3 and is not a separate piece of work.
 
@@ -2372,7 +2373,7 @@ requires.
 - *Tests (names to add).*
   - `Analysis.PltStubIsNamedByItsImport` (ELF fixture, x86-64: a stub named `abort@plt`)
   - `Analysis.GotCallIsNamedByItsImport` (ELF fixture built with `-fno-plt`)
-  - `Analysis.AArch64PltStubIsNamed` (AArch64 ELF fixture, read under `qemu-aarch64` per AGENTS.md section 7)
+  - `Analysis.AArch64PltStubIsNamed` (AArch64 ELF fixture; the stub reader only reads bytes, so no AArch64 host is needed)
   - `Analysis.ThunkTakesItsTargetsName` (unit: a one-jump function)
   - `Cfg.JumpToAnotherFunctionIsATailCall` and `Cfg.JumpIntoUnknownCodeIsABranch` (unit)
   - `cli.functions_lists_import_stubs_by_name` and `cli.decompile_prints_import_calls_by_name` (CLI, committed fixture)
