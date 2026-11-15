@@ -2675,6 +2675,16 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
             "not recovered and locals are not recovered"
           : "x86-64 subset; locals are not recovered");
 
+  // Conditional branches whose target is outside this function (a conditional tail call): each
+  // branches to an exit block, appended after the function's own blocks, that calls the target and
+  // returns its result. They are patched once every block is lifted.
+  struct ConditionalTailCall {
+    std::size_t block = 0;
+    std::size_t statement = 0;
+    const Instruction* instruction = nullptr;
+  };
+  std::vector<ConditionalTailCall> conditional_tail_calls;
+
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
@@ -2764,6 +2774,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
+        if (target == lifter.block_by_address.end() && instruction.direct_target.has_value()) {
+          // The target is another function's code: a conditional tail call. The branch goes to an
+          // exit block that calls it; the block is made after the loop.
+          statement.b = IrOperand::block_ref(0);
+          lifter.push(out_block, std::move(statement));
+          conditional_tail_calls.push_back(ConditionalTailCall{
+              lifter.out.blocks.size(), out_block.statements.size() - 1, &instruction});
+          continue;
+        }
         if (target == lifter.block_by_address.end()) {
           lifter.mark_partial("conditional branch target is outside this function");
           statement.b = IrOperand::block_ref(0);
@@ -3034,6 +3053,57 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.blocks.push_back(std::move(exit_block));
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
+  }
+  // The exit blocks of conditional tail calls, one per target: a call of the target, with its
+  // inferred signature when it is a known function of the image, and a return of its result.
+  std::map<std::uint64_t, std::uint32_t> tail_exit_by_target;
+  for (const ConditionalTailCall& pending : conditional_tail_calls) {
+    if (pending.block >= lifter.out.blocks.size() ||
+        pending.statement >= lifter.out.blocks[pending.block].statements.size()) {
+      continue;  // the block was not kept (the statement limit stopped the lift)
+    }
+    const Instruction& instruction = *pending.instruction;
+    const std::uint64_t target = instruction.direct_target.value();
+    auto exit = tail_exit_by_target.find(target);
+    if (exit == tail_exit_by_target.end()) {
+      IrBlock exit_block;
+      exit_block.address = target;
+      IrStatement call;
+      call.op = IrOp::Call;
+      call.source_address = instruction.address;
+      call.width = lifter.pointer_width;
+      call.a = IrOperand::constant_value(target, lifter.pointer_width);
+      if (const auto callee = lifter.known_callee(instruction)) {
+        Lifter::resolve_call_statement(call, *callee);
+        const std::string note =
+            "a conditional jump to a known function is lifted as a branch to a call with its "
+            "inferred arguments and result, followed by a return";
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      } else {
+        const std::string note = "conditional jump leaves the function; treated as a tail call";
+        lifter.out.partial = true;
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      }
+      exit_block.statements.push_back(std::move(call));
+      IrStatement tail;
+      tail.op = IrOp::Return;
+      tail.source_address = instruction.address;
+      tail.width = lifter.pointer_width;
+      tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
+      exit_block.statements.push_back(std::move(tail));
+      exit =
+          tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
+              .first;
+      lifter.out.blocks.push_back(std::move(exit_block));
+    }
+    lifter.out.blocks[pending.block].statements[pending.statement].b =
+        IrOperand::block_ref(exit->second);
   }
   const ReturnRegisters return_registers = image.architecture == Architecture::AArch64
                                                ? ReturnRegisters{"x0", "v0", true}

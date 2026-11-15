@@ -1033,7 +1033,9 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         if (visited.contains(address)) {
           break;
         }
-        if (decoded >= decoded_limit) {
+        // The budget counts distinct instructions: one that another walk already counted can be
+        // visited after it is spent.
+        if (decoded >= decoded_limit && !reached_anywhere.contains(address)) {
           truncated = true;
           break;
         }
@@ -1061,7 +1063,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             indirect = true;  // the slot is not a decoded instruction of this path
             break;
           }
-          if (decoded >= decoded_limit) {
+          if (decoded >= decoded_limit && !reached_anywhere.contains(next)) {
             truncated = true;
             break;
           }
@@ -1126,11 +1128,18 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             break;
           case InstructionClass::ConditionalJump:
             if (instruction.direct_target.has_value()) {
-              const std::size_t keep = std::min<std::size_t>(2, run.size());
-              entered_by.emplace(instruction.direct_target.value(),
-                                 std::vector<std::uint32_t>(
-                                     run.end() - static_cast<std::ptrdiff_t>(keep), run.end()));
-              worklist.push_back(instruction.direct_target.value());
+              const std::uint64_t target = instruction.direct_target.value();
+              // A conditional jump to another function's start (or to an import stub) is a
+              // conditional tail call, as an unconditional one is: the target's code is that
+              // function's, so it is not followed. The edge is kept.
+              if (target == function.address ||
+                  (!function_starts.contains(target) && !import_stubs.contains(target))) {
+                const std::size_t keep = std::min<std::size_t>(2, run.size());
+                entered_by.emplace(target,
+                                   std::vector<std::uint32_t>(
+                                       run.end() - static_cast<std::ptrdiff_t>(keep), run.end()));
+                worklist.push_back(target);
+              }
             } else {
               indirect = true;
             }

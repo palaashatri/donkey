@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
@@ -528,6 +530,83 @@ TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
   ASSERT_TRUE(result.value().cfg.partial);
   EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
   EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.block_limit"), 1U);
+}
+
+namespace {
+
+/// Bytes, padded with int3 to `size`, and a function symbol at each of `starts`.
+std::pair<std::vector<std::byte>, BinaryImage> image_with_functions(
+    std::initializer_list<std::pair<std::size_t, std::vector<std::uint8_t>>> pieces,
+    std::size_t size, std::initializer_list<std::uint64_t> starts) {
+  std::vector<std::byte> data(size, std::byte{0xcc});
+  for (const auto& [offset, bytes] : pieces) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      data[offset + i] = static_cast<std::byte>(bytes[i]);
+    }
+  }
+  BinaryImage image = synthetic_image(data.size());
+  std::size_t n = 0;
+  for (const std::uint64_t start : starts) {
+    donkey::Symbol symbol;
+    symbol.name = "f" + std::to_string(n++);
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  return {std::move(data), std::move(image)};
+}
+
+}  // namespace
+
+// A conditional jump to another function's start is a conditional tail call, as an unconditional
+// one is: the caller does not take in the other function's body, and the edge is kept.
+TEST(Cfg, AConditionalJumpToAnotherFunctionDoesNotTakeInItsBody) {
+  // f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret.  f1 (0x1010): xor eax, eax; ret.
+  auto [data, image] =
+      image_with_functions({{0x0, {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}},
+                            {0x10, {0x31, 0xc0, 0xc3}}},
+                           0x20, {0x1000, 0x1010});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : result.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_TRUE(caller->has_extent);
+  EXPECT_EQ(caller->end_address, 0x100aU);
+  EXPECT_EQ(caller->block_count, 2U);
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1002 && edge.to == 0x1010 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalTrue);
+  }
+  EXPECT_TRUE(kept);
+}
+
+// The instruction budget counts distinct instructions, so one that an earlier walk counted is
+// still followed after the budget is spent. f0 and f1 both jump to one unseeded ret; with a budget
+// of three, f0 counts its jump and the ret, f1 counts its jump, and then reaches the counted ret.
+TEST(Cfg, AnInstructionCountedByAnotherWalkIsFollowedAfterTheBudget) {
+  auto [data, image] =
+      image_with_functions({{0x0, {0xe9, 0x1b, 0x00, 0x00, 0x00}},   // 0x1000: jmp 0x1020
+                            {0x10, {0xe9, 0x0b, 0x00, 0x00, 0x00}},  // 0x1010: jmp 0x1020
+                            {0x20, {0xc3}}},                         // 0x1020: ret
+                           0x21, {0x1000, 0x1010});
+  auto full = donkey::analyze(image, data);
+  ASSERT_TRUE(full.has_value()) << full.diagnostic().message;
+  AnalysisOptions options;
+  options.max_instructions = 3;
+  auto cfg = donkey::build_control_flow_graph(image, full.value().instructions,
+                                              full.value().functions, options, data);
+  ASSERT_TRUE(cfg.has_value()) << cfg.diagnostic().message;
+  EXPECT_EQ(count_diagnostics(cfg.value(), "analysis.instruction_limit"), 0U);
+  for (const donkey::Function& function : cfg.value().functions) {
+    EXPECT_EQ(function.block_count, 2U) << std::hex << function.address;
+  }
 }
 
 // The traversal's work is bounded, not only its distinct instructions: 1,000 stubs each jump into

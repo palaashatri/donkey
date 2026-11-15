@@ -5529,6 +5529,56 @@ TEST(Ir, TheClobberCheckIgnoresABranchTargetOutsideTheFunction) {
   EXPECT_FALSE(function.partial);
 }
 
+TEST(Ir, AConditionalJumpToAKnownFunctionIsACallInAnExitBlock) {
+  // f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret.  f1 (0x1010): xor eax, eax; ret.
+  // The je is a conditional tail call to f1: it branches to an exit block that calls f1 with its
+  // inferred signature and returns the result, not to a made-up block of f0.
+  std::vector<std::byte> data(0x20, std::byte{0xcc});
+  const std::uint8_t f0[] = {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
+  const std::uint8_t f1[] = {0x31, 0xc0, 0xc3};
+  for (std::size_t i = 0; i < sizeof(f0); ++i) {
+    data[i] = static_cast<std::byte>(f0[i]);
+  }
+  for (std::size_t i = 0; i < sizeof(f1); ++i) {
+    data[0x10 + i] = static_cast<std::byte>(f1[i]);
+  }
+  auto image = synthetic_image(data.size());
+  for (const std::uint64_t start : {0x1000ULL, 0x1010ULL}) {
+    donkey::Symbol symbol;
+    symbol.name = start == 0x1000 ? "f0" : "f1";
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  bool calls_f1 = false;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      calls_f1 = calls_f1 ||
+                 (statement.op == IrOp::Call && statement.signature_inferred &&
+                  statement.a.kind == IrOperandKind::Constant && statement.a.constant == 0x1010);
+    }
+  }
+  EXPECT_TRUE(calls_f1);
+  for (const std::string& note : function.notes) {
+    EXPECT_EQ(note.find("outside this function"), std::string::npos) << note;
+  }
+  EXPECT_FALSE(function.partial);
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+}
+
 TEST(Ir, AFunctionThatForwardsItsArgumentToACallTakesThatParameter) {
   // forward (0x1000): call 0x1006; ret.  leaf (0x1006): mov eax, edi; add eax, 1; ret.
   // forward never reads edi itself: the resolved call reads it as the leaf's 4-byte argument, so
