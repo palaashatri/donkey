@@ -58,12 +58,17 @@ Result<PdataReadResult> read_pdata_of_image(const BinaryImage& image,
     result.truncated = true;
   }
   for (std::size_t i = 0; i < result.entries; ++i) {
-    // Each entry is mapped by its own RVA: the directory need not lie in one section's file data,
-    // and an entry whose 12 bytes are not mapped together is not read from unrelated file bytes.
+    // Each entry is mapped by its own RVA, byte by byte: the directory need not lie in one
+    // section's file data, and an entry whose 12 bytes are not mapped contiguously (a gap between
+    // two sections in its middle, or its end in another section) is not read from unrelated bytes.
     const std::uint64_t entry_rva = std::uint64_t{rva.value()} + i * kRuntimeFunctionSize;
     auto first = binary::detail::rva_to_file_offset(image, entry_rva);
-    auto last = binary::detail::rva_to_file_offset(image, entry_rva + kRuntimeFunctionSize - 1);
-    if (!first || !last || last.value() != first.value() + kRuntimeFunctionSize - 1) {
+    bool contiguous = first.has_value();
+    for (std::uint64_t byte = 1; contiguous && byte < kRuntimeFunctionSize; ++byte) {
+      auto mapped = binary::detail::rva_to_file_offset(image, entry_rva + byte);
+      contiguous = mapped.has_value() && mapped.value() == first.value() + byte;
+    }
+    if (!contiguous) {
       ++result.malformed;
       continue;
     }

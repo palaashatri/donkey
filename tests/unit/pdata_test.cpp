@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
@@ -146,4 +147,45 @@ TEST(Pdata, AnEntryOutsideItsSectionIsNotReadFromTheNextFileBytes) {
     reported = reported || diagnostic.code == "analysis.pdata_incomplete";
   }
   EXPECT_TRUE(reported);
+}
+
+TEST(Pdata, AnEntryWithAGapInItsMiddleIsNotRead) {
+  // One 12-byte entry at RVA 0x5000. Section A maps RVAs 0x5000 to 0x5003 to file 0x400, section B
+  // maps 0x5008 to 0x500b to file 0x408, and nothing maps 0x5004 to 0x5007. The entry's first and
+  // last bytes map to 0x400 and 0x40b, 11 apart, as if it were contiguous; its EndAddress field is
+  // not mapped at all, so the entry is not read (the bytes at file 0x404 belong to nothing here).
+  constexpr std::uint64_t kImageBase = 0x140000000ULL;
+  std::vector<std::byte> file(0x600, std::byte{0});
+  put_u32(file, 0x3c, 0x40);
+  file[0x58] = std::byte{0x0b};
+  file[0x59] = std::byte{0x02};
+  put_u32(file, 0x58 + 108, 16);
+  put_u32(file, 0x58 + 112 + 3 * 8, 0x5000);
+  put_u32(file, 0x58 + 112 + 3 * 8 + 4, 12);
+  put_u32(file, 0x400, 0x2000);  // BeginAddress (mapped by section A)
+  put_u32(file, 0x404, 0x2010);  // the bytes under the unmapped EndAddress RVAs
+  put_u32(file, 0x408, 0x6000);  // UnwindInfo (mapped by section B)
+  file[0x500] = std::byte{0x01};
+
+  donkey::BinaryImage image;
+  image.format = donkey::BinaryFormat::Pe;
+  image.architecture = donkey::Architecture::X86_64;
+  image.image_base = kImageBase;
+  image.file_size = file.size();
+  for (const auto& [name, rva, offset, size] :
+       {std::tuple<const char*, std::uint64_t, std::uint64_t, std::uint64_t>{".a", 0x5000, 0x400,
+                                                                             4},
+        {".b", 0x5008, 0x408, 4},
+        {".xdata", 0x6000, 0x500, 0x10}}) {
+    donkey::Section section;
+    section.name = name;
+    section.address = kImageBase + rva;
+    section.file_offset = offset;
+    section.file_size = size;
+    image.sections.push_back(section);
+  }
+  auto read = donkey::read_pdata_of_image(image, file, 1000);
+  ASSERT_TRUE(read.has_value()) << read.diagnostic().message;
+  EXPECT_TRUE(read.value().functions.empty());
+  EXPECT_EQ(read.value().malformed, 1U);
 }

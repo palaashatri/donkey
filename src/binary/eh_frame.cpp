@@ -363,7 +363,7 @@ Cie parse_cie_body(Cursor& cursor, unsigned pointer_size) {
 struct RecordHeader {
   std::uint64_t length = 0;
   std::uint64_t body = 0;   // offset of the id field
-  unsigned id_size = 4;     // 4 for the 32-bit form, 8 for the 64-bit form
+  unsigned id_size = 4;     // 4 in both forms: .eh_frame keeps a 4-byte CIE id and pointer
   bool terminator = false;  // a zero length ends the section
 };
 
