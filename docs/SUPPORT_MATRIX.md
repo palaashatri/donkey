@@ -20,7 +20,7 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`). An indirect tail jump (`jmp rax`) is a call
   through its operand (`Ir.IndirectTailJumpCallsItsOperand`).
 - Calls (G21): a direct call to a same-image integer callee is resolved to its inferred arguments
-  and result (x86-64 only) when the callee lifts Complete with its own calls left unresolved, in
+  and result (x86-64 System V; Win64 (PE) calls with arguments stay Partial) when the callee lifts Complete with its own calls left unresolved, in
   practice a leaf. A callee that makes a call is Partial at that level, so its callers stay Partial
   even when it is Complete on its own (resolution is one level deep). A callee that reads a stack argument is not resolved,
   so its caller is Partial (`Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial`,
