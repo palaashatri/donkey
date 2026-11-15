@@ -539,43 +539,47 @@ The counts at `09d585e` were the same, binary for binary; the change from the fi
 ### W1: goto structuring (G04-T5)
 
 Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,
-1,986 functions) with the Release build of the branch head (`14b94a4`) and the baseline build from
-`5162f62` (the plan commit, no code change; the same list). The measurement is
-`sample_list.py measure`, extended with the goto and refusal counts.
+1,986 functions) with the Release build of the branch after it merged `claude/funny-meitner-cpc7oc` up to
+`e2c078c` (branch commit `d5e9350`); the baseline is that phase A head itself, measured the same way.
+The measurement is `sample_list.py measure`, extended with the goto and refusal counts. (The first
+measurement, at `14b94a4` against `5162f62`, had 996 labelled before and 989 goto-free, 997 with gotos
+and 16,364 gotos after; the review fixes of phase A changed the baseline, see "Second and third review
+rounds".)
 
-| | Before | After |
+| | Before (phase A, `e2c078c`) | After (W1, `d5e9350`) |
 |---|---|---|
-| Printed as labelled blocks (whole function) | 996 (50.2%) | **0** |
-| Structured, no goto | 990 | 989 |
-| Structured with gotos | 0 | 997 |
-| Gotos, total | 0 | 16,364 |
+| Printed as labelled blocks (whole function) | 985 (49.6%) | **0** |
+| Structured, no goto | 1,001 | 1,000 |
+| Structured with gotos | 0 | 986 |
+| Gotos, total | 0 | 16,232 |
 | Gotos, largest in one function | 0 | 409 (`git`) |
 | Candidate structures refused by the control-flow check | not checked | 0 |
-| Complete / InvalidIR / Unsupported | 180 / 0 / 0 | 180 / 0 / 0 |
+| Complete / InvalidIR / Unsupported | 183 / 0 / 0 | 183 / 0 / 0 |
 
 Per binary (after; before in brackets is the labelled count):
 
 | Binary (sampled) | Labelled | No goto | With gotos | Gotos | Largest |
 |---|---|---|---|---|---|
-| ls (186) | 0 (96) | 90 | 96 | 1,656 | 240 |
-| openssl (300) | 0 (169) | 130 | 170 | 3,329 | 291 |
-| bash (300) | 0 (130) | 170 | 130 | 2,003 | 230 |
+| ls (186) | 0 (96) | 90 | 96 | 1,648 | 240 |
+| openssl (300) | 0 (169) | 130 | 170 | 3,326 | 291 |
+| bash (300) | 0 (130) | 170 | 130 | 1,997 | 230 |
 | libsqlite3 (300) | 0 (124) | 177 | 123 | 1,734 | 125 |
-| libc (300) | 0 (122) | 177 | 123 | 1,403 | 102 |
+| libc (300) | 0 (122) | 177 | 123 | 1,362 | 102 |
 | git (300) | 0 (199) | 101 | 199 | 3,749 | 409 |
-| python3.12 (300) | 0 (156) | 144 | 156 | 2,490 | 392 |
+| python3.12 (300) | 0 (145) | 155 | 145 | 2,416 | 392 |
 
-**Goto-free functions dropped by 1 (990 to 989), and this is a correctness fix, not a regression.**
-Per function, two functions left the goto-free set and one joined it (`libsqlite3`). The two that left
-(`openssl` `0xa9b70`, `libc` `0x97ec0`) printed a switch whose join lies outside the region of the
-enclosing `if`. The layout-based structurer accepted that by walking on to the next block, which printed
-the case blocks a second time: `return rax;` appeared 22 times in `0x97ec0` and `rax = (u64)(0xbacc6);` 103
-times in `0xa9b70` (their outputs had 230 and 539 lines; now 139 and 203). The switch rule now rejects
-that shape (`switch join outside its region`), and the goto structurer prints the two functions with
-gotos (one in `0xa9b70`, two in `0x97ec0`). Net goto-free count: 990 before, 989 after.
+**Goto-free functions: 1,001 before, 1,000 after, and the drop is a correctness fix, not a regression.**
+Per function, two functions left the goto-free set and one joined it (`libsqlite3` `0xa5c40`, which the
+fallback rejected with "an if joins outside its region"). The two that left (`openssl` `0xa9b70`, `libc`
+`0x97ec0`) print a switch whose join lies outside the region of the enclosing `if`. The layout-based
+structurer accepts that by walking on to the next block, which prints the case blocks a second time: at
+`e2c078c`, `return rax;` appears 22 times in `0x97ec0` and `rax = (u64)(0xbacc6);` 103 times in
+`0xa9b70` (outputs of 230 and 539 lines). The switch rule now rejects that shape (`switch join outside
+its region`), and the goto structurer prints the two functions with one goto each (126 and 184 lines;
+the statement appears 9 times and once). These are the same three functions as at `14b94a4`.
 
-Where the gotos are. Counted on `openssl` (all its functions, both runs of the goto structurer, so each
-decision counted twice; shares are what matter):
+Where the gotos are. Counted on `openssl` at `14b94a4` (all its functions, both runs of the goto
+structurer, so each decision counted twice; shares are what matter):
 
 | Target of the goto | Share | Note |
 |---|---|---|
@@ -663,17 +667,41 @@ What changed:
   chain segfaults on the 512 KiB stack, the three-check chain prints `} else {`, the blank-line test finds
   whitespace-only lines, and the nesting test gets no refusal.
 
-Measurement on the fixed list at `14b94a4` (the same binary as the table above): labelled 0, structured
-without goto 989, with gotos 997, 16,364 gotos in all, largest 409 (`git`), 0 candidates refused,
-Complete 180, InvalidIR 0. The 990 to 989 drop in goto-free functions is unchanged from the previous
-measurement (see the paragraph above).
+Measurement on the fixed list at `14b94a4` (before the merge of phase A's review rounds): labelled 0,
+structured without goto 989, with gotos 997, 16,364 gotos in all, largest 409 (`git`), 0 candidates
+refused, Complete 180, InvalidIR 0. At `d5e9350`, after the merge, the numbers are those of the table at
+the top of this section.
 
 Matrix at `14b94a4`: GCC headless 809/809; Clang headless 809/809 with no warnings; Release 810/810;
 desktop UI under Xvfb 836/836; pinned clang-format 20.1.8 over include, src, apps and tests: clean.
 
+#### W1: merging phase A's review rounds (`2a613ff`, `d5e9350`)
+
+Phase A's review fixes touched the same structurer. The merge needed three changes beyond the conflicts:
+
+1. **The loop follow.** The goto structurer chose a loop's follow by a search from every body block for
+   every exit, the cubic pattern the review found in the fallback. Phase A's test
+   `Ir.ALoopWithManyReturnExitsChoosesItsFollowInBoundedTime` (2,000 exits) ran for more than eleven
+   minutes on the merged tree before it was stopped. Both structurers now call one helper,
+   `choose_loop_follow` (`ir_internal.h`), which labels each body block once with the non-return exits it
+   reaches: the test takes 0.37 s. `Ir.LoopFollowChoiceMatchesTheSearchPerExit` compares the helper with
+   the old search on 20,000 random graphs and bodies (two mutations of the helper, a reversed tie rule and
+   a worklist that does not propagate, fail it at rounds 15 and 60).
+2. **Phase A's flat early-return `if`** in the fallback printed its lines without the control-flow tags
+   W1 adds, so the check refused every fallback candidate that used it, and the goto structurer printed
+   those functions instead (`Ir.FallbackPrintsALoopExitToTheFollowAsBreak` and
+   `Ir.FallbackCopiesASmallReturnBlockReachedTwice` failed). The flat form is tagged as an `if` without
+   an else.
+3. **An unreachable cycle** (`Ir.ACycleTheEntryDoesNotReachIsUnreachable`) is classified
+   `GotoStructured` with the reason "unreachable block" on this branch (the goto structurer places such
+   blocks after the reachable code); the verifier refuses such IR, so it is never printed.
+
+The nesting bound is W1's recursion counter, which also bounds the indentation, with phase A's reason
+text ("nesting deeper than 128 levels").
+
 Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
 arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
 compound conditions (`a && b`) are recovered as one `if` with a combined condition, which needs a
-multi-block condition in the tags and a check of its rendering; (3) whether 997 functions with gotos is
+multi-block condition in the tags and a check of its rendering; (3) whether 986 functions with gotos is
 acceptable as the decompiler's state for irreducible and shared-join control flow until (1) or (2) is
 decided.
