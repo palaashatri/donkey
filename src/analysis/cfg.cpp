@@ -308,6 +308,9 @@ class TableSlice {
       return std::nullopt;
     }
     const MemoryOperand& mem = operand.memory;
+    if (!mem.segment.empty()) {
+      return std::nullopt;  // fs- or gs-relative: an offset into the thread block, not an address
+    }
     std::uint64_t address = static_cast<std::uint64_t>(mem.displacement);
     if (mem.base == "rip") {
       address += at.address + at.length;
