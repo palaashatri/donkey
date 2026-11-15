@@ -33,6 +33,7 @@
 #include "donkey/ir/prototype.h"
 #include "donkey/project/types.h"
 #include "lift_internal.h"
+#include "registers.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -1003,55 +1004,68 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
   EXPECT_EQ(checked, std::size(kLibraries) * std::size(kCorpus));
 }
 
-// The same holds after a call: c_call_six returns k_six(...) + 1, and a pass that turns the
-// addition after the call into a subtraction has to be reported. Without the callee resolver both
-// snapshots fail at the call and compare equal, so this also checks that the resolver is in place.
+// The same holds after a call: a pass that turns an addition into rax after a resolved call into a
+// subtraction has to be reported. Without the callee resolver both snapshots fail at the call and
+// compare equal, so this also checks that the resolver is in place. Every library and every
+// call-heavy corpus function with such an addition is checked, and at least one must exist. Calls
+// resolve under System V only, so on a Win64 host the test is skipped.
 TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
 #if !(defined(__x86_64__) || defined(_M_X64))
   GTEST_SKIP() << "calls are resolved on x86-64 only";
 #endif
-  const CorpusFunction* six = nullptr;
-  for (const CorpusFunction& entry : kCorpus) {
-    if (std::string_view(entry.name) == "c_call_six") {
-      six = &entry;
-    }
+  if (host_convention() != donkey::IrCallingConvention::SysV64) {
+    GTEST_SKIP() << "calls are resolved under the System V convention only (G21-T1): the host's "
+                    "corpus is Win64, where every call with arguments stays unresolved";
   }
-  ASSERT_NE(six, nullptr);
-  auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
-  ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
-  ASSERT_TRUE(analysis.has_value());
-  const donkey::Function* function = find_corpus_function(analysis.value(), six->name);
-  ASSERT_NE(function, nullptr);
-  donkey::LiftOptions raw_options;
-  raw_options.run_passes = false;
-  auto raw = donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
-  ASSERT_TRUE(raw.has_value());
-
-  donkey::IrFunction broken = raw.value();
-  bool after_call = false;
-  std::size_t changed = 0;
-  for (donkey::IrBlock& block : broken.blocks) {
-    for (donkey::IrStatement& statement : block.statements) {
-      if (statement.op == donkey::IrOp::Call && statement.signature_inferred) {
-        after_call = true;
-      } else if (after_call && statement.op == donkey::IrOp::Add && changed == 0) {
-        statement.op = donkey::IrOp::Sub;
-        ++changed;
+  std::size_t checked = 0;
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    ASSERT_TRUE(analysis.has_value());
+    donkey::IrEvalOptions eval_options;
+    eval_options.architecture = loaded.value().image.architecture;
+    eval_options.convention = host_convention();
+    const CalleeResolver callees(loaded.value().image, analysis.value());
+    eval_options.callees = callees.get();
+    for (const CorpusFunction& entry : kCorpus) {
+      if (std::string_view(entry.name).rfind("c_call_", 0) != 0) {
+        continue;
       }
+      const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
+      ASSERT_NE(function, nullptr) << library.level << " " << entry.name;
+      donkey::LiftOptions raw_options;
+      raw_options.run_passes = false;
+      auto raw =
+          donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+      ASSERT_TRUE(raw.has_value());
+      donkey::IrFunction broken = raw.value();
+      bool after_call = false;
+      bool changed = false;
+      for (donkey::IrBlock& block : broken.blocks) {
+        for (donkey::IrStatement& statement : block.statements) {
+          if (statement.op == donkey::IrOp::Call && statement.signature_inferred) {
+            after_call = true;
+          } else if (after_call && !changed && statement.op == donkey::IrOp::Add &&
+                     statement.dest.kind == donkey::IrOperandKind::Register &&
+                     donkey::internal::register_family(statement.dest.reg) == "rax") {
+            statement.op = donkey::IrOp::Sub;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) {
+        continue;
+      }
+      const std::vector<PassSnapshot> versions{{"lift", raw.value()}, {"broken", broken}};
+      EXPECT_NE(first_difference(versions, entry, loaded.value().image, loaded.value().data,
+                                 eval_options),
+                "")
+          << library.level << " " << entry.name;
+      ++checked;
     }
   }
-  ASSERT_EQ(changed, 1U) << "c_call_six has no resolved call followed by an addition";
-
-  donkey::IrEvalOptions eval_options;
-  eval_options.architecture = loaded.value().image.architecture;
-  eval_options.convention = host_convention();
-  const CalleeResolver callees(loaded.value().image, analysis.value());
-  eval_options.callees = callees.get();
-  const std::vector<PassSnapshot> versions{{"lift", raw.value()}, {"broken", broken}};
-  EXPECT_NE(
-      first_difference(versions, *six, loaded.value().image, loaded.value().data, eval_options),
-      "");
+  EXPECT_GT(checked, 0U) << "no resolved call followed by an addition into rax in the corpus";
 }
 
 // The checker must not be vacuous: a pass that turns the first addition of
