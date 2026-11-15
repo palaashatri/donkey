@@ -69,11 +69,13 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 
 ## 3. Scorecard
 
-State on 2026-11-13, with the work integrated that day (ledger rows G09, G10, G12, G14, G15,
-G16 and G17). The measured baseline of the audit that began the Wave 1 work is in
+State on 2026-11-15: the work integrated on 2026-11-13 (ledger rows G09, G10, G12, G14, G15,
+G16 and G17), and the changes below. The measured baseline of the audit that began the Wave 1 work is in
 [`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). On 2026-11-14 the goal 1 to 10 work on
 branch `claude/funny-meitner-cpc7oc`, merged into `main` with this change, changed the evidence in
-rows 4, 6, 7 and 22 as described there. The IDA Pro and Ghidra columns are short
+rows 4, 6, 7 and 22 as described there. On 2026-11-15 G04-T5 (goto structuring) changed row 7,
+and the G22-T0 plan corrected row 8: the CLI records prototype applications, and nothing applies
+them to code yet. The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 

@@ -160,7 +160,7 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL; T5 DONE with one open decision: no function of the 1,986 list is printed as labelled blocks, 986 are printed with gotos, see G04-T5. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample before T5: 49.6% (985; bar 52%, met); with T5, 0. 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial: `apply_prototype` and its tests; no CLI or decompiler path calls it); project type add, list and apply in the CLI (T4, CLI part; apply records the application only). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial: `apply_prototype` and its tests; no CLI or decompiler path calls it); project type add, list and apply in the CLI (T4, CLI part; apply records the application only). No editing UI, no undo, and the decompiler does not read the applied types | P0 | IN PROGRESS (T1 PARTIAL; T2 DONE; T3 PARTIAL, step 3 TODO; T4 PARTIAL: CLI only, UI and undo TODO) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -1950,11 +1950,18 @@ and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/p
   windows, macos), `architecture` (x86_64, aarch64), `abi` (sysv, win64, aapcs64), `data_model` (LP64 or
   LLP64), `pointer_size`, `long_size` (these map to `CDeclarationOptions`), `char_is_signed`, `source`
   (package or URL, with its version), `source_sha256`, `licence` (an SPDX identifier), `licence_file`
-  (where the licence text came from), `generator` (a name and version), `body_sha256` (of the C text),
-  `declarations` (the count). Optional: `note`, repeated.
+  (where the licence text came from), `licence_sha256` (of that licence text), `generator` (a name and
+  version), `generator_command` (the command line), `preprocessor` (its name and version, or `none`),
+  `created` (an ISO 8601 date), `body_sha256` (of the C text), `declarations` (the count).
+  Repeated, in this order after the single keys, each optional unless T2 requires it: `source_file`
+  (one line per header or archive used: `<relative path> <sha256>`, at most one line per path), `macro`
+  (one per macro set: `NAME=value`), `skipped` (one per declaration left out: `<name>: <reason>`) and
+  `note`. The reader keeps every record, in order, as the library's provenance and refuses a malformed
+  value, a repeated path, or a single key given twice.
 - *Bounds (proposed; to be measured in T2).* The whole file at most 4 MiB, the C text at most
   `kMaxCDeclarationBytes` (1 MiB, the existing limit), at most 20,000 declarations, header lines at most
-  256 bytes and at most 32 of them. Nesting stays at `kMaxCDeclarationNesting` (64).
+  256 bytes and at most 4,096 of them (the repeated `source_file` and `skipped` records
+  can be many). Nesting stays at `kMaxCDeclarationNesting` (64).
 - *The reader refuses* (each with a stable `typelib.` code and the line where it can be located):
   a missing or other format line; an unknown or duplicate key; a missing required key; a platform,
   architecture, ABI or data model outside its enum; a `pointer_size` or `long_size` other than 4 or 8;
@@ -2061,8 +2068,11 @@ what waiver. (5) Whether hand-written declarations are acceptable, and from whic
 - *How a library prototype drives a call.* The argument count comes from the prototype's fixed
   parameters, not from register use. Each argument's width and class come from the prototype. The
   operands are the ABI registers in order. Floating-point arguments wait for G21's floating-point step.
-  A prototype with fewer parameters than the registers the caller reads is a contradiction: the call
-  prints the prototype's arguments and the caller stays Partial.
+  A register the caller reads for its own use is not evidence of an extra argument. A shorter
+  prototype is contradicted only when the caller writes an argument register beyond the prototype's
+  parameters before the call and nothing but the call can read that value (no read of it in the
+  caller after the write). Then the call prints the prototype's arguments, the extra write is
+  reported, and the caller stays Partial.
 - *Import calls.* `lift_call` (`src/ir/lift.cpp`) sees only the call target address. The import name comes
   from `plt_stub_imports` (`include/donkey/binary/plt.h`), which cfg.cpp already uses (`cfg.cpp` line
   986). T4 passes that name into the lifter for calls through a PLT stub. A call through a register
@@ -2082,7 +2092,10 @@ what waiver. (5) Whether hand-written declarations are acceptable, and from whic
   - `Ir.ImportCallNamesItsTargetThroughThePltStub` (unit).
   - `Ir.VariadicPrototypeLeavesTheCallPartial` (unit).
   - `Ir.LibraryCallerStaysPartial` (unit: the caller of an import is Partial).
-  - `Ir.PrototypeThatContradictsTheCallerIsRefused` (negative: fewer parameters than registers read).
+  - `Ir.ArgumentRegisterSetOnlyForTheCallContradictsAShorterPrototype` (negative: the caller sets `rdx`
+    just before calling a one-parameter function and never reads it).
+  - `Ir.CallerReadOfAnArgumentRegisterIsNotAnExtraArgument` (the caller reads `rdx` for its own use around
+    a call to a one-parameter function; the prototype is applied, no contradiction).
   - `DecompilerCorpus.LibraryCallsAreLabelledAndNotComplete` (oracle: the call prints with its
     arguments, and the caller is not Complete).
   - `cli.decompile_prints_library_arguments` (CLI, the ELF fixture of T3).
