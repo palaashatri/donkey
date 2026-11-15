@@ -17,7 +17,7 @@ Two modes, both run with `python3 -I`:
 Only system binaries are used: their files are identical at every commit, so the population is
 the same by construction. A commit's own donkey-cli is a different file at each commit.
 """
-import argparse, hashlib, json, os, random, re, subprocess, sys
+import argparse, contextlib, hashlib, json, os, random, re, shutil, subprocess, sys, tempfile
 
 BINARIES = [
     ("/usr/bin/ls", "ls"),
@@ -45,6 +45,16 @@ def sha256_of(path):
     return digest.hexdigest()
 
 
+@contextlib.contextmanager
+def stable_copy(path):
+    """A private copy of the binary and its hash. Reading, sampling and decompiling the copy means
+    the hash names exactly the bytes measured, even if a package update replaces `path` meanwhile."""
+    with tempfile.TemporaryDirectory(prefix="donkey-sample-") as directory:
+        copy = os.path.join(directory, os.path.basename(path))
+        shutil.copyfile(path, copy)
+        yield copy, sha256_of(copy)
+
+
 def text_range(path):
     out = subprocess.run(["readelf", "-SW", path], capture_output=True, text=True).stdout
     m = re.search(r"\s\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)", out)
@@ -56,15 +66,22 @@ def write(args):
     rng = random.Random(args.seed)
     lists = {}
     for path, tag in BINARIES:
-        lo, hi = text_range(path)
-        starts = json.loads(run([args.cli, "functions", path, "--json"]))["functions"]
+        with stable_copy(path) as (copy, digest):
+            lo, hi = text_range(copy)
+            starts = json.loads(run([args.cli, "functions", copy, "--json"]))["functions"]
         addresses = sorted(int(f["address"], 16) for f in starts if lo <= int(f["address"], 16) < hi)
         rng.shuffle(addresses)
-        lists[tag] = {"path": path, "sha256": sha256_of(path), "population": len(addresses),
+        lists[tag] = {"path": path, "sha256": digest, "population": len(addresses),
                       "addresses": sorted(addresses[: args.per_binary])}
         print(tag, "population", len(addresses), "sampled", len(lists[tag]["addresses"]), flush=True)
     with open(args.out, "w") as handle:
         json.dump({"seed": args.seed, "per_binary": args.per_binary, "binaries": lists}, handle, indent=1)
+
+
+def check_identity(path, actual, expected):
+    if actual != expected:
+        sys.exit(f"sample_list.py: {path} is not the binary the list was drawn from "
+                 f"(sha256 {actual}, list {expected})")
 
 
 def measure(args):
@@ -72,19 +89,18 @@ def measure(args):
         plan = json.load(handle)
     result = {}
     # A package update can replace a binary at the same path: the sampled addresses would then name
-    # other code. Every binary must be the one the list was drawn from.
+    # other code. Every binary must be the one the list was drawn from: each is checked before any
+    # is measured, and each is measured from a copy whose hash is checked again.
     for tag, entry in plan["binaries"].items():
-        expected = entry.get("sha256")
-        if expected is None:
+        if entry.get("sha256") is None:
             sys.exit(f"sample_list.py: the list has no sha256 for {tag}; it cannot be measured safely")
-        actual = sha256_of(entry["path"])
-        if actual != expected:
-            sys.exit(f"sample_list.py: {entry['path']} is not the binary the list was drawn from "
-                     f"(sha256 {actual}, list {expected})")
+        check_identity(entry["path"], sha256_of(entry["path"]), entry["sha256"])
     for tag, entry in plan["binaries"].items():
         wanted = set(entry["addresses"])
-        decompiled = json.loads(run([args.cli, "decompile", entry["path"], "--json",
-                                     "--max-functions", "1000000"]))
+        with stable_copy(entry["path"]) as (copy, digest):
+            check_identity(entry["path"], digest, entry["sha256"])
+            decompiled = json.loads(run([args.cli, "decompile", copy, "--json",
+                                         "--max-functions", "1000000"]))
         classes = {}
         reasons = {}
         counts = {"sampled": 0, "found": 0, "Complete": 0, "Partial": 0, "Unsupported": 0,
