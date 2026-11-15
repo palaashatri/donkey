@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <span>
 #include <sstream>
@@ -432,7 +433,10 @@ class CalleeResolver {
   CalleeResolver(const donkey::BinaryImage& image, const donkey::AnalysisResult& analysis)
       : image_(image),
         analysis_(analysis),
-        resolve_([this](std::uint64_t address) { return lookup(address); }) {}
+        resolve_([this](std::uint64_t address) { return lookup(address); }) {
+    // One cache of callee summaries for every callee of this image (G21-T2).
+    options_.call_summaries = std::make_shared<donkey::CallSummaryCache>();
+  }
   CalleeResolver(const CalleeResolver&) = delete;
   CalleeResolver& operator=(const CalleeResolver&) = delete;
 
@@ -447,7 +451,7 @@ class CalleeResolver {
     }
     for (const donkey::Function& candidate : analysis_.functions) {
       if (candidate.address == address) {
-        auto callee = donkey::lift_function(image_, analysis_, candidate);
+        auto callee = donkey::lift_function(image_, analysis_, candidate, options_);
         if (!callee) {
           return nullptr;
         }
@@ -459,6 +463,7 @@ class CalleeResolver {
 
   const donkey::BinaryImage& image_;
   const donkey::AnalysisResult& analysis_;
+  donkey::LiftOptions options_;
   std::map<std::uint64_t, donkey::IrFunction> lifted_;
   std::function<const donkey::IrFunction*(std::uint64_t)> resolve_;
 };
