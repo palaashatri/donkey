@@ -1,0 +1,4 @@
+# Type libraries carry a SHA-256 of their C text, and the reader refuses a CR byte, so their bytes
+# must not change on checkout (core.autocrlf on Windows would turn LF into CRLF).
+*.dtl -text
+tests/fuzz/corpus/typelib/** -text
