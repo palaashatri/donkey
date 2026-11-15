@@ -149,7 +149,7 @@ jobs:
             ubuntu*|debian*) apt-get remove -y donkey ;;
             fedora*) dnf remove -y donkey ;;
             archlinux*) rm -f /usr/bin/donkey /usr/bin/donkey-cli
-                        rm -rf /usr/share/doc/donkey /usr/share/applications/donkey.desktop
+                        rm -rf /usr/share/doc/donkey /usr/share/donkey /usr/share/applications/donkey.desktop
                         find /usr/share/icons/hicolor -name donkey.png -delete ;;
           esac
           if command -v donkey || command -v donkey-cli; then
