@@ -31,9 +31,9 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
   splitting of irreducible functions (`Ir.*Fallback*`, `Ir.*PostDominator*`, `Ir.*Split*`).
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
-  InvalidIR and 0 Unsupported, 180 Complete (9.1%), 996 labelled (50.2%, under the 52% bar).
-- Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls; .xdata and ARM64
-  unwind; structured output for the 996 labelled functions (106 irreducible, 890 reducible shapes).
+  InvalidIR and 0 Unsupported, 183 Complete (9.2%), 985 labelled (49.6%, under the 52% bar).
+- Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
+  unwind; structured output for the 985 labelled functions (106 irreducible, 879 reducible shapes).
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
 |---|---|---|---|---|
