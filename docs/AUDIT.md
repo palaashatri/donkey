@@ -712,9 +712,12 @@ text ("nesting deeper than 128 levels").
 
 The control-flow check left four things unchecked. Each fix has a test that fails without it:
 
-1. **Where the printed function starts.** Code that printed block 1 (a return) first and block 0 after
-   it, jumping back, passed: every block's own edges were right. The first block control reaches must
-   now be the entry (`Ir.ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry`).
+1. **Where the printed function starts, and where each test is.** Code that printed block 1 (a return)
+   first and block 0 after it, jumping back, passed: every block's own edges were right. A switch with
+   only a default arm, wrapped around the code before block 0 or between two blocks, passed too: its one
+   arm reaches the right block. The first operation must now be the entry block's code, and every
+   condition and switch must come right after the code of the block it tests
+   (`Ir.ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry`, `Ir.ControlFlowCheckRefusesATestThatNoBlockEndsIn`).
 2. **The value each switch arm is entered for.** Only the set of arm targets was compared, so swapped
    case values passed. Each arm now carries its value, and every value is compared: each IR case (the
    last case with that value, as the evaluator takes it), each printed case the IR does not have (it
@@ -737,8 +740,8 @@ class decides now, and without a class only the whole note line counts. A graph 
 `kMaxStructureNesting` prints as labelled blocks, which `AGENTS.md`, `DESIGN.md` §17.2 and the ledger now
 say.
 
-Re-measurement on the fixed list at `6948cef`: every count of every binary is the same as before this
-round (0 labelled, 1,000 without goto, 986 with gotos, 16,232 gotos, largest 409, 0 candidates refused,
+Re-measurement on the fixed list at `6948cef`, and again with the test-placement rule: every count of
+every binary is the same as before this round (0 labelled, 1,000 without goto, 986 with gotos, 16,232 gotos, largest 409, 0 candidates refused,
 Complete 183, InvalidIR 0). The printed text of each sampled function was compared before and after:
 it changed for exactly the 144 functions with a doubled label, none prints a label twice now, and no
 sampled function prints the new empty `if`.

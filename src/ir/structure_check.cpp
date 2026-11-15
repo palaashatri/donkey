@@ -686,14 +686,24 @@ class Checker {
         return "block " + hex(block) + " is not printed";
       }
     }
-    // The printed function starts where the IR's does: the first block control reaches is the
-    // entry, with no test or return before it.
+    // The printed function starts where the IR's does: the first operation, after jumps, is the
+    // code of the entry block, with no test or return before it.
     if (count > 0) {
-      Reach entry;
-      reach(0, entry, 0);
-      if (!is_exactly(entry, 0)) {
-        return "the printed code does not start at the entry block " + hex(0) + ": it reaches " +
-               describe(entry) + " first";
+      const std::size_t start = skip_jumps(0);
+      if (start >= ops_.size() || ops_[start].kind != Op::Kind::Block || ops_[start].block != 0) {
+        return "the printed code does not start at the entry block " + hex(0);
+      }
+    }
+    // Every test is printed right after the code of the block it tests: a condition or switch that
+    // follows anything else is a test the IR does not have there.
+    for (std::size_t pos = 0; pos < ops_.size(); ++pos) {
+      const Op& op = ops_[pos];
+      if (op.kind != Op::Kind::CJump && op.kind != Op::Kind::Switch) {
+        continue;
+      }
+      if (pos == 0 || ops_[pos - 1].kind != Op::Kind::Block || ops_[pos - 1].block != op.block) {
+        return "the test of block " + hex(op.block) + " at line " + std::to_string(op.line) +
+               " is not printed right after that block's code";
       }
     }
     for (std::size_t pos = 0; pos < ops_.size(); ++pos) {

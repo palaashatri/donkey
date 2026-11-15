@@ -5797,6 +5797,45 @@ TEST(Ir, ControlFlowCheckRefusesCodeThatDoesNotStartAtTheEntry) {
   EXPECT_NE(mismatch->find("does not start at the entry"), std::string::npos) << *mismatch;
 }
 
+TEST(Ir, ControlFlowCheckRefusesATestThatNoBlockEndsIn) {
+  // Block 1 is a switch with no case (only its default, block 2). A second copy of its switch, with
+  // a default arm only, is wrapped around the printed code: before block 0, and then between block
+  // 0 and block 1. Each arm reaches exactly the block the IR expects, but the printed code
+  // evaluates a switch that the IR does not have there.
+  const IrFunction f = fb_function({
+      {fb_set("rcx", 1), fb_jump(1)},
+      {switch_on_rax(2, {})},
+      {fb_set("rdx", 2), fb_return()},
+  });
+  const auto verified = donkey::verify_ir(f);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+  const std::vector<StructuredLine> lines = structured_with(f, kGotoRuleAll).lines;
+  const auto wrapped = [&](donkey::detail::BlockId from) {
+    std::vector<StructuredLine> out;
+    bool opened = false;
+    for (const StructuredLine& line : lines) {
+      if (!opened && line.tag.kind == LineKind::Marker && line.tag.block == from) {
+        out.push_back(StructuredLine{"switch (rax) {", 0, make_tag(LineKind::SwitchOpen, 1), {}});
+        out.push_back(StructuredLine{"default:", 0, make_tag(LineKind::Default), {}});
+        opened = true;
+      }
+      out.push_back(line);
+    }
+    out.push_back(StructuredLine{"}", 0, make_tag(LineKind::Close), {}});
+    EXPECT_TRUE(opened);
+    return out;
+  };
+  const std::vector<StructuredLine> before_entry = wrapped(0);
+  const auto entry = check_structured_control_flow(f, before_entry);
+  ASSERT_TRUE(entry.has_value()) << printed(before_entry);
+  EXPECT_NE(entry->find("block #0"), std::string::npos) << *entry;
+
+  const std::vector<StructuredLine> between = wrapped(1);
+  const auto middle = check_structured_control_flow(f, between);
+  ASSERT_TRUE(middle.has_value()) << printed(between);
+  EXPECT_NE(middle->find("block #1"), std::string::npos) << *middle;
+}
+
 TEST(Ir, ControlFlowCheckRefusesASwitchWhoseCaseValuesAreSwapped) {
   // Cases 1 and 2 swap their values; the arms keep their bodies. The set of arm targets is the
   // same, but the printed switch sends 1 to block 2 and 2 to block 1.
