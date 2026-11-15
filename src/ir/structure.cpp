@@ -1744,6 +1744,34 @@ struct Structurer {
     return render_condition(function_, branch, previous, negate, string_literals_);
   }
 
+  // The lines emit_range prints, each built in a frame of its own that is gone before emit_range
+  // recurses. emit_range recurses once per nesting level, and in an unoptimised build every
+  // temporary string or tag it built inline would take a slot in every level's frame (4 KiB per
+  // level under Clang, which put the nesting bound over a 512 KiB stack).
+  void if_open_line(BlockId block, bool negate) {
+    line("if (" + condition_of(block, negate) + ") {", 0,
+         make_tag(LineKind::IfOpen, block, kNoBlock, negate));
+  }
+  void if_jump_line(BlockId block, LineKind jump, BlockId target) {
+    line("if (" + condition_of(block, false) +
+             (jump == LineKind::Break ? ") break;" : ") continue;"),
+         0, ifjump_tag(block, jump, target));
+  }
+  void switch_line(BlockId block, BlockId join, const IrOperand& selector) {
+    line("switch (" + render_operand(function_, selector, string_literals_) + ") {", 0,
+         make_tag(LineKind::SwitchOpen, block, join));
+  }
+  void case_line(std::uint64_t value) {
+    char text[32];
+    std::snprintf(text, sizeof(text), "0x%llx", static_cast<unsigned long long>(value));
+    line("case " + std::string(text) + ":", 0, case_tag(value));
+  }
+  void close_line() { line("}", 0, make_tag(LineKind::Close)); }
+  void else_line() { line("} else {", 0, make_tag(LineKind::Else)); }
+  void default_line() { line("default:", 0, make_tag(LineKind::Default)); }
+  void break_line(BlockId target) { line("break;", 0, make_tag(LineKind::Break, target)); }
+  void continue_line(BlockId header) { line("continue;", 0, make_tag(LineKind::Continue, header)); }
+
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
                   BlockId join_exit = kNoBlock) {
     // Nesting is bounded, as in the fallback: a deeper region is refused and the next stage (or
@@ -1817,14 +1845,10 @@ struct Structurer {
         if (!frames_.empty()) {
           ++frames_.back().switch_depth;
         }
-        line("switch (" + render_operand(function_, terminator.dest, string_literals_) + ") {", 0,
-             make_tag(LineKind::SwitchOpen, index, join));
+        switch_line(index, join, terminator.dest);
         ++indent_;
         for (const auto& sc : terminator.switch_cases) {
-          char val_buf[32];
-          std::snprintf(val_buf, sizeof(val_buf), "0x%llx",
-                        static_cast<unsigned long long>(sc.value));
-          line("case " + std::string(val_buf) + ":", 0, case_tag(sc.value));
+          case_line(sc.value);
           ++indent_;
           const bool ends_return =
               sc.target_block < function_.blocks.size() &&
@@ -1836,12 +1860,12 @@ struct Structurer {
             emit_statements(sc.target_block, true);
           }
           if (!ends_return) {
-            line("break;", 0, make_tag(LineKind::Break, join));
+            break_line(join);
           }
           --indent_;
         }
         if (terminator.a.kind == IrOperandKind::Block) {
-          line("default:", 0, make_tag(LineKind::Default));
+          default_line();
           ++indent_;
           const bool ends_return =
               terminator.a.block < function_.blocks.size() &&
@@ -1853,12 +1877,12 @@ struct Structurer {
             emit_statements(terminator.a.block, true);
           }
           if (!ends_return) {
-            line("break;", 0, make_tag(LineKind::Break, join));
+            break_line(join);
           }
           --indent_;
         }
         --indent_;
-        line("}", 0, make_tag(LineKind::Close));
+        close_line();
         if (!frames_.empty()) {
           --frames_.back().switch_depth;
         }
@@ -1887,13 +1911,13 @@ struct Structurer {
               }
               return;
             }
-            line("break;", 0, make_tag(LineKind::Break, frames_.back().exit));
+            break_line(frames_.back().exit);
             ++index;
             continue;
           }
           if (terminator.a.block == loop_header) {
             if (index + 1 != last) {
-              line("continue;", 0, make_tag(LineKind::Continue, loop_header));
+              continue_line(loop_header);
             }
           } else if (terminator.a.block != last && terminator.a.block != join_exit &&
                      terminator.a.block != index + 1) {
@@ -1919,8 +1943,7 @@ struct Structurer {
       // exit are handled as an if-guard below, never skipped: dropping them
       // would make the following blocks run unconditionally.
       if (loop_header != kNoBlock && target == loop_header) {
-        line("if (" + condition_of(index, false) + ") continue;", 0,
-             ifjump_tag(index, LineKind::Continue, loop_header));
+        if_jump_line(index, LineKind::Continue, loop_header);
         ++index;
         continue;
       }
@@ -1934,8 +1957,7 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") break;", 0,
-             ifjump_tag(index, LineKind::Break, frames_.back().exit));
+        if_jump_line(index, LineKind::Break, frames_.back().exit);
         ++index;
         continue;
       }
@@ -1956,11 +1978,11 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
+        if_open_line(index, false);
         ++indent_;
         emit_range(target, join, loop_header);
         --indent_;
-        line("}", 0, make_tag(LineKind::Close));
+        close_line();
         index = join;
         continue;
       }
@@ -1973,12 +1995,11 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, true) + ") {", 0,
-             make_tag(LineKind::IfOpen, index, kNoBlock, true));
+        if_open_line(index, true);
         ++indent_;
         emit_range(fallthrough, join, loop_header);
         --indent_;
-        line("}", 0, make_tag(LineKind::Close));
+        close_line();
         index = join;
         continue;
       }
@@ -1998,15 +2019,15 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
+        if_open_line(index, false);
         ++indent_;
         emit_range(target, join, loop_header);
         --indent_;
-        line("} else {", 0, make_tag(LineKind::Else));
+        else_line();
         ++indent_;
         emit_range(fallthrough, target, loop_header, join);
         --indent_;
-        line("}", 0, make_tag(LineKind::Close));
+        close_line();
       } else if (target < fallthrough) {
         if (!region_closed(target, fallthrough, loop_header, innermost_loop_exit()) ||
             !region_closed(fallthrough, join, loop_header, innermost_loop_exit())) {
@@ -2016,15 +2037,15 @@ struct Structurer {
           }
           return;
         }
-        line("if (" + condition_of(index, false) + ") {", 0, make_tag(LineKind::IfOpen, index));
+        if_open_line(index, false);
         ++indent_;
         emit_range(target, fallthrough, loop_header);
         --indent_;
-        line("} else {", 0, make_tag(LineKind::Else));
+        else_line();
         ++indent_;
         emit_range(fallthrough, join, loop_header);
         --indent_;
-        line("}", 0, make_tag(LineKind::Close));
+        close_line();
       } else {
         {
           note("branch order");

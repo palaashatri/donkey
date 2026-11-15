@@ -701,6 +701,13 @@ Phase A's review fixes touched the same structurer. The merge needed three chang
 The nesting bound is W1's recursion counter, which also bounds the indentation, with phase A's reason
 text ("nesting deeper than 128 levels").
 
+4. **Stack per nesting level.** Phase A's `Ir.NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack`
+   (1,000 nested tests on a 512 KiB thread) crashed in the Clang Debug build of the merged tree: the
+   layout structurer's `emit_range` frame was 4,104 bytes there (`-fstack-usage`), and 128 levels need
+   525 KB. Its lines are now built by small helpers whose frames are gone before it recurses: 792
+   bytes. The output is unchanged (libc's whole `decompile --json`, 63 MB, is byte-identical before and
+   after), and the test passes under GCC and Clang.
+
 Decisions for the owner (not made here): (1) whether to copy small blocks (up to 4 statements) into each
 arm that reaches them, which should remove much of the first goto group at a cost in output size; (2) whether
 compound conditions (`a && b`) are recovered as one `if` with a combined condition, which needs a
