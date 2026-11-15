@@ -7,6 +7,7 @@
 #include <cstddef>
 #include <cstdio>
 #include <map>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -18,6 +19,36 @@
 #include "registers.h"
 
 namespace donkey {
+
+struct CallSummaryCache::Impl {
+  /// What a call to a resolved callee needs and what it changes (G21-T2).
+  struct Summary {
+    std::vector<IrParameter> parameters;  // the callee's System V integer arguments, in order
+    std::uint8_t return_width = 0;        // the integer result's width; 0 for none
+    std::vector<std::string> writes;      // every register family the callee's code may write
+    std::size_t height = 1;               // 1 + the tallest resolved callee below it; 1 for a leaf
+  };
+  struct Entry {
+    bool resolved = false;  // false: a cached negative; the call stays unresolved
+    Summary summary;
+  };
+  std::unordered_map<std::uint64_t, Entry> entries;
+  // The functions whose summaries are being computed (the lifted function first). A call back
+  // into this path is recursive.
+  std::vector<std::uint64_t> path;
+  // Depth cuts so far. A result is cached only when no cut happened while it was computed.
+  std::uint64_t cuts = 0;
+};
+
+class CallSummaryAccess {
+ public:
+  static CallSummaryCache::Impl& impl(CallSummaryCache& cache) { return *cache.impl_; }
+};
+
+CallSummaryCache::CallSummaryCache() : impl_(std::make_unique<CallSummaryCache::Impl>()) {}
+
+CallSummaryCache::~CallSummaryCache() = default;
+
 namespace {
 
 // Whether a callee's code may read an argument passed on the stack (the seventh and later integer
@@ -478,6 +509,144 @@ IrOp arithmetic_op(const std::string& mnemonic) {
     return IrOp::Mul;
   }
   return IrOp::Nop;
+}
+
+/// The largest number of nested calls a resolved call may run through (G21-T2). It is the
+/// evaluator's call depth: kMaxCallDepth in eval.cpp is 8, and it runs a callee at depth 1 to 8. A
+/// callee taller than this would run out of depth when it is interpreted, so it stays unresolved.
+constexpr std::size_t kMaxCallHeight = 8;
+
+using KnownCallee = CallSummaryCache::Impl::Summary;
+
+/// Keeps a function on the path of summaries being computed for the length of a lift.
+class PathFrame {
+ public:
+  PathFrame(CallSummaryCache::Impl& cache, std::uint64_t address) : cache_(cache) {
+    cache_.path.push_back(address);
+  }
+  ~PathFrame() { cache_.path.pop_back(); }
+  PathFrame(const PathFrame&) = delete;
+  PathFrame& operator=(const PathFrame&) = delete;
+
+ private:
+  CallSummaryCache::Impl& cache_;
+};
+
+Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& analysis,
+                             const Function& function, const LiftOptions& options);
+
+/// Lifts `callee` (with its own calls resolved) and reads its summary. The caller caches the
+/// result; this function does not.
+CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
+                                              const BinaryImage& image,
+                                              const AnalysisResult& analysis,
+                                              const Function& callee, const LiftOptions& options) {
+  CallSummaryCache::Impl::Entry unresolved;
+  LiftOptions nested = options;
+  // The signature must not depend on how the caller is lifted: always with passes.
+  nested.run_passes = true;
+  auto lifted = lift_body(image, analysis, callee, nested);
+  if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
+    return unresolved;
+  }
+  static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+  for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
+    if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
+      return unresolved;
+    }
+  }
+  // The passes remove a register write that nothing reads (dead-register removal), but the
+  // compiled callee still makes it, so the write set comes from the callee's lift without passes.
+  LiftOptions unoptimised = nested;
+  unoptimised.run_passes = false;
+  auto raw = lift_body(image, analysis, callee, unoptimised);
+  if (!raw || raw.value().partial) {
+    return unresolved;
+  }
+  // A callee that reads a stack-passed argument has more parameters than the registers show.
+  if (reads_incoming_stack_argument(raw.value())) {
+    return unresolved;
+  }
+  CallSummaryCache::Impl::Entry result;
+  result.resolved = true;
+  KnownCallee& summary = result.summary;
+  summary.parameters = lifted.value().parameters;
+  summary.return_width = lifted.value().return_width;
+  std::size_t tallest = 0;
+  for (const IrBlock& block : raw.value().blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
+        summary.writes.push_back(internal::register_family(statement.dest.reg));
+      }
+      if (statement.op != IrOp::Call || !statement.signature_inferred) {
+        continue;
+      }
+      // A resolved call of the callee: what its own callee writes changes here too, and the
+      // callee's height counts. Both are known: that call resolved, so its summary is cached.
+      summary.writes.insert(summary.writes.end(), statement.call_writes.begin(),
+                            statement.call_writes.end());
+      if (statement.a.kind != IrOperandKind::Constant) {
+        return unresolved;
+      }
+      const auto below = cache.entries.find(statement.a.constant);
+      if (below == cache.entries.end() || !below->second.resolved) {
+        return unresolved;
+      }
+      tallest = std::max(tallest, below->second.summary.height);
+    }
+  }
+  std::sort(summary.writes.begin(), summary.writes.end());
+  summary.writes.erase(std::unique(summary.writes.begin(), summary.writes.end()),
+                       summary.writes.end());
+  summary.height = 1 + tallest;
+  return result;
+}
+
+/// The summary of the function at `target`, computed on first use and cached (G21-T2). Null when
+/// the call stays unresolved: no function of the image starts there, it is recursive (on the path
+/// being computed), its lift is partial, its arguments are not System V integer registers in order,
+/// it returns a floating-point value, or it reads a stack argument. A result that depends on the
+/// depth cut is returned as unresolved and not cached, because it depends on where the path began.
+const KnownCallee* callee_summary(const BinaryImage& image, const AnalysisResult& analysis,
+                                  std::uint64_t target, const LiftOptions& options) {
+  CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
+  if (const auto known = cache.entries.find(target); known != cache.entries.end()) {
+    return known->second.resolved ? &known->second.summary : nullptr;
+  }
+  // A cycle: the caller whose summary is being computed records this as its own negative result,
+  // which is sound because every function on the cycle is recursive.
+  if (std::find(cache.path.begin(), cache.path.end(), target) != cache.path.end()) {
+    return nullptr;
+  }
+  const Function* callee = nullptr;
+  for (const Function& candidate : analysis.functions) {
+    if (candidate.address == target) {
+      callee = &candidate;
+      break;
+    }
+  }
+  if (callee == nullptr) {
+    cache.entries[target] = CallSummaryCache::Impl::Entry{};
+    return nullptr;
+  }
+  if (cache.path.size() > kMaxCallHeight) {
+    // Too deep to compute. The unresolved answer depends on where the path began, so it is not
+    // cached, and every result computed around it is not cached either.
+    ++cache.cuts;
+    return nullptr;
+  }
+  const std::uint64_t cuts_before = cache.cuts;
+  CallSummaryCache::Impl::Entry entry;
+  {
+    PathFrame frame(cache, target);
+    entry = compute_summary(cache, image, analysis, *callee, options);
+  }
+  if (cache.cuts != cuts_before) {
+    return nullptr;
+  }
+  CallSummaryCache::Impl::Entry& stored = cache.entries[target];
+  stored = std::move(entry);
+  return stored.resolved ? &stored.summary : nullptr;
 }
 
 struct Lifter {
@@ -1935,78 +2104,30 @@ struct Lifter {
     push(block, std::move(increment));
   }
 
-  /// The lifted callee of a direct call to a function of this image, when its signature is known
-  /// (G21-T2): the callee lifts Complete (not partial), takes integer arguments in the System V
-  /// registers, and returns an integer. Otherwise nothing is returned and the call stays unknown.
-  struct KnownCallee {
-    IrFunction signature;             // the callee's lift with passes: parameters and result
-    std::vector<std::string> writes;  // every register family its code writes (no passes)
-  };
-
+  /// The summary of the callee of a direct call to a function of this image (G21-T2), when the call
+  /// resolves: see callee_summary. A callee taller than kMaxCallHeight does not resolve.
   std::optional<KnownCallee> known_callee(const Instruction& instruction) const {
     if (image.architecture != Architecture::X86_64 || !options.resolve_calls ||
-        !instruction.direct_target.has_value()) {
+        !options.call_summaries || !instruction.direct_target.has_value()) {
       return std::nullopt;
     }
-    const std::uint64_t target = instruction.direct_target.value();
-    const Function* callee = nullptr;
-    for (const Function& candidate : analysis.functions) {
-      if (candidate.address == target) {
-        callee = &candidate;
-        break;
-      }
-    }
-    if (callee == nullptr) {
+    const KnownCallee* summary =
+        callee_summary(image, analysis, instruction.direct_target.value(), options);
+    if (summary == nullptr || summary->height > kMaxCallHeight) {
       return std::nullopt;
     }
-    LiftOptions nested = options;
-    nested.resolve_calls = false;  // one level only: the callee's own calls stay unknown
-    // The callee's signature must not depend on how the caller is lifted: always with passes.
-    nested.run_passes = true;
-    auto lifted = lift_function(image, analysis, *callee, nested);
-    if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
-      return std::nullopt;
-    }
-    static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
-    for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
-      if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
-        return std::nullopt;
-      }
-    }
-    // The passes remove a register write that nothing reads (dead-register removal), but the
-    // compiled callee still makes it, so the write set comes from the callee's lift without
-    // passes: every write its instructions make.
-    LiftOptions unoptimised = nested;
-    unoptimised.run_passes = false;
-    auto raw = lift_function(image, analysis, *callee, unoptimised);
-    if (!raw || raw.value().partial) {
-      return std::nullopt;
-    }
-    // A callee that reads a stack-passed argument has more parameters than the registers show.
-    if (reads_incoming_stack_argument(raw.value())) {
-      return std::nullopt;
-    }
-    KnownCallee known;
-    known.signature = std::move(lifted.value());
-    for (const IrBlock& block : raw.value().blocks) {
-      for (const IrStatement& written : block.statements) {
-        if (written.dest.kind == IrOperandKind::Register && !written.dest.reg.empty()) {
-          known.writes.push_back(internal::register_family(written.dest.reg));
-        }
-      }
-    }
-    return known;
+    return *summary;
   }
 
   /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
   /// call, in the callee's ABI order, and the result is the whole of rax. Reads after the call are
   /// checked by check_call_clobbers, not assumed here.
   static void resolve_call_statement(IrStatement& statement, const KnownCallee& callee) {
-    for (const IrParameter& parameter : callee.signature.parameters) {
+    for (const IrParameter& parameter : callee.parameters) {
       statement.call_arguments.push_back(IrOperand::register_ref(
           parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
     }
-    if (callee.signature.return_width > 0) {
+    if (callee.return_width > 0) {
       // After the call, the caller's rax is the callee's rax: all 64 bits, whatever width the
       // callee's return value has. The inferred width (from the callee's last write in block
       // order) can be narrower than what a path leaves in rax (`mov eax, 0x100; mov al, 1` leaves
@@ -2634,8 +2755,10 @@ Result<bool> keep_reachable_blocks(IrFunction& function, const AnalysisResult& a
 
 }  // namespace internal
 
-Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
-                                 const Function& function, const LiftOptions& options) {
+namespace {
+
+Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& analysis,
+                             const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
     if (lifted) {
@@ -3145,6 +3268,19 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     }
   }
   return lifter.out;
+}
+
+}  // namespace
+
+Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
+                                 const Function& function, const LiftOptions& options) {
+  LiftOptions shared = options;
+  if (shared.call_summaries == nullptr) {
+    shared.call_summaries = std::make_shared<CallSummaryCache>();
+  }
+  // The lifted function is on the path: a call back into it is recursive, so it is not resolved.
+  PathFrame frame(CallSummaryAccess::impl(*shared.call_summaries), function.address);
+  return lift_body(image, analysis, function, shared);
 }
 
 }  // namespace donkey
