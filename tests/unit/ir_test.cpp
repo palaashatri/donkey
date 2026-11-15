@@ -5523,3 +5523,22 @@ TEST(Ir, NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack) {
   EXPECT_NE(job.text.find("labeled blocks"), std::string::npos);
 }
 #endif
+
+TEST(Ir, LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat) {
+  // The shape of openssl sub_a9c60: the loop body block 1 returns on one side and falls through to
+  // the loop header 2, which is already printed. The flat form would walk into the header, so the
+  // body keeps its if-else with `continue` on the fall-through side. Before the guard the function
+  // was rejected ("a block is reached twice").
+  const IrFunction f = fb_function({
+      {fb_jump(2)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 3), fb_return()},
+      {fb_set("rdx", 5), fb_return()},
+  });
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("continue;"), std::string::npos) << text.value();
+}

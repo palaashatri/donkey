@@ -1029,7 +1029,16 @@ struct Structurer {
           }
           fb_region(target, arm_stop, block);
         };
-        if (join == count && taken != join && fallthrough != join) {
+        // The flat form only when the fall-through is an ordinary next block of this region: not
+        // the stop, not a block already printed (a return block printed again is a copy, which the
+        // nested form makes), and not the innermost loop's header or follow (edges: continue,
+        // break).
+        const bool fallthrough_is_edge =
+            fallthrough == stop || fb_emitted_[fallthrough] ||
+            (!fb_active_.empty() &&
+             (fallthrough == fb_active_.back()->header ||
+              (fb_active_.back()->has_follow && fallthrough == fb_active_.back()->follow)));
+        if (join == count && taken != join && fallthrough != join && !fallthrough_is_edge) {
           // Both arms leave by return (or an edge): the taken arm is an `if` of its own and the
           // fall-through arm continues at this nesting level, so a chain of such tests stays flat.
           line("if (" + condition_of(block, false) + ") {");
