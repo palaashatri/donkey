@@ -160,7 +160,7 @@ P0 is the most important, P3 the least.
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
 | G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL; T5 DONE with one open decision: no function of the 1,986 list is printed as labelled blocks, 986 are printed with gotos, see G04-T5. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample before T5: 49.6% (985; bar 52%, met); with T5, 0. 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
-| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
+| G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial: `apply_prototype` and its tests; no CLI or decompiler path calls it); project type add, list and apply in the CLI (T4, CLI part; apply records the application only). No editing UI, no undo, and the decompiler does not read the applied types | P0 | IN PROGRESS (T1 PARTIAL; T2 DONE; T3 PARTIAL, step 3 TODO; T4 PARTIAL: CLI only, UI and undo TODO) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
 | G08 | SIMD (SSE/AVX, NEON) | Decompiles to intrinsics | Unsupported: vectorised loops are Partial | P1 | TODO |
@@ -177,7 +177,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | TODO (T2 needs an owner decision on header sources) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 to T4 TODO; T2 needs an owner decision on header sources) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -1872,8 +1872,9 @@ callee-saved registers. Mutual recursion stops at depth 1 in the lifter, so the 
 imported function a prototype and every system structure a layout before the
 user does anything.
 
-**Donkey today.** A type store, a bounded C declaration parser and prototype
-application from the CLI (G05). No bundled declarations.
+**Donkey today.** A type store, a bounded C declaration parser, and `apply_prototype`
+(G05). Only tests call `apply_prototype`: the CLI's `project type apply` records an application,
+and the decompiler does not read it (G05-T3 and T4). No bundled declarations.
 
 **Tasks.**
 
@@ -1893,6 +1894,238 @@ each applied type records where it came from.
 
 **Pitfalls.** Never copy an IDA type library or a Ghidra data type archive.
 Generate from headers and record the header version.
+
+#### G22-T0 task-level plan (written 2026-11-15, before any G22 code)
+
+Checked against: `include/donkey/project/types.h` and `src/project/types.cpp` (`TypeTable`, `TypeKind`,
+`TypeProvenance`, `types_from_debug_info`, `types_from_pdb`); `include/donkey/project/cdecl.h` and
+`src/project/cdecl.cpp` (`parse_c_declarations`, `CDeclarationOptions`); `include/donkey/ir/prototype.h`
+and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/project/project.h` and
+`src/project/project.cpp` (`TypeApplication`, `set_type_application`, the migrations, latest v7);
+`apps/donkey-cli/commands.cpp` (`command_project_type`, the `add`, `list` and `apply` actions);
+`src/binary/elf.cpp` (the symbol loop from line 419), `src/binary/pe.cpp` (imports, line 345),
+`src/binary/macho.cpp` (imports, line 400); `include/donkey/binary/link.h` (`resolve_imports`);
+`include/donkey/binary/plt.h` (`plt_stub_imports`); `src/ir/lift.cpp` (`lift_call`, line 2021);
+`src/ir/ir.h` (`call_arguments`, `signature_inferred`); `signatures/PROVENANCE.md` and
+`docs/SIGNATURES.md` (the closest precedent: a versioned set with a licence and a provenance record);
+`fuzz/fuzz_cdecl.cpp`, `tests/fuzz/corpus/cdecl` and the fuzz block of `CMakeLists.txt`.
+
+**What exists today.**
+- The type store validates references, cycles and ABI sizes. `TypeProvenance` has `User`, `Dwarf`,
+  `Pdb`, `Inferred` and `Library`. Nothing assigns `Library` yet.
+- `parse_c_declarations` parses a C subset into `TypeDefinition`s with provenance `User`. It refuses a
+  preprocessor line (`cdecl.preprocessor`), a variable (`cdecl.variable`), a bit-field, a parenthesised
+  declarator such as a function pointer (`cdecl.parenthesized_declarator`), and an unknown type name.
+  Built-in names are the fixed-width integers, `size_t`, `ptrdiff_t`, `intptr_t` and `uintptr_t`.
+  `wchar_t`, `va_list`, `FILE`, `time_t` and `off_t` are not built in.
+- `TypeDefinition` has `variadic`. `IrPrototype` has no variadic field, so `apply_prototype` cannot
+  express a `printf`-style prototype.
+- `apply_prototype` changes an `IrFunction` that has a body. An import has no lifted body in its image,
+  so it cannot be the target of `apply_prototype`.
+- `type_applications` (`image_id`, `address`, `kind`, `type_id`) is written with `INSERT OR REPLACE`
+  and has no provenance column. A library application written there would replace a user one.
+- The CLI `project type apply` stores an application. It does not call `apply_prototype`, and the
+  decompiler does not read applications (G05-T3 and G05-T4 status). Outside the tests, nothing in
+  `src/` or `apps/` calls `apply_prototype`. The G22 "Donkey today" line says prototype application
+  comes from the CLI; that is not the case (see the report note below).
+- ELF import names: the symbol loop reads `.symtab` and `.dynsym` and keeps each name as written
+  (`sanitize_name`). It dedupes on (name, address, kind, imported). Symbol version data
+  (`.gnu.version`, `.gnu.version_r`) is not read. A `.symtab` name can carry a version suffix, such as
+  `getenv@GLIBC_2.2.5` (seen in the string table of `tests/fixtures/calls/calls-x86_64`); a `.dynsym`
+  name does not. So one import can appear twice under two names. This comes from the code and the
+  fixture's string table. It has not been run through `donkey-cli`.
+- PE: an import by ordinal is named `ordinal_N` (`pe.cpp` line 349). The image does not hold the name
+  of the DLL export.
+- Mach-O: the name is kept as written. The reader does not drop the C leading underscore (not checked
+  against a Mach-O fixture, so this is expected, not measured).
+- Cross-image import binding (`resolve_imports`) matches by name only. It does not map ordinals.
+- Bundled data: `signatures/musl-1.2.4.json` and `signatures/PROVENANCE.md` exist. Nothing installs
+  them. `CMakeLists.txt` has no `install()` rule for `signatures/`, and the tests find the directory
+  through the `DONKEY_SIGNATURE_DIR` define. There is no install path for bundled libraries.
+- The IR call fields from G21 are `call_arguments` and a `signature_inferred` bool. A library source
+  needs more than a bool (see T4).
+
+**T1 — library file format.**
+
+- *Shape.* A versioned text file. A first line `donkey-typelib 1` (format version). Then header lines
+  `key: value`, up to a blank line. The rest is C text for `parse_c_declarations`. The reader splits the
+  header before the parser runs, so the parser never sees a `#` line.
+- *Header keys (required unless noted).* `library`, `library_version`, `platform` (linux, freebsd,
+  windows, macos), `architecture` (x86_64, aarch64), `abi` (sysv, win64, aapcs64), `data_model` (LP64 or
+  LLP64), `pointer_size`, `long_size` (these map to `CDeclarationOptions`), `char_is_signed`, `source`
+  (package or URL, with its version), `source_sha256`, `licence` (an SPDX identifier), `licence_file`
+  (where the licence text came from), `licence_sha256` (of that licence text), `generator` (a name and
+  version), `generator_command` (the command line), `preprocessor` (its name and version, or `none`),
+  `created` (an ISO 8601 date), `body_sha256` (of the C text), `declarations` (the count).
+  Repeated, in this order after the single keys, each optional unless T2 requires it: `source_file`
+  (one line per header or archive used: `<relative path> <sha256>`, at most one line per path), `macro`
+  (one per macro set: `NAME=value`), `skipped` (one per declaration left out: `<name>: <reason>`) and
+  `note`. The reader keeps every record, in order, as the library's provenance and refuses a malformed
+  value, a repeated path, or a single key given twice.
+- *Bounds (proposed; to be measured in T2).* The whole file at most 4 MiB, the C text at most
+  `kMaxCDeclarationBytes` (1 MiB, the existing limit), at most 20,000 declarations, header lines at most
+  256 bytes and at most 4,096 of them (the repeated `source_file` and `skipped` records
+  can be many). Nesting stays at `kMaxCDeclarationNesting` (64).
+- *The reader refuses* (each with a stable `typelib.` code and the line where it can be located):
+  a missing or other format line; an unknown key; a single key given twice (the repeated records
+  `source_file`, `macro`, `skipped` and `note` may repeat); a missing required key; a platform,
+  architecture, ABI or data model outside its enum; a `pointer_size` or `long_size` other than 4 or 8;
+  a data model that contradicts the ABI (LLP64 with `long_size` 8, for example); a `body_sha256` that
+  does not match the C text; a `declarations` count that does not match the parsed count; a file or
+  count over its bound; any C construct the parser refuses (the parser's `cdecl.` code is passed on
+  with the library's line); a duplicate declaration name; a name used both as a type and as a function;
+  any result that fails `TypeTable::validate`.
+- *Where files live.* Bundled libraries: an install directory that does not exist yet (T1 adds the
+  `install()` rule for a `typelibs/` directory, next to the existing `signatures/`). User libraries: a
+  per-user directory whose path the code does not define yet; T1 picks it with the same rule the
+  project path uses (to check in `src/project/project.cpp` before choosing).
+- *Fuzz.* `fuzz/fuzz_typelib.cpp`, registered in the fuzz block of `CMakeLists.txt` the way `fuzz_cdecl`
+  is (sanitizers, `donkey::project`). Seed corpus in `tests/fuzz/corpus/typelib/`: one valid small file,
+  and one seed for each refusal above. A run of 60 s with no finding.
+- *Tests.*
+  - `TypeLib.ReadsAHeaderAndItsDeclarations` (unit, a hand-written fixture in `tests/fixtures/types/`).
+  - `TypeLib.TypesCarryTheLibraryProvenance` (unit: every type has `TypeProvenance::Library`).
+  - `TypeLib.RefusesAnUnknownFormatVersion` (negative).
+  - `TypeLib.RefusesABodyThatDoesNotMatchItsHash` (negative).
+  - `TypeLib.RefusesAFileOverItsBounds` (negative, file and declaration count).
+  - `TypeLib.RefusesADataModelThatContradictsItsAbi` (negative).
+  - `TypeLib.RefusesAVariableAndAFunctionPointer` (negative: the parser refusals, with the library line).
+  - `TypeLib.ErrorsAreLocated` (the `line L, column C:` text survives).
+  - `fuzz_typelib` (fuzz, 60 s clean under ASan and UBSan).
+- *Done when.* The tests and the fuzz run pass on Linux x86-64 with `-Werror`; a fixture library loads
+  with provenance `Library`; each refusal above has a test and a stable code; the install rule is in
+  `CMakeLists.txt` and the `install` target copies the directory (checked on Linux).
+
+**T2 — generator [owner decision].** The owner decides which header sources are allowed. This plan
+does not pick one. Licences below are as I understand them and must be checked in each source before
+T2 starts.
+
+| Source | Licence (to check) | Covers | Input form | Notes |
+|---|---|---|---|---|
+| musl 1.2.4 headers | MIT (`signatures/PROVENANCE.md` records the MIT licence of the musl package) | libc, POSIX | C headers | The same library as the shipped signature set. Needs a C preprocessor (`gcc -E` or `clang -E`) as a build-time tool. The owner decides whether that tool is allowed in the generator. |
+| Microsoft win32metadata | MIT (check the repository's licence file) | Windows API | ECMA-335 `.winmd` metadata, not C | Not C text. T2 would need a metadata reader (a new parser, with its own fuzz target and its own task), or a converter outside the repo whose output is checked by T1. |
+| MinGW-w64 headers | Mixed, per file (check each file) | Windows CRT and Win32 | C headers | Each file's licence must be read. Mixed files need an owner decision. |
+| glibc headers | LGPL-2.1 with exceptions (check) | glibc | C headers | Rule 4 of section 1 forbids LGPL. Only the owner can waive it. Listed so the owner sees the choice; not recommended here. |
+| Linux UAPI headers | GPL-2.0 with the Linux-syscall-note exception (check) | system calls and kernel structures | C headers | Rule 4 forbids GPL. The note concerns user-space use; whether that is enough is the owner's decision. |
+| FreeBSD headers | BSD-style (check per file) | FreeBSD libc | C headers | Needs a FreeBSD build target to be useful. |
+| Apple SDK headers | Apple SDK licence | macOS | C headers | Excluded: AGENTS.md forbids SDK headers in the repository, and they are not an input option. |
+| Hand-written declarations from public standards | Each standard's text has its own copyright (check) | libc, POSIX | Hand-written C | An option only. The owner decides whether a set written by hand from these texts is acceptable, and records the reason. |
+
+*What each generated library records* (the provenance `T1` reads back): the source package or URL and
+its version; the SHA-256 of each header or archive used; the SPDX licence and the licence file's path
+and hash; the generator name and version; the command line, the preprocessor and its version, and the
+macros set; the platform, architecture, ABI and data model; the creation date; and a list of every
+declaration that was skipped and why (for example a variable, a function pointer, or an unknown name).
+Skipped declarations are listed, never dropped quietly.
+
+*Decisions needed from the owner before T2 starts.* (1) Which sources are allowed. (2) Whether a
+preprocessor tool may run in the generator (a build-time dependency). (3) Whether a metadata reader for
+`.winmd` is in scope, and under which task. (4) Whether any LGPL or GPL headers may be used, and under
+what waiver. (5) Whether hand-written declarations are acceptable, and from which sources.
+
+**T3 — application.**
+
+1. *Name matching.* ELF: strip a version suffix (`@VERSION` or `@@VERSION`) before matching, and keep the
+   version in the record. If one name has several versions with different prototypes, apply none and
+   record `ambiguous`. A `.symtab` and a `.dynsym` entry with the same stripped name are one import.
+2. *PE.* Match by name. An ordinal import (`ordinal_N`) is not matched. Matching it needs the export
+   name table of the DLL, which the image does not hold; that waits for a second image (G15-T2 binds by
+   name only).
+3. *Mach-O.* Strip one leading underscore before matching. Check the rule on a Mach-O fixture before
+   relying on it.
+4. *Functions identified by G09.* The library prototype goes through `apply_prototype` on the matched
+   function's body, which works today. The G09 name stays; the type's provenance is `Library`.
+5. *Provenance per application.* Add a `source` column (user, dwarf, pdb, library, inferred) to
+   `type_applications`, with a schema migration (v7 to v8) and a test that opens a v7 project. Order:
+   a user application is never replaced by a library one; a DWARF or PDB type is not replaced by a
+   library one; a user edit replaces a library application.
+6. *Name collisions.* A library type name that matches a user, DWARF or PDB type is a collision. The
+   table is per project. `parse_c_declarations` assigns ids from `known.next_id()`, so the merge must
+   remap ids. A collision keeps the existing type and records a diagnostic. A library layout is never
+   applied to a pointer whose debug type has a different layout.
+7. *Display.* The CLI `project type list` and `apply` show the source. The printer labels a library
+   prototype the way `signature_inferred` is labelled today, with the library name and version.
+8. *CLI.* A verb to load a library file into a project and one to list the libraries loaded. Final
+   names are chosen in T3 and listed in the PR.
+
+- *Tests.*
+  - `TypeLib.AppliesALibraryPrototypeToAnImportedName` (unit, an ELF fixture that calls `puts`).
+  - `TypeLib.VersionedNameMatchesTheUnversionedLibraryName` (unit: `memcpy@GLIBC_2.14` matches `memcpy`).
+  - `TypeLib.AmbiguousVersionsApplyNothing` (negative).
+  - `TypeLib.OrdinalImportIsNotMatched` (negative, a PE fixture with an ordinal import).
+  - `TypeLib.UserAndDebugTypesWinOverALibrary` (unit, both orders).
+  - `TypeLib.SameNameDifferentLayoutIsACollision` (negative).
+  - `Types.MigratesFromSchemaV7` (unit: an older project opens; existing rows get source `user`).
+  - `cli.project_type_library_apply` (CLI, a committed fixture project).
+- *Done when.* The fixture ELF shows its `puts` and `memcpy` prototypes in the CLI with provenance
+  `Library`; a user edit replaces the library application; the schema migration test passes; the PE
+  ordinal and Mach-O checks are recorded in the PR. The R1 corpus check (G20-T1) comes later, when R1
+  exists.
+
+**T4 — typed arguments at calls (needs G21-T2 and the G21 ABI tables).**
+
+- *What G21 must give.* `call_arguments` in ABI order and the result `dest`, for a direct call
+  (G21-T2 is PARTIAL: integer arguments, same-image callees, System V only). Three things G21 does not
+  yet give: (a) a call signature built from an `IrPrototype`, not from a lifted callee; (b) a signature
+  source enum in place of the `signature_inferred` bool, with values inferred, debug, type and library;
+  (c) an argument register table for each ABI in use. PE calls stay unresolved until a Win64 table
+  exists, as G21 says.
+- *How a library prototype drives a call.* The argument count comes from the prototype's fixed
+  parameters, not from register use. Each argument's width and class come from the prototype. The
+  operands are the ABI registers in order. Floating-point arguments wait for G21's floating-point step.
+  A register the caller reads for its own use is not evidence of an extra argument. An argument
+  register beyond the prototype's parameters that the caller writes before the call and never reads
+  afterwards is only a possible mismatch, not proof: the write can be dead code that the callee does
+  not read either. The prototype is applied as written, the call prints its arguments, the write is
+  reported as a possible mismatch (with its address), and the caller stays Partial as every caller of
+  an import does. Nothing in this check changes a prototype.
+- *Import calls.* `lift_call` (`src/ir/lift.cpp`) sees only the call target address. The import name comes
+  from `plt_stub_imports` (`include/donkey/binary/plt.h`), which cfg.cpp already uses (`cfg.cpp` line
+  986). T4 passes that name into the lifter for calls through a PLT stub. A call through a register
+  loaded from a GOT slot stays unresolved (G15-T2 says so).
+- *Verification of an import call.* The interpreter runs same-image callees only. An import has no body
+  here, so the caller of a library call cannot be checked by execution, and the rule in section 1
+  (Complete means executed and compared) keeps its caller Partial. The arguments are printed and
+  labelled. The plan leaves the way to check the prototype open; the options are for the T4 spike:
+  (1) run the real program under the Linux debugger (G14) and compare the argument registers at each call
+  with the prototype's arity and widths; (2) compare the prototype with the debug information of an
+  unstripped build of the same library version; (3) no check: the call stays labelled Partial. Option
+  (3) is what the code does by default. The owner decides whether options (1) or (2) are wanted.
+- *Varargs.* A variadic prototype (`printf`) gives its fixed parameters only. The call's argument list is
+  the fixed part, and the call stays Partial (G21-T4 stays Partial unless the count is known).
+- *Tests.*
+  - `Ir.LibraryPrototypeSuppliesTheArgumentsOfAnImportCall` (unit, hand-built IR and a PLT stub fixture).
+  - `Ir.ImportCallNamesItsTargetThroughThePltStub` (unit).
+  - `Ir.VariadicPrototypeLeavesTheCallPartial` (unit).
+  - `Ir.LibraryCallerStaysPartial` (unit: the caller of an import is Partial).
+  - `Ir.UnreadArgumentRegisterWriteIsReportedAsAPossibleMismatch` (the caller sets `rdx` just before
+    calling a one-parameter function and never reads it: the prototype is applied unchanged and the
+    write is reported, not treated as an argument).
+  - `Ir.DeadArgumentRegisterWriteDoesNotChangeTheCall` (a dead `rdx` write before a call to a
+    one-parameter function that does not read `rdx`: the printed call has one argument, the report
+    says "possible mismatch", and nothing else changes).
+  - `Ir.CallerReadOfAnArgumentRegisterIsNotAnExtraArgument` (the caller reads `rdx` for its own use around
+    a call to a one-parameter function; the prototype is applied, no contradiction).
+  - `DecompilerCorpus.LibraryCallsAreLabelledAndNotComplete` (oracle: the call prints with its
+    arguments, and the caller is not Complete).
+  - `cli.decompile_prints_library_arguments` (CLI, the ELF fixture of T3).
+- *Done when.* The unit and CLI tests pass; every corpus result that was Complete is still Complete and
+  equal to the compiled code; the import-call verification option chosen by the owner is recorded; no
+  import caller is Complete unless the owner has accepted a different rule in writing.
+
+**Pitfalls.**
+- Never copy an IDA type library, a Ghidra data type archive or a `.winmd` file into the repository.
+  Generate from a source whose licence is allowed, and record the source's version and hash.
+- Record the header version in every library. A library built from a different version of the same
+  headers gives a different body hash, and the reader must refuse a body that does not match.
+- A wrong prototype must fail a check, not print plausible code. For a function with a body, the check
+  is the oracle. For an import, it is the option the owner picks in T4.
+- ABI differences: LP64 (Linux, macOS) and LLP64 (Windows) differ in `long`; `char` is signed on
+  x86-64 and Apple arm64 but not on Linux AArch64 (`CDeclarationOptions::char_is_signed`). Windows x64
+  and System V pass arguments in different registers. A library must carry its data model and ABI,
+  and the reader must refuse a mismatch with the target.
+- A type library is a per-project table. A library type must not change a user, DWARF or PDB type.
+- Keep the ELF version suffix out of the library's names; keep it in the provenance.
 
 ### G23 Unwind tables and exception handling (P1)
 
