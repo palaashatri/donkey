@@ -1708,8 +1708,12 @@ TEST(DecompilerCorpus, EveryPrintedFunctionPassesTheControlFlowCheck) {
         ++with_gotos;
         total_gotos += structure.gotos;
       }
+      // A structure built on the reverse-postorder copy or the split function names that
+      // function's blocks, so its lines are checked against it.
+      const donkey::IrFunction& described =
+          structure.described ? *structure.described : lifted.value();
       const auto mismatch =
-          donkey::detail::check_structured_control_flow(lifted.value(), structure.lines);
+          donkey::detail::check_structured_control_flow(described, structure.lines);
       if (mismatch.has_value()) {
         problems.push_back(std::string(library.level) + " " + function.name + ": " + *mismatch);
       }

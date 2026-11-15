@@ -2235,6 +2235,7 @@ StructureResult structure_function(const IrFunction& function,
     Structurer structurer(*copy, string_literals);
     if (structurer.run().has_value() && accept(*copy, structurer)) {
       result.outcome = StructureOutcome::Structured;
+      result.described = std::make_shared<const IrFunction>(*copy);
       return result;
     }
     result.legacy_reason = structurer.reason();
@@ -2255,12 +2256,14 @@ StructureResult structure_function(const IrFunction& function,
       Structurer structurer(*split, string_literals);
       if (structurer.run().has_value() && accept(*split, structurer)) {
         result.outcome = StructureOutcome::Structured;
+        result.described = std::make_shared<const IrFunction>(*split);
         return result;
       }
     }
     Structurer split_fallback(*split, string_literals);
     if (split_fallback.run_fallback().has_value() && accept(*split, split_fallback)) {
       result.outcome = StructureOutcome::Structured;
+      result.described = std::make_shared<const IrFunction>(*split);
       return result;
     }
     result.legacy_reason = split_fallback.reason();

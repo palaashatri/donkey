@@ -6644,3 +6644,18 @@ TEST(Ir, LoopFollowChoiceMatchesTheSearchPerExit) {
   }
   EXPECT_GT(with_follow, 1000u);
 }
+
+TEST(Ir, AStructureBuiltOnTheReorderedCopyNamesTheCopysBlocks) {
+  // Block 2 is laid out after block 1 but runs before it: 0 -> {2, 1}, 2 -> 1, 1 returns. The
+  // structure is built on the reverse-postorder copy, so its tags name the copy's blocks: the
+  // result carries that copy, and the lines are checked against it.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_set("rdx", 1), fb_return()},
+      {fb_set("rdx", 2), fb_jump(1)},
+  });
+  const auto structure = donkey::detail::structure_function(f, nullptr);
+  ASSERT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured) << structure.refusal;
+  ASSERT_NE(structure.described, nullptr) << "the layout structured it: pick another layout";
+  EXPECT_FALSE(check_structured_control_flow(*structure.described, structure.lines).has_value());
+}

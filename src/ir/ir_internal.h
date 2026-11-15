@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -182,6 +183,10 @@ struct StructureResult {
   /// Why the goto structurer refused the function (empty when it did not), for example a nesting
   /// deeper than kMaxStructureNesting.
   std::string refusal;
+  /// The function whose blocks the lines' tags name, when it is not the input function: the
+  /// reverse-postorder copy or the split function that was structured. Their block numbers differ
+  /// from the input's, so the lines are checked against this function. Null for the input function.
+  std::shared_ptr<const IrFunction> described;
 };
 
 /// Rules of the goto structurer (G04-T5, src/ir/structure_goto.cpp). Each can be switched off, so a
