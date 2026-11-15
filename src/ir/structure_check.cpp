@@ -6,17 +6,20 @@
 // the innermost loop or switch), and then reads, for each IR block, the blocks that control reaches
 // from it. Those are compared with the IR's successors, edge for edge: a condition's true side must
 // enter the IR's taken block when the printed condition is the branch condition, and the
-// fall-through block otherwise. The check does not look at the text of statements, only at the tags
-// and the braces that the tags describe.
+// fall-through block otherwise. The check does not look at the text of statements, only at the
+// tags, the braces that the tags describe, the text of each control line (conditions, switch
+// selectors, case values) and the labels: a goto goes to the line that defines the label it prints.
 //
 // A mismatch is a bug in the structurer: the printer must not print code whose control flow
 // differs from the IR's. structure_function uses this check as a gate on each candidate structure.
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -43,9 +46,11 @@ struct Node {
   bool has_alt = false;
   LineKind jump = LineKind::Plain;  ///< IfJump: the jump it guards
   std::size_t line = 0;             ///< index of the line the node came from
-  std::vector<Node> body;           ///< If: then-arm; loops: body
-  std::vector<Node> alt;            ///< If: else-arm
-  std::vector<Arm> arms;            ///< Switch
+  std::string
+      label;  ///< Marker, While: the label the line defines; Goto, IfJump: the label it names
+  std::vector<Node> body;  ///< If: then-arm; loops: body
+  std::vector<Node> alt;   ///< If: else-arm
+  std::vector<Arm> arms;   ///< Switch
 };
 
 struct Arm {
@@ -71,6 +76,53 @@ bool ends_with(const std::string& text, const std::string& suffix) {
 
 bool starts_with(const std::string& text, const std::string& prefix) {
   return text.compare(0, prefix.size(), prefix) == 0;
+}
+
+/// A C identifier: a letter or an underscore, then letters, digits and underscores.
+bool is_identifier(const std::string& text) {
+  if (text.empty() || (std::isalpha(static_cast<unsigned char>(text[0])) == 0 && text[0] != '_')) {
+    return false;
+  }
+  return std::all_of(text.begin(), text.end(), [](char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_';
+  });
+}
+
+/// The label a marker line defines: `L:`, or `L: ;` for a block with no statement. Empty when the
+/// line has no text; nullopt when its text is anything else.
+std::optional<std::string> marker_label(const std::string& text) {
+  const std::string line = trimmed(text);
+  if (line.empty()) {
+    return std::string();
+  }
+  for (const char* suffix : {": ;", ":"}) {
+    const std::string end(suffix);
+    if (ends_with(line, end) && is_identifier(line.substr(0, line.size() - end.size()))) {
+      return line.substr(0, line.size() - end.size());
+    }
+  }
+  return std::nullopt;
+}
+
+/// The label in front of a loop opener (`L: while (...) {`), or empty.
+std::string opener_label(const std::string& text) {
+  const std::string line = trimmed(text);
+  const std::size_t colon = line.find(": ");
+  if (colon == std::string::npos || !is_identifier(line.substr(0, colon))) {
+    return std::string();
+  }
+  return line.substr(0, colon);
+}
+
+/// The label a jump line names: the text ends in `goto L;`. Empty when it does not.
+std::string goto_label(const std::string& text) {
+  const std::string line = trimmed(text);
+  const std::size_t at = line.rfind("goto ");
+  if (at == std::string::npos || (at != 0 && line[at - 1] != ' ') || !ends_with(line, ";")) {
+    return std::string();
+  }
+  const std::string label = line.substr(at + 5, line.size() - at - 6);
+  return is_identifier(label) ? label : std::string();
 }
 
 /// Rebuilds the tree from the tagged lines. Every opening tag must be closed by the tag that
@@ -145,6 +197,18 @@ class TagParser {
           leaf.kind = tag.kind;
           leaf.block = tag.block;
           leaf.line = pos_;
+          if (tag.kind == LineKind::Marker) {
+            const auto label = marker_label(current.text);
+            if (!label) {
+              return fail("a block marker whose text is not a label: " + describe(current, pos_));
+            }
+            leaf.label = *label;
+          } else if (tag.kind == LineKind::Goto) {
+            leaf.label = goto_label(current.text);
+            if (leaf.label.empty() || trimmed(current.text) != "goto " + leaf.label + ";") {
+              return fail("a goto whose text is not `goto label;`: " + describe(current, pos_));
+            }
+          }
           out.push_back(std::move(leaf));
           ++pos_;
           break;
@@ -163,6 +227,13 @@ class TagParser {
           node.follow = tag.follow;
           node.jump = tag.jump;
           node.line = pos_;
+          if (tag.jump == LineKind::Goto) {
+            node.label = goto_label(current.text);
+            if (node.label.empty()) {
+              return fail("an if-goto whose text does not end in `goto label;`: " +
+                          describe(current, pos_));
+            }
+          }
           out.push_back(std::move(node));
           ++pos_;
           break;
@@ -208,6 +279,7 @@ class TagParser {
           node.negated = tag.negated;
           node.pure = tag.pure;
           node.line = pos_;
+          node.label = opener_label(current.text);
           ++pos_;
           if (!sequence(node.body)) {
             return false;
@@ -283,18 +355,34 @@ class TagParser {
 /// One operation of the lowered code. A Block op is the start of an IR block's code (a copy of it
 /// when the block is printed twice). Jumps and conditional jumps name their targets as labels until
 /// the labels are resolved to positions.
+/// The value an arm of a printed switch is entered for: a case value, or the default (also the
+/// way past a switch that prints no default arm).
+struct SwitchKey {
+  bool is_default = false;
+  std::uint64_t value = 0;
+};
+
 struct Op {
   enum class Kind : std::uint8_t { Block, Ret, Jump, CJump, Switch };
   Kind kind = Kind::Block;
   BlockId block = kNoBlock;  ///< Block: the block; CJump, Switch: the tested or dispatched block
   bool negated = false;      ///< CJump: the printed condition is the complement of the IR's
-  bool goto_target = false;  ///< Jump: `block` is a goto target, resolved to its first Block op
+  bool goto_target = false;  ///< Jump: a goto to `label`, which the tag says is block `block`
+  std::string label;         ///< Jump with goto_target: the printed label it names
   std::vector<std::size_t> labels;   ///< Jump: [0]; CJump: [0] true, [1] false; Switch: the arms
+  std::vector<SwitchKey> keys;       ///< Switch: the value each of `labels` is entered for
   std::vector<std::size_t> targets;  ///< the resolved positions of `labels` (same order)
   std::size_t line = 0;              ///< index of the line the op came from
 };
 
 constexpr std::size_t kUnplaced = std::numeric_limits<std::size_t>::max();
+
+/// A printed label: the position of the op it stands before, and the block its line belongs to.
+struct LabelDef {
+  std::size_t pos = 0;
+  BlockId block = kNoBlock;
+  std::size_t line = 0;
+};
 
 struct Frame {
   bool loop = false;
@@ -309,6 +397,7 @@ class Lowerer {
  public:
   std::vector<Op> ops;
   std::vector<std::size_t> label_pos;
+  std::map<std::string, LabelDef> printed_labels;  ///< the labels the lines define
   std::string error;
 
   bool lower(const std::vector<Node>& nodes) {
@@ -351,10 +440,25 @@ class Lowerer {
     return false;
   }
 
-  bool lower_jump(LineKind kind, BlockId claim, std::size_t line) {
+  /// A label defined here: it stands before the next op. A label printed twice is refused (the C
+  /// would not compile, and a goto could not say which one it means).
+  bool define(const std::string& label, BlockId block, std::size_t line) {
+    if (label.empty()) {
+      return true;
+    }
+    const auto [it, inserted] = printed_labels.emplace(label, LabelDef{ops.size(), block, line});
+    if (!inserted) {
+      return fail("label " + label + " is printed twice (lines " + std::to_string(it->second.line) +
+                  " and " + std::to_string(line) + ")");
+    }
+    return true;
+  }
+
+  bool lower_jump(LineKind kind, BlockId claim, std::size_t line, const std::string& label) {
     if (kind == LineKind::Goto) {
       emit(Op::Kind::Jump, claim, line);
       ops.back().goto_target = true;
+      ops.back().label = label;
       return true;
     }
     if (kind == LineKind::Break) {
@@ -395,6 +499,9 @@ class Lowerer {
           case LineKind::Plain:
             return true;
           case LineKind::Marker:
+            if (!define(node.label, node.block, node.line)) {
+              return false;
+            }
             emit(Op::Kind::Block, node.block, node.line);
             return true;
           case LineKind::Return:
@@ -403,7 +510,7 @@ class Lowerer {
           case LineKind::Break:
           case LineKind::Continue:
           case LineKind::Goto:
-            return lower_jump(node.kind, node.block, node.line);
+            return lower_jump(node.kind, node.block, node.line, node.label);
           default:
             return fail("an unexpected leaf at line " + std::to_string(node.line));
         }
@@ -414,7 +521,7 @@ class Lowerer {
         emit(Op::Kind::CJump, node.block, node.line);
         ops.back().labels = {taken, after};
         place(taken);
-        if (!lower_jump(node.jump, node.follow, node.line)) {
+        if (!lower_jump(node.jump, node.follow, node.line, node.label)) {
           return false;
         }
         place(after);
@@ -446,6 +553,9 @@ class Lowerer {
         const std::size_t top = new_label();
         const std::size_t end = new_label();
         place(top);
+        if (!define(node.label, node.block, node.line)) {
+          return false;
+        }
         if (node.pure) {
           // The loop's test is the header's branch: `while (C)` runs the header, then tests it.
           emit(Op::Kind::Block, node.block, node.line);
@@ -488,15 +598,19 @@ class Lowerer {
         const std::size_t end = new_label();
         emit(Op::Kind::Switch, node.block, node.line);
         std::vector<std::size_t> arm_labels;
+        std::vector<SwitchKey> keys;
         bool has_default = false;
         for (const Arm& arm : node.arms) {
           arm_labels.push_back(new_label());
+          keys.push_back(SwitchKey{arm.is_default, arm.value});
           has_default = has_default || arm.is_default;
         }
         if (!has_default) {
           arm_labels.push_back(end);  // no matching case and no default: past the switch
+          keys.push_back(SwitchKey{true, 0});
         }
         ops.back().labels = arm_labels;
+        ops.back().keys = std::move(keys);
         frames_.push_back(Frame{false, node.follow, kNoBlock, end, end});
         for (std::size_t index = 0; index < node.arms.size(); ++index) {
           place(arm_labels[index]);
@@ -512,6 +626,12 @@ class Lowerer {
     return fail("an unexpected node at line " + std::to_string(node.line));
   }
 };
+
+std::string hex_value(std::uint64_t value) {
+  char buffer[32];
+  std::snprintf(buffer, sizeof buffer, "0x%llx", static_cast<unsigned long long>(value));
+  return buffer;
+}
 
 /// Where control can go from a point of the lowered code: the blocks it reaches first, and whether
 /// it reaches the end of the function.
@@ -530,15 +650,17 @@ struct Tail {
   Reach fall;   ///< Cond: the false side
   BlockId tested = kNoBlock;
   bool negated = false;
-  std::vector<Reach> arms;  ///< Multi
+  std::vector<Reach> arms;      ///< Multi
+  std::vector<SwitchKey> keys;  ///< Multi: the value each arm is entered for
 };
 
 /// Compares the lowered code with the IR. `ops` are resolved in place.
 class Checker {
  public:
   Checker(const IrFunction& function, std::vector<Op>& ops,
-          const std::vector<std::size_t>& label_pos)
-      : function_(function), ops_(ops), label_pos_(label_pos) {}
+          const std::vector<std::size_t>& label_pos,
+          const std::map<std::string, LabelDef>& printed_labels)
+      : function_(function), ops_(ops), label_pos_(label_pos), printed_labels_(printed_labels) {}
 
   std::optional<std::string> run() {
     const std::size_t count = function_.blocks.size();
@@ -564,6 +686,16 @@ class Checker {
         return "block " + hex(block) + " is not printed";
       }
     }
+    // The printed function starts where the IR's does: the first block control reaches is the
+    // entry, with no test or return before it.
+    if (count > 0) {
+      Reach entry;
+      reach(0, entry, 0);
+      if (!is_exactly(entry, 0)) {
+        return "the printed code does not start at the entry block " + hex(0) + ": it reaches " +
+               describe(entry) + " first";
+      }
+    }
     for (std::size_t pos = 0; pos < ops_.size(); ++pos) {
       if (ops_[pos].kind == Op::Kind::Block) {
         if (auto mismatch = check_block(pos, ops_[pos].block)) {
@@ -582,10 +714,12 @@ class Checker {
   const IrFunction& function_;
   std::vector<Op>& ops_;
   const std::vector<std::size_t>& label_pos_;
+  const std::map<std::string, LabelDef>& printed_labels_;
   std::vector<std::size_t> first_block_;
   mutable bool too_deep_ = false;  ///< set by reach when the walk would nest too deeply
 
-  /// Resolves every label to a position, and every goto to the first printed copy of its target.
+  /// Resolves every label to a position, and every goto to the line that defines the label it
+  /// prints. That label must be on its tagged target block.
   std::optional<std::string> resolve() {
     for (Op& op : ops_) {
       op.targets.clear();
@@ -596,11 +730,17 @@ class Checker {
         op.targets.push_back(label_pos_[label]);
       }
       if (op.goto_target) {
-        if (op.block >= first_block_.size() || first_block_[op.block] == kUnplaced) {
-          return "a goto at line " + std::to_string(op.line) + " to block " + hex(op.block) +
-                 " that is not printed";
+        const auto label = printed_labels_.find(op.label);
+        if (label == printed_labels_.end()) {
+          return "a goto at line " + std::to_string(op.line) + " to label " + op.label +
+                 ", which no line defines";
         }
-        op.targets.push_back(first_block_[op.block]);
+        if (label->second.block != op.block) {
+          return "a goto at line " + std::to_string(op.line) + " to label " + op.label +
+                 ", which is printed on block " + hex(label->second.block) + "; the tag says " +
+                 hex(op.block);
+        }
+        op.targets.push_back(label->second.pos);
       }
     }
     return std::nullopt;
@@ -680,6 +820,7 @@ class Checker {
       const Op& op = ops_[first];
       tail.kind = Tail::Kind::Multi;
       tail.tested = op.block;
+      tail.keys = op.keys;
       for (const std::size_t target : op.targets) {
         Reach arm;
         reach(target, arm, 0);
@@ -760,28 +901,52 @@ class Checker {
         if (tail.kind != Tail::Kind::Multi || tail.tested != block) {
           return name + " is a switch in the IR, but the printed code has no switch for it";
         }
-        std::vector<BlockId> expected{terminator.a.block};
-        for (const IrSwitchCase& switch_case : terminator.switch_cases) {
-          expected.push_back(switch_case.target_block);
-        }
-        std::vector<BlockId> printed;
-        for (const Reach& arm : tail.arms) {
+        // Where the printed switch sends each value: the arm of its case, else the default arm (or
+        // past the switch when no default arm is printed).
+        std::optional<BlockId> printed_default;
+        std::map<std::uint64_t, BlockId> printed_cases;
+        for (std::size_t index = 0; index < tail.arms.size(); ++index) {
+          const Reach& arm = tail.arms[index];
           if (arm.cycle || arm.exit || arm.blocks.size() != 1) {
             // An arm that is empty and falls into the next one reaches that arm's block; any other
             // shape is a mismatch.
             return name + ": a switch arm reaches " + describe(arm) + ", not one block";
           }
-          printed.push_back(arm.blocks[0]);
+          const SwitchKey key = index < tail.keys.size() ? tail.keys[index] : SwitchKey{true, 0};
+          if (key.is_default) {
+            if (printed_default) {
+              return name + ": the switch has two default arms";
+            }
+            printed_default = arm.blocks[0];
+          } else if (!printed_cases.emplace(key.value, arm.blocks[0]).second) {
+            return name + ": case " + hex_value(key.value) + " is printed twice";
+          }
         }
-        // The dispatch may also go past the switch when no arm matches (no default arm in the
-        // code).
-        if (printed.size() == expected.size() + 1) {
-          printed.pop_back();
+        // Where the IR sends it: the last case with that value (as the evaluator does), else the
+        // default target.
+        std::map<std::uint64_t, BlockId> ir_cases;
+        for (const IrSwitchCase& switch_case : terminator.switch_cases) {
+          ir_cases[switch_case.value] = switch_case.target_block;
         }
-        std::sort(expected.begin(), expected.end());
-        std::sort(printed.begin(), printed.end());
-        if (printed != expected) {
-          return name + ": the switch arms reach a different set of blocks than the IR's targets";
+        const BlockId ir_default = terminator.a.block;
+        if (!printed_default || *printed_default != ir_default) {
+          return name + ": a value no case names goes to " +
+                 (printed_default ? hex(*printed_default) : std::string("nothing")) +
+                 ", the IR's default is " + hex(ir_default);
+        }
+        for (const auto& [value, target] : ir_cases) {
+          const auto printed = printed_cases.find(value);
+          const BlockId goes = printed == printed_cases.end() ? *printed_default : printed->second;
+          if (goes != target) {
+            return name + ": case " + hex_value(value) + " goes to " + hex(goes) +
+                   ", the IR's target is " + hex(target);
+          }
+        }
+        for (const auto& [value, goes] : printed_cases) {
+          if (ir_cases.count(value) == 0 && goes != ir_default) {
+            return name + ": case " + hex_value(value) + " goes to " + hex(goes) +
+                   ", the IR sends it to its default " + hex(ir_default);
+          }
         }
         return std::nullopt;
       }
@@ -801,12 +966,6 @@ std::string expected_condition(const IrFunction& function, BlockId block, bool n
   }
   const IrStatement* previous = flags_producer(ir, ir.statements.size() - 1);
   return render_condition(function, ir.statements.back(), previous, negated, literals);
-}
-
-std::string hex_value(std::uint64_t value) {
-  char buffer[32];
-  std::snprintf(buffer, sizeof buffer, "0x%llx", static_cast<unsigned long long>(value));
-  return buffer;
 }
 
 /// The text of each control line must say what its tag says: the condition of a branch, the value
@@ -906,9 +1065,18 @@ std::optional<std::string> check_control_text(
       case LineKind::Close:
         if (text != "}") return wrong("}");
         break;
-      case LineKind::SwitchOpen:
-        if (!starts_with(text, "switch (") || !ends_with(text, "{")) return wrong("switch (...) {");
+      case LineKind::SwitchOpen: {
+        if (!block_ok(tag.block)) return wrong("a block the function does not have");
+        const IrBlock& dispatch = function.blocks[tag.block];
+        if (dispatch.statements.empty() || dispatch.statements.back().op != IrOp::Switch) {
+          return wrong("a switch on a block that does not end in one");
+        }
+        const std::string expected =
+            "switch (" + render_operand(function, dispatch.statements.back().dest, literals) +
+            ") {";
+        if (text != expected) return wrong(expected);
         break;
+      }
       case LineKind::Return:
         if (!starts_with(text, "return") || !ends_with(text, ";")) return wrong("return ...;");
         break;
@@ -940,7 +1108,7 @@ std::optional<std::string> check_structured_control_flow(
   if (!lowerer.lower(tree)) {
     return lowerer.error;
   }
-  Checker checker(function, lowerer.ops, lowerer.label_pos);
+  Checker checker(function, lowerer.ops, lowerer.label_pos, lowerer.printed_labels);
   return checker.run();
 }
 

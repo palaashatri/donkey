@@ -503,8 +503,9 @@ class Emitter {
       }
       --depth_;
     } else {
-      const std::string label = labelled_[header] ? names_[header] + ": " : std::string();
-      push(label + "while (1) {", function_.blocks[header].address,
+      // The header's label, if it has one, goes on its marker, the first line of the body: on the
+      // `while (1)` as well it would be printed twice.
+      push("while (1) {", function_.blocks[header].address,
            make_tag(LineKind::WhileOpen, header, follow, false, false));
       ++depth_;
       region(header, Ctx{header, header, true});
@@ -658,7 +659,10 @@ class Emitter {
       insert_line(first_begin + 1 + second_length, "}", 0, make_tag(LineKind::Close), depth);
       dedent_from(first_begin + 2 + second_length);
     } else if (first_empty && second_empty) {
-      // Both arms are empty: nothing to print.
+      // Both arms are empty: the branch's two targets are the same block, the join. The test is
+      // still printed, as an empty `if`, so that the printed code has the block's branch.
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      push("}", 0, make_tag(LineKind::Close));
     } else if (first_empty) {
       insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
       push("}", 0, make_tag(LineKind::Close));
