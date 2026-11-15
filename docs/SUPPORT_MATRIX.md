@@ -20,9 +20,10 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`). An indirect tail jump (`jmp rax`) is a call
   through its operand (`Ir.IndirectTailJumpCallsItsOperand`).
 - Calls (G21): a direct call to a same-image integer callee is resolved to its inferred arguments
-  and result (x86-64 System V; Win64 (PE) calls with arguments stay Partial) when the callee lifts Complete with its own calls left unresolved, in
-  practice a leaf. A callee that makes a call is Partial at that level, so its callers stay Partial
-  even when it is Complete on its own (resolution is one level deep). A callee that reads a stack argument is not resolved,
+  and result (x86-64 System V; Win64 (PE) calls with arguments stay Partial) when the callee lifts Complete,
+  with its own calls resolved the same way up to 8 levels deep (G21-T2: call summaries computed bottom-up
+  and cached per image; a recursive callee stays unresolved; corpus `c_call_nested`, a two-level chain,
+  is verified at -O0, -O2 and -O3). A callee that reads a stack argument is not resolved,
   so its caller is Partial (`Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial`,
   `cli.decompile_stack_argument_caller_is_partial`). The clobber check and the callee write set are
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
@@ -33,7 +34,7 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
   splitting of irreducible functions (`Ir.*Fallback*`, `Ir.*PostDominator*`, `Ir.*Split*`).
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
-  InvalidIR and 0 Unsupported, 183 Complete (9.2%); before G04-T5, 985 labelled (49.6%, under the 52% bar).
+  InvalidIR and 0 Unsupported, 184 Complete (9.3%); before G04-T5, 985 labelled (49.6%, under the 52% bar).
 - Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
   blocks (985 before G04-T5). 1,000 print without a goto and 986 with gotos (16,232 in all; the
   largest function has 409). Every printed structure is checked edge by edge against the IR before it

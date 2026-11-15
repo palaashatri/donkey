@@ -9,6 +9,7 @@
 #include <fstream>
 #include <limits>
 #include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -1768,8 +1769,12 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   if (auto read = read_debug_info(loaded.image, loaded.data); read.has_value()) {
     debug = std::move(read.value());
   }
+  // One cache of callee summaries for the whole image (G21-T2): each callee is summarised once,
+  // whichever function calls it first.
+  LiftOptions lift_options;
+  lift_options.call_summaries = std::make_shared<CallSummaryCache>();
   auto lift_named = [&](const Function& function) {
-    auto lifted = lift_function(loaded.image, analysis.value(), function);
+    auto lifted = lift_function(loaded.image, analysis.value(), function, lift_options);
     if (lifted && debug) {
       if (const DebugFunction* named = debug->function_at(function.address)) {
         (void)apply_debug_parameter_names(lifted.value(), *named, *debug);
