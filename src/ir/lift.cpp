@@ -3,8 +3,12 @@
 #include "donkey/ir/abi.h"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <cstdio>
+#include <map>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -16,29 +20,247 @@
 namespace donkey {
 namespace {
 
+// Whether a callee's code may read an argument passed on the stack (the seventh and later integer
+// arguments, at entry rsp + 8 and up). The check runs a dataflow over the callee's IR (the lift
+// without passes): every register is tracked as an offset from the entry rsp when it holds a stack
+// address, and an access, a lea or a stack address passed to a call at offset 8 or more is taken as
+// an incoming argument. Whatever cannot be followed (a stack address of unknown offset, or a stack
+// address stored into a register the tracking does not model) is taken as an incoming argument too,
+// so the caller is never resolved on a guess. Returns true when the callee may read one.
+bool reads_incoming_stack_argument(const IrFunction& function) {
+  // A register family's value: absent (not a stack address), a known offset from the entry rsp, or
+  // nullopt (a stack address of unknown offset).
+  using StackValues = std::map<std::string, std::optional<std::int64_t>>;
+  const std::size_t count = function.blocks.size();
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::optional<StackValues>> entry(count);
+  entry[0] = StackValues{{"rsp", 0}};
+  bool refused = false;
+
+  auto join = [](const StackValues& a, const StackValues& b) {
+    StackValues out;
+    for (const auto& [family, value] : a) {
+      const auto other = b.find(family);
+      if (other == b.end()) {
+        out[family] = std::nullopt;
+      } else {
+        out[family] = value == other->second ? value : std::nullopt;
+      }
+    }
+    for (const auto& [family, value] : b) {
+      if (a.find(family) == a.end()) {
+        out[family] = std::nullopt;
+      }
+    }
+    return out;
+  };
+  auto same = [](const StackValues& a, const StackValues& b) { return a == b; };
+
+  // `access` is false for a lea, which only computes the address; an access covers the operand's
+  // bytes, so it reaches an argument when any of them is at entry rsp + 8 or above.
+  auto check_memory = [&](const IrOperand& operand, const StackValues& values, bool access) {
+    if (operand.kind != IrOperandKind::Memory) {
+      return;
+    }
+    const std::string base =
+        operand.reg.empty() ? std::string() : internal::register_family(operand.reg);
+    const std::string index =
+        operand.index.empty() ? std::string() : internal::register_family(operand.index);
+    if (!index.empty() && values.count(index) != 0) {
+      refused = true;  // an indexed stack address
+    }
+    if (base.empty()) {
+      return;
+    }
+    const auto found = values.find(base);
+    if (found == values.end()) {
+      return;
+    }
+    if (!found->second.has_value()) {
+      refused = true;
+      return;
+    }
+    if (!index.empty()) {
+      // A stack base with an index: nothing bounds the index, so the access can reach the incoming
+      // stack arguments whatever the displacement is.
+      refused = true;
+      return;
+    }
+    const auto displacement = static_cast<std::int64_t>(operand.constant);
+    const std::int64_t first = *found->second + displacement;
+    const std::int64_t size = access ? (operand.width == 0 ? 8 : operand.width) : 1;
+    if (first + size > 8) {
+      refused = true;  // an incoming stack argument (entry rsp + 8 and up)
+    }
+  };
+
+  auto transfer = [&](const IrStatement& statement, StackValues& values) {
+    const bool lea = statement.op == IrOp::Lea;
+    check_memory(statement.dest, values, true);
+    check_memory(statement.a, values, !lea);
+    check_memory(statement.b, values, true);
+    check_memory(statement.c, values, true);
+    auto tracked = [&](const IrOperand& operand) {
+      return operand.kind == IrOperandKind::Register &&
+             values.count(internal::register_family(operand.reg)) != 0;
+    };
+    if (statement.op == IrOp::Call) {
+      for (const IrOperand& argument : statement.call_arguments) {
+        if (tracked(argument)) {
+          refused = true;  // a stack address escapes into the callee
+        }
+      }
+    }
+    // The statements the tracking models: a move, an add or subtract of a constant, a lea, a load
+    // and a call. Any other statement that reads a stack address (including a store of one, which
+    // would let a later load read it back) is not followed: it is refused.
+    const bool modelled = statement.op == IrOp::Assign || statement.op == IrOp::Lea ||
+                          statement.op == IrOp::Load || statement.op == IrOp::Call ||
+                          ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+                           statement.b.kind == IrOperandKind::Constant);
+    if (!modelled) {
+      for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (tracked(*operand)) {
+          refused = true;
+        }
+      }
+    }
+    if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
+      return;
+    }
+    const std::string dest = internal::register_family(statement.dest.reg);
+    // A write that can keep the destination's old value, in part or on some path (a conditional
+    // move, an 8- or 16-bit write, a merge into the register), leaves a stack address the register
+    // held in it: the tracking does not follow that, so it is refused.
+    const bool keeps_old_value = statement.op == IrOp::CondAssign || statement.merged_width != 0 ||
+                                 (statement.dest.width != 0 && statement.dest.width < 4);
+    if (keeps_old_value && values.count(dest) != 0) {
+      refused = true;
+      return;
+    }
+    // The value the statement gives the destination: outer optional: is it a stack address; inner:
+    // its offset from the entry rsp, when known.
+    using StackAddress = std::optional<std::optional<std::int64_t>>;
+    StackAddress result;
+    auto source_value = [&](const IrOperand& operand) -> StackAddress {
+      if (operand.kind != IrOperandKind::Register) {
+        return std::nullopt;
+      }
+      const auto found = values.find(internal::register_family(operand.reg));
+      if (found == values.end()) {
+        return std::nullopt;
+      }
+      return found->second;
+    };
+    if (statement.op == IrOp::Assign) {
+      result = source_value(statement.a);
+    } else if ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+               statement.b.kind == IrOperandKind::Constant) {
+      const auto source = source_value(statement.a);
+      if (source.has_value()) {
+        if (!source->has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto amount = static_cast<std::int64_t>(statement.b.constant);
+          result = statement.op == IrOp::Add ? **source + amount : **source - amount;
+        }
+      }
+    } else if (statement.op == IrOp::Lea && statement.a.kind == IrOperandKind::Memory) {
+      // The address of a memory operand. With an index register the offset is not known: refuse
+      // when the index or the base is a stack address; otherwise the base and displacement give it.
+      const bool index_tracked = !statement.a.index.empty() &&
+                                 values.count(internal::register_family(statement.a.index)) != 0;
+      const auto base = statement.a.reg.empty()
+                            ? values.end()
+                            : values.find(internal::register_family(statement.a.reg));
+      const bool base_tracked = base != values.end();
+      if (index_tracked || (base_tracked && !statement.a.index.empty())) {
+        refused = true;
+      } else if (base_tracked) {
+        if (!base->second.has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto displacement = static_cast<std::int64_t>(statement.a.constant);
+          result = *base->second + displacement;
+        }
+      }
+    }
+    if (result.has_value()) {
+      values[dest] = *result;
+    } else {
+      values.erase(dest);
+    }
+  };
+
+  std::vector<std::size_t> worklist{0};
+  while (!worklist.empty() && !refused) {
+    const std::size_t block = worklist.back();
+    worklist.pop_back();
+    if (!entry[block].has_value()) {
+      continue;
+    }
+    StackValues values = *entry[block];
+    for (const IrStatement& statement : function.blocks[block].statements) {
+      transfer(statement, values);
+      if (refused) {
+        return true;
+      }
+    }
+    const IrStatement& terminator = function.blocks[block].statements.back();
+    std::vector<std::size_t> successors;
+    if (terminator.op == IrOp::Branch) {
+      successors.push_back(terminator.a.block);
+    } else if (terminator.op == IrOp::CondBranch) {
+      successors.push_back(terminator.b.block);
+      successors.push_back(block + 1);
+    } else if (terminator.op == IrOp::Switch) {
+      return true;  // not followed through a jump table
+    }
+    for (const std::size_t successor : successors) {
+      if (successor >= count) {
+        return true;
+      }
+      if (!entry[successor].has_value()) {
+        entry[successor] = values;
+        worklist.push_back(successor);
+      } else {
+        StackValues merged = join(*entry[successor], values);
+        if (!same(merged, *entry[successor])) {
+          entry[successor] = std::move(merged);
+          worklist.push_back(successor);
+        }
+      }
+    }
+  }
+  return refused;
+}
+
 using namespace donkey;
 
 std::uint8_t register_width(const std::string& name) {
   static const std::unordered_map<std::string, std::uint8_t> kWidths = {
-      {"rax", 8},  {"rbx", 8},  {"rcx", 8},  {"rdx", 8},  {"rsi", 8}, {"rdi", 8},  {"rbp", 8},
-      {"rsp", 8},  {"r8", 8},   {"r9", 8},   {"r10", 8},  {"r11", 8}, {"r12", 8},  {"r13", 8},
-      {"r14", 8},  {"r15", 8},  {"eax", 4},  {"ebx", 4},  {"ecx", 4}, {"edx", 4},  {"esi", 4},
-      {"edi", 4},  {"ebp", 4},  {"esp", 4},  {"r8d", 4},  {"r9d", 4}, {"r10d", 4}, {"r11d", 4},
-      {"r12d", 4}, {"r13d", 4}, {"r14d", 4}, {"r15d", 4}, {"ax", 2},  {"bx", 2},   {"cx", 2},
-      {"dx", 2},   {"si", 2},   {"di", 2},   {"bp", 2},   {"sp", 2},  {"al", 1},   {"bl", 1},
-      {"cl", 1},   {"dl", 1},   {"ah", 1},   {"bh", 1},   {"ch", 1},  {"dh", 1},   {"sil", 1},
-      {"dil", 1},  {"bpl", 1},  {"spl", 1},  {"r8b", 1},  {"r9b", 1}, {"r10b", 1}, {"r11b", 1},
-      {"r12b", 1}, {"r13b", 1}, {"r14b", 1}, {"r15b", 1}, {"x0", 8},  {"x1", 8},   {"x2", 8},
-      {"x3", 8},   {"x4", 8},   {"x5", 8},   {"x6", 8},   {"x7", 8},  {"x8", 8},   {"x9", 8},
-      {"x10", 8},  {"x11", 8},  {"x12", 8},  {"x13", 8},  {"x14", 8}, {"x15", 8},  {"x16", 8},
-      {"x17", 8},  {"x18", 8},  {"x19", 8},  {"x20", 8},  {"x21", 8}, {"x22", 8},  {"x23", 8},
-      {"x24", 8},  {"x25", 8},  {"x26", 8},  {"x27", 8},  {"x28", 8}, {"x29", 8},  {"x30", 8},
-      {"w0", 4},   {"w1", 4},   {"w2", 4},   {"w3", 4},   {"w4", 4},  {"w5", 4},   {"w6", 4},
-      {"w7", 4},   {"w8", 4},   {"w9", 4},   {"w10", 4},  {"w11", 4}, {"w12", 4},  {"w13", 4},
-      {"w14", 4},  {"w15", 4},  {"w16", 4},  {"w17", 4},  {"w18", 4}, {"w19", 4},  {"w20", 4},
-      {"w21", 4},  {"w22", 4},  {"w23", 4},  {"w24", 4},  {"w25", 4}, {"w26", 4},  {"w27", 4},
-      {"w28", 4},  {"w29", 4},  {"w30", 4},  {"sp", 8},   {"wsp", 4}, {"fp", 8},   {"lr", 8},
-      {"pc", 8},   {"xzr", 8},  {"wzr", 4},
+      {"rax", 8},  {"rbx", 8},  {"rcx", 8},  {"rdx", 8},  {"rsi", 8},  {"rdi", 8},  {"rbp", 8},
+      {"rsp", 8},  {"r8", 8},   {"r9", 8},   {"r10", 8},  {"r11", 8},  {"r12", 8},  {"r13", 8},
+      {"r14", 8},  {"r15", 8},  {"eax", 4},  {"ebx", 4},  {"ecx", 4},  {"edx", 4},  {"esi", 4},
+      {"edi", 4},  {"ebp", 4},  {"esp", 4},  {"r8d", 4},  {"r9d", 4},  {"r10d", 4}, {"r11d", 4},
+      {"r12d", 4}, {"r13d", 4}, {"r14d", 4}, {"r15d", 4}, {"ax", 2},   {"bx", 2},   {"cx", 2},
+      {"dx", 2},   {"si", 2},   {"di", 2},   {"bp", 2},   {"sp", 2},   {"al", 1},   {"bl", 1},
+      {"cl", 1},   {"dl", 1},   {"ah", 1},   {"bh", 1},   {"ch", 1},   {"dh", 1},   {"sil", 1},
+      {"dil", 1},  {"bpl", 1},  {"spl", 1},  {"r8b", 1},  {"r9b", 1},  {"r10b", 1}, {"r11b", 1},
+      {"r12b", 1}, {"r13b", 1}, {"r14b", 1}, {"r15b", 1}, {"r8w", 2},  {"r9w", 2},  {"r10w", 2},
+      {"r11w", 2}, {"r12w", 2}, {"r13w", 2}, {"r14w", 2}, {"r15w", 2}, {"x0", 8},   {"x1", 8},
+      {"x2", 8},   {"x3", 8},   {"x4", 8},   {"x5", 8},   {"x6", 8},   {"x7", 8},   {"x8", 8},
+      {"x9", 8},   {"x10", 8},  {"x11", 8},  {"x12", 8},  {"x13", 8},  {"x14", 8},  {"x15", 8},
+      {"x16", 8},  {"x17", 8},  {"x18", 8},  {"x19", 8},  {"x20", 8},  {"x21", 8},  {"x22", 8},
+      {"x23", 8},  {"x24", 8},  {"x25", 8},  {"x26", 8},  {"x27", 8},  {"x28", 8},  {"x29", 8},
+      {"x30", 8},  {"w0", 4},   {"w1", 4},   {"w2", 4},   {"w3", 4},   {"w4", 4},   {"w5", 4},
+      {"w6", 4},   {"w7", 4},   {"w8", 4},   {"w9", 4},   {"w10", 4},  {"w11", 4},  {"w12", 4},
+      {"w13", 4},  {"w14", 4},  {"w15", 4},  {"w16", 4},  {"w17", 4},  {"w18", 4},  {"w19", 4},
+      {"w20", 4},  {"w21", 4},  {"w22", 4},  {"w23", 4},  {"w24", 4},  {"w25", 4},  {"w26", 4},
+      {"w27", 4},  {"w28", 4},  {"w29", 4},  {"w30", 4},  {"sp", 8},   {"wsp", 4},  {"fp", 8},
+      {"lr", 8},   {"pc", 8},   {"xzr", 8},  {"wzr", 4},
   };
   const auto found = kWidths.find(name);
   if (found != kWidths.end()) {
@@ -402,10 +624,11 @@ struct Lifter {
     }
     const IrOperand destination = to_ir_operand(operands[0], instruction, pointer_width);
     const IrOperand source = to_ir_operand(operands[1], instruction, pointer_width);
-    if (destination.kind != IrOperandKind::Register || destination.width < source.width ||
+    if (destination.kind != IrOperandKind::Register || destination.width <= source.width ||
         source.width == 0) {
-      // movsxd from a 64-bit source is a plain copy; anything else that does
-      // not widen is not modelled rather than silently mis-typed.
+      // An extend must widen: the verifier requires a destination strictly wider than its
+      // source. movsxd with a 32-bit destination from a 32-bit source (found by the PE fuzzer,
+      // ir.malformed_extend) is not a widening, so it is not modelled rather than mis-typed.
       unsupported(block, instruction);
       return;
     }
@@ -1196,6 +1419,11 @@ struct Lifter {
       return;
     }
     const IrOperand value = to_ir_operand(operands[0], instruction, pointer_width);
+    if (value.width == 0) {
+      // No modelled width: a zero width must not reach the modulo below.
+      unsupported(block, instruction);
+      return;
+    }
     const unsigned bits = value.width * 8U;
     const unsigned count = static_cast<unsigned>(operands[1].immediate) % bits;
     flags_state = FlagsState::Unknown;  // CF/OF change, ZF does not: not modelled
@@ -1707,6 +1935,89 @@ struct Lifter {
     push(block, std::move(increment));
   }
 
+  /// The lifted callee of a direct call to a function of this image, when its signature is known
+  /// (G21-T2): the callee lifts Complete (not partial), takes integer arguments in the System V
+  /// registers, and returns an integer. Otherwise nothing is returned and the call stays unknown.
+  struct KnownCallee {
+    IrFunction signature;             // the callee's lift with passes: parameters and result
+    std::vector<std::string> writes;  // every register family its code writes (no passes)
+  };
+
+  std::optional<KnownCallee> known_callee(const Instruction& instruction) const {
+    if (image.architecture != Architecture::X86_64 || !options.resolve_calls ||
+        !instruction.direct_target.has_value()) {
+      return std::nullopt;
+    }
+    const std::uint64_t target = instruction.direct_target.value();
+    const Function* callee = nullptr;
+    for (const Function& candidate : analysis.functions) {
+      if (candidate.address == target) {
+        callee = &candidate;
+        break;
+      }
+    }
+    if (callee == nullptr) {
+      return std::nullopt;
+    }
+    LiftOptions nested = options;
+    nested.resolve_calls = false;  // one level only: the callee's own calls stay unknown
+    // The callee's signature must not depend on how the caller is lifted: always with passes.
+    nested.run_passes = true;
+    auto lifted = lift_function(image, analysis, *callee, nested);
+    if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
+      return std::nullopt;
+    }
+    static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
+    for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
+      if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
+        return std::nullopt;
+      }
+    }
+    // The passes remove a register write that nothing reads (dead-register removal), but the
+    // compiled callee still makes it, so the write set comes from the callee's lift without
+    // passes: every write its instructions make.
+    LiftOptions unoptimised = nested;
+    unoptimised.run_passes = false;
+    auto raw = lift_function(image, analysis, *callee, unoptimised);
+    if (!raw || raw.value().partial) {
+      return std::nullopt;
+    }
+    // A callee that reads a stack-passed argument has more parameters than the registers show.
+    if (reads_incoming_stack_argument(raw.value())) {
+      return std::nullopt;
+    }
+    KnownCallee known;
+    known.signature = std::move(lifted.value());
+    for (const IrBlock& block : raw.value().blocks) {
+      for (const IrStatement& written : block.statements) {
+        if (written.dest.kind == IrOperandKind::Register && !written.dest.reg.empty()) {
+          known.writes.push_back(internal::register_family(written.dest.reg));
+        }
+      }
+    }
+    return known;
+  }
+
+  /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
+  /// call, in the callee's ABI order, and the result is the whole of rax. Reads after the call are
+  /// checked by check_call_clobbers, not assumed here.
+  static void resolve_call_statement(IrStatement& statement, const KnownCallee& callee) {
+    for (const IrParameter& parameter : callee.signature.parameters) {
+      statement.call_arguments.push_back(IrOperand::register_ref(
+          parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
+    }
+    if (callee.signature.return_width > 0) {
+      // After the call, the caller's rax is the callee's rax: all 64 bits, whatever width the
+      // callee's return value has. The inferred width (from the callee's last write in block
+      // order) can be narrower than what a path leaves in rax (`mov eax, 0x100; mov al, 1` leaves
+      // 0x101 with a width of 1), so a write of that width would keep stale bits of the caller's
+      // rax above it.
+      statement.dest = IrOperand::register_ref("rax", 8);
+    }
+    statement.signature_inferred = true;
+    statement.call_writes = callee.writes;
+  }
+
   void lift_call(IrBlock& block, const Instruction& instruction) {
     IrStatement statement;
     statement.op = IrOp::Call;
@@ -1719,6 +2030,11 @@ struct Lifter {
           to_ir_operand(instruction.structured_operands.front(), instruction, pointer_width);
     } else {
       statement.a = IrOperand::constant_value(0, pointer_width);
+    }
+    if (const auto callee = known_callee(instruction)) {
+      resolve_call_statement(statement, *callee);
+      push(block, std::move(statement));
+      return;
     }
     push(block, std::move(statement));
     // The callee's effects on registers and memory are not modelled, so the
@@ -1816,6 +2132,16 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
                                                     const ReturnRegisters& regs) {
   for (std::size_t s = end; s-- > 0;) {
     const IrStatement& statement = block.statements[s];
+    // A resolved call (G21) that returns a value defines the integer return register: its result.
+    // Any other call, and an unsupported statement, may define either register: unknown.
+    if (statement.op == IrOp::Call && statement.signature_inferred &&
+        statement.dest.kind == IrOperandKind::Register &&
+        internal::register_family(statement.dest.reg) == regs.integer_family) {
+      ReturnDefinition out;
+      out.found = true;
+      out.width = statement.dest.width;
+      return out;
+    }
     if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
       return unknown_definition();
     }
@@ -1947,9 +2273,10 @@ void resolve_return_registers(IrFunction& function, const ReturnRegisters& regs)
       }
       if (!found.found || found.unknown) {
         function.partial = true;
+        // Name the architecture's integer return register (rax, or x0 on AArch64).
         function.notes.push_back(
-            "the returned register is not determined by the definitions that reach the return; rax "
-            "is assumed");
+            "the returned register is not determined by the definitions that reach the return; " +
+            regs.integer_family + " is assumed");
       } else if (found.float_value) {
         statement.a = IrOperand::register_ref(float_return_name(regs, found.width), found.width);
       }
@@ -1977,11 +2304,346 @@ void mark_mixed_parameters(IrFunction& function) {
   }
 }
 
+namespace {
+
+/// Keeps only the blocks reachable from the function's entry by the modelled control flow, puts
+/// the entry first, and states what was left out (G-audit Goal 4).
+///
+/// Two things made some functions fail the verifier with ir.unreachable_block. The CFG assigns a
+/// function every block it reaches by a direct jump that stays inside it, and the lifter emits
+/// them in address order. First, a jump that leaves the function is lifted as a tail call (a call
+/// and a return, with no edge), so the code it reaches is not connected to the entry; those blocks
+/// are removed here and the function is Partial, with their address ranges in a note. Second, the
+/// verifier starts at block 0, but the entry is not always the lowest block: a block below it can
+/// be reached from the entry (a PLT stub the CFG counts as part of the function). Then the entry
+/// is placed behind a trampoline, a block at address 0 whose only statement branches to the entry.
+/// The trampoline changes no state, so it does not make the function Partial.
+///
+/// Removing unreachable blocks keeps the fall-through of a conditional branch intact: a reachable
+/// block's fall-through block is reachable, so it is never removed, and the two stay adjacent.
+Result<bool> keep_blocks_reachable_from_entry(IrFunction& function, const AnalysisResult& analysis,
+                                              FunctionId function_id, std::uint8_t pointer_width) {
+  const std::size_t count = function.blocks.size();
+  std::size_t entry = count;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (function.blocks[i].address == function.address) {
+      entry = i;
+      break;
+    }
+  }
+  if (entry == count) {
+    return false;  // nothing to do: the verifier reports a missing entry
+  }
+  std::vector<bool> reachable(count, false);
+  std::vector<std::size_t> work = {entry};
+  reachable[entry] = true;
+  const auto visit = [&](std::size_t target) {
+    if (target < count && !reachable[target]) {
+      reachable[target] = true;
+      work.push_back(target);
+    }
+  };
+  while (!work.empty()) {
+    const std::size_t index = work.back();
+    work.pop_back();
+    const auto& statements = function.blocks[index].statements;
+    if (statements.empty()) {
+      continue;
+    }
+    const IrStatement& terminator = statements.back();
+    switch (terminator.op) {
+      case IrOp::Branch:
+        if (terminator.a.kind == IrOperandKind::Block) {
+          visit(terminator.a.block);
+        }
+        break;
+      case IrOp::CondBranch:
+        if (terminator.b.kind == IrOperandKind::Block) {
+          visit(terminator.b.block);
+        }
+        visit(index + 1);  // the fall-through is the next block
+        break;
+      case IrOp::Switch:
+        if (terminator.a.kind == IrOperandKind::Block) {
+          visit(terminator.a.block);
+        }
+        for (const IrSwitchCase& sc : terminator.switch_cases) {
+          visit(sc.target_block);
+        }
+        break;
+      default:
+        break;
+    }
+  }
+
+  std::size_t removed = 0;
+  for (std::size_t i = 0; i < count; ++i) {
+    removed += reachable[i] ? 0 : 1;
+  }
+  // The printer and the evaluator start at block 0, so an entry that is not block 0 needs the
+  // trampoline; a function whose entry is block 0 and has nothing unreachable is unchanged.
+  if (removed == 0 && entry == 0) {
+    return false;
+  }
+
+  // Ranges of the blocks left out, from the CFG's block ends.
+  const auto hex_text = [](std::uint64_t value) {
+    char buffer[24];
+    std::snprintf(buffer, sizeof(buffer), "%llx", static_cast<unsigned long long>(value));
+    return std::string(buffer);
+  };
+  std::map<std::uint64_t, std::uint64_t> ends;
+  for (const BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == function_id) {
+      ends[block.address] = block.end_address;
+    }
+  }
+  std::vector<std::string> left_out;
+  constexpr std::size_t kNamedRanges = 8;
+  for (std::size_t i = 0; i < count && removed > 0; ++i) {
+    if (reachable[i]) {
+      continue;
+    }
+    const std::uint64_t start = function.blocks[i].address;
+    const auto end = ends.find(start);
+    if (left_out.size() < kNamedRanges) {
+      left_out.push_back(end != ends.end() && end->second > start
+                             ? "0x" + hex_text(start) + "..0x" + hex_text(end->second)
+                             : "0x" + hex_text(start));
+    }
+  }
+
+  // New indices: the trampoline (when there is one) is block 0, and the reachable blocks follow
+  // in their original order.
+  const std::uint32_t offset = entry == 0 ? 0 : 1;
+  std::vector<std::uint32_t> new_index(count, 0);
+  std::uint32_t next = offset;
+  for (std::size_t i = 0; i < count; ++i) {
+    if (reachable[i]) {
+      new_index[i] = next++;
+    }
+  }
+  std::vector<IrBlock> kept;
+  if (offset == 1) {
+    IrBlock trampoline;
+    trampoline.address = 0;  // no code lives at 0, so its label is unique
+    IrStatement branch;
+    branch.op = IrOp::Branch;
+    branch.a = IrOperand::block_ref(new_index[entry]);
+    branch.width = pointer_width;
+    branch.source_address = function.address;
+    trampoline.statements.push_back(std::move(branch));
+    kept.push_back(std::move(trampoline));
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (!reachable[i]) {
+      continue;
+    }
+    IrBlock block = std::move(function.blocks[i]);
+    for (IrStatement& statement : block.statements) {
+      // An out-of-range reference is left as it is; the verifier reports it.
+      for (IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (operand->kind == IrOperandKind::Block && operand->block < count) {
+          operand->block = new_index[operand->block];
+        }
+      }
+      for (IrSwitchCase& sc : statement.switch_cases) {
+        if (sc.target_block < count) {
+          sc.target_block = new_index[sc.target_block];
+        }
+      }
+    }
+    kept.push_back(std::move(block));
+  }
+  function.blocks = std::move(kept);
+  if (removed > 0) {
+    function.partial = true;
+    std::string list;
+    for (const std::string& range : left_out) {
+      list += (list.empty() ? "" : ", ") + range;
+    }
+    if (removed > left_out.size()) {
+      list += ", and " + std::to_string(removed - left_out.size()) + " more";
+    }
+    function.notes.push_back(
+        std::to_string(removed) +
+        " block(s) are not reached by modelled control flow from the entry and are not shown "
+        "(a jump out of the function is a tail call, so the code it reaches is not included): " +
+        list);
+  }
+  return true;
+}
+
+}  // namespace
+
+namespace {
+
+/// The register families a statement reads: its register operands, the base and index of its
+/// memory operands, and its call arguments.
+void collect_reads(const IrStatement& statement, std::vector<std::string>& out) {
+  const auto add = [&](const IrOperand& operand) {
+    if (operand.kind == IrOperandKind::Register && !operand.reg.empty()) {
+      out.push_back(internal::register_family(operand.reg));
+    } else if (operand.kind == IrOperandKind::Memory) {
+      if (!operand.reg.empty()) out.push_back(internal::register_family(operand.reg));
+      if (!operand.index.empty()) out.push_back(internal::register_family(operand.index));
+    }
+  };
+  if (statement.dest.kind == IrOperandKind::Memory) {
+    add(statement.dest);  // a store's address is read; a register destination is only written
+  }
+  add(statement.a);
+  add(statement.b);
+  add(statement.c);
+  for (const IrOperand& argument : statement.call_arguments) {
+    add(argument);
+  }
+}
+
+/// Checks that no caller-saved register is read after a call without a definition since that call
+/// (G21-T1). A call clobbers them; the one register a call defines is its result. The check is a
+/// forward dataflow over the blocks (a register is clobbered on a path if some path reaches the
+/// read clobbered). A read of a clobbered register makes the function partial, with a note naming
+/// the register. A function without calls is unchanged.
+void check_call_clobbers_impl(IrFunction& function) {
+  const std::size_t count = function.blocks.size();
+  bool has_call = false;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      has_call = has_call || statement.op == IrOp::Call;
+    }
+  }
+  if (!has_call || count == 0) {
+    return;
+  }
+  using State = std::set<std::string>;
+  // Successor blocks of each block, as the verifier's graph has them.
+  std::vector<std::vector<std::size_t>> successors(count);
+  for (std::size_t b = 0; b < count; ++b) {
+    const auto& statements = function.blocks[b].statements;
+    if (statements.empty()) {
+      continue;
+    }
+    const IrStatement& terminator = statements.back();
+    // A target outside the function is not a successor here (the verifier rejects it; this check
+    // must not index past `in` either way).
+    const auto add = [&](std::size_t target) {
+      if (target < count) {
+        successors[b].push_back(target);
+      }
+    };
+    if (terminator.op == IrOp::Branch && terminator.a.kind == IrOperandKind::Block) {
+      add(terminator.a.block);
+    } else if (terminator.op == IrOp::CondBranch) {
+      if (terminator.b.kind == IrOperandKind::Block) add(terminator.b.block);
+      add(b + 1);
+    } else if (terminator.op == IrOp::Switch) {
+      if (terminator.a.kind == IrOperandKind::Block) add(terminator.a.block);
+      for (const IrSwitchCase& sc : terminator.switch_cases) add(sc.target_block);
+    }
+  }
+  // Simulates one block from `state`; with `report`, the first read of a clobbered register is
+  // returned.
+  const auto simulate = [&](const IrBlock& block, State& state,
+                            std::optional<std::string>* report) {
+    for (const IrStatement& statement : block.statements) {
+      std::vector<std::string> reads;
+      collect_reads(statement, reads);
+      if (report != nullptr && !report->has_value()) {
+        for (const std::string& family : reads) {
+          if (state.count(family) != 0) {
+            *report = family;
+            break;
+          }
+        }
+      }
+      if (statement.op == IrOp::Call) {
+        // A call clobbers the caller-saved families. A resolved call (its callee's IR is known and
+        // complete) clobbers only the caller-saved families that callee writes; an unknown call
+        // clobbers all of them. Then the call defines its result.
+        static const std::set<std::string> kCallerSaved = [] {
+          std::set<std::string> families = {"rax", "rcx", "rdx", "rsi", "rdi",
+                                            "r8",  "r9",  "r10", "r11"};
+          for (int n = 0; n < 16; ++n) {
+            families.insert("xmm" + std::to_string(n));
+          }
+          return families;
+        }();
+        if (statement.signature_inferred) {
+          for (const std::string& family : statement.call_writes) {
+            if (kCallerSaved.count(family) != 0) {
+              state.insert(family);
+            }
+          }
+        } else {
+          state.insert(kCallerSaved.begin(), kCallerSaved.end());
+        }
+        if (statement.dest.kind == IrOperandKind::Register) {
+          state.erase(internal::register_family(statement.dest.reg));
+        }
+      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+                 statement.op != IrOp::CondAssign &&
+                 (statement.dest.width == 0 || statement.dest.width >= 4)) {
+        // Only a write of the whole register defines it: a conditional assignment keeps the old
+        // value when its condition is false, and an 8- or 16-bit write keeps the rest of the
+        // register, so a clobber stays on those paths.
+        state.erase(internal::register_family(statement.dest.reg));
+      }
+    }
+  };
+  std::vector<State> in(count);
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t b = 0; b < count; ++b) {
+      State out = in[b];
+      simulate(function.blocks[b], out, nullptr);
+      for (const std::size_t successor : successors[b]) {
+        const std::size_t before = in[successor].size();
+        in[successor].insert(out.begin(), out.end());
+        changed = changed || in[successor].size() != before;
+      }
+    }
+  }
+  for (std::size_t b = 0; b < count; ++b) {
+    State state = in[b];
+    std::optional<std::string> report;
+    simulate(function.blocks[b], state, &report);
+    if (report.has_value()) {
+      function.partial = true;
+      function.notes.push_back("register " + *report +
+                               " is read after a call that does not define it; the value is not "
+                               "the caller's, so the function is not Complete");
+      return;
+    }
+  }
+}
+
+}  // namespace
+
+namespace internal {
+
+void check_call_clobbers(IrFunction& function) {
+  check_call_clobbers_impl(function);
+}
+
+Result<bool> keep_reachable_blocks(IrFunction& function, const AnalysisResult& analysis,
+                                   FunctionId function_id, std::uint8_t pointer_width) {
+  return keep_blocks_reachable_from_entry(function, analysis, function_id, pointer_width);
+}
+
+}  // namespace internal
+
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
   if (image.architecture == Architecture::AArch64) {
     auto lifted = internal::lift_aarch64(image, analysis, function, options);
     if (lifted) {
+      if (auto kept = keep_blocks_reachable_from_entry(lifted.value(), analysis, function.id, 8);
+          !kept) {
+        return make_error<IrFunction>(kept.diagnostic().status, kept.diagnostic().code,
+                                      kept.diagnostic().message, function.address);
+      }
       resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
       internal::canonicalise_registers(lifted.value(), image.architecture);
       if (options.run_passes) {
@@ -2031,6 +2693,16 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           ? "x86-32 subset; register aliases are not canonicalised, cdecl stack arguments are "
             "not recovered and locals are not recovered"
           : "x86-64 subset; locals are not recovered");
+
+  // Conditional branches whose target is outside this function (a conditional tail call): each
+  // branches to an exit block, appended after the function's own blocks, that calls the target and
+  // returns its result. They are patched once every block is lifted.
+  struct ConditionalTailCall {
+    std::size_t block = 0;
+    std::size_t statement = 0;
+    const Instruction* instruction = nullptr;
+  };
+  std::vector<ConditionalTailCall> conditional_tail_calls;
 
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
@@ -2121,6 +2793,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
+        if (target == lifter.block_by_address.end() && instruction.direct_target.has_value()) {
+          // The target is another function's code: a conditional tail call. The branch goes to an
+          // exit block that calls it; the block is made after the loop.
+          statement.b = IrOperand::block_ref(0);
+          lifter.push(out_block, std::move(statement));
+          conditional_tail_calls.push_back(ConditionalTailCall{
+              lifter.out.blocks.size(), out_block.statements.size() - 1, &instruction});
+          continue;
+        }
         if (target == lifter.block_by_address.end()) {
           lifter.mark_partial("conditional branch target is outside this function");
           statement.b = IrOperand::block_ref(0);
@@ -2192,12 +2873,29 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           call.op = IrOp::Call;
           call.source_address = instruction.address;
           call.width = lifter.pointer_width;
-          call.a = instruction.direct_target.has_value()
-                       ? IrOperand::constant_value(instruction.direct_target.value(),
-                                                   lifter.pointer_width)
-                       : IrOperand::constant_value(0, lifter.pointer_width);
-          lifter.push(out_block, std::move(call));
-          lifter.mark_partial("jump leaves the function; treated as a tail call");
+          if (instruction.direct_target.has_value()) {
+            call.a =
+                IrOperand::constant_value(instruction.direct_target.value(), lifter.pointer_width);
+          } else if (!instruction.structured_operands.empty()) {
+            // An indirect jump (jmp rax, jmp [rip+x]) is called through its own operand, as an
+            // indirect call is.
+            call.a = to_ir_operand(instruction.structured_operands.front(), instruction,
+                                   lifter.pointer_width);
+          } else {
+            call.a = IrOperand::constant_value(0, lifter.pointer_width);
+          }
+          if (const auto callee = lifter.known_callee(instruction)) {
+            // A tail call to a function of the image with a known signature: the callee runs with
+            // the caller's argument registers, and its result is what this function returns.
+            Lifter::resolve_call_statement(call, *callee);
+            lifter.push(out_block, std::move(call));
+            lifter.out.notes.push_back(
+                "a jump to a known function is lifted as a call with its inferred arguments and "
+                "result, followed by a return");
+          } else {
+            lifter.push(out_block, std::move(call));
+            lifter.mark_partial("jump leaves the function; treated as a tail call");
+          }
           IrStatement tail;
           tail.op = IrOp::Return;
           tail.source_address = instruction.address;
@@ -2375,14 +3073,76 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
   }
+  // The exit blocks of conditional tail calls, one per target: a call of the target, with its
+  // inferred signature when it is a known function of the image, and a return of its result.
+  std::map<std::uint64_t, std::uint32_t> tail_exit_by_target;
+  for (const ConditionalTailCall& pending : conditional_tail_calls) {
+    if (pending.block >= lifter.out.blocks.size() ||
+        pending.statement >= lifter.out.blocks[pending.block].statements.size()) {
+      continue;  // the block was not kept (the statement limit stopped the lift)
+    }
+    const Instruction& instruction = *pending.instruction;
+    const std::uint64_t target = instruction.direct_target.value();
+    auto exit = tail_exit_by_target.find(target);
+    if (exit == tail_exit_by_target.end()) {
+      IrBlock exit_block;
+      exit_block.address = target;
+      IrStatement call;
+      call.op = IrOp::Call;
+      call.source_address = instruction.address;
+      call.width = lifter.pointer_width;
+      call.a = IrOperand::constant_value(target, lifter.pointer_width);
+      if (const auto callee = lifter.known_callee(instruction)) {
+        Lifter::resolve_call_statement(call, *callee);
+        const std::string note =
+            "a conditional jump to a known function is lifted as a branch to a call with its "
+            "inferred arguments and result, followed by a return";
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      } else {
+        const std::string note = "conditional jump leaves the function; treated as a tail call";
+        lifter.out.partial = true;
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      }
+      exit_block.statements.push_back(std::move(call));
+      IrStatement tail;
+      tail.op = IrOp::Return;
+      tail.source_address = instruction.address;
+      tail.width = lifter.pointer_width;
+      tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
+      exit_block.statements.push_back(std::move(tail));
+      exit =
+          tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
+              .first;
+      lifter.out.blocks.push_back(std::move(exit_block));
+    }
+    lifter.out.blocks[pending.block].statements[pending.statement].b =
+        IrOperand::block_ref(exit->second);
+  }
   const ReturnRegisters return_registers = image.architecture == Architecture::AArch64
                                                ? ReturnRegisters{"x0", "v0", true}
                                                : ReturnRegisters{"rax", "xmm0", false};
+  if (auto kept =
+          keep_blocks_reachable_from_entry(lifter.out, analysis, function.id, lifter.pointer_width);
+      !kept) {
+    return make_error<IrFunction>(kept.diagnostic().status, kept.diagnostic().code,
+                                  kept.diagnostic().message, function.address);
+  }
   resolve_return_registers(lifter.out, return_registers);
   internal::canonicalise_registers(lifter.out, image.architecture);
   if (options.run_passes) {
     run_ir_passes(lifter.out, PassOptions{image.architecture, image.format, {}});
     mark_mixed_parameters(lifter.out);
+    // After the passes: copy propagation changes which registers a statement reads, so the check
+    // is only sound on the final IR. Tests that lift without passes see the lifter's output as is.
+    if (image.architecture == Architecture::X86_64) {
+      internal::check_call_clobbers(lifter.out);
+    }
   }
   return lifter.out;
 }

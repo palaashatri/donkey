@@ -129,6 +129,11 @@ std::uint8_t read_width(const IrStatement& statement, const std::string& name) {
       return operand->width;
     }
   }
+  for (const IrOperand& argument : statement.call_arguments) {
+    if (argument.kind == IrOperandKind::Register && argument.reg == name && argument.width != 0) {
+      return argument.width;
+    }
+  }
   return 8;
 }
 
@@ -238,6 +243,11 @@ void walk_block(const IrBlock& block, const AbiModel& model, std::vector<bool>& 
     collect_reads(statement.c, reads);  // the divisor of Div and Rem
     if (statement.dest.kind == IrOperandKind::Memory) {
       collect_reads(statement.dest, reads);
+    }
+    // A resolved call reads its argument registers at the call: a function that only forwards
+    // its own arguments to a callee reads them there.
+    for (const IrOperand& argument : statement.call_arguments) {
+      collect_reads(argument, reads);
     }
 
     // Reads happen before the write in one statement, so a read of an

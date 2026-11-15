@@ -161,6 +161,8 @@ add_executable(donkey_unit_tests
   unit/decompiler_corpus_test.cpp
   unit/binary_test.cpp
   unit/cfg_test.cpp
+  unit/eh_frame_test.cpp
+  unit/pdata_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
@@ -181,6 +183,8 @@ add_executable(donkey_unit_tests
   unit/session_test.cpp
 )
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
+# Internal lifter declarations (src/ir/lift_internal.h) are unit-tested directly.
+target_include_directories(donkey_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/ir)
 target_compile_definitions(donkey_unit_tests PRIVATE
   DONKEY_FIXTURE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures"
   DONKEY_SIGNATURE_DIR="${PROJECT_SOURCE_DIR}/signatures"
@@ -629,11 +633,45 @@ add_test(NAME cli.decompile_macho_aarch64
 set_tests_properties(cli.decompile_macho_aarch64 PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"_main\".*\"pseudocode\":.*sp - 0x10")
 
+# G21: a direct call to a same-image helper prints its inferred arguments and result. The fixture is
+# tests/fixtures/calls/calls.c built with gcc -O0; caller_add passes its two arguments to add2.
+add_test(NAME cli.decompile_prints_call_arguments
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/calls/calls-x86_64)
+set_tests_properties(cli.decompile_prints_call_arguments PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "// caller_add\n[^\n]*\n[^\n]*\n[^\n]*\n.*rax = sub_[0-9a-f]+\\(\\(u32\\)rdi, \\(u32\\)rsi\\); /\\* arguments inferred from callee \\*/")
+
 add_test(NAME cli.decompile_elf_i386
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-i386 --json)
 set_tests_properties(cli.decompile_elf_i386 PROPERTIES
   PASS_REGULAR_EXPRESSION
     "\"name\": \"_start\".*\"status\": \"Partial\".*u32 _start\\(void\\).*esp = esp - 0x4")
+
+# G-audit Goal 2: a whole-binary decompile states its cap. tiny-elf-x86_64 has two functions.
+add_test(NAME cli.decompile_truncation_json
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --json --max-functions 1)
+set_tests_properties(cli.decompile_truncation_json PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"total_functions\": 2,.*\"shown_functions\": 1,.*\"truncated\": true")
+
+add_test(NAME cli.decompile_truncation_text
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --max-functions 1)
+set_tests_properties(cli.decompile_truncation_text PROPERTIES
+  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions; raise the limit with --max-functions N")
+
+add_test(NAME cli.decompile_no_truncation_at_the_limit
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --json --max-functions 2)
+set_tests_properties(cli.decompile_no_truncation_at_the_limit PROPERTIES
+  PASS_REGULAR_EXPRESSION
+    "\"total_functions\": 2,.*\"shown_functions\": 2,.*\"truncated\": false")
+
+add_test(NAME cli.decompile_rejects_zero_max_functions
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
+                 --max-functions 0)
+set_tests_properties(cli.decompile_rejects_zero_max_functions PROPERTIES WILL_FAIL TRUE)
 
 # ---------------------------------------------------------------------------
 # Project persistence CLI.
@@ -722,6 +760,16 @@ add_test(NAME cli.project_link_refusals
                  -DWORK_DIR=${CMAKE_CURRENT_BINARY_DIR}
                  -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link
                  -P ${CMAKE_CURRENT_SOURCE_DIR}/cli/project_link_refusals.cmake)
+
+add_test(NAME cli.decompile_stack_argument_caller_is_partial
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/calls/stack_argument-x86_64)
+set_tests_properties(cli.decompile_stack_argument_caller_is_partial PROPERTIES
+  PASS_REGULAR_EXPRESSION "// caller  \\[partial\\]\n// note: x86-64 subset[^\n]*\n// note: outgoing call arguments")
+
+add_test(NAME cli.decompile_lea_stack_argument_caller_is_partial
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/calls/lea_stack_argument-x86_64)
+set_tests_properties(cli.decompile_lea_stack_argument_caller_is_partial PROPERTIES
+  PASS_REGULAR_EXPRESSION "// caller  \\[partial\\]\n// note: x86-64 subset[^\n]*\n// note: outgoing call arguments")
 
 add_test(NAME cli.project_info_rejects_non_database
          COMMAND donkey-cli project info

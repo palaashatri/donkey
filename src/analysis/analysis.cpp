@@ -1,5 +1,8 @@
 #include "donkey/analysis/analysis.h"
 
+#include "donkey/binary/eh_frame.h"
+#include "donkey/binary/pdata.h"
+
 #include <algorithm>
 #include <iterator>
 #include <limits>
@@ -487,6 +490,53 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       seeds.insert(xref.to);
     }
   }
+  // Unwind tables (G23-T1): every FDE of `.eh_frame` names a function's range, stripped or not.
+  // A start found only here is marked with the unwind provenance.
+  // A table that could not be read in full may leave function starts out, so the result is
+  // Partial and says why.
+  std::set<std::uint64_t> unwind_starts;
+  if (auto frames = read_eh_frame_of_image(image, file); frames) {
+    for (const EhFrameFunction& frame : frames.value().functions) {
+      if (executable_contains(image, frame.start)) {
+        seeds.insert(frame.start);
+        unwind_starts.insert(frame.start);
+      }
+    }
+    if (frames.value().malformed_records > 0 || frames.value().truncated) {
+      result.partial = true;
+      result.diagnostics.push_back(Diagnostic::make(
+          Status::Partial, "analysis.eh_frame_incomplete",
+          ".eh_frame was not read in full (" + std::to_string(frames.value().malformed_records) +
+              " unreadable records" + (frames.value().truncated ? ", walk stopped early" : "") +
+              "); function starts it names may be missing",
+          std::nullopt));
+    }
+  } else {
+    result.partial = true;
+    result.diagnostics.push_back(frames.diagnostic());
+  }
+  // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
+  if (auto pdata = read_pdata_of_image(image, file); pdata) {
+    for (const PdataFunction& frame : pdata.value().functions) {
+      if (executable_contains(image, frame.start)) {
+        seeds.insert(frame.start);
+        unwind_starts.insert(frame.start);
+      }
+    }
+    if (pdata.value().malformed > 0 || pdata.value().truncated) {
+      result.partial = true;
+      result.diagnostics.push_back(
+          Diagnostic::make(Status::Partial, "analysis.pdata_incomplete",
+                           "the exception directory was not read in full (" +
+                               std::to_string(pdata.value().malformed) + " unreadable entries" +
+                               (pdata.value().truncated ? ", entry limit reached" : "") +
+                               "); function starts it names may be missing",
+                           std::nullopt));
+    }
+  } else {
+    result.partial = true;
+    result.diagnostics.push_back(pdata.diagnostic());
+  }
   std::set<std::uint64_t> user_defined;
   for (const std::uint64_t address : options.user_function_starts) {
     if (executable_contains(image, address)) {
@@ -510,17 +560,23 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     it = in_user_data(user_data, *it) ? seeds.erase(it) : std::next(it);
   }
 
+  // The symbol that names each address: the first one in the image's order. One pass over the
+  // symbols, not one per seed (unwind tables can give tens of thousands of seeds).
+  std::unordered_map<std::uint64_t, const Symbol*> naming_symbol;
+  for (const Symbol& symbol : image.symbols) {
+    if (!symbol.imported && !symbol.name.empty() &&
+        (symbol.kind == SymbolKind::Function || symbol.exported)) {
+      naming_symbol.emplace(symbol.address, &symbol);
+    }
+  }
   for (const std::uint64_t address : seeds) {
     Function seed;
     seed.address = address;
     seed.from_symbol = named.count(address) != 0;
-    for (const Symbol& symbol : image.symbols) {
-      if (!symbol.imported && !symbol.name.empty() && symbol.address == address &&
-          (symbol.kind == SymbolKind::Function || symbol.exported)) {
-        seed.name = symbol.name;
-        seed.exported = symbol.exported;
-        break;
-      }
+    seed.from_unwind = unwind_starts.count(address) != 0;
+    if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
+      seed.name = symbol->second->name;
+      seed.exported = symbol->second->exported;
     }
     if (seed.name.empty()) {
       seed.name = synthetic_function_name(address);
@@ -539,15 +595,19 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       result.diagnostics.push_back(graph.diagnostic());
     } else {
       result.cfg = std::move(graph.value());
+      // Each graph function updates the first function at its address, found through an index
+      // (a search per function was quadratic in the number of functions).
+      std::unordered_map<std::uint64_t, std::size_t> function_at;
+      for (std::size_t index = 0; index < result.functions.size(); ++index) {
+        function_at.emplace(result.functions[index].address, index);
+      }
       for (const Function& function : result.cfg.functions) {
-        for (Function& existing : result.functions) {
-          if (existing.address == function.address) {
-            existing.end_address = function.end_address;
-            existing.block_count = function.block_count;
-            existing.has_extent = function.has_extent;
-            existing.estimated = function.estimated;
-            break;
-          }
+        if (const auto found = function_at.find(function.address); found != function_at.end()) {
+          Function& existing = result.functions[found->second];
+          existing.end_address = function.end_address;
+          existing.block_count = function.block_count;
+          existing.has_extent = function.has_extent;
+          existing.estimated = function.estimated;
         }
       }
       result.call_graph = build_call_graph(result.cfg, result.instructions);

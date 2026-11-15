@@ -159,7 +159,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL: `for` for register and in-memory counters; O0 corpus loops print `for`, O2 and O3 guarded do-while loops do not) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample: 49.6% (985; bar 52%, met). 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial); project type add, list and apply in the CLI (T4, CLI part). No editing UI, no undo, and the decompiler does not read the applied types |list| IN PROGRESS (T2 DONE; T1, T3, T4 PARTIAL; T4 UI and undo, and T3 step 3, TODO) | P0 | IN PROGRESS (G05-T1 PARTIAL; T2 DONE; T3 PARTIAL; T4 PARTIAL, CLI only) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
@@ -171,15 +171,15 @@ P0 is the most important, P3 the least.
 | G13 | Processor coverage | Dozens of ISAs | 32-bit ARM (A32, little-endian), RISC-V 64 (RV64GC, little-endian), MIPS32 and PowerPC32 (each in both byte orders) decode, checked against llvm-objdump. MIPS delay slots are in their branch's block in the CFG; branch-likely forms make the graph partial. Thumb is not decoded or detected; no ISA is lifted; MIPS16 and microMIPS images are refused with `elf.mips_isa_extension`; 64-bit MIPS and PowerPC decode in their 64-bit modes, checked against llvm-objdump; VLE is not detected | P2 | IN PROGRESS (A32, RV64GC, MIPS32 and PPC32 decode DONE; MIPS delay slots DONE for ordinary branches; Thumb, lifting, CFG checks and branch-likely forms TODO) |
 | G14 | Debugger coverage | All major OSes, remote debugging, hardware watchpoints, conditional breakpoints | Hardware watchpoints on Linux x86-64, with conditions, and conditional breakpoints on Linux (x86-64; AArch64 compiled, not run in this change), in the library and the CLI (T5, partial); the native debugger on Linux and Windows x64 otherwise | P2 | IN PROGRESS (T5 PARTIAL; T1 to T4 TODO) |
 | G15 | Loaders and multi-image | Objects, archives, dumps, firmware; cross-image references | Relocatable objects, GOT, COMMON and page relocations, and the TLS models for x86-64 and AArch64 (T1, partial); archives listed (T1); Intel HEX, S-records, ELF cores and Windows minidumps (T3, DONE for the formats it names; the minidump test file is generated, not Windows output). Import resolution and calls through PLT stubs and, on x86-64, GOT slots read directly, across images (`donkey-cli link`, `project link`), done for ELF; calls through a register loaded from a GOT slot, AArch64 GOT calls, and PE and Mach-O references not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 PARTIAL; T3 DONE) |
-| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions and over one real large binary (LLVM's libLLVM.so.1, 123 MB), with time, peak memory and the status each run reports. The block bound is now exact. Memory is about 1 KB per decoded instruction (T1, partial: one real binary, no UI frame times). Incremental re-analysis not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO) |
+| G16 | Scale on real large binaries | Decades of tuning | Scale benchmark over generated programs up to 80,000 functions and over one real large binary (LLVM's libLLVM.so.1, 123 MB), with time, peak memory and the status each run reports. The block bound is now exact. Memory is about 1 KB per decoded instruction (T1, partial: one real binary, no UI frame times). Incremental re-analysis not done (T2) | P2 | IN PROGRESS (T1 PARTIAL; T2 TODO. The CFG block bound is now one block per decoded instruction with a floor of 200,000 (it was a fixed 200,000, which cut a 3.6 MB AArch64 build; docs/AUDIT.md)) |
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
-| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Measured only on the differential corpus; no whole-program measurement | P0 | TODO |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | A call prints as `sub_x();` with no arguments or result, and every function that makes a call is Partial | P0 | TODO |
+| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete without resolving its own calls, returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Six call-heavy corpus functions verified at -O0 and -O2, and at -O3) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | TODO (T2 needs an owner decision on header sources) |
-| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | Not read | P1 | TODO |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols and call targets only | P0 | TODO |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -1657,7 +1657,9 @@ program. Nothing measures Donkey on whole programs, so the order of the
 decompiler work is a guess.
 
 **Donkey today.** The corpus in `tests/corpus/*.c` (see
-`docs/SUPPORT_MATRIX.md`). No whole-program measurement.
+`docs/SUPPORT_MATRIX.md`). No whole-program measurement in the ledger's own plan. Baseline
+(`main` at `1a92abf`, [`AUDIT.md`](AUDIT.md)): on 1,893 sampled functions, Complete 11.0%,
+Partial 58.1%, InvalidIR 25.8%, Unsupported 4.7%, crash 0.3%.
 
 **Tasks.**
 
@@ -1691,10 +1693,16 @@ Complete but not executed is not verified: report the two counts separately.
 **Why.** Both reference tools print `r = f(a, b);`. Donkey prints
 `sub_401000();`, with no arguments and no result.
 
-**Donkey today.** `lift_call` in `src/ir/lift.cpp` and
-`src/ir/lift_aarch64.cpp` keeps only the target and marks the function
-Partial ("outgoing call arguments and return values follow no modelled ABI").
-So every function that makes a call is Partial.
+**Donkey today.** On x86-64 under System V (ELF and Mach-O; a Win64 callee's parameters are not
+in the System V order, so a PE call with arguments is not resolved), `lift_call` in
+`src/ir/lift.cpp` resolves a direct call to a same-image callee when that callee lifts Complete without resolving its own calls (in practice a
+leaf), returns an integer and reads no stack-passed argument (`known_callee`, T1 and T2 partial):
+the call carries the callee's System V arguments and result, `check_call_clobbers` refuses a read
+of a register the callee may have changed, and the caller can be Complete. Every other call, and
+every AArch64 call (`src/ir/lift_aarch64.cpp`), keeps only its target and marks the function
+Partial ("outgoing call arguments and return values follow no modelled ABI"). On the fixed list of
+1,986 functions, 1,497 carried that note at `665c9e4` ([`AUDIT.md`](AUDIT.md)). Baseline: 1,009 of the
+1,893 functions of the first sample carried it.
 
 **Tasks.**
 
@@ -1721,6 +1729,72 @@ corpus has call-heavy functions verified by execution.
 **Pitfalls.** An argument count taken from register liveness is an inference.
 Label it as one (`signature_inferred`) and never print it as certain. A wrong
 prototype must fail the oracle, not print plausible code.
+
+#### G21-T0 task-level plan (written 2026-11-14, before any G21 code)
+
+Checked against: `src/ir/lift.cpp` (`lift_call`, the Call handling that marks the function Partial
+with "outgoing call arguments and return values follow no modelled ABI"), `src/ir/eval.cpp` (the
+`IrOp::Call` case, which fails with "calls are not interpreted"), `src/ir/ir.cpp` (verifier and
+printer), `src/ir/abi.cpp` (ABI register tables), and `tests/unit/decompiler_corpus_test.cpp`
+(the oracle; `tests/corpus/corpus.c` holds 3 files today).
+
+**IR change.** `IrStatement` gains `std::vector<IrOperand> call_arguments` (in ABI order) and
+`IrOperand call_result` (a register, or `None` when the callee's return is not used). A `Call`
+keeps `a` as the target. The statement's `signature_inferred` flag (new bool) is set when the
+argument count comes from the callee's inferred parameters rather than from a debug or type
+source. Every printed call names the inference when it is one.
+
+**Lifter (x86-64 SysV first).** `lift_call` resolves a direct target T to a function of the same
+image in the CFG (a jump-stub or import is not resolved). It lifts T once with calls to other
+functions not resolved (depth 1; the callee's own calls stay Partial), reads T's inferred
+`parameters` (ABI register names) and its return width and return register, and emits the call
+with those operands. Calls with an unresolved target keep today's form and stay Partial.
+
+**Clobber model (T1).** After any call, caller-saved registers (rax, rcx, rdx, rsi, rdi, r8-r11,
+xmm0-15) are unknown. Callee-saved (rbx, rbp, rsp, r12-r15) are preserved. A later read of an
+unknown register marks the function Partial, not Complete. Windows x64 is a second table (T1
+second step).
+
+**Verifier rules.** Every argument operand has a width matching its ABI register; `call_result`
+is a register that the clobber model defines; a call with arguments but no resolved signature is
+rejected (`ir.call_signature`). A call's arguments are reads: the verifier checks that they are
+defined on every path (an undefined argument marks the function Partial, it does not fail).
+
+**Interpreter (the oracle's part).** `eval.cpp`'s Call case evaluates the callee's IR recursively
+with the arguments, up to a depth of 8, and returns its result; a depth or an unresolved callee
+fails with `ir.eval_call` as today. This is what lets the differential harness execute a caller.
+
+**Printer.** `r = f(a, b);` when a result is used, `f(a, b);` otherwise, with the callee's name
+from the function table. A `signature_inferred` call prints a trailing comment
+`/* arguments inferred from callee */`.
+
+**Corpus (T2 oracle).** At least six call-heavy functions added to `tests/corpus/corpus.c`:
+arguments of 0 to 6 integer or pointer values, a result used and unused, a call inside a loop,
+a call chain of depth 2, a recursive call (must stay Partial), and a call through a function
+pointer (must stay Partial). The oracle compiles them at -O0 and -O2 on x86-64. A corpus function
+is Complete only when the interpreter's result equals the compiled code's on every input.
+
+**Tests (names to add).**
+- `Ir.CallCarriesItsArgumentsFromTheCalleeSignature` (unit, from bytes: a caller of a two-argument
+  callee in the same image)
+- `Ir.CallToAnUnresolvedTargetStaysPartial` (unit)
+- `Ir.CallerSavedRegistersAreUnknownAfterACall` (unit: a read of rax after a call is Partial)
+- `Ir.VerifierRejectsACallWithoutASignature` (unit, hand-built IR)
+- `DecompilerCorpus.CallHeavyFunctionsAgreeWithTheCompiledCode` (oracle, -O0 and -O2)
+- `cli.decompile_prints_call_arguments` (CLI, a committed fixture with a two-argument call)
+
+**Done when.** (1) the six corpus functions verify (Complete: executed and equal) at -O0 and -O2;
+(2) every existing corpus result still agrees with the compiled code; (3) the CLI test prints a
+call with arguments; (4) the count of sampled functions carrying "outgoing call arguments and
+return values follow no modelled ABI" is measured before and after with `tools/audit`, both in
+the PR. A function that still calls an unknown or recursive callee is Partial, and that is
+reported as such.
+
+**Pitfalls.** An argument count from register use is an inference: label it, never print it as
+certain (`signature_inferred`). A wrong signature must fail the oracle, not print plausible code:
+the oracle must run each call-heavy function with several inputs. The clobber model must not let
+a value that a call changed be printed as the old one. Do not widen the subset by guessing at
+callee-saved registers. Mutual recursion stops at depth 1 in the lifter, so the cost is bounded.
 
 ### G22 Type libraries (P1)
 
@@ -1756,7 +1830,14 @@ Generate from headers and record the header version.
 every function in a stripped binary. Exception tables give the `try` and
 `catch` regions. Both reference tools read them.
 
-**Donkey today.** Not read.
+**Donkey today.** `src/binary/eh_frame.cpp` reads the FDE ranges of ELF `.eh_frame` (CIE
+versions 1, 3 and 4; the pointer encodings the FDEs use) and `src/binary/pdata.cpp` the PE x64
+RUNTIME_FUNCTION entries, skipping chained ones; both seed function starts, and a table that cannot
+be read in full makes the analysis Partial with a diagnostic (T1 done, T2 partial). CFI programs,
+LSDA, `.xdata` and ARM64 unwind data are not read (T3 to T5). Baseline
+([`AUDIT.md`](AUDIT.md)): before T1, recall against the FDE starts was 33.0% (`python3.12`) to
+88.5% (`bash`); it is now 100%, which shows the seeds are read, not that discovery works without
+them.
 
 **Tasks.**
 
@@ -1781,8 +1862,15 @@ binaries, and a C++ fixture with `try`/`catch` shows its regions.
 reference tools. Everything else works on what this step finds.
 
 **Donkey today.** `src/analysis/analysis.cpp` seeds functions from the entry
-point, exported function symbols and call targets. There is no prologue scan,
-no no-return analysis, no thunk classification and no stack-depth analysis.
+point, exported function symbols, call targets and the unwind tables (G23-T1, T2). A walk stops
+at a jump or a fall-through into another function's start and at an import stub (T2 partial), and
+its traversal work is bounded. There is no prologue scan, no no-return analysis, no thunk
+classification and no stack-depth analysis, so a binary without unwind tables gets the first three
+seed sources only. On the stripped own CLI, recall against its symbols is 99.9% with 99.9%
+precision ([`AUDIT.md`](AUDIT.md), "Function starts at `6af21ee`").
+Baseline ([`AUDIT.md`](AUDIT.md)): function-start recall 85.8% on the stripped own CLI against
+its symbols (precision 100.0%); against `.eh_frame` entries, 68.0% on the stripped CLI, and
+33.0% to 88.5% on the system binaries, with precision 98.9% to 100%.
 
 **Tasks.**
 

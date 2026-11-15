@@ -1,14 +1,18 @@
 #include <gtest/gtest.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/plt.h"
 #include "test_io.h"
 
 namespace {
@@ -412,18 +416,33 @@ TEST(Cfg, RespectsInstructionLimit) {
   EXPECT_EQ(result.value().instructions.size(), 2U);
 }
 
-// A run of two-byte jumps to the next instruction makes a block at every instruction. Past the
-// block bound (200,000) the graph stops, and the result says so once, rather than being partial
-// without a reason.
+// The bound is one block per decoded instruction, with a floor of 200,000. One function's walk
+// cannot exceed the instructions it covers, so the limit is reached only when code is shared. Three
+// exported stubs (each `jmp` into the same run of two-byte jumps, which is no function's start)
+// each make a function whose walk covers the whole run: 3 x 100,000 blocks for 100,003
+// instructions. The graph stops at the bound, and the result says so once. The graph never holds
+// more blocks than the bound allows.
 TEST(Cfg, TheBlockBoundIsReportedOnce) {
-  const std::size_t jumps = 210'000;
+  const std::size_t run = 100'000;
   std::vector<std::byte> data;
-  data.reserve(jumps * 2);
-  for (std::size_t i = 0; i < jumps; ++i) {
+  // Stubs at offsets 0, 2 and 4: jmp to offset 6 (rel8 = 6 - (stub + 2)).
+  for (const std::uint8_t rel : {4, 2, 0}) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(static_cast<std::byte>(rel));
+  }
+  for (std::size_t i = 0; i < run; ++i) {
     data.push_back(std::byte{0xEB});
     data.push_back(std::byte{0x00});
   }
-  const auto image = synthetic_image(data.size());
+  auto image = synthetic_image(data.size());
+  for (const std::size_t at : {std::size_t{0}, std::size_t{2}, std::size_t{4}}) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(at);
+    symbol.address = 0x1000 + at;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
   AnalysisOptions options;
   options.max_instructions = 400'000;
   auto result = donkey::analyze(image, data, options);
@@ -438,7 +457,6 @@ TEST(Cfg, TheBlockBoundIsReportedOnce) {
     }
   }
   EXPECT_EQ(reported, 1U);
-  // The bound is exact: the graph never holds more blocks than the limit.
   EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
 }
 
@@ -480,12 +498,32 @@ std::size_t count_diagnostics(const donkey::ControlFlowGraph& cfg, const char* c
   return count;
 }
 
-// Five functions of 60,000 jumps each. The bound is reached inside the fourth, and the fifth must
-// not add blocks: a graph that checks the bound only after a block is made would still exceed it
-// by one block for each function that follows the limit. The result is reported once.
+// Five exported stubs, each a jump into one run of 60,000 two-byte jumps (no function starts in the
+// run). Each stub's function covers the whole run, so the bound (the floor, 200,000, since the
+// run is shorter) is reached inside the fourth, and the fifth must not add blocks: a graph that
+// checked the bound only after a block is made would exceed it by one block for each function
+// that follows the limit. The result is reported once.
 TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
-  const auto data = call_chain_image(5, 60'000);
-  const auto image = synthetic_image(data.size());
+  const std::size_t run = 60'000;
+  std::vector<std::byte> data;
+  // Stub k at offset 2k jumps to offset 10 (rel8 = 10 - (2k + 2)).
+  for (std::size_t k = 0; k < 5; ++k) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(static_cast<std::byte>(10 - (2 * k + 2)));
+  }
+  for (std::size_t j = 0; j < run; ++j) {
+    data.push_back(std::byte{0xEB});
+    data.push_back(std::byte{0x00});
+  }
+  auto image = synthetic_image(data.size());
+  for (std::size_t k = 0; k < 5; ++k) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(k);
+    symbol.address = 0x1000 + 2 * k;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
   AnalysisOptions options;
   options.max_instructions = 1'000'000;
   auto result = donkey::analyze(image, data, options);
@@ -493,6 +531,119 @@ TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
   ASSERT_TRUE(result.value().cfg.partial);
   EXPECT_LE(result.value().cfg.blocks.size(), 200'000U);
   EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.block_limit"), 1U);
+}
+
+namespace {
+
+/// Bytes, padded with int3 to `size`, and a function symbol at each of `starts`.
+std::pair<std::vector<std::byte>, BinaryImage> image_with_functions(
+    std::initializer_list<std::pair<std::size_t, std::vector<std::uint8_t>>> pieces,
+    std::size_t size, std::initializer_list<std::uint64_t> starts) {
+  std::vector<std::byte> data(size, std::byte{0xcc});
+  for (const auto& [offset, bytes] : pieces) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      data[offset + i] = static_cast<std::byte>(bytes[i]);
+    }
+  }
+  BinaryImage image = synthetic_image(data.size());
+  std::size_t n = 0;
+  for (const std::uint64_t start : starts) {
+    donkey::Symbol symbol;
+    symbol.name = "f" + std::to_string(n++);
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  return {std::move(data), std::move(image)};
+}
+
+}  // namespace
+
+// A conditional jump to another function's start is a conditional tail call, as an unconditional
+// one is: the caller does not take in the other function's body, and the edge is kept.
+TEST(Cfg, AConditionalJumpToAnotherFunctionDoesNotTakeInItsBody) {
+  // f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret.  f1 (0x1010): xor eax, eax; ret.
+  auto [data, image] =
+      image_with_functions({{0x0, {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}},
+                            {0x10, {0x31, 0xc0, 0xc3}}},
+                           0x20, {0x1000, 0x1010});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : result.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_TRUE(caller->has_extent);
+  EXPECT_EQ(caller->end_address, 0x100aU);
+  EXPECT_EQ(caller->block_count, 2U);
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1002 && edge.to == 0x1010 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalTrue);
+  }
+  EXPECT_TRUE(kept);
+}
+
+// The instruction budget counts distinct instructions, so one that an earlier walk counted is
+// still followed after the budget is spent. f0 and f1 both jump to one unseeded ret; with a budget
+// of three, f0 counts its jump and the ret, f1 counts its jump, and then reaches the counted ret.
+TEST(Cfg, AnInstructionCountedByAnotherWalkIsFollowedAfterTheBudget) {
+  auto [data, image] =
+      image_with_functions({{0x0, {0xe9, 0x1b, 0x00, 0x00, 0x00}},   // 0x1000: jmp 0x1020
+                            {0x10, {0xe9, 0x0b, 0x00, 0x00, 0x00}},  // 0x1010: jmp 0x1020
+                            {0x20, {0xc3}}},                         // 0x1020: ret
+                           0x21, {0x1000, 0x1010});
+  auto full = donkey::analyze(image, data);
+  ASSERT_TRUE(full.has_value()) << full.diagnostic().message;
+  AnalysisOptions options;
+  options.max_instructions = 3;
+  auto cfg = donkey::build_control_flow_graph(image, full.value().instructions,
+                                              full.value().functions, options, data);
+  ASSERT_TRUE(cfg.has_value()) << cfg.diagnostic().message;
+  EXPECT_EQ(count_diagnostics(cfg.value(), "analysis.instruction_limit"), 0U);
+  for (const donkey::Function& function : cfg.value().functions) {
+    EXPECT_EQ(function.block_count, 2U) << std::hex << function.address;
+  }
+}
+
+// The traversal's work is bounded, not only its distinct instructions: 1,000 stubs each jump into
+// one shared run of 5,000 instructions that no seed starts, so every stub walks the whole run
+// again (5,000,000 visits of 6,001 distinct instructions). The walk stops at the work limit,
+// reports it once, and the graph is Partial.
+TEST(Cfg, RepeatedWalksOfSharedCodeStopAtTheWorkLimit) {
+  constexpr std::size_t kStubs = 1000;
+  constexpr std::size_t kRun = 5000;
+  std::vector<std::byte> data;
+  const std::size_t run_start = 5 * kStubs;
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    const auto rel = static_cast<std::uint32_t>(run_start - (5 * k + 5));
+    data.push_back(std::byte{0xE9});  // jmp rel32 to the shared run
+    for (int shift = 0; shift < 32; shift += 8) {
+      data.push_back(static_cast<std::byte>((rel >> shift) & 0xFFU));
+    }
+  }
+  for (std::size_t j = 0; j < kRun; ++j) {
+    data.push_back(std::byte{0x90});  // nop
+  }
+  data.push_back(std::byte{0xC3});  // ret
+  auto image = synthetic_image(data.size());
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(k);
+    symbol.address = 0x1000 + 5 * k;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.partial);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.traversal_limit"), 1U);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.instruction_limit"), 0U);
 }
 
 // The traversal's instruction budget is reported once, with the number of functions it cut short,
@@ -521,3 +672,185 @@ TEST(Cfg, TheInstructionLimitIsReportedOnceForAllFunctions) {
 }
 
 }  // namespace
+
+// Goal 4, cause: a direct jump from one function to another function's start is a tail call. The
+// target's blocks belong to that function. Before the fix, the walk of the entry followed the jump
+// and counted the target's blocks as the entry's, so the entry's IR contained another function.
+TEST(Cfg, TailCallToAnotherFunctionStartIsNotCountedAsItsBlock) {
+  // call 0x1010; jmp 0x1010 (a tail call); padding; 0x1010: ret
+  const std::vector<std::uint8_t> raw = {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xe9, 0x06, 0x00, 0x00,
+                                         0x00, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xc3};
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  const auto image = synthetic_image(data.size());
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& analysis = result.value();
+
+  const donkey::Function* entry = nullptr;
+  const donkey::Function* callee = nullptr;
+  for (const donkey::Function& function : analysis.functions) {
+    if (function.address == 0x1000) {
+      entry = &function;
+    }
+    if (function.address == 0x1010) {
+      callee = &function;
+    }
+  }
+  ASSERT_NE(entry, nullptr);
+  ASSERT_NE(callee, nullptr);
+  // The callee's own block is its; the entry does not own it.
+  const auto* target = block_at(analysis.cfg, 0x1010);
+  ASSERT_NE(target, nullptr);
+  EXPECT_EQ(target->function, callee->id);
+  // The tail-call jump is still an edge out of the entry, so it stays visible.
+  EXPECT_NE(edge_between(analysis.cfg, 0x1005, 0x1010), nullptr);
+  for (const donkey::BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == entry->id) {
+      EXPECT_NE(block.address, 0x1010U);
+    }
+  }
+}
+
+// Goal 4, cause: a direct jump from a function into a PLT import stub is a tail call. The stub is
+// not a function start in this image (nothing calls it), so only the import-stub rule keeps it out
+// of the function's blocks. tests/fixtures/link/libtailcall.so is built from libtailcall.c with
+// gcc -O2 -shared -fPIC; its tail_fn ends with `jmp imported_add@plt`.
+TEST(Cfg, TailCallIntoAPltStubIsNotCountedAsTheFunctionsBlock) {
+  auto loaded = donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/link/libtailcall.so");
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  const auto stubs = donkey::plt_stub_imports(loaded.value().image, loaded.value().data);
+  std::uint64_t stub = 0;
+  for (const auto& [address, name] : stubs) {
+    if (name == "imported_add") {
+      stub = address;
+    }
+  }
+  ASSERT_NE(stub, 0U) << "no PLT stub for imported_add";
+  std::uint64_t tail = 0;
+  for (const donkey::Symbol& symbol : loaded.value().image.symbols) {
+    if (symbol.exported && symbol.name == "tail_fn") {
+      tail = symbol.address;
+    }
+  }
+  ASSERT_NE(tail, 0U);
+  auto result = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const auto& analysis = result.value();
+  const donkey::Function* function = nullptr;
+  for (const donkey::Function& candidate : analysis.functions) {
+    if (candidate.address == tail) {
+      function = &candidate;
+    }
+  }
+  ASSERT_NE(function, nullptr);
+  for (const donkey::BasicBlock& block : analysis.cfg.blocks) {
+    if (block.function == function->id) {
+      EXPECT_NE(block.address, stub) << "the stub's block is counted as tail_fn's";
+    }
+  }
+  // The jump is still an edge out of tail_fn, so the tail call stays visible.
+  EXPECT_NE(edge_between(analysis.cfg, tail + 7, stub), nullptr);
+}
+
+// A block bound that is fixed at 200,000 cuts a large image that is entirely valid code (the
+// AArch64 build of donkey-cli has more than that many blocks: its big functions are real). The
+// bound is one block per decoded instruction, with 200,000 as the floor; this function has 250,000
+// blocks (each `b .+4` ends a block and jumps to the next, then a ret), so it needs the larger
+// bound.
+TEST(Cfg, BlockBoundFollowsTheDecodedInstructionCount) {
+  constexpr std::size_t kBlocks = 250000;
+  std::vector<std::byte> data;
+  data.reserve((kBlocks + 1) * 4);
+  for (std::size_t i = 0; i < kBlocks; ++i) {
+    // b .+4 (0x14000001), little-endian
+    for (const std::uint8_t b : {0x01, 0x00, 0x00, 0x14}) {
+      data.push_back(static_cast<std::byte>(b));
+    }
+  }
+  for (const std::uint8_t b : {0xc0, 0x03, 0x5f, 0xd6}) {  // ret
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  for (const donkey::Diagnostic& diagnostic : result.value().cfg.diagnostics) {
+    EXPECT_NE(diagnostic.code, "analysis.block_limit") << diagnostic.message;
+  }
+  EXPECT_EQ(result.value().cfg.blocks.size(), kBlocks + 1);
+  EXPECT_FALSE(result.value().cfg.partial);
+}
+
+// Falling through into another function's start ends the function (G24). Layout: 0x1000 call
+// 0x1010; 0x1005 ret (a function: the call at 0x1010 targets it); 0x1010 call 0x1005; 0x1015 ret.
+// The caller at 0x1000 falls through its call into 0x1005, so it ends at 0x1005, not at its ret
+// after that. A call to the next instruction (the call-next idiom) does not end a function; see the
+// fixture test.
+TEST(Cfg, CallThatFallsIntoAnotherFunctionEndsTheCaller) {
+  const std::vector<std::byte> data = [] {
+    std::vector<std::byte> out;
+    for (const std::uint8_t b :
+         {0xe8, 0x0b, 0x00, 0x00, 0x00,                                // 0x1000: call 0x1010
+          0xc3,                                                        // 0x1005: ret
+          0xc3, 0xc3, 0xc3, 0xc3, 0xc3,                                // padding to 0x1010
+          0xc3, 0xc3, 0xc3, 0xc3, 0xc3, 0xe8, 0xf0, 0xff, 0xff, 0xff,  // 0x1010: call 0x1005
+          0xc3}) {                                                     // 0x1015: ret
+      out.push_back(static_cast<std::byte>(b));
+    }
+    return out;
+  }();
+  const auto image = synthetic_image(data.size());
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : result.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_TRUE(caller->has_extent);
+  EXPECT_EQ(caller->end_address, 0x1005U);
+  EXPECT_EQ(caller->block_count, 1U);
+  // The walk stops at 0x1005, but control goes on there: the graph keeps the edge from the call
+  // into the next function's start.
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1000 && edge.to == 0x1005 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalFalse);
+  }
+  EXPECT_TRUE(kept);
+}
+
+TEST(Cfg, ManyFunctionsAreNamedAndMergedInLinearTime) {
+  // 100,000 one-instruction functions, each named by a symbol. Naming each seed by a search of the
+  // symbols, and merging each graph function by a search of the functions, were quadratic: 10^10
+  // comparisons each. Both now go through an index.
+  constexpr std::size_t kFunctions = 100'000;
+  std::vector<std::byte> data(kFunctions, std::byte{0xc3});  // ret
+  BinaryImage image = synthetic_image(data.size());
+  image.symbols.reserve(kFunctions);
+  for (std::size_t n = 0; n < kFunctions; ++n) {
+    donkey::Symbol symbol;
+    symbol.name = "f" + std::to_string(n);
+    symbol.address = image.entry_point + n;
+    symbol.kind = donkey::SymbolKind::Function;
+    image.symbols.push_back(std::move(symbol));
+  }
+  const auto started = std::chrono::steady_clock::now();
+  auto analysis = donkey::analyze(image, data);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  ASSERT_EQ(analysis.value().functions.size(), kFunctions);
+  for (const std::size_t n : {std::size_t{0}, kFunctions / 2, kFunctions - 1}) {
+    const donkey::Function& function = analysis.value().functions[n];
+    EXPECT_EQ(function.name, "f" + std::to_string(function.address - image.entry_point));
+    EXPECT_EQ(function.block_count, 1U) << function.name;
+    EXPECT_EQ(function.end_address, function.address + 1) << function.name;
+  }
+  EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 60)
+      << "analysis took longer than a minute";
+}

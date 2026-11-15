@@ -24,6 +24,8 @@ struct Function {
   bool has_extent = false;
   bool exported = false;
   bool from_symbol = false;
+  /// The start is an FDE of the image's `.eh_frame` (G23-T1): the compiler's unwind table names it.
+  bool from_unwind = false;
   bool estimated = true;
 };
 

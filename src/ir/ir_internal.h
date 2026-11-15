@@ -70,6 +70,9 @@ struct Graph {
 
 Graph build_graph(const IrFunction& function);
 std::vector<BitSet> compute_dominators(const Graph& graph);
+/// Whether some block cannot be reached from the entry (block 0). A block with predecessors can
+/// still be unreachable, as part of a cycle the entry does not reach.
+bool has_unreachable_block(const Graph& graph);
 
 /// Render an operand into C-like expression text.
 std::string render_operand(const IrFunction& function, const IrOperand& operand,
@@ -96,10 +99,23 @@ std::string render_condition(const IrFunction& function, const IrStatement& stat
 /// condition would then read as if it tested the new value).
 const IrStatement* flags_producer(const IrBlock& block, std::size_t index);
 
+/// Immediate post-dominator of every block (goal 8, step 1). A block that ends in a return flows
+/// into a virtual exit whose index is the block count; a tail call is lifted as a return, so it
+/// does too. The entry is `count` for a block whose paths reach the exit with no block in common
+/// after it. An empty result means the graph is not valid.
+std::vector<BlockId> immediate_post_dominators(const IrFunction& function);
+
 struct StructuredLine {
   std::string text;
   std::uint64_t source_address = 0;
+  /// The other statements printed in this line (the step of a `for` header).
+  std::vector<std::uint64_t> folded_addresses;
 };
+
+/// The deepest nesting of if, loop and switch statements that the printer and the control-flow
+/// check accept (G04-T5). A candidate deeper than this is refused with a reason, so a crafted
+/// function cannot exhaust the stack of the thread that prints it, and the labelled form is shown.
+inline constexpr std::size_t kMaxStructureNesting = 128;
 
 /// Structured rendering of the function body, or `nullopt` when the control-flow
 /// graph does not match a shape this structurer models. Callers must fall back

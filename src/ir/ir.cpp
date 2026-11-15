@@ -377,11 +377,25 @@ class Renderer {
         return destination(statement.dest) + " = " + operand(statement.a) + ";";
       case IrOp::Store:
         return operand(statement.a) + " = " + operand(statement.b) + ";";
-      case IrOp::Call:
-        if (statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0) {
-          return "sub_" + hex(statement.a.constant) + "();";
+      case IrOp::Call: {
+        // `r = f(a, b);` when the result is used; the arguments are the callee's inferred ones.
+        std::string target =
+            statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0
+                ? "sub_" + hex(statement.a.constant)
+                : "((void (*)(void))" + operand(statement.a) + ")";
+        std::string arguments;
+        for (const IrOperand& argument : statement.call_arguments) {
+          arguments += (arguments.empty() ? "" : ", ") + operand(argument);
         }
-        return "((void (*)(void))" + operand(statement.a) + ")();";
+        std::string line =
+            (statement.dest.kind == IrOperandKind::Register ? destination(statement.dest) + " = "
+                                                            : std::string()) +
+            target + "(" + arguments + ");";
+        if (statement.signature_inferred && !statement.call_arguments.empty()) {
+          line += " /* arguments inferred from callee */";
+        }
+        return line;
+      }
       case IrOp::Return:
         if (statement.a.kind == IrOperandKind::None) {
           return "return;";
@@ -1199,6 +1213,22 @@ Result<bool> verify_ir(const IrFunction& function) {
           if (statement.a.kind == IrOperandKind::None) {
             return fail("ir.malformed_call", "call needs a target");
           }
+          if (statement.dest.kind != IrOperandKind::None &&
+              statement.dest.kind != IrOperandKind::Register) {
+            return fail("ir.malformed_call", "a call's result must be a register");
+          }
+          // Arguments come from a known signature only (G21-T2): an unknown one has none.
+          if (!statement.call_arguments.empty() && !statement.signature_inferred) {
+            return fail("ir.call_signature", "call arguments need a signature");
+          }
+          for (const IrOperand& argument : statement.call_arguments) {
+            if ((argument.kind != IrOperandKind::Register &&
+                 argument.kind != IrOperandKind::Constant) ||
+                argument.width == 0 || argument.width > 8) {
+              return fail("ir.call_signature",
+                          "a call argument must be a register or constant of 1 to 8 bytes");
+            }
+          }
           break;
         case IrOp::Return:
           break;
@@ -1452,8 +1482,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
 
   const Renderer renderer(function, &options.string_literals);
   Pseudocode out;
-  auto append_line = [&](const std::string& line, std::uint64_t source_address = 0) {
-    out.lines.push_back(PseudocodeLine{line, source_address});
+  auto append_line = [&](const std::string& line, std::uint64_t source_address = 0,
+                         std::vector<std::uint64_t> folded_addresses = {}) {
+    out.lines.push_back(PseudocodeLine{line, source_address, std::move(folded_addresses)});
     out.full_text += line + "\n";
   };
 
@@ -1535,13 +1566,17 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
   if (auto structured = detail::format_structured_body_lines(function, &options.string_literals);
       structured.has_value()) {
     for (const auto& sline : structured.value()) {
-      append_line(sline.text, sline.source_address);
+      append_line(sline.text, sline.source_address, sline.folded_addresses);
     }
     append_line("}");
     return out;
   }
 
   append_line("// note: control flow not fully structured; showing labeled blocks");
+  if (const StructureVerdict verdict = classify_structure(function);
+      verdict.cls == StructureClass::Irreducible) {
+    append_line("// note: " + verdict.reason);
+  }
   for (std::size_t index = 0; index < function.blocks.size(); ++index) {
     const IrBlock& block = function.blocks[index];
     append_line("loc_" + Renderer::hex(block.address) + ":", block.address);

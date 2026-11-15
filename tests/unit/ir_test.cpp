@@ -2,16 +2,25 @@
 
 #include <algorithm>
 #include <cfenv>
+#include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#else
+#include <thread>
+#endif
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
@@ -19,6 +28,8 @@
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "ir_internal.h"
+#include "lift_internal.h"
 #include "test_io.h"
 
 namespace {
@@ -533,10 +544,30 @@ TEST(Ir, StructuresCountedLoopAsFor) {
   step.a = IrOperand::register_ref("rax", 8);
   step.b = IrOperand::constant_value(1, 8);
   step.width = 8;
+  body.source_address = 0x100c;
+  step.source_address = 0x1010;
   function.blocks[2].statements.push_back(body);
   function.blocks[2].statements.push_back(step);
   function.blocks[2].statements.push_back(branch_statement(1));
   function.blocks[3].statements.push_back(return_statement());
+
+  // The header prints the step in place, and says so: its line folds the step's address, and only
+  // that one. The body statement of the same latch block has a line of its own, so a printer that
+  // dropped it would leave its address unprinted (DecompilerCorpus.EveryKeptStatementIsPrinted).
+  auto lines = donkey::format_pseudocode_lines(function);
+  ASSERT_TRUE(lines.has_value()) << lines.diagnostic().message;
+  bool header_folds_the_step = false;
+  bool body_has_its_line = false;
+  for (const donkey::PseudocodeLine& line : lines.value().lines) {
+    if (line.text.find("for (") != std::string::npos) {
+      header_folds_the_step = line.folded_addresses == std::vector<std::uint64_t>{0x1010};
+    }
+    body_has_its_line =
+        body_has_its_line ||
+        (line.source_address == 0x100c && line.text.find("rbx = rbx + 0x2;") != std::string::npos);
+  }
+  EXPECT_TRUE(header_folds_the_step) << lines.value().full_text;
+  EXPECT_TRUE(body_has_its_line) << lines.value().full_text;
 
   auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
@@ -611,9 +642,13 @@ TEST(Ir, StructuresDoWhileLoop) {
 }
 
 TEST(Ir, FallsBackToLabelsForIrreducibleControlFlow) {
+  // Blocks 1 and 2 form a cycle that block 0 enters at both ends (0 -> 1 and 0 -> 2), so the
+  // retreating edge 2 -> 1 does not have a dominating target: irreducible. Node splitting makes it
+  // reducible, but the loop header then has two entries from outside, which the structurer does
+  // not model, so the output stays labelled (see SplitsAnIrreducibleFunctionIntoAReducibleOne).
   IrFunction function = branch_function();
   function.blocks[0].statements.push_back(compare_zero_statement());
-  function.blocks[0].statements.push_back(conditional_branch_statement(1));
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
   function.blocks[1].statements.push_back(branch_statement(2));
   function.blocks[2].statements.push_back(compare_zero_statement());
   function.blocks[2].statements.push_back(conditional_branch_statement(1));
@@ -2181,6 +2216,124 @@ std::uint64_t run_x86_64(const donkey::IrFunction& function,
   return result.has_value() ? result.value().return_value : 0;
 }
 
+namespace {
+
+/// A callee of `assignments` statements `rax = 1, rax = 2, ...` and a return of rax.
+donkey::IrFunction counting_callee(std::size_t assignments) {
+  donkey::IrFunction callee;
+  callee.address = 0x2000;
+  callee.blocks.push_back(make_block(0x2000));
+  for (std::size_t i = 0; i < assignments; ++i) {
+    callee.blocks[0].statements.push_back(assign_register_statement("rax", i + 1));
+  }
+  callee.blocks[0].statements.push_back(return_statement());
+  return callee;
+}
+
+/// A caller: call 0x2000 (its result in rax when `resolved`), then return rax.
+donkey::IrFunction calling_caller(bool resolved) {
+  donkey::IrFunction caller;
+  caller.address = 0x1000;
+  caller.blocks.push_back(make_block(0x1000));
+  IrStatement call;
+  call.op = IrOp::Call;
+  call.a = IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  if (resolved) {
+    call.signature_inferred = true;
+    call.dest = IrOperand::register_ref("rax", 8);
+  }
+  caller.blocks[0].statements.push_back(call);
+  caller.blocks[0].statements.push_back(return_statement());
+  return caller;
+}
+
+donkey::Result<donkey::IrEvalResult> run_with_callee(const donkey::IrFunction& caller,
+                                                     const donkey::IrFunction& callee,
+                                                     std::size_t max_steps) {
+  const std::function<const donkey::IrFunction*(std::uint64_t)> resolve =
+      [&](std::uint64_t address) { return address == callee.address ? &callee : nullptr; };
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.max_steps = max_steps;
+  options.callees = &resolve;
+  return donkey::evaluate_ir(caller, {}, memory, options);
+}
+
+}  // namespace
+
+TEST(Ir, EvaluatorRunsAResolvedCallAndCountsItsSteps) {
+  const donkey::IrFunction callee = counting_callee(2);
+  auto result = run_with_callee(calling_caller(true), callee, 1000);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 2u);
+  // The caller's call and return, and the callee's two assignments and return.
+  EXPECT_EQ(result.value().steps, 5u);
+}
+
+TEST(Ir, EvaluatorRefusesACallWithoutAModelledSignature) {
+  // The callee's IR is known, but the call has no argument or result mapping: running it would
+  // drop the result and let the caller return its own stale rax.
+  const donkey::IrFunction callee = counting_callee(2);
+  auto result = run_with_callee(calling_caller(false), callee, 1000);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "ir.eval_call");
+}
+
+TEST(Ir, EvaluatorChargesACalleeAgainstTheCallersStepBudget) {
+  // Three steps in all: the call is one, so the callee has two left and its three statements
+  // exceed them.
+  const donkey::IrFunction callee = counting_callee(2);
+  auto result = run_with_callee(calling_caller(true), callee, 3);
+  ASSERT_FALSE(result.has_value());
+  EXPECT_EQ(result.diagnostic().code, "ir.eval_step_limit");
+}
+
+TEST(Ir, AResolvedCallDefinesTheCalleesWholeRax) {
+  // caller (0x1000): mov eax, 0x200; call 0x100f; shr rax, 8; ret.
+  // leaf (0x100f): mov eax, 0x100; mov al, 1; ret.
+  // After the call rax is the leaf's rax, 0x101, so the caller returns 1. The leaf's inferred
+  // return width is 1 (its last write is al): writing only that byte into the caller's rax would
+  // keep the caller's 0x200 above it and return 2.
+  const std::uint8_t bytes[] = {
+      0xb8, 0x00, 0x02, 0x00, 0x00,  // 0x1000: mov eax, 0x200
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1005: call 0x100f
+      0x48, 0xc1, 0xe8, 0x08,        // 0x100a: shr rax, 8
+      0xc3,                          // 0x100e: ret
+      0xb8, 0x00, 0x01, 0x00, 0x00,  // 0x100f: mov eax, 0x100
+      0xb0, 0x01,                    // 0x1014: mov al, 1
+      0xc3,                          // 0x1016: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  const donkey::Function* leaf = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    } else if (function.address == 0x100f) {
+      leaf = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_NE(leaf, nullptr);
+  auto lifted_caller = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted_caller.has_value()) << lifted_caller.diagnostic().message;
+  donkey::LiftOptions leaf_options;
+  leaf_options.resolve_calls = false;
+  auto lifted_leaf = donkey::lift_function(image, analyzed.value(), *leaf, leaf_options);
+  ASSERT_TRUE(lifted_leaf.has_value()) << lifted_leaf.diagnostic().message;
+  ASSERT_FALSE(lifted_caller.value().partial);
+  auto result = run_with_callee(lifted_caller.value(), lifted_leaf.value(), 1000);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 1u);
+}
+
 TEST(Ir, X86AddWithCarryMatchesHardwareFlags) {
   // add rdi, rsi; adc rdx, rcx; mov rax, rdx; ret
   donkey::IrFunction f;
@@ -2678,6 +2831,49 @@ TEST(Ir, StructuresCounterInMemoryAsFor) {
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
 }
 
+TEST(Ir, ACounterTemporaryThatACallReadsAfterTheLoopIsNotFolded) {
+  // The loop of StructuresCounterInMemoryAsFor, with a resolved call after it that takes the
+  // step's temporary as its argument. Folding the step into the header would replace the load,
+  // add and store with `*(u32 *)(rbp - 0x8) = ... + 0x1` and drop the assignment that gives the
+  // call its argument, so the loop is not printed as `for`.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x04, 0x83, 0x45,
+                               0xf8, 0x01, 0x39, 0x7d, 0xf8, 0x7c, 0xf7, 0x8b, 0x45, 0xf8, 0xc3},
+                              function));
+  std::string temporary;
+  for (const donkey::IrBlock& block : function.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Add &&
+          statement.dest.kind == donkey::IrOperandKind::Register &&
+          statement.b.kind == donkey::IrOperandKind::Constant && statement.b.constant == 1) {
+        temporary = statement.dest.reg;
+      }
+    }
+  }
+  ASSERT_FALSE(temporary.empty());
+  {
+    // Without the call the step folds (the control for this test).
+    auto text = donkey::format_pseudocode(function);
+    ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+    ASSERT_NE(text.value().find("for ("), std::string::npos) << text.value();
+  }
+  donkey::IrBlock& exit = function.blocks.back();
+  ASSERT_EQ(exit.statements.back().op, donkey::IrOp::Return);
+  donkey::IrStatement call;
+  call.op = donkey::IrOp::Call;
+  call.width = 8;
+  call.source_address = exit.statements.back().source_address;
+  call.a = donkey::IrOperand::constant_value(0x2000, 8);
+  call.call_arguments.push_back(donkey::IrOperand::register_ref(temporary, 4));
+  call.signature_inferred = true;
+  exit.statements.insert(exit.statements.end() - 1, call);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_EQ(code.find("for ("), std::string::npos) << code;
+  EXPECT_NE(code.find(temporary + " = " + temporary + " + 0x1;"), std::string::npos) << code;
+}
+
 TEST(Ir, ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter) {
   // mov [rbp - 8], rdi; mov rax, [rbp - 8]; mov eax, [rax + 4]; mov rdx, [rbp - 8];
   // mov ecx, [rdx + 8]; add eax, ecx; ret. An unoptimised build keeps the pointer in a frame
@@ -2917,13 +3113,33 @@ TEST(Ir, X86BitTestCarriesTheSelectedBit) {
   EXPECT_EQ(run_x86_64(immediate_index, {4}) & 0xffU, 0U);
 }
 
-TEST(Ir, FunctionWithADirectCallIsNotComplete) {
-  // call +0; mov eax, 1; ret. The call's effects are not modelled, so the result
-  // must be Partial even though every instruction lifts.
+TEST(Ir, FunctionWithADirectCallToAnUnknownTargetIsNotComplete) {
+  // call +0x100; mov eax, 1; ret. The target (0x1105) is outside the image, so no signature is
+  // known: the call's effects are not modelled and the result must be Partial, even though every
+  // instruction lifts. (A call to a known function of the image is resolved; see the next test.)
+  donkey::IrFunction f;
+  ASSERT_TRUE(
+      lift_raw_x86_64({0xe8, 0x00, 0x01, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+}
+
+// G21-T2: a direct call to a function of the image whose signature is known is resolved, so the
+// call is not a reason for Partial by itself. Here the target is the next instruction, which is a
+// function start with no arguments and a 4-byte result in eax.
+TEST(Ir, DirectCallToAKnownCalleeIsNotPartial) {
   donkey::IrFunction f;
   ASSERT_TRUE(
       lift_raw_x86_64({0xe8, 0x00, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}, f));
-  EXPECT_TRUE(f.partial);
+  EXPECT_FALSE(f.partial);
+  bool resolved = false;
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call) {
+        resolved = resolved || statement.signature_inferred;
+      }
+    }
+  }
+  EXPECT_TRUE(resolved);
 }
 
 TEST(Ir, VerifierRejectsADivisorTemporaryThatIsNeverDefined) {
@@ -3039,15 +3255,14 @@ TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedExchange) {
   }
 }
 
-TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedMove) {
-  // cmp rdi, rsi; mov r8w, 1; adc rdx, rcx; mov rax, rdx; ret
-  // The 16-bit move to r8w has no IR width, so it is Unsupported and may have written the flags.
-  // The flags are then unknown, so the adc is not lifted with the compare's carry: the function is
-  // partial. Before this rule the adc was lifted, and the verifier rejected the whole function.
+TEST(Ir, X86CarryIsNotReadAcrossAnUnsupportedSixteenBitExchange) {
+  // cmp rdi, rsi; xchg [rdi], ax; adc rdx, rcx; mov rax, rdx; ret
+  // The 16-bit memory exchange is Unsupported and may have written the flags, so the adc is not
+  // lifted with the compare's carry: the function is partial. (This used to be a `mov r8w, 1`,
+  // which had no IR width until the r8w to r15w entries were added in the register table.)
   donkey::IrFunction f;
   ASSERT_TRUE(lift_raw_x86_64(
-      {0x48, 0x39, 0xf7, 0x66, 0x41, 0xb8, 0x01, 0x00, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3},
-      f));
+      {0x48, 0x39, 0xf7, 0x66, 0x87, 0x07, 0x48, 0x11, 0xca, 0x48, 0x89, 0xd0, 0xc3}, f));
   EXPECT_TRUE(f.partial);
   for (const donkey::IrBlock& block : f.blocks) {
     for (const donkey::IrStatement& statement : block.statements) {
@@ -4384,4 +4599,1456 @@ TEST(Ir, AMovOfAStringAddressPrintsTheLiteral) {
   auto unchanged = donkey::format_pseudocode(f, other);
   ASSERT_TRUE(unchanged.has_value());
   EXPECT_EQ(unchanged.value(), plain.value());
+}
+
+// Goal 1: the 16-bit forms of r8w to r15w have a width, so a rotate of them lifts and
+// evaluates. Before the fix their width was 0 and the rotate divided by it (SIGFPE).
+TEST(Ir, RotateOfAHighSixteenBitRegisterLiftsAndEvaluates) {
+  // mov r9d, 0x1234; rol r9w, 8; mov rax, r9; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x41, 0xb9, 0x34, 0x12, 0x00, 0x00, 0x66, 0x41, 0xc1, 0xc1, 0x08, 0x4c, 0x89, 0xc8, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {}), 0x3412U);
+}
+
+TEST(Ir, RotateOfR12WRightLiftsAndEvaluates) {
+  // mov r12d, 0x1234; ror r12w, 4; mov rax, r12; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0x41, 0xbc, 0x34, 0x12, 0x00, 0x00, 0x66, 0x41, 0xc1, 0xcc, 0x04, 0x4c, 0x89, 0xe0, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  EXPECT_EQ(run_x86_64(f, {}), 0x4123U);
+}
+
+// Every 16-bit name r8w to r15w has a width: rol <name>, 1 lifts to 2-byte shifts, and the full
+// register is written after them (the register table entry; a zero width used to fault).
+TEST(Ir, RegisterWidthTableCoversEveryHighSixteenBitName) {
+  for (std::uint8_t reg = 8; reg <= 15; ++reg) {
+    const std::string name = "r" + std::to_string(reg) + "w";
+    // 66 REX.B c1 /0 ib: rol r/m16, imm8 with the register in r/m. Then mov rax, r<n> (REX.WR 89
+    // /r) reads the register back, so the rotate is not removed as dead.
+    const auto rm = static_cast<std::uint8_t>(reg - 8);
+    const auto modrm = static_cast<std::uint8_t>(0xc0 | (rm << 3));  // reg = r<n>, r/m = rax
+    donkey::IrFunction f;
+    ASSERT_TRUE(lift_raw_x86_64(
+        {0x66, 0x41, 0xc1, static_cast<std::uint8_t>(0xc0 | rm), 0x01, 0x4c, 0x89, modrm, 0xc3}, f))
+        << name;
+    bool shifted_16 = false;
+    bool writes_full = false;
+    for (const donkey::IrBlock& block : f.blocks) {
+      for (const donkey::IrStatement& statement : block.statements) {
+        shifted_16 = shifted_16 || (statement.op == IrOp::Shl && statement.width == 2);
+        writes_full = writes_full || (statement.dest.kind == IrOperandKind::Register &&
+                                      statement.dest.reg == "r" + std::to_string(reg));
+      }
+    }
+    EXPECT_TRUE(shifted_16) << name;
+    EXPECT_TRUE(writes_full) << name;
+  }
+}
+
+// Goal 3: the note names the architecture's integer return register. On AArch64 that is x0; it
+// used to say rax for every architecture.
+TEST(Ir, AArch64ReturnRegisterNoteNamesX0NotRax) {
+  // ret: nothing defines x0 on the way to the return, so the note is raised.
+  const auto data = aarch64_bytes({0xd65f03c0});
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::AArch64;
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  bool noted = false;
+  for (const std::string& note : lifted.value().notes) {
+    if (note.find("not determined by the definitions") != std::string::npos) {
+      noted = true;
+      EXPECT_NE(note.find("x0 is assumed"), std::string::npos) << note;
+      EXPECT_EQ(note.find("rax"), std::string::npos) << note;
+    }
+  }
+  EXPECT_TRUE(noted);
+}
+
+// The x86-64 note keeps naming rax.
+TEST(Ir, X86_64ReturnRegisterNoteNamesRax) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0xc3}, f));
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    if (note.find("not determined by the definitions") != std::string::npos) {
+      noted = true;
+      EXPECT_NE(note.find("rax is assumed"), std::string::npos) << note;
+    }
+  }
+  EXPECT_TRUE(noted);
+}
+
+namespace {
+
+/// Lifts the function that starts at `entry_offset` into the raw bytes, which are mapped at the
+/// synthetic image's base. Code below the entry is part of the image too.
+bool lift_raw_x86_64_at_entry(const std::vector<std::uint8_t>& raw, std::uint64_t entry_offset,
+                              donkey::IrFunction& out) {
+  std::vector<std::byte> data;
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  auto image = synthetic_image(data.size());
+  image.architecture = Architecture::X86_64;
+  image.entry_point = 0x1000 + entry_offset;
+  auto analyzed = donkey::analyze(image, data);
+  if (!analyzed.has_value()) {
+    return false;
+  }
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address != image.entry_point) {
+      continue;
+    }
+    auto lifted = donkey::lift_function(image, analyzed.value(), function);
+    if (!lifted.has_value()) {
+      return false;
+    }
+    out = std::move(lifted.value());
+    return true;
+  }
+  return false;
+}
+
+}  // namespace
+
+// Goal 4, cause 1: the entry is not the lowest block, and a block below it is reached from it
+// (here `ret` at offset 0, reached by `jmp 0` from the entry at offset 2). The verifier starts at
+// block 0, so the entry used to be unreachable. The lifter now puts a trampoline at block 0 that
+// branches to the entry, and the function verifies.
+TEST(Ir, EntryBelowAReachableBlockGetsATrampolineAndVerifies) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64_at_entry({0xc3, 0x90, 0xeb, 0xfc}, 2, f));
+  ASSERT_GE(f.blocks.size(), 2U);
+  // Block 0 is the trampoline: it only branches to the block at the entry address.
+  const donkey::IrBlock& trampoline = f.blocks[0];
+  ASSERT_EQ(trampoline.statements.size(), 1U);
+  ASSERT_EQ(trampoline.statements[0].op, IrOp::Branch);
+  const std::uint32_t target = trampoline.statements[0].a.block;
+  ASSERT_LT(target, f.blocks.size());
+  EXPECT_EQ(f.blocks[target].address, 0x1002U);
+  auto verified = donkey::verify_ir(f);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().message;
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+}
+
+// Goal 4, cause: a block the entry cannot reach is removed, not shown, and the function is Partial
+// with a note giving its address range. Hand-built IR: the entry at 0x1000 branches to 0x1004 and
+// the block at 0x1010 is reached from nothing. The entry is block 0 here, so no trampoline is made.
+TEST(Ir, BlockNotReachedFromTheEntryIsDroppedWithANote) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "sub_1000";
+  f.return_width = 8;
+  donkey::IrBlock entry;
+  entry.address = 0x1000;
+  IrStatement branch;
+  branch.op = IrOp::Branch;
+  branch.a = IrOperand::block_ref(1);
+  branch.width = 8;
+  branch.source_address = 0x1000;
+  entry.statements.push_back(branch);
+  donkey::IrBlock next;
+  next.address = 0x1004;
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref("rax", 8);
+  ret.width = 8;
+  ret.source_address = 0x1004;
+  next.statements.push_back(ret);
+  donkey::IrBlock orphan;
+  orphan.address = 0x1010;
+  orphan.statements.push_back(ret);
+  f.blocks = {entry, next, orphan};
+
+  donkey::AnalysisResult analysis;
+  donkey::BasicBlock b0;
+  b0.function = donkey::FunctionId{7};
+  b0.address = 0x1000;
+  b0.end_address = 0x1004;
+  donkey::BasicBlock b1 = b0;
+  b1.address = 0x1004;
+  b1.end_address = 0x1008;
+  donkey::BasicBlock b2 = b0;
+  b2.address = 0x1010;
+  b2.end_address = 0x1014;
+  analysis.cfg.blocks = {b0, b1, b2};
+
+  auto changed = donkey::internal::keep_reachable_blocks(f, analysis, donkey::FunctionId{7}, 8);
+  ASSERT_TRUE(changed.has_value()) << changed.diagnostic().message;
+  EXPECT_TRUE(changed.value());
+  ASSERT_EQ(f.blocks.size(), 2U);
+  EXPECT_EQ(f.blocks[0].address, 0x1000U);
+  // The branch now names the kept block at index 1.
+  EXPECT_EQ(f.blocks[0].statements[0].a.block, 1U);
+  EXPECT_TRUE(f.partial);
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    if (note.find("1 block(s) are not reached") != std::string::npos &&
+        note.find("0x1010..0x1014") != std::string::npos) {
+      noted = true;
+    }
+  }
+  EXPECT_TRUE(noted);
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
+
+// Found by fuzz_binary on a mutated PE: `63 61 6c` decodes as movsxd esp, dword ptr [rcx + 0x6c].
+// A 32-bit destination from a 32-bit source does not widen, so the lifter must not emit an extend
+// for it (the verifier rejects one, ir.malformed_extend). It is Unsupported and the function is
+// Partial, and the lifted IR verifies.
+TEST(Ir, MovsxdWithA32BitDestinationIsUnsupportedNotAnExtend) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x63, 0x61, 0x6c, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      EXPECT_NE(statement.op, donkey::IrOp::SignExtend);
+    }
+  }
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
+
+// G21: a direct call to a same-image callee carries the callee's inferred arguments and result.
+// Layout: 0x1000 mov edi, 5; 0x1005 call 0x100b; 0x100a ret; 0x100b mov rax, rdi; ret.
+TEST(Ir, CallCarriesItsArgumentsFromTheCalleeSignature) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0xbf, 0x05, 0x00, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x48, 0x89, 0xf8, 0xc3},
+      f));
+  EXPECT_FALSE(f.partial);
+  const donkey::IrStatement* call = nullptr;
+  for (const donkey::IrBlock& block : f.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call) {
+        call = &statement;
+      }
+    }
+  }
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  ASSERT_EQ(call->call_arguments.size(), 1U);
+  EXPECT_EQ(call->call_arguments[0].reg, "rdi");
+  EXPECT_EQ(call->dest.reg, "rax");
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rax = sub_100b(rdi); /* arguments inferred from callee */"),
+            std::string::npos)
+      << text.value();
+  auto verified = donkey::verify_ir(f);
+  EXPECT_TRUE(verified.has_value()) << (verified ? "" : verified.diagnostic().message);
+}
+
+// Layout: 0x1000 call 0x1009; 0x1005 mov rax, rdx; ret; 0x1009 mov rdx, rdi; mov rax, rdx; ret.
+// The callee writes rdx (caller-saved), so the value the caller read there is gone after the call.
+TEST(Ir, CallerSavedRegistersAreUnknownAfterACall) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0xe8, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0xd0, 0xc3, 0x48, 0x89,
+                               0xfa, 0x48, 0x89, 0xd0, 0xc3},
+                              f));
+  EXPECT_TRUE(f.partial);
+  bool noted = false;
+  for (const std::string& note : f.notes) {
+    noted = noted || note.find("register rdx is read after a call") != std::string::npos;
+  }
+  EXPECT_TRUE(noted);
+}
+
+// Layout: 0x1000 call 0x1009; 0x1005 mov rax, rdx; ret; 0x1009 mov rax, rdi; ret.
+// The callee writes only rax, so rdx keeps the caller's value across the call: not Partial.
+TEST(Ir, CallerSavedRegistersTheCalleeDoesNotWriteSurviveACall) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64(
+      {0xe8, 0x04, 0x00, 0x00, 0x00, 0x48, 0x89, 0xd0, 0xc3, 0x48, 0x89, 0xf8, 0xc3}, f));
+  EXPECT_FALSE(f.partial);
+}
+
+TEST(Ir, VerifierRejectsACallWithArgumentsButNoSignature) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  donkey::IrBlock block;
+  donkey::IrStatement call;
+  call.op = donkey::IrOp::Call;
+  call.a = donkey::IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  call.call_arguments.push_back(donkey::IrOperand::register_ref("rdi", 8));
+  call.signature_inferred = false;
+  block.statements.push_back(call);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::none();
+  ret.width = 8;
+  block.statements.push_back(ret);
+  f.blocks.push_back(block);
+  auto verified = donkey::verify_ir(f);
+  ASSERT_FALSE(verified.has_value());
+  EXPECT_EQ(verified.diagnostic().code, "ir.call_signature");
+}
+
+// Structuring (G8): a conditional branch to the enclosing loop's exit is `if (cond) break;`, not an
+// if region whose body is the exit's code. Hand-built IR: 1 is the loop header (its test leaves to
+// the exit, 5); 2 breaks out of the loop on a compare; 3 is the rest of the body; 4 is the latch.
+TEST(Ir, ConditionalBranchToTheLoopExitPrintsAsBreak) {
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "loop_break";
+  f.return_width = 8;
+  const auto compare = [](const std::string& reg) {
+    IrStatement c;
+    c.op = IrOp::Compare;
+    c.a = IrOperand::register_ref(reg, 8);
+    c.b = IrOperand::constant_value(0, 8);
+    c.condition = IrCondition::Equal;
+    c.width = 8;
+    return c;
+  };
+  const auto branch = [](IrCondition condition, std::uint32_t taken) {
+    IrStatement b;
+    b.op = IrOp::CondBranch;
+    b.condition = condition;
+    b.a = IrOperand::register_ref("rax", 8);
+    b.b = IrOperand::block_ref(taken);
+    b.width = 8;
+    return b;
+  };
+  const auto jump = [](std::uint32_t target) {
+    IrStatement j;
+    j.op = IrOp::Branch;
+    j.a = IrOperand::block_ref(target);
+    j.width = 8;
+    return j;
+  };
+  IrBlock entry;
+  entry.statements.push_back(jump(1));
+  IrBlock header;
+  header.statements.push_back(compare("rdi"));
+  header.statements.push_back(
+      branch(IrCondition::Equal, 5));  // while loop test: leaves to the exit
+  IrBlock inner;
+  inner.statements.push_back(compare("rsi"));
+  inner.statements.push_back(branch(IrCondition::Equal, 5));  // if (rsi == 0) break;
+  IrBlock rest;
+  {
+    IrStatement a;
+    a.op = IrOp::Assign;
+    a.dest = IrOperand::register_ref("rdx", 8);
+    a.a = IrOperand::constant_value(7, 8);
+    a.width = 8;
+    rest.statements.push_back(a);
+  }
+  rest.statements.push_back(jump(4));
+  IrBlock latch;
+  latch.statements.push_back(jump(1));
+  IrBlock exit;
+  {
+    IrStatement r;
+    r.op = IrOp::Return;
+    r.a = IrOperand::register_ref("rax", 8);
+    r.width = 8;
+    exit.statements.push_back(r);
+  }
+  f.blocks = {entry, header, inner, rest, latch, exit};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_NE(text.value().find("if ("), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find(") break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
+// Structuring (G8): the synthetic entry trampoline (a block at address 0 that only branches to the
+// entry, which lies after other blocks) must not show as `goto` or `loc_`. Hand-built IR: 0
+// branches to the entry 2, which tests rdi and branches to 1 or falls through to 3; both join at 4,
+// a return.
+TEST(Ir, SyntheticEntryTrampolineDoesNotPrintAsGoto) {
+  // Output regression, not a discriminating test: block 0 is a synthetic entry trampoline (address
+  // 0) that jumps to block 2, and the printed output has no goto. It does not discriminate because
+  // the original layout already structures this shape, with or without the trampoline rule
+  // (removed from reverse_postorder_copy; see AUDIT, goal 8).
+  donkey::IrFunction f;
+  f.address = 0x1000;
+  f.name = "trampoline";
+  f.return_width = 8;
+  const auto jump = [](std::uint32_t target) {
+    IrStatement j;
+    j.op = IrOp::Branch;
+    j.a = IrOperand::block_ref(target);
+    j.width = 8;
+    return j;
+  };
+  const auto assign_constant = [](const std::string& reg, std::uint64_t value) {
+    IrStatement a;
+    a.op = IrOp::Assign;
+    a.dest = IrOperand::register_ref(reg, 8);
+    a.a = IrOperand::constant_value(value, 8);
+    a.width = 8;
+    return a;
+  };
+  IrBlock trampoline;
+  trampoline.address = 0;
+  trampoline.statements.push_back(jump(2));
+  IrBlock then_arm;
+  then_arm.address = 0x1008;
+  then_arm.statements.push_back(assign_constant("rdx", 2));
+  then_arm.statements.push_back(jump(4));
+  IrBlock entry;
+  entry.address = 0x1000;
+  {
+    IrStatement c;
+    c.op = IrOp::Compare;
+    c.a = IrOperand::register_ref("rdi", 8);
+    c.b = IrOperand::constant_value(0, 8);
+    c.condition = IrCondition::Equal;
+    c.width = 8;
+    entry.statements.push_back(c);
+    IrStatement b;
+    b.op = IrOp::CondBranch;
+    b.condition = IrCondition::Equal;
+    b.a = IrOperand::register_ref("rax", 8);
+    b.b = IrOperand::block_ref(1);
+    b.width = 8;
+    entry.statements.push_back(b);
+  }
+  IrBlock else_arm;
+  else_arm.address = 0x1010;
+  else_arm.statements.push_back(assign_constant("rdx", 1));
+  else_arm.statements.push_back(jump(4));
+  IrBlock join;
+  join.address = 0x1020;
+  {
+    IrStatement r;
+    r.op = IrOp::Return;
+    r.a = IrOperand::register_ref("rdx", 8);
+    r.width = 8;
+    join.statements.push_back(r);
+  }
+  f.blocks = {trampoline, then_arm, entry, else_arm, join};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("loc_"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
+TEST(Ir, StatementsInTheBranchingBlockArePrintedBeforeTheIf) {
+  // Block 0 assigns rsi, then compares rax and branches. The assignment must
+  // print before the if; before the fix the structured emitter dropped it.
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(assign_register_statement("rsi", 9));
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(assign_register_statement("rdx", 2));
+  function.blocks[1].statements.push_back(branch_statement(3));
+  function.blocks[2].statements.push_back(assign_register_statement("rcx", 1));
+  function.blocks[2].statements.push_back(branch_statement(3));
+  function.blocks[3].statements.push_back(return_statement());
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const auto assign = text.value().find("rsi = 0x9;");
+  const auto guard = text.value().find("if (");
+  ASSERT_NE(assign, std::string::npos) << text.value();
+  ASSERT_NE(guard, std::string::npos) << text.value();
+  EXPECT_LT(assign, guard) << text.value();
+}
+
+// ---- Post-dominators and the fallback structurer (goal 8, step 1) ------------------------
+
+namespace {
+
+IrStatement fb_jump(std::uint32_t target) {
+  IrStatement statement;
+  statement.op = IrOp::Branch;
+  statement.a = IrOperand::block_ref(target);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_branch(std::uint32_t taken) {
+  IrStatement statement;
+  statement.op = IrOp::CondBranch;
+  statement.condition = IrCondition::Equal;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::block_ref(taken);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_compare() {
+  IrStatement statement;
+  statement.op = IrOp::Compare;
+  statement.a = IrOperand::register_ref("rax", 8);
+  statement.b = IrOperand::constant_value(0, 8);
+  statement.condition = IrCondition::Equal;
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_set(const std::string& reg, std::uint64_t value) {
+  IrStatement statement;
+  statement.op = IrOp::Assign;
+  statement.dest = IrOperand::register_ref(reg, 8);
+  statement.a = IrOperand::constant_value(value, 8);
+  statement.width = 8;
+  return statement;
+}
+
+IrStatement fb_return() {
+  IrStatement statement;
+  statement.op = IrOp::Return;
+  statement.a = IrOperand::register_ref("rdx", 8);
+  statement.width = 8;
+  return statement;
+}
+
+IrFunction fb_function(std::vector<std::vector<IrStatement>> blocks) {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "fallback";
+  function.return_width = 8;
+  std::uint64_t address = 0x1000;
+  for (auto& statements : blocks) {
+    IrBlock block;
+    block.address = address;
+    block.statements = std::move(statements);
+    function.blocks.push_back(std::move(block));
+    address += 0x10;
+  }
+  return function;
+}
+
+}  // namespace
+
+TEST(Ir, PostDominatorsOfADiamondJoinAtTheMerge) {
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_jump(3)},
+      {fb_jump(3)},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 4u);
+  EXPECT_EQ(immediate[0], 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 3u);
+}
+
+TEST(Ir, EveryReturnFeedsTheVirtualExit) {
+  // Two returns have no block in common after the branch: the join is the virtual exit, whose
+  // index is the block count (4).
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {fb_return()},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 3u);
+  EXPECT_EQ(immediate[0], 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 3u);
+}
+
+TEST(Ir, ATailCallFeedsTheVirtualExit) {
+  // Block 1 is a tail call (a call followed by a return, as the lifter emits it). Its exit is the
+  // virtual exit, so the branch above it has no join among the blocks.
+  IrStatement call;
+  call.op = IrOp::Call;
+  call.dest = IrOperand::register_ref("rax", 8);
+  call.a = IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(2)},
+      {call, fb_return()},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 3u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[0], 3u);
+}
+
+TEST(Ir, PostDominatorsOfAWhileLoopLeaveTheHeaderToItsExit) {
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(3)},
+      {fb_jump(1)},
+      {fb_return()},
+  });
+  const auto immediate = donkey::detail::immediate_post_dominators(f);
+  ASSERT_EQ(immediate.size(), 4u);
+  EXPECT_EQ(immediate[1], 3u);
+  EXPECT_EQ(immediate[2], 1u);
+  EXPECT_EQ(immediate[0], 1u);
+}
+
+TEST(Ir, SyntheticEntryTrampolineInAnIfWithTwoReturnsDoesNotPrintAsGoto) {
+  // Output regression, not a discriminating test: the shape of libc's sub_191770, a synthetic
+  // entry (block 0, address 0) that jumps to block 2, which branches to two returns with no join.
+  // It does not discriminate: the output is the same with or without the trampoline rule, which
+  // was removed from reverse_postorder_copy (AUDIT, goal 8).
+  IrFunction f = fb_function({
+      {fb_jump(2)},
+      {fb_return()},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 3), fb_return()},
+  });
+  f.blocks[0].address = 0;
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().code << ": " << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+}
+
+namespace {
+
+// A loop with two exits: the header leaves to the follow block 4 (which returns), and the
+// body's test leaves to block 5, a return block of its own. The layout-based structurer rejects
+// it (two exit blocks), so only the fallback can structure it.
+IrFunction fb_two_exit_loop() {
+  // Block 4 is the follow (not itself a return), so the header's exit to it prints as break.
+  return fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(5)},
+      {fb_set("rdx", 1), fb_jump(1)},
+      {fb_set("rdx", 7), fb_jump(6)},
+      {fb_set("rdx", 9), fb_return()},
+      {fb_return()},
+  });
+}
+
+}  // namespace
+
+TEST(Ir, FallbackPrintsALoopExitToTheFollowAsBreak) {
+  const IrFunction f = fb_two_exit_loop();
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("break;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x1;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x7;"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackPrintsALoopExitToAReturnBlockInPlace) {
+  // Block 3 leaves the loop with an unconditional branch to the return block 5. The loop's follow
+  // is block 4, so the return is the only exit that is not the follow.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 9), fb_jump(5)},
+      {fb_set("rdx", 7), fb_jump(6)},
+      {fb_return()},
+      {fb_return()},
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rdx = 0x9;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackJoinsAnIfAtItsPostDominator) {
+  // The layout-based structurer rejects this loop (ReducibleRejected without the fallback). Block
+  // 2 is an if whose arms are block 3 and the join 4, the immediate post-dominator of block 2;
+  // block 3 continues to the header, and the header's exit is block 5.
+  const IrFunction f = fb_function({
+      {fb_jump(1)},
+      {fb_compare(), fb_branch(5)},
+      {fb_compare(), fb_branch(1)},
+      {fb_compare(), fb_branch(4)},
+      {fb_set("rdx", 2), fb_jump(1)},
+      {fb_set("rdx", 7), fb_return()},
+  });
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("rdx = 0x2;"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("rdx = 0x7;"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackCopiesASmallReturnBlockReachedTwice) {
+  // Block 3 is a one-statement return reached from block 0 and from block 1. The two arms of
+  // block 0 have no join but the virtual exit (block 2 returns elsewhere), so block 3 is printed
+  // in each arm: the second time as a copy.
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(3)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 5), fb_return()},
+      {fb_set("rdx", 9), fb_return()},
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  std::size_t copies = 0;
+  for (std::size_t at = text.value().find("rdx = 0x9;"); at != std::string::npos;
+       at = text.value().find("rdx = 0x9;", at + 1)) {
+    ++copies;
+  }
+  EXPECT_EQ(copies, 2u) << text.value();
+}
+
+TEST(Ir, FallbackDoesNotCopyAReturnBlockOverEightStatements) {
+  // The same shape as FallbackCopiesASmallReturnBlockReachedTwice, but block 3 has nine statements
+  // (over the copy bound of eight), so the second arrival rejects and the function stays labelled.
+  std::vector<IrStatement> big;
+  for (int i = 0; i < 8; ++i) {
+    big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
+  }
+  big.push_back(fb_return());
+  const IrFunction f = fb_function({
+      {fb_compare(), fb_branch(3)},
+      {fb_compare(), fb_branch(3)},
+      {fb_set("rdx", 5), fb_return()},
+      big,
+  });
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, FallbackStopsCopyingAtTheFunctionBudget) {
+  // Ten branches reach the eight-statement return block 10 (the first arrival prints it, the rest
+  // copy it): nine copies of eight statements is seventy-two, over the budget of sixty-four.
+  std::vector<IrStatement> big;
+  for (int i = 0; i < 7; ++i) {
+    big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
+  }
+  big.push_back(fb_return());  // eight statements in all: copyable, under the per-block bound
+  std::vector<std::vector<IrStatement>> blocks;
+  for (int i = 0; i < 9; ++i) {
+    blocks.push_back({fb_compare(), fb_branch(10)});
+  }
+  blocks.push_back({fb_compare(), fb_branch(11)});
+  blocks.push_back(big);
+  blocks.push_back({fb_set("rdx", 3), fb_return()});
+  const IrFunction f = fb_function(blocks);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("goto"), std::string::npos) << text.value();
+}
+
+TEST(Ir, ALoopWithManyReturnExitsChoosesItsFollowInBoundedTime) {
+  // while (1) { if (rax == 0) return 0; ... if (rax == 0) return 1999; }: 2,000 tests in one loop,
+  // each leaving to its own return block. Choosing the loop's follow searched from every body
+  // block for every exit, which is cubic: about three minutes at this size. It is now linear in
+  // the loop; the bound below is far above that and far below the old cost.
+  constexpr std::uint32_t kTests = 2000;
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "loop_exits";
+  for (std::uint32_t i = 0; i < 2 * kTests + 1; ++i) {
+    function.blocks.push_back(make_block(0x1000 + 0x10ULL * i));
+  }
+  for (std::uint32_t i = 0; i < kTests; ++i) {
+    function.blocks[i].statements = {compare_zero_statement(),
+                                     conditional_branch_statement(kTests + 1 + i)};
+  }
+  function.blocks[kTests].statements = {branch_statement(0)};
+  for (std::uint32_t i = 0; i < kTests; ++i) {
+    function.blocks[kTests + 1 + i].statements = {assign_register_statement("rax", i),
+                                                  return_statement()};
+  }
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+  const auto start = std::chrono::steady_clock::now();
+  const auto verdict = donkey::classify_structure(function);
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Structured) << verdict.reason;
+  EXPECT_LT(seconds, 60.0);
+}
+
+TEST(Ir, ACycleTheEntryDoesNotReachIsUnreachable) {
+  // Block 0 returns; blocks 1 and 2 branch to each other. Both have a predecessor, but neither is
+  // reached from the entry, so the verdict is Other (unreachable), not a rejected structure.
+  IrFunction function;
+  function.address = 0x1000;
+  function.blocks.push_back(make_block(0x1000));
+  function.blocks.push_back(make_block(0x1010));
+  function.blocks.push_back(make_block(0x1020));
+  function.blocks[0].statements = {return_statement()};
+  function.blocks[1].statements = {branch_statement(2)};
+  function.blocks[2].statements = {branch_statement(1)};
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Other);
+  EXPECT_EQ(verdict.reason, "unreachable block");
+}
+
+TEST(Ir, SplittingATargetWithASelfLoopGivesEachCopyItsOwnLoop) {
+  // 0 -> {2, 1}, 1 -> 3, 2 -> {2, 3}, 3 -> {2, 4}, 4 returns. The cycle 2 <-> 3 is entered at 2
+  // and at 3, and 2 also loops on itself. Each copy of 2 must keep its self-loop on itself: a copy
+  // that still loops back to the removed original is an invalid graph.
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "selfloop";
+  for (std::uint64_t i = 0; i < 5; ++i) {
+    function.blocks.push_back(make_block(0x1000 + 0x10 * i));
+  }
+  IrStatement increment;
+  increment.op = IrOp::Add;
+  increment.dest = IrOperand::register_ref("rax", 8);
+  increment.a = IrOperand::register_ref("rax", 8);
+  increment.b = IrOperand::constant_value(1, 8);
+  increment.width = 8;
+  function.blocks[0].statements = {compare_zero_statement(), conditional_branch_statement(2)};
+  function.blocks[1].statements = {branch_statement(3)};
+  function.blocks[2].statements = {increment, compare_zero_statement(),
+                                   conditional_branch_statement(2)};
+  function.blocks[3].statements = {compare_zero_statement(), conditional_branch_statement(2)};
+  function.blocks[4].statements = {return_statement()};
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_NE(verdict.reason, "invalid graph");
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Structured) << verdict.reason;
+}
+
+TEST(Ir, SplitsAnIrreducibleFunctionIntoAReducibleOne) {
+  // The shape of FallsBackToLabelsForIrreducibleControlFlow. Without node splitting the verdict is
+  // Irreducible; with it the split function is reducible (ReducibleRejected: the structurer does
+  // not model a loop header with two entries from outside).
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  function.blocks[2].statements.push_back(compare_zero_statement());
+  function.blocks[2].statements.push_back(conditional_branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+  EXPECT_EQ(donkey::classify_structure(function).cls, donkey::StructureClass::ReducibleRejected);
+}
+
+TEST(Ir, NodeSplittingKeepsItsPerNodeBound) {
+  // The split target (block 2) has a body of twenty statements: one copy costs twenty more, over
+  // the per-node bound of sixteen, so the function stays Irreducible and the verdict names the
+  // region.
+  IrFunction function = branch_function();
+  function.blocks[0].statements.push_back(compare_zero_statement());
+  function.blocks[0].statements.push_back(conditional_branch_statement(2));
+  function.blocks[1].statements.push_back(branch_statement(2));
+  for (int i = 0; i < 20; ++i) {
+    function.blocks[2].statements.push_back(
+        assign_register_statement("rcx", static_cast<std::uint64_t>(i)));
+  }
+  function.blocks[2].statements.push_back(conditional_branch_statement(1));
+  function.blocks[3].statements.push_back(return_statement());
+  const auto verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Irreducible);
+  EXPECT_NE(verdict.reason.find("node-splitting bound"), std::string::npos) << verdict.reason;
+}
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentIsPartial) {
+  // caller (0x1000): call 0x1010; ret.  callee (0x1010): mov rax, [rsp+8]; ret.  The callee reads
+  // its seventh argument, which the caller passes on the stack, so the caller's call cannot be
+  // given the callee's register-only signature: the caller must not be Complete.
+  const std::uint8_t bytes[] = {
+      0xe8, 0x0b, 0x00, 0x00, 0x00,                                // 0x1000: call 0x1010
+      0xc3,                                                        // 0x1005: ret
+      0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,  // padding
+      0x48, 0x8b, 0x44, 0x24, 0x08,                                // 0x1010: mov rax, [rsp+8]
+      0xc3,                                                        // 0x1015: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::AnalysisResult& analysis = analyzed.value();
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analysis.functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analysis, *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+TEST(Ir, IndirectTailJumpCallsItsOperand) {
+  // jmp rax (ff e0): a tail call through a register. The call must name rax, not address 0.
+  const std::uint8_t bytes[] = {0xff, 0xe0};
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  ASSERT_FALSE(analyzed.value().functions.empty());
+  auto lifted = donkey::lift_function(image, analyzed.value(), analyzed.value().functions.front());
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrStatement* call = nullptr;
+  for (const IrBlock& block : lifted.value().blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.op == IrOp::Call) {
+        call = &statement;
+      }
+    }
+  }
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->a.kind, IrOperandKind::Register);
+  EXPECT_EQ(call->a.reg, "rax");
+}
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentThroughALeaIsPartial) {
+  // caller (0x1000): push 7; call 0x100c; add rsp, 8; ret.  callee (0x100c): sub rsp, 24;
+  // lea rax, [rsp+8]; mov rax, [rax+32]; add rsp, 24; ret. The lea takes the address of the first
+  // stack argument and the load reads entry rsp + 16, an incoming argument, through the register.
+  const std::uint8_t bytes[] = {
+      0x6a, 0x07,                    // 0x1000: push 7
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1002: call 0x100c
+      0x48, 0x83, 0xc4, 0x08,        // 0x1007: add rsp, 8
+      0xc3,                          // 0x100b: ret
+      0x48, 0x83, 0xec, 0x18,        // 0x100c: sub rsp, 24
+      0x48, 0x8d, 0x44, 0x24, 0x08,  // 0x1010: lea rax, [rsp+8]
+      0x48, 0x8b, 0x40, 0x20,        // 0x1015: mov rax, [rax+32]
+      0x48, 0x83, 0xc4, 0x18,        // 0x1019: add rsp, 24
+      0xc3,                          // 0x101d: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+namespace {
+
+/// One block: a resolved call whose callee writes `clobbered`, then `write`, then `return
+/// returned`.
+IrFunction call_then_write(const char* clobbered, IrStatement write, const char* returned) {
+  IrFunction function;
+  function.address = 0x1000;
+  function.name = "after_call";
+  function.blocks.push_back(make_block(0x1000));
+  IrStatement call;
+  call.op = IrOp::Call;
+  call.a = IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  call.signature_inferred = true;
+  call.call_writes = {clobbered};
+  function.blocks[0].statements.push_back(call);
+  function.blocks[0].statements.push_back(write);
+  IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = IrOperand::register_ref(returned, 8);
+  ret.width = 8;
+  function.blocks[0].statements.push_back(ret);
+  return function;
+}
+
+}  // namespace
+
+TEST(Ir, AConditionalMoveDoesNotDefineAClobberedRegister) {
+  // call (writes r10); r10 = 7 if equal; return r10. When the condition is false, r10 keeps the
+  // callee's value, so the read is of a clobbered register and the function is not Complete.
+  IrStatement cmov;
+  cmov.op = IrOp::CondAssign;
+  cmov.condition = IrCondition::Equal;
+  cmov.dest = IrOperand::register_ref("r10", 8);
+  cmov.a = IrOperand::constant_value(7, 8);
+  cmov.width = 8;
+  IrFunction function = call_then_write("r10", cmov, "r10");
+  donkey::internal::check_call_clobbers(function);
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, AByteWriteDoesNotDefineAClobberedRegister) {
+  // call (writes rax); al = 1; return rax. Bits 8 to 63 are still the callee's.
+  IrStatement byte;
+  byte.op = IrOp::Assign;
+  byte.dest = IrOperand::register_ref("al", 1);
+  byte.a = IrOperand::constant_value(1, 1);
+  byte.width = 1;
+  IrFunction function = call_then_write("rax", byte, "rax");
+  donkey::internal::check_call_clobbers(function);
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, AFullWriteDefinesAClobberedRegister) {
+  // call (writes rax); eax = 1 (zero-extended); return rax: the caller's own value.
+  IrStatement dword;
+  dword.op = IrOp::Assign;
+  dword.dest = IrOperand::register_ref("eax", 4);
+  dword.a = IrOperand::constant_value(1, 4);
+  dword.width = 4;
+  IrFunction function = call_then_write("rax", dword, "rax");
+  donkey::internal::check_call_clobbers(function);
+  EXPECT_FALSE(function.partial);
+}
+
+TEST(Ir, TheClobberCheckIgnoresABranchTargetOutsideTheFunction) {
+  // A branch to block 7 of a one-block function: the check must not index past its state.
+  IrFunction function;
+  function.address = 0x1000;
+  function.blocks.push_back(make_block(0x1000));
+  IrStatement call;
+  call.op = IrOp::Call;
+  call.a = IrOperand::constant_value(0x2000, 8);
+  call.width = 8;
+  function.blocks[0].statements.push_back(call);
+  function.blocks[0].statements.push_back(branch_statement(7));
+  donkey::internal::check_call_clobbers(function);
+  EXPECT_FALSE(function.partial);
+}
+
+TEST(Ir, AConditionalJumpToAKnownFunctionIsACallInAnExitBlock) {
+  // f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret.  f1 (0x1010): xor eax, eax; ret.
+  // The je is a conditional tail call to f1: it branches to an exit block that calls f1 with its
+  // inferred signature and returns the result, not to a made-up block of f0.
+  std::vector<std::byte> data(0x20, std::byte{0xcc});
+  const std::uint8_t f0[] = {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
+  const std::uint8_t f1[] = {0x31, 0xc0, 0xc3};
+  for (std::size_t i = 0; i < sizeof(f0); ++i) {
+    data[i] = static_cast<std::byte>(f0[i]);
+  }
+  for (std::size_t i = 0; i < sizeof(f1); ++i) {
+    data[0x10 + i] = static_cast<std::byte>(f1[i]);
+  }
+  auto image = synthetic_image(data.size());
+  for (const std::uint64_t start : {0x1000ULL, 0x1010ULL}) {
+    donkey::Symbol symbol;
+    symbol.name = start == 0x1000 ? "f0" : "f1";
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  bool calls_f1 = false;
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      calls_f1 = calls_f1 ||
+                 (statement.op == IrOp::Call && statement.signature_inferred &&
+                  statement.a.kind == IrOperandKind::Constant && statement.a.constant == 0x1010);
+    }
+  }
+  EXPECT_TRUE(calls_f1);
+  for (const std::string& note : function.notes) {
+    EXPECT_EQ(note.find("outside this function"), std::string::npos) << note;
+  }
+  EXPECT_FALSE(function.partial);
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+}
+
+TEST(Ir, AFunctionThatForwardsItsArgumentToACallTakesThatParameter) {
+  // forward (0x1000): call 0x1006; ret.  leaf (0x1006): mov eax, edi; add eax, 1; ret.
+  // forward never reads edi itself: the resolved call reads it as the leaf's 4-byte argument, so
+  // edi is forward's incoming parameter too, at the same width.
+  const std::uint8_t bytes[] = {
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x89, 0xf8,                    // 0x1006: mov eax, edi
+      0x83, 0xc0, 0x01,              // 0x1008: add eax, 1
+      0xc3,                          // 0x100b: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* forward = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      forward = &function;
+    }
+  }
+  ASSERT_NE(forward, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *forward);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrFunction& function = lifted.value();
+  ASSERT_EQ(function.parameters.size(), 1u);
+  EXPECT_EQ(function.parameters[0].abi_register, "rdi");
+  EXPECT_EQ(function.parameters[0].width, 4);
+}
+
+TEST(Ir, CallerOfAFunctionThatIndexesFromItsStackPointerIsPartial) {
+  // caller (0x1000): mov edi, 1; call 0x100b; ret.  callee (0x100b): mov rax, [rsp+rdi*8]; ret.
+  // The displacement is 0, but with rdi == 1 the load reads entry rsp + 8, the first incoming stack
+  // argument. Nothing bounds the index, so the callee's signature is not known and the caller stays
+  // Partial.
+  const std::uint8_t bytes[] = {
+      0xbf, 0x01, 0x00, 0x00, 0x00,  // 0x1000: mov edi, 1
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1005: call 0x100b
+      0xc3,                          // 0x100a: ret
+      0x48, 0x8b, 0x04, 0xfc,        // 0x100b: mov rax, [rsp+rdi*8]
+      0xc3,                          // 0x100f: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+namespace {
+
+/// Whether the caller at 0x1000 of `bytes` (a call to the function right after it, then ret) lifts
+/// Partial.
+bool caller_is_partial(const std::vector<std::uint8_t>& bytes) {
+  std::vector<std::byte> data(bytes.size());
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed) {
+    return false;
+  }
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      auto lifted = donkey::lift_function(image, analyzed.value(), function);
+      EXPECT_TRUE(lifted.has_value());
+      return lifted && lifted.value().partial;
+    }
+  }
+  ADD_FAILURE() << "no caller at 0x1000";
+  return false;
+}
+
+}  // namespace
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentThroughAConditionalMoveIsPartial) {
+  // caller (0x1000): call 0x1006; ret.  callee (0x1006): mov r10, rsp; mov ecx, 0; cmp ecx, 0;
+  // cmovne r10, rdi; mov eax, [r10 + 8]; ret. The move is not taken, so r10 is still the entry rsp
+  // and the load reads the first incoming stack argument.
+  EXPECT_TRUE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x49, 0x89, 0xe2,              // 0x1006: mov r10, rsp
+      0xb9, 0x00, 0x00, 0x00, 0x00,  // 0x1009: mov ecx, 0
+      0x83, 0xf9, 0x00,              // 0x100e: cmp ecx, 0
+      0x4c, 0x0f, 0x45, 0xd7,        // 0x1011: cmovne r10, rdi
+      0x41, 0x8b, 0x42, 0x08,        // 0x1015: mov eax, [r10 + 8]
+      0xc3,                          // 0x1019: ret
+  }));
+}
+
+TEST(Ir, CallerOfAFunctionWhoseLoadOverlapsAStackArgumentIsPartial) {
+  // caller (0x1000): call 0x1006; ret.  callee (0x1006): mov rax, [rsp + 7]; ret. The load starts
+  // inside the return address but its last seven bytes are the first incoming stack argument.
+  EXPECT_TRUE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x44, 0x24, 0x07,  // 0x1006: mov rax, [rsp + 7]
+      0xc3,                          // 0x100b: ret
+  }));
+  // The return address itself (entry rsp + 0, eight bytes) is not an argument.
+  EXPECT_FALSE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x04, 0x24,        // 0x1006: mov rax, [rsp]
+      0xc3,                          // 0x100a: ret
+  }));
+}
+
+TEST(Ir, CallerOfAFunctionThatStoresAStackAddressAndReadsItBackIsPartial) {
+  // caller (0x1000): push 7; call 0x100c; add rsp, 8; ret.  callee (0x100c): sub rsp, 24;
+  // lea rax, [rsp+8]; mov [rsp-8], rax; mov rcx, [rsp-8]; mov rax, [rcx+32]; add rsp, 24; ret.
+  // The stack address (entry rsp + 8 - 24 = -16) is stored and read back, so the load through the
+  // reloaded value reaches the incoming argument at entry rsp + 16, which the tracking cannot
+  // follow through memory. The store itself must refuse. (Without the sub the lea's own offset is 8
+  // and every version refuses it, so the sub keeps the store as the case under test.)
+  const std::uint8_t bytes[] = {
+      0x6a, 0x07,                    // 0x1000: push 7
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1002: call 0x100c
+      0x48, 0x83, 0xc4, 0x08,        // 0x1007: add rsp, 8
+      0xc3,                          // 0x100b: ret
+      0x48, 0x83, 0xec, 0x18,        // 0x100c: sub rsp, 24
+      0x48, 0x8d, 0x44, 0x24, 0x08,  // 0x1010: lea rax, [rsp+8]
+      0x48, 0x89, 0x44, 0x24, 0xf8,  // 0x1015: mov [rsp-8], rax
+      0x48, 0x8b, 0x4c, 0x24, 0xf8,  // 0x101a: mov rcx, [rsp-8]
+      0x48, 0x8b, 0x41, 0x20,        // 0x101f: mov rax, [rcx+32]
+      0x48, 0x83, 0xc4, 0x18,        // 0x1023: add rsp, 24
+      0xc3,                          // 0x1027: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  auto lifted = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+}
+
+// ---- Resource use of the fallback structurer (defect 6) -----------------------------------
+
+namespace {
+
+// N tests in a row, each returning when rax == 0 (the return block is the taken arm), then the
+// irreducible tail of Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks. 2N+4 blocks.
+IrFunction early_return_chain(std::size_t checks) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "chain";
+  f.return_width = 8;
+  const std::size_t total = checks + 4 + checks;
+  for (std::size_t i = 0; i < total; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks + 4 + i))};
+  }
+  f.blocks[checks + 0].statements = {fb_compare(),
+                                     fb_branch(static_cast<std::uint32_t>(checks + 2))};
+  f.blocks[checks + 1].statements = {fb_jump(static_cast<std::uint32_t>(checks + 2))};
+  f.blocks[checks + 2].statements = {fb_compare(),
+                                     fb_branch(static_cast<std::uint32_t>(checks + 1))};
+  f.blocks[checks + 3].statements = {fb_return()};
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[checks + 4 + i].statements = {fb_set("rdx", i), fb_return()};
+  }
+  return f;
+}
+
+}  // namespace
+
+namespace {
+
+// N tests in a row, each returning when rax == 0, ending in a return: reducible (no irreducible
+// tail).
+IrFunction reducible_early_return_chain(std::size_t checks) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "chain";
+  f.return_width = 8;
+  for (std::size_t i = 0; i < 2 * checks + 1; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks + 1 + i))};
+  }
+  f.blocks[checks].statements = {fb_set("rdx", 9), fb_return()};
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[checks + 1 + i].statements = {fb_set("rdx", i), fb_return()};
+  }
+  return f;
+}
+
+}  // namespace
+
+TEST(Ir, EarlyReturnChainPrintsFlatWhenShort) {
+  // Three checks: each `if` returns, so the rest continues at the same level: no `} else {`.
+  const IrFunction f = reducible_early_return_chain(3);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_EQ(text.value().find("} else {"), std::string::npos) << text.value();
+}
+
+namespace {
+
+/// Runs `work` on a thread with a small stack and waits for it. On POSIX the stack is 512 KiB, the
+/// macOS default for secondary threads; elsewhere it is the platform's default thread stack (1 MiB
+/// for a Windows executable unless its header says otherwise). False when no thread was started.
+bool run_on_small_stack(std::function<void()> work) {
+#if defined(__unix__) || defined(__APPLE__)
+  pthread_attr_t attributes;
+  if (pthread_attr_init(&attributes) != 0) {
+    return false;
+  }
+  pthread_t thread{};
+  const auto trampoline = [](void* argument) -> void* {
+    (*static_cast<std::function<void()>*>(argument))();
+    return nullptr;
+  };
+  const bool started = pthread_attr_setstacksize(&attributes, 512 * 1024) == 0 &&
+                       pthread_create(&thread, &attributes, trampoline, &work) == 0;
+  if (started) {
+    pthread_join(thread, nullptr);
+  }
+  pthread_attr_destroy(&attributes);
+  return started;
+#else
+  std::thread thread(std::move(work));
+  thread.join();
+  return true;
+#endif
+}
+
+/// The widest run of leading spaces on any line of `text`.
+std::size_t deepest_indent(const std::string& text) {
+  std::size_t deepest = 0;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    std::size_t end = text.find('\n', pos);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    std::size_t spaces = pos;
+    while (spaces < end && text[spaces] == ' ') {
+      ++spaces;
+    }
+    deepest = std::max(deepest, spaces - pos);
+    pos = end + 1;
+  }
+  return deepest;
+}
+
+}  // namespace
+
+TEST(Ir, EarlyReturnChainOf5000FormatsOnASmallStack) {
+  // Before the fix the nested `else` grew the recursion and the indentation with every check
+  // (quadratic memory, unbounded depth), and 5,000 checks overflowed a 512 KiB stack.
+  bool ok = false;
+  std::string text;
+  ASSERT_TRUE(run_on_small_stack([&] {
+    auto printed = donkey::format_pseudocode(early_return_chain(5000));
+    ok = printed.has_value();
+    if (ok) {
+      text = printed.value();
+    }
+  }));
+  ASSERT_TRUE(ok);
+  // Indentation stays under twice the nesting bound plus a small constant.
+  EXPECT_LE(deepest_indent(text), 2u * donkey::detail::kMaxStructureNesting + 8u);
+}
+
+TEST(Ir, NestingThatCannotBeFlatIsRejectedNotNested) {
+  // Each test branches to one join block (its immediate post-dominator), so no `if` closes early:
+  // the rest nests in the fall-through arm. 400 such tests exceed the nesting bound, so the
+  // fallback rejects and the function prints labelled, with no nesting beyond the bound.
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "joined";
+  f.return_width = 8;
+  const std::size_t checks = 400;
+  for (std::size_t i = 0; i <= checks; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t i = 0; i < checks; ++i) {
+    f.blocks[i].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(checks))};
+  }
+  f.blocks[checks].statements = {fb_set("rdx", 1), fb_return()};
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_NE(text.value().find("labeled blocks"), std::string::npos)
+      << "the depth bound must reject";
+}
+
+namespace {
+
+// A genuinely nested chain (G04-T5): blocks 2k test rax == 0 and go to 2k+2, blocks 2k+1 assign and
+// jump to the return 2D. Each test nests the rest of the chain in its fall-through.
+IrFunction nested_chain(std::size_t depth) {
+  IrFunction f;
+  f.address = 0x1000;
+  f.name = "nested";
+  f.return_width = 8;
+  for (std::size_t i = 0; i <= 2 * depth; ++i) {
+    IrBlock block;
+    block.address = 0x1000 + 0x10 * i;
+    f.blocks.push_back(block);
+  }
+  for (std::size_t k = 0; k < depth; ++k) {
+    f.blocks[2 * k].statements = {fb_compare(), fb_branch(static_cast<std::uint32_t>(2 * k + 2))};
+    f.blocks[2 * k + 1].statements = {fb_set("rdx", k),
+                                      fb_jump(static_cast<std::uint32_t>(2 * depth))};
+  }
+  f.blocks[2 * depth].statements = {fb_return()};
+  return f;
+}
+
+}  // namespace
+
+TEST(Ir, NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack) {
+  // 1,000 nested tests on a small stack: deeper than kMaxStructureNesting, so both structurers
+  // refuse it and the labelled form is printed. Without the bound this recursed a thousand levels.
+  bool ok = false;
+  std::string text;
+  ASSERT_TRUE(run_on_small_stack([&] {
+    auto printed = donkey::format_pseudocode(nested_chain(1000));
+    ok = printed.has_value();
+    if (ok) {
+      text = printed.value();
+    }
+  }));
+  ASSERT_TRUE(ok);
+  EXPECT_NE(text.find("labeled blocks"), std::string::npos);
+}
+
+TEST(Ir, LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat) {
+  // The shape of openssl sub_a9c60: the loop body block 1 returns on one side and falls through to
+  // the loop header 2, which is already printed. The flat form would walk into the header, so the
+  // body keeps its if-else with `continue` on the fall-through side. Before the guard the function
+  // was rejected ("a block is reached twice").
+  const IrFunction f = fb_function({
+      {fb_jump(2)},
+      {fb_compare(), fb_branch(4)},
+      {fb_compare(), fb_branch(1)},
+      {fb_set("rdx", 3), fb_return()},
+      {fb_set("rdx", 5), fb_return()},
+  });
+  EXPECT_EQ(donkey::classify_structure(f).cls, donkey::StructureClass::Structured);
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("continue;"), std::string::npos) << text.value();
 }

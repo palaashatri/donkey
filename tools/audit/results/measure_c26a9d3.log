@@ -1,0 +1,8 @@
+ls {'sampled': 186, 'found': 186, 'Complete': 14, 'Partial': 172, 'Unsupported': 0, 'InvalidIR': 0, 'call_note': 119, 'structure_note': 138}
+openssl {'sampled': 300, 'found': 300, 'Complete': 17, 'Partial': 283, 'Unsupported': 0, 'InvalidIR': 0, 'call_note': 248, 'structure_note': 209}
+bash {'sampled': 300, 'found': 300, 'Complete': 28, 'Partial': 272, 'Unsupported': 0, 'InvalidIR': 0, 'call_note': 228, 'structure_note': 211}
+libsqlite3 {'sampled': 300, 'found': 300, 'Complete': 45, 'Partial': 255, 'Unsupported': 0, 'InvalidIR': 0, 'call_note': 212, 'structure_note': 182}
+libc {'sampled': 300, 'found': 300, 'Complete': 39, 'Partial': 261, 'Unsupported': 0, 'InvalidIR': 0, 'call_note': 189, 'structure_note': 180}
+git {'sampled': 300, 'found': 300, 'Complete': 2, 'Partial': 71, 'Unsupported': 227, 'InvalidIR': 0, 'call_note': 65, 'structure_note': 63}
+python3.12 {'sampled': 300, 'found': 300, 'Complete': 22, 'Partial': 243, 'Unsupported': 35, 'InvalidIR': 0, 'call_note': 208, 'structure_note': 181}
+MEASURE_DONE
