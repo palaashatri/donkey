@@ -58,6 +58,22 @@ else()
   install(FILES ${DONKEY_DOC_FILES} DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
 
+# Bundled type libraries (G22-T1). The directory holds no library yet; the format is in
+# docs/TYPELIBS.md. A macOS app keeps them in its resources (installed before the CPack pre-build
+# script signs the bundle); Windows keeps them next to the executables; elsewhere they sit in the
+# data directory. The component matches the other files installed on each platform.
+if(APPLE AND TARGET donkey)
+  install(DIRECTORY ${PROJECT_SOURCE_DIR}/typelibs/
+          DESTINATION Donkey.app/Contents/Resources/typelibs COMPONENT applications)
+elseif(APPLE)
+  install(DIRECTORY ${PROJECT_SOURCE_DIR}/typelibs/
+          DESTINATION ${CMAKE_INSTALL_DATADIR}/donkey/typelibs COMPONENT applications)
+elseif(WIN32)
+  install(DIRECTORY ${PROJECT_SOURCE_DIR}/typelibs/ DESTINATION typelibs COMPONENT applications)
+else()
+  install(DIRECTORY ${PROJECT_SOURCE_DIR}/typelibs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/donkey/typelibs)
+endif()
+
 # ---------------------------------------------------------------------------
 # CPack
 # ---------------------------------------------------------------------------
