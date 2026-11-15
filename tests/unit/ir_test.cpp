@@ -7,11 +7,19 @@
 #include <cstdint>
 #include <cstring>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
 #include <string>
+#include <utility>
 #include <vector>
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <pthread.h>
+#else
+#include <thread>
+#endif
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
@@ -5381,61 +5389,73 @@ TEST(Ir, EarlyReturnChainPrintsFlatWhenShort) {
   EXPECT_EQ(text.value().find("} else {"), std::string::npos) << text.value();
 }
 
-#if defined(__unix__) || defined(__APPLE__)
-#include <pthread.h>
-
 namespace {
 
-struct ChainJob {
-  std::size_t checks = 0;
-  bool ok = false;
-  std::size_t deepest_indent = 0;
-  std::string text;
-};
-
-void* format_chain(void* argument) {
-  auto* job = static_cast<ChainJob*>(argument);
-  auto text = donkey::format_pseudocode(early_return_chain(job->checks));
-  job->ok = text.has_value();
-  if (job->ok) {
-    job->text = text.value();
-    std::size_t pos = 0;
-    while (pos < job->text.size()) {
-      std::size_t end = job->text.find('\n', pos);
-      if (end == std::string::npos) {
-        end = job->text.size();
-      }
-      std::size_t spaces = pos;
-      while (spaces < end && job->text[spaces] == ' ') {
-        ++spaces;
-      }
-      job->deepest_indent = std::max(job->deepest_indent, spaces - pos);
-      pos = end + 1;
-    }
+/// Runs `work` on a thread with a small stack and waits for it. On POSIX the stack is 512 KiB, the
+/// macOS default for secondary threads; elsewhere it is the platform's default thread stack (1 MiB
+/// for a Windows executable unless its header says otherwise). False when no thread was started.
+bool run_on_small_stack(std::function<void()> work) {
+#if defined(__unix__) || defined(__APPLE__)
+  pthread_attr_t attributes;
+  if (pthread_attr_init(&attributes) != 0) {
+    return false;
   }
-  return nullptr;
+  pthread_t thread{};
+  const auto trampoline = [](void* argument) -> void* {
+    (*static_cast<std::function<void()>*>(argument))();
+    return nullptr;
+  };
+  const bool started = pthread_attr_setstacksize(&attributes, 512 * 1024) == 0 &&
+                       pthread_create(&thread, &attributes, trampoline, &work) == 0;
+  if (started) {
+    pthread_join(thread, nullptr);
+  }
+  pthread_attr_destroy(&attributes);
+  return started;
+#else
+  std::thread thread(std::move(work));
+  thread.join();
+  return true;
+#endif
+}
+
+/// The widest run of leading spaces on any line of `text`.
+std::size_t deepest_indent(const std::string& text) {
+  std::size_t deepest = 0;
+  std::size_t pos = 0;
+  while (pos < text.size()) {
+    std::size_t end = text.find('\n', pos);
+    if (end == std::string::npos) {
+      end = text.size();
+    }
+    std::size_t spaces = pos;
+    while (spaces < end && text[spaces] == ' ') {
+      ++spaces;
+    }
+    deepest = std::max(deepest, spaces - pos);
+    pos = end + 1;
+  }
+  return deepest;
 }
 
 }  // namespace
 
 TEST(Ir, EarlyReturnChainOf5000FormatsOnASmallStack) {
-  // 512 KiB is the macOS default for secondary threads. Before the fix the nested `else` grew the
-  // recursion and the indentation with every check (quadratic memory, unbounded depth).
-  ChainJob job;
-  job.checks = 5000;
-  pthread_attr_t attributes;
-  ASSERT_EQ(pthread_attr_init(&attributes), 0);
-  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
-  pthread_t thread;
-  ASSERT_EQ(pthread_create(&thread, &attributes, format_chain, &job), 0);
-  pthread_join(thread, nullptr);
-  pthread_attr_destroy(&attributes);
-  ASSERT_TRUE(job.ok);
-  // Indentation stays under twice the nesting bound (256 levels) plus a small constant.
-  EXPECT_LE(job.deepest_indent, 2u * 256u + 8u);
+  // Before the fix the nested `else` grew the recursion and the indentation with every check
+  // (quadratic memory, unbounded depth), and 5,000 checks overflowed a 512 KiB stack.
+  bool ok = false;
+  std::string text;
+  ASSERT_TRUE(run_on_small_stack([&] {
+    auto printed = donkey::format_pseudocode(early_return_chain(5000));
+    ok = printed.has_value();
+    if (ok) {
+      text = printed.value();
+    }
+  }));
+  ASSERT_TRUE(ok);
+  // Indentation stays under twice the nesting bound plus a small constant.
+  EXPECT_LE(deepest_indent(text), 2u * donkey::detail::kMaxStructureNesting + 8u);
 }
-
-#endif
 
 TEST(Ir, NestingThatCannotBeFlatIsRejectedNotNested) {
   // Each test branches to one join block (its immediate post-dominator), so no `if` closes early:
@@ -5486,43 +5506,21 @@ IrFunction nested_chain(std::size_t depth) {
 
 }  // namespace
 
-#if defined(__unix__) || defined(__APPLE__)
-namespace {
-
-struct NestedJob {
-  std::size_t depth = 0;
+TEST(Ir, NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack) {
+  // 1,000 nested tests on a small stack: deeper than kMaxStructureNesting, so both structurers
+  // refuse it and the labelled form is printed. Without the bound this recursed a thousand levels.
   bool ok = false;
   std::string text;
-};
-
-void* format_nested(void* argument) {
-  auto* job = static_cast<NestedJob*>(argument);
-  auto text = donkey::format_pseudocode(nested_chain(job->depth));
-  job->ok = text.has_value();
-  if (job->ok) {
-    job->text = text.value();
-  }
-  return nullptr;
+  ASSERT_TRUE(run_on_small_stack([&] {
+    auto printed = donkey::format_pseudocode(nested_chain(1000));
+    ok = printed.has_value();
+    if (ok) {
+      text = printed.value();
+    }
+  }));
+  ASSERT_TRUE(ok);
+  EXPECT_NE(text.find("labeled blocks"), std::string::npos);
 }
-
-}  // namespace
-
-TEST(Ir, NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack) {
-  // 1,000 nested tests on a 512 KiB thread: deeper than kMaxStructureNesting, so both structurers
-  // refuse it and the labelled form is printed. Without the bound this recursed a thousand levels.
-  NestedJob job;
-  job.depth = 1000;
-  pthread_attr_t attributes;
-  ASSERT_EQ(pthread_attr_init(&attributes), 0);
-  ASSERT_EQ(pthread_attr_setstacksize(&attributes, 512 * 1024), 0);
-  pthread_t thread;
-  ASSERT_EQ(pthread_create(&thread, &attributes, format_nested, &job), 0);
-  pthread_join(thread, nullptr);
-  pthread_attr_destroy(&attributes);
-  ASSERT_TRUE(job.ok);
-  EXPECT_NE(job.text.find("labeled blocks"), std::string::npos);
-}
-#endif
 
 TEST(Ir, LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat) {
   // The shape of openssl sub_a9c60: the loop body block 1 returns on one side and falls through to
