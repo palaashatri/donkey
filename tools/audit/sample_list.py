@@ -31,7 +31,8 @@ BINARIES = [
     ("/usr/bin/python3.12", "python3.12"),
 ]
 CALL_NOTE = "outgoing call arguments and return values follow no modelled ABI"
-STRUCTURE_NOTE = "control flow not fully structured"
+# The whole line the printer writes in front of a labelled function (src/ir/ir.cpp).
+STRUCTURE_NOTE_LINE = "// note: control flow not fully structured; showing labeled blocks"
 GOTO_NOTE = " goto(s) where control flow has no structured form"
 
 
@@ -119,13 +120,20 @@ def measure(args):
             counts[status] = counts.get(status, 0) + 1
             text = function.get("pseudocode") or ""
             counts["call_note"] += int(CALL_NOTE in text)
-            counts["structure_note"] += int(STRUCTURE_NOTE in text)
+            # The note is a whole line of its own; a string literal that quotes it is not the note.
+            has_note = any(line.strip() == STRUCTURE_NOTE_LINE for line in text.splitlines())
+            counts["structure_note"] += int(has_note)
             structure = function.get("structure") or {}
             cls = structure.get("class", "none")
             classes[cls] = classes.get(cls, 0) + 1
             gotos = int(structure.get("gotos", 0))
-            if cls == "other" or STRUCTURE_NOTE in text:
-                counts["labelled"] += 1
+            # The class says how the function was printed; the note decides only for output that
+            # has no class (older command-line tools).
+            if "class" in structure:
+                labelled = cls == "other"
+            else:
+                labelled = has_note
+            counts["labelled"] += int(labelled)
             if gotos > 0:
                 counts["goto_functions"] += 1
                 counts["gotos_total"] += gotos
