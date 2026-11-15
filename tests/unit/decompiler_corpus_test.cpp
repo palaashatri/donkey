@@ -103,6 +103,7 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_call_loop", 'i', "n"},
     {"c_call_wide", 'l', "ll"},
     {"c_call_chain", 'i', "ii"},
+    {"c_call_nested", 'i', "ii"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
     {"c_add128_hi", 'U', "UUUU"},
@@ -681,6 +682,22 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
       EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
     }
+  }
+  // A call chain two levels deep (G21-T2): the helper's own calls resolve first, so the caller's
+  // call resolves and the interpreter runs both levels. Measured Complete at every level under
+  // Clang 18.1 and GCC 13.3 where calls resolve (System V); before call summaries it was Partial.
+  if ((clang18 || gcc13_linux) && host_convention() == donkey::IrCallingConvention::SysV64) {
+    bool seen = false;
+    for (const Outcome& o : outcomes) {
+      if (o.function != "c_call_nested") {
+        continue;
+      }
+      seen = true;
+      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+    }
+    EXPECT_TRUE(seen) << "c_call_nested is missing from the corpus";
   }
 #endif
 }
