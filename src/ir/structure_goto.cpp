@@ -163,7 +163,9 @@ class Emitter {
     }
     for (BlockId block = 0; block < count; ++block) {
       if (!emitted_[block]) {
-        return false;  // a block with no printed code: internal error, never printed silently
+        // A block with no printed code: an internal error, never printed silently.
+        refusal_ = "block #" + std::to_string(block) + " has no printed code (an internal error)";
+        return false;
       }
     }
     return true;
