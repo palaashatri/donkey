@@ -348,3 +348,66 @@ TEST(Decode, AArch64FoldsAdrpAddAndLdrDataReferences) {
 }
 
 }  // namespace
+
+// ---- fs/gs segment overrides are kept on the memory operand ----
+
+TEST(Decode, X86FsRelativeOperandKeepsItsSegment) {
+  auto decoder = donkey::Decoder::create(donkey::Architecture::X86_64, donkey::Endian::Little);
+  ASSERT_TRUE(decoder.has_value());
+
+  // mov rax, fs:[0x28] (the stack-protector canary load)
+  const std::vector<std::byte> fs_load = {std::byte{0x64}, std::byte{0x48}, std::byte{0x8B},
+                                          std::byte{0x04}, std::byte{0x25}, std::byte{0x28},
+                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+  auto fs = decoder.value().decode(fs_load, 0x1000, 1);
+  ASSERT_TRUE(fs.has_value());
+  ASSERT_EQ(fs.value().instructions.size(), 1U);
+  const auto& fs_instruction = fs.value().instructions[0];
+  ASSERT_GE(fs_instruction.structured_operands.size(), 2U);
+  const auto& fs_memory = fs_instruction.structured_operands[1].memory;
+  EXPECT_EQ(fs_memory.segment, "fs");
+  EXPECT_EQ(fs_memory.displacement, 0x28);
+  EXPECT_TRUE(fs_instruction.data_references.empty())
+      << "an fs-relative displacement is an offset into the thread block, not an address";
+
+  // mov rax, gs:[0x30]
+  const std::vector<std::byte> gs_load = {std::byte{0x65}, std::byte{0x48}, std::byte{0x8B},
+                                          std::byte{0x04}, std::byte{0x25}, std::byte{0x30},
+                                          std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+  auto gs = decoder.value().decode(gs_load, 0x1000, 1);
+  ASSERT_TRUE(gs.has_value());
+  ASSERT_EQ(gs.value().instructions.size(), 1U);
+  EXPECT_EQ(gs.value().instructions[0].structured_operands[1].memory.segment, "gs");
+  EXPECT_TRUE(gs.value().instructions[0].data_references.empty());
+
+  // mov rax, [0x28] with no prefix: no segment.
+  const std::vector<std::byte> plain = {std::byte{0x48}, std::byte{0x8B}, std::byte{0x04},
+                                        std::byte{0x25}, std::byte{0x28}, std::byte{0x00},
+                                        std::byte{0x00}, std::byte{0x00}};
+  auto none = decoder.value().decode(plain, 0x1000, 1);
+  ASSERT_TRUE(none.has_value());
+  ASSERT_EQ(none.value().instructions.size(), 1U);
+  EXPECT_TRUE(none.value().instructions[0].structured_operands[1].memory.segment.empty());
+
+  // 32-bit mode: mov eax, [0x28] with no prefix keeps its absolute data reference, and
+  // mov eax, fs:[0x28] has the segment and no reference.
+  auto x86 = donkey::Decoder::create(donkey::Architecture::X86, donkey::Endian::Little);
+  ASSERT_TRUE(x86.has_value());
+  const std::vector<std::byte> absolute32 = {std::byte{0x8B}, std::byte{0x05}, std::byte{0x28},
+                                             std::byte{0x00}, std::byte{0x00}, std::byte{0x00}};
+  auto abs = x86.value().decode(absolute32, 0x1000, 1);
+  ASSERT_TRUE(abs.has_value());
+  ASSERT_EQ(abs.value().instructions.size(), 1U);
+  EXPECT_TRUE(abs.value().instructions[0].structured_operands[1].memory.segment.empty());
+  ASSERT_EQ(abs.value().instructions[0].data_references.size(), 1U);
+  EXPECT_EQ(abs.value().instructions[0].data_references[0], 0x28U);
+
+  const std::vector<std::byte> fs32 = {std::byte{0x64}, std::byte{0x8B}, std::byte{0x05},
+                                       std::byte{0x28}, std::byte{0x00}, std::byte{0x00},
+                                       std::byte{0x00}};
+  auto fs_abs = x86.value().decode(fs32, 0x1000, 1);
+  ASSERT_TRUE(fs_abs.has_value());
+  ASSERT_EQ(fs_abs.value().instructions.size(), 1U);
+  EXPECT_EQ(fs_abs.value().instructions[0].structured_operands[1].memory.segment, "fs");
+  EXPECT_TRUE(fs_abs.value().instructions[0].data_references.empty());
+}

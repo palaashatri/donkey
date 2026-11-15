@@ -280,6 +280,21 @@ std::uint8_t operand_width(const Operand& operand) {
   return 0;
 }
 
+/// Note for an instruction with an fs- or gs-relative memory operand (x86 thread-local storage and
+/// the stack-protector canary).
+const std::string kSegmentRelativeNote =
+    "fs- or gs-relative memory (thread-local storage) is not modelled";
+
+/// True when an operand of the instruction is a memory access with an fs or gs segment override.
+bool has_segment_memory_operand(const Instruction& instruction) {
+  for (const Operand& operand : instruction.structured_operands) {
+    if (operand.kind == OperandKind::Memory && !operand.memory.segment.empty()) {
+      return true;
+    }
+  }
+  return false;
+}
+
 IrOperand memory_operand(const Operand& operand, const Instruction& instruction) {
   IrOperand result;
   result.kind = IrOperandKind::Memory;
@@ -2773,6 +2788,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       }
       const Instruction& instruction = analysis.instructions[index];
       const std::string& mnemonic = instruction.mnemonic;
+
+      // An fs- or gs-relative operand addresses the thread block, not the address its displacement
+      // names. lea ignores the segment, so it keeps its meaning and is lifted as before.
+      if (mnemonic != "lea" && has_segment_memory_operand(instruction)) {
+        lifter.unsupported(out_block, instruction);
+        lifter.mark_partial(kSegmentRelativeNote);
+        lifter.flags_state = Lifter::FlagsState::Unknown;
+        continue;
+      }
 
       if (instruction.classification == InstructionClass::ConditionalJump) {
         IrCondition condition = branch_condition(mnemonic);

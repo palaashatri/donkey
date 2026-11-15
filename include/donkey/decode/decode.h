@@ -47,6 +47,14 @@ struct MemoryOperand {
   bool writeback = false;
   /// True for post-index writeback (`[sp], #16`), false for pre-index (`!`).
   bool post_index = false;
+  /// x86 only: segment override, "fs" or "gs" when the operand has one, empty
+  /// otherwise. The displacement of an fs- or gs-relative operand is an offset
+  /// into the thread block (thread-local storage, stack protector canary), not
+  /// an address, so it must not be read as one. In 64-bit mode the CS, DS, ES
+  /// and SS overrides have base 0 and are left empty. In 32-bit mode GS and FS
+  /// are kept; the other overrides are left empty on the assumption of a flat
+  /// model (Linux, Windows and the BSDs use one).
+  std::string segment;
 };
 
 struct Operand {
