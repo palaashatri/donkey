@@ -58,7 +58,16 @@ Result<PdataReadResult> read_pdata_of_image(const BinaryImage& image,
     result.truncated = true;
   }
   for (std::size_t i = 0; i < result.entries; ++i) {
-    const std::uint64_t at = offset.value() + i * kRuntimeFunctionSize;
+    // Each entry is mapped by its own RVA: the directory need not lie in one section's file data,
+    // and an entry whose 12 bytes are not mapped together is not read from unrelated file bytes.
+    const std::uint64_t entry_rva = std::uint64_t{rva.value()} + i * kRuntimeFunctionSize;
+    auto first = binary::detail::rva_to_file_offset(image, entry_rva);
+    auto last = binary::detail::rva_to_file_offset(image, entry_rva + kRuntimeFunctionSize - 1);
+    if (!first || !last || last.value() != first.value() + kRuntimeFunctionSize - 1) {
+      ++result.malformed;
+      continue;
+    }
+    const std::uint64_t at = first.value();
     auto begin = reader.u32(at, Endian::Little);
     auto end = reader.u32(at + 4, Endian::Little);
     auto unwind = reader.u32(at + 8, Endian::Little);

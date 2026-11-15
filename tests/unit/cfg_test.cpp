@@ -530,6 +530,42 @@ TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
   EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.block_limit"), 1U);
 }
 
+// The traversal's work is bounded, not only its distinct instructions: 1,000 stubs each jump into
+// one shared run of 5,000 instructions that no seed starts, so every stub walks the whole run
+// again (5,000,000 visits of 6,001 distinct instructions). The walk stops at the work limit,
+// reports it once, and the graph is Partial.
+TEST(Cfg, RepeatedWalksOfSharedCodeStopAtTheWorkLimit) {
+  constexpr std::size_t kStubs = 1000;
+  constexpr std::size_t kRun = 5000;
+  std::vector<std::byte> data;
+  const std::size_t run_start = 5 * kStubs;
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    const auto rel = static_cast<std::uint32_t>(run_start - (5 * k + 5));
+    data.push_back(std::byte{0xE9});  // jmp rel32 to the shared run
+    for (int shift = 0; shift < 32; shift += 8) {
+      data.push_back(static_cast<std::byte>((rel >> shift) & 0xFFU));
+    }
+  }
+  for (std::size_t j = 0; j < kRun; ++j) {
+    data.push_back(std::byte{0x90});  // nop
+  }
+  data.push_back(std::byte{0xC3});  // ret
+  auto image = synthetic_image(data.size());
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(k);
+    symbol.address = 0x1000 + 5 * k;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.partial);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.traversal_limit"), 1U);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.instruction_limit"), 0U);
+}
+
 // The traversal's instruction budget is reported once, with the number of functions it cut short,
 // not once per function. The graph is built directly from a full decode, with a smaller budget, so
 // the traversal (not the linear decode) is what runs out.
@@ -699,4 +735,12 @@ TEST(Cfg, CallThatFallsIntoAnotherFunctionEndsTheCaller) {
   ASSERT_TRUE(caller->has_extent);
   EXPECT_EQ(caller->end_address, 0x1005U);
   EXPECT_EQ(caller->block_count, 1U);
+  // The walk stops at 0x1005, but control goes on there: the graph keeps the edge from the call
+  // into the next function's start.
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1000 && edge.to == 0x1005 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalFalse);
+  }
+  EXPECT_TRUE(kept);
 }

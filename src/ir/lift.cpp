@@ -80,6 +80,12 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
       refused = true;
       return;
     }
+    if (!index.empty()) {
+      // A stack base with an index: nothing bounds the index, so the access can reach the incoming
+      // stack arguments whatever the displacement is.
+      refused = true;
+      return;
+    }
     const auto displacement = static_cast<std::int64_t>(operand.constant);
     if (*found->second + displacement >= 8) {
       refused = true;  // an incoming stack argument (entry rsp + 8 and up)
@@ -2500,15 +2506,21 @@ void check_call_clobbers_impl(IrFunction& function) {
       continue;
     }
     const IrStatement& terminator = statements.back();
+    // A target outside the function is not a successor here (the verifier rejects it; this check
+    // must not index past `in` either way).
+    const auto add = [&](std::size_t target) {
+      if (target < count) {
+        successors[b].push_back(target);
+      }
+    };
     if (terminator.op == IrOp::Branch && terminator.a.kind == IrOperandKind::Block) {
-      successors[b].push_back(terminator.a.block);
+      add(terminator.a.block);
     } else if (terminator.op == IrOp::CondBranch) {
-      if (terminator.b.kind == IrOperandKind::Block) successors[b].push_back(terminator.b.block);
-      if (b + 1 < count) successors[b].push_back(b + 1);
+      if (terminator.b.kind == IrOperandKind::Block) add(terminator.b.block);
+      add(b + 1);
     } else if (terminator.op == IrOp::Switch) {
-      if (terminator.a.kind == IrOperandKind::Block) successors[b].push_back(terminator.a.block);
-      for (const IrSwitchCase& sc : terminator.switch_cases)
-        successors[b].push_back(sc.target_block);
+      if (terminator.a.kind == IrOperandKind::Block) add(terminator.a.block);
+      for (const IrSwitchCase& sc : terminator.switch_cases) add(sc.target_block);
     }
   }
   // Simulates one block from `state`; with `report`, the first read of a clobbered register is
@@ -2550,7 +2562,12 @@ void check_call_clobbers_impl(IrFunction& function) {
         if (statement.dest.kind == IrOperandKind::Register) {
           state.erase(internal::register_family(statement.dest.reg));
         }
-      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
+      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+                 statement.op != IrOp::CondAssign &&
+                 (statement.dest.width == 0 || statement.dest.width >= 4)) {
+        // Only a write of the whole register defines it: a conditional assignment keeps the old
+        // value when its condition is false, and an 8- or 16-bit write keeps the rest of the
+        // register, so a clobber stays on those paths.
         state.erase(internal::register_family(statement.dest.reg));
       }
     }

@@ -17,7 +17,7 @@ Two modes, both run with `python3 -I`:
 Only system binaries are used: their files are identical at every commit, so the population is
 the same by construction. A commit's own donkey-cli is a different file at each commit.
 """
-import argparse, json, os, random, re, subprocess, sys
+import argparse, hashlib, json, os, random, re, subprocess, sys
 
 BINARIES = [
     ("/usr/bin/ls", "ls"),
@@ -36,6 +36,15 @@ def run(args):
     return subprocess.run(args, capture_output=True, text=True, check=True).stdout
 
 
+def sha256_of(path):
+    """The binary's content hash: a list's addresses are only meaningful for these exact bytes."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def text_range(path):
     out = subprocess.run(["readelf", "-SW", path], capture_output=True, text=True).stdout
     m = re.search(r"\s\.text\s+PROGBITS\s+([0-9a-f]+)\s+[0-9a-f]+\s+([0-9a-f]+)", out)
@@ -51,7 +60,8 @@ def write(args):
         starts = json.loads(run([args.cli, "functions", path, "--json"]))["functions"]
         addresses = sorted(int(f["address"], 16) for f in starts if lo <= int(f["address"], 16) < hi)
         rng.shuffle(addresses)
-        lists[tag] = {"path": path, "population": len(addresses), "addresses": sorted(addresses[: args.per_binary])}
+        lists[tag] = {"path": path, "sha256": sha256_of(path), "population": len(addresses),
+                      "addresses": sorted(addresses[: args.per_binary])}
         print(tag, "population", len(addresses), "sampled", len(lists[tag]["addresses"]), flush=True)
     with open(args.out, "w") as handle:
         json.dump({"seed": args.seed, "per_binary": args.per_binary, "binaries": lists}, handle, indent=1)
@@ -61,6 +71,16 @@ def measure(args):
     with open(args.list) as handle:
         plan = json.load(handle)
     result = {}
+    # A package update can replace a binary at the same path: the sampled addresses would then name
+    # other code. Every binary must be the one the list was drawn from.
+    for tag, entry in plan["binaries"].items():
+        expected = entry.get("sha256")
+        if expected is None:
+            sys.exit(f"sample_list.py: the list has no sha256 for {tag}; it cannot be measured safely")
+        actual = sha256_of(entry["path"])
+        if actual != expected:
+            sys.exit(f"sample_list.py: {entry['path']} is not the binary the list was drawn from "
+                     f"(sha256 {actual}, list {expected})")
     for tag, entry in plan["binaries"].items():
         wanted = set(entry["addresses"])
         decompiled = json.loads(run([args.cli, "decompile", entry["path"], "--json",
@@ -100,7 +120,9 @@ def main():
     parser.add_argument("out", nargs="?")
     parser.add_argument("--per-binary", type=int, default=300)
     parser.add_argument("--seed", type=int, default=7)
-    parser.add_argument("--cli", default="/home/user/donkey/build/release-headless/apps/donkey-cli/donkey-cli")
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    parser.add_argument("--cli", default=os.path.join(repo, "build", "release-headless", "apps",
+                                                      "donkey-cli", "donkey-cli"))
     args = parser.parse_args()
     if args.mode == "write":
         args.out = args.file

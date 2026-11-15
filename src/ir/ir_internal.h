@@ -70,6 +70,9 @@ struct Graph {
 
 Graph build_graph(const IrFunction& function);
 std::vector<BitSet> compute_dominators(const Graph& graph);
+/// Whether some block cannot be reached from the entry (block 0). A block with predecessors can
+/// still be unreachable, as part of a cycle the entry does not reach.
+bool has_unreachable_block(const Graph& graph);
 
 /// Render an operand into C-like expression text.
 std::string render_operand(const IrFunction& function, const IrOperand& operand,
@@ -105,6 +108,8 @@ std::vector<BlockId> immediate_post_dominators(const IrFunction& function);
 struct StructuredLine {
   std::string text;
   std::uint64_t source_address = 0;
+  /// The other statements printed in this line (the step of a `for` header).
+  std::vector<std::uint64_t> folded_addresses;
 };
 
 /// The deepest nesting of if, loop and switch statements that the printer and the control-flow

@@ -107,12 +107,13 @@ TEST(EhFrame, ReadsPcRelativeFdeRanges) {
 }
 
 TEST(EhFrame, Reads64BitLengthRecordsWithAbsoluteEncodings) {
-  // A 64-bit CIE: 0xffffffff, its 8-byte length, and an 8-byte id of 0.
+  // A 64-bit CIE: 0xffffffff, its 8-byte length, and a 4-byte id of 0 (in .eh_frame the id stays
+  // four bytes in the 64-bit form).
   std::vector<std::byte> cie;
   append_u32(cie, 0xffffffffU);
-  const std::uint64_t cie_body = 8 + 1 + 3 + 1 + 1 + 1 + 1 + 1;  // id, fields below
+  const std::uint64_t cie_body = 4 + 1 + 3 + 1 + 1 + 1 + 1 + 1;  // id, fields below
   append_u64(cie, cie_body);
-  append_u64(cie, 0);              // CIE id (64-bit form)
+  append_u32(cie, 0);              // CIE id
   cie.push_back(std::byte{0x01});  // version
   for (const char c : std::string("zR")) {
     cie.push_back(static_cast<std::byte>(c));
@@ -126,10 +127,10 @@ TEST(EhFrame, Reads64BitLengthRecordsWithAbsoluteEncodings) {
   // A 64-bit FDE for the CIE at offset 0. Its id field is at 12 + 8 = 20 (after the header).
   std::vector<std::byte> fde;
   append_u32(fde, 0xffffffffU);
-  const std::uint64_t fde_body = 8 + 8 + 8 + 1;
+  const std::uint64_t fde_body = 4 + 8 + 8 + 1;
   append_u64(fde, fde_body);
-  const std::uint64_t id_field = static_cast<std::uint64_t>(cie.size()) + 12;
-  append_u64(fde, id_field);    // distance back to the CIE
+  const auto id_field = static_cast<std::uint32_t>(cie.size() + 12);
+  append_u32(fde, id_field);    // distance back to the CIE (4 bytes)
   append_u64(fde, 0x402000);    // pc_begin, absolute
   append_u64(fde, 0x30);        // pc_range
   fde.push_back(std::byte{0});  // augmentation length
@@ -140,6 +141,57 @@ TEST(EhFrame, Reads64BitLengthRecordsWithAbsoluteEncodings) {
   EXPECT_EQ(result.value().functions[0].start, 0x402000U);
   EXPECT_EQ(result.value().functions[0].size, 0x30U);
   EXPECT_EQ(result.value().malformed_records, 0U);
+}
+
+namespace {
+
+/// A 32-bit version-4 CIE with augmentation "zR" (pcrel sdata4 FDE pointers), an address size of
+/// `address_size` and a segment selector size of `segment_size`; 19 bytes.
+std::vector<std::byte> version4_cie(std::uint8_t address_size, std::uint8_t segment_size) {
+  std::vector<std::byte> out;
+  append_u32(out, 0);
+  for (const unsigned value :
+       {0x00U, 0x00U, 0x00U, 0x00U,  // CIE id
+        0x04U,                       // version 4
+        0x7AU, 0x52U, 0x00U,         // augmentation "zR"
+        static_cast<unsigned>(address_size), static_cast<unsigned>(segment_size),
+        0x01U,     // code alignment (uleb)
+        0x78U,     // data alignment (sleb -8)
+        0x10U,     // return register (uleb)
+        0x01U,     // augmentation data length
+        0x1bU}) {  // pcrel sdata4
+    out.push_back(static_cast<std::byte>(value & 0xFFU));
+  }
+  const auto length = static_cast<std::uint32_t>(out.size() - 4);
+  for (std::size_t i = 0; i < 4; ++i) {
+    out[i] = static_cast<std::byte>((length >> (8 * i)) & 0xFFU);
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(EhFrame, ReadsAVersion4CieWithItsAddressAndSegmentSizes) {
+  // The CIE is 19 bytes, so the FDE's id field is at 23 and its pc_begin field at 27.
+  const auto field_address = static_cast<std::uint32_t>(kBase + 27);
+  const std::uint32_t start_field = 0x401000U - field_address;
+  const auto section = concat({version4_cie(8, 0), fde_record(23, start_field, 0x20)});
+  auto result = donkey::read_eh_frame(section, kBase, 8, Endian::Little);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  ASSERT_EQ(result.value().functions.size(), 1U);
+  EXPECT_EQ(result.value().functions[0].start, 0x401000U);
+  EXPECT_EQ(result.value().malformed_records, 0U);
+}
+
+TEST(EhFrame, RefusesAVersion4CieWithASegmentSelectorOrAnotherAddressSize) {
+  const auto field_address = static_cast<std::uint32_t>(kBase + 27);
+  const std::uint32_t start_field = 0x401000U - field_address;
+  for (const auto& cie : {version4_cie(8, 4), version4_cie(4, 0)}) {
+    const auto section = concat({cie, fde_record(23, start_field, 0x20)});
+    auto result = donkey::read_eh_frame(section, kBase, 8, Endian::Little);
+    ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+    EXPECT_TRUE(result.value().functions.empty());
+  }
 }
 
 TEST(EhFrame, ZeroStartsAndZeroRangesAreSkippedNotCounted) {

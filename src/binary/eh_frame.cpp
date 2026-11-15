@@ -292,6 +292,18 @@ Cie parse_cie_body(Cursor& cursor, unsigned pointer_size) {
   if (!cursor.ok()) {
     return cie;
   }
+  if (version != 1 && version != 3 && version != 4) {
+    return cie;  // a layout this reader does not know
+  }
+  if (version == 4) {
+    // Version 4 puts the address size and the segment selector size before the alignment
+    // factors. A segment selector, or an address size other than the image's, is not modelled.
+    const std::uint8_t address_size = cursor.u8();
+    const std::uint8_t segment_selector_size = cursor.u8();
+    if (!cursor.ok() || segment_selector_size != 0 || address_size != pointer_size) {
+      return cie;
+    }
+  }
   if (augmentation.find("eh") != std::string::npos) {
     cursor.skip(pointer_size);  // the old eh_data pointer
   }
@@ -368,8 +380,10 @@ std::optional<RecordHeader> read_header(const ByteReader& reader, std::uint64_t 
     return header;
   }
   if (length32 == 0xffffffffU) {
+    // The 64-bit form widens the length only: in .eh_frame (unlike .debug_frame) the CIE id and
+    // the FDE's CIE pointer stay four bytes.
     header.length = cursor.unsigned_of(8);
-    header.id_size = 8;
+    header.id_size = 4;
   } else {
     header.length = length32;
     header.id_size = 4;
