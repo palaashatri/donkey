@@ -27,8 +27,9 @@ note: a hand-written fixture
 - Repeated records come after the single keys, in this order: `source_file`, `macro`, `skipped`,
   `note`. Each keeps its order in the library.
 - The C text is parsed by `parse_c_declarations` (`include/donkey/project/cdecl.h`, G05-T2). It may name
-  the built-in names only, and its own declarations: a library parses on its own. The types a
-  library returns take their ids from the `known` table, so they do not collide with it.
+  the built-in names only, and its own declarations: a library parses on its own, so the table it is
+  read into cannot change what its text means. Its types are then moved up to take their ids from
+  `known.next_id()`, so they do not collide with that table.
 - `body_sha256` is the SHA-256 of the C text: the bytes after the empty line, to the end of the file,
   as stored. `declarations` counts the body parsed with only the built-in names: the number of
   type definitions that parse returns, scalar, pointer and array types included. It does not depend
@@ -51,8 +52,10 @@ one, and typedef and function names share the other. One spelling may be both a 
 ordinary name (`struct stat` and the function `stat`, or `typedef struct point point`). Within one
 name space a name is declared once: a typedef and a function with one name is
 `typelib.type_and_function`, and any other repeat (two prototypes, or a struct and an enum with one
-tag) is `typelib.duplicate_name`. Scalar, pointer and array types are not declarations and are not
-checked.
+tag) is `typelib.duplicate_name`. `typedef struct { ... } item;` declares the ordinary name `item`
+(the untagged struct takes the typedef's name), so a function `item` collides with it. The parser
+reports each name it declares with its name space (`CDeclaredName` in `cdecl.h`), and the check uses
+that list. Scalar, pointer and array types are not declarations and are not checked.
 
 The parser's final whole-set check (`cdecl.invalid_type`) is reported as `typelib.invalid_types`,
 because the parser runs that check first on the same set.

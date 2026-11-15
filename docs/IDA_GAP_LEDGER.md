@@ -2000,20 +2000,27 @@ and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/p
   LF), `typelib.record_order` and `typelib.io`. A parser refusal keeps its `cdecl.` code, and its
   `line L, column C:` names the line in the library file.
 - Two choices made here. (1) `declarations` counts the body parsed with the built-in names only, so
-  a library must parse on its own. Its count does not depend on the table it is read into. The
-  types it returns still take their ids from that table. (2) Names follow C's two name spaces: struct,
+  a library must parse on its own. It is parsed once, on its own, so the table it is read into
+  cannot change what its text means; its types are then moved up to take their ids from that
+  table's `next_id()`. (2) Names follow C's two name spaces: struct,
   union and enum tags share one, and typedef and function names share the other. `struct stat` next
   to the function `stat`, and `typedef struct point point`, are accepted. A typedef and a function
-  with one name is `typelib.type_and_function`. Any other repeat within one name space is
-  `typelib.duplicate_name`.
-- Tests: 30 `TypeLib.*` tests in `tests/unit/typelib_test.cpp`, the eight named above among them, one
+  with one name is `typelib.type_and_function`, also when the typedef names an untagged struct. Any
+  other repeat within one name space is `typelib.duplicate_name`. The parser lists the names it
+  declares with their name space (`CDeclaredName`, a new optional output of
+  `parse_c_declarations`).
+- Tests: 32 `TypeLib.*` tests in `tests/unit/typelib_test.cpp`, the eight named above among them, one
   for each refusal code, and one that accepts a tag and an ordinary name with one spelling. The fixture
   is `tests/fixtures/types/typelib-small.dtl` (hand-written, MIT; 18 declarations), and it loads with
   provenance `Library`.
 - Fuzz: `fuzz/fuzz_typelib.cpp`, registered next to `fuzz_cdecl`. The seed corpus is
   `tests/fuzz/corpus/typelib/` (31 seeds: three valid files, an empty body, and one seed for each
-  refusal; each seed was checked to reach the outcome its name gives). A 60 s run under ASan and
-  UBSan (Clang 18, Linux x86-64) made 290,100 runs and found nothing.
+  refusal; each seed was checked to reach the outcome its name gives). Review found that a fuzz build
+  compiled only the harnesses with `-fsanitize`: the libraries, the parsers included, had no coverage
+  instrumentation and no ASan or UBSan, for every fuzz target. A fuzz build now compiles every target
+  with `-fsanitize=fuzzer-no-link,address,undefined` (`CMakeLists.txt`). With that, a 60 s run of
+  `fuzz_typelib` (Clang 18, Linux x86-64) started from 9,466 coverage edges, made 76,090 runs, grew the
+  corpus to 304 inputs and found nothing; `fuzz_cdecl` made 414,063 runs in 60 s and found nothing.
 - Install: `cmake/DonkeyPackaging.cmake` installs `typelibs/` to `share/donkey/typelibs` (Linux and
   FreeBSD), `typelibs` (Windows) and `Donkey.app/Contents/Resources/typelibs` (the macOS app). Checked
   on Linux only: `cmake --install build/headless-linux --prefix <dir>` installs
