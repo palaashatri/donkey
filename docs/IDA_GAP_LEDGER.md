@@ -932,7 +932,8 @@ for Partial functions.
   without goto: 1,001 before, 1,000 after. Two functions left that set (`openssl` `0xa9b70`, `libc`
   `0x97ec0`): their old output printed a switch's case blocks a second time, which the switch rule now
   refuses; one function joined it (`libsqlite3` `0xa5c40`). Gotos: 986 functions, 16,232 in all,
-  largest 409. Measured at `d5e9350`, after the merge of phase A's review rounds.
+  largest 409. Measured at `d5e9350` and again at `443a2da`, after the merges of phase A's
+  review rounds (the same counts).
   The open decision is whether to copy small shared blocks and recover compound conditions to remove
   most of them (owner decision; not made here).
 - **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two

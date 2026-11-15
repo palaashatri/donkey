@@ -539,14 +539,16 @@ The counts at `09d585e` were the same, binary for binary; the change from the fi
 ### W1: goto structuring (G04-T5)
 
 Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,
-1,986 functions) with the Release build of the branch after it merged `claude/funny-meitner-cpc7oc` up to
-`e2c078c` (branch commit `d5e9350`); the baseline is that phase A head itself, measured the same way.
+1,986 functions) with the Release build of the branch at `d5e9350` (after it merged
+`claude/funny-meitner-cpc7oc` up to `8322ece`), and again at `443a2da` (after it merged phase A up to
+`5309774`, which adds the stack-argument fixes of `e2c078c`): the two measurements are the same,
+binary for binary. The baseline is phase A at `e2c078c`, measured the same way.
 The measurement is `sample_list.py measure`, extended with the goto and refusal counts. (The first
 measurement, at `14b94a4` against `5162f62`, had 996 labelled before and 989 goto-free, 997 with gotos
 and 16,364 gotos after; the review fixes of phase A changed the baseline, see "Second and third review
 rounds".)
 
-| | Before (phase A, `e2c078c`) | After (W1, `d5e9350`) |
+| | Before (phase A, `e2c078c`) | After (W1, `443a2da`) |
 |---|---|---|
 | Printed as labelled blocks (whole function) | 985 (49.6%) | **0** |
 | Structured, no goto | 1,001 | 1,000 |
@@ -669,8 +671,8 @@ What changed:
 
 Measurement on the fixed list at `14b94a4` (before the merge of phase A's review rounds): labelled 0,
 structured without goto 989, with gotos 997, 16,364 gotos in all, largest 409 (`git`), 0 candidates
-refused, Complete 180, InvalidIR 0. At `d5e9350`, after the merge, the numbers are those of the table at
-the top of this section.
+refused, Complete 180, InvalidIR 0. At `d5e9350` and `443a2da`, after the merges, the numbers are those of the
+table at the top of this section.
 
 Matrix at `14b94a4`: GCC headless 809/809; Clang headless 809/809 with no warnings; Release 810/810;
 desktop UI under Xvfb 836/836; pinned clang-format 20.1.8 over include, src, apps and tests: clean.
