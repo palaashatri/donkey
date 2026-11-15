@@ -280,7 +280,7 @@ Progress (the state is in the commits; this list is the order of the work):
    the step 2 section.
 5. Next: full verification on the final commit, and the doc updates (G04, PARITY row 7, README, AGENTS).
 
-Bar: at most 1,032 of 1,986 labelled. Current: 996 (50.2%), met.
+Bar: at most 1,032 of 1,986 labelled. 996 (50.2%) after step 2, met; 985 (49.6%) after the review rounds (below, "Second and third review rounds").
 
 
 Classification (`classify_structure`, `ir.h`): a function is **structured** (printed without labels),
@@ -491,6 +491,51 @@ whose call-note count moved from 235 to 236 (the stack-argument refusal). No fun
 verdict. The Complete share is 180 of 1,986 (9.1%); an earlier draft of PARITY row 6 said 10.1%, which
 was wrong and is corrected.
 
+#### Second and third review rounds, and the re-measurement
+
+The second review round (`7e1c108`, `09d585e`, `6f4a2da`, `8493c88`) and the third (`d0b91c2` to `28cb808`) fixed
+findings in the lifter, the evaluator, the unwind readers, the CFG walk, the structurer, the guards and
+the audit tools; each has a test that fails without its fix (the PR's review threads list them). The
+fixes that change what the measurement counts:
+
+1. **A conditional jump to another function's start** (`09d585e`). The CFG walk followed it into the
+   other function, so the caller took in that function's body. It now stops there; the lifter ends
+   that path with an exit block that calls the target and returns (resolved like any direct call,
+   else Partial with the note "conditional jump leaves the function; treated as a tail call").
+   Tests: `Ir.AConditionalJumpToAKnownFunctionIsACallInAnExitBlock`,
+   `Cfg.AConditionalJumpToAnotherFunctionDoesNotTakeInItsBody`. The same commit stopped the
+   distinct-instruction budget from refusing an instruction that an earlier walk had counted
+   (`Cfg.AnInstructionCountedByAnotherWalkIsFollowedAfterTheBudget`). Between `7e1c108` and
+   `09d585e`, 16 functions of `python3.12` changed and none of the other six binaries: 12 went from
+   rejected to structured, 1 from structured to rejected (`sub_6ca9f0`), and 3 from Partial to
+   Complete. 14 of the 16 print the new exit-block call (item 1), among them `sub_6fff30`, now
+   Complete. The other two (`sub_4cd5e8`, `sub_510f5f`) are one-block `xor eax, eax; ret` functions
+   that were Partial with no note; which of the commit's two changes moved them was not separated.
+2. **A resolved call writes all of `rax`** (`d0b91c2`). The call wrote `rax` at the callee's
+   inferred return width. That width comes from the callee's last write in block order, so it can be
+   narrower than what a path leaves in `rax` (`mov eax, 0x100; mov al, 1` returns 0x101 with a width of
+   1), and the caller kept stale bits above it. After a call the caller's `rax` is the callee's `rax`,
+   all 64 bits, and the IR now says so. Test: `Ir.AResolvedCallDefinesTheCalleesWholeRax` (the
+   caller returned 2 instead of 1). On the fixed list it changed no count.
+3. **Measurement inputs** (`9e98468`). `sample_list.py` hashes a private copy of each binary and
+   samples or decompiles that copy, so the recorded hash names exactly the bytes measured. The seven
+   binaries are files of installed Ubuntu packages, unchanged since before the list was drawn
+   (`5d39ed2`, 2026-11-14): coreutils 9.4-3ubuntu6.3 (`ls`), openssl 3.0.13-0ubuntu3.16, bash
+   5.2.21-2ubuntu4, libsqlite3-0 3.45.1-1ubuntu2.8, libc6 2.39-0ubuntu8.9, git 1:2.43.0-1ubuntu7.4,
+   python3.12-minimal 3.12.3-1ubuntu0.17. `dpkg --verify` reports none of their files changed, and
+   the last package operation on any of them was on 2026-10-22. No hash was recorded when the list was
+   drawn; the hashes in `list_final.json` were recorded afterwards, from these files.
+
+Re-measurement on the same 1,986 functions at `28cb808` (`tools/audit/sample_list.py measure`):
+
+| Structured | Irreducible | Reducible but rejected | Labelled | Share | Complete | InvalidIR | Unsupported |
+|---|---|---|---|---|---|---|---|
+| 1,001 | 106 | 879 | 985 | 49.6% | 183 (9.2%) | 0 | 0 |
+
+Per binary (Complete, labelled): ls 14, 96; openssl 17, 169; bash 28, 130; libsqlite3 45, 124; libc 39,
+122; git 15, 199; python3.12 25, 145. 1,491 functions carry the call note (python3.12 234, from 236).
+The counts at `09d585e` were the same, binary for binary; the change from the first round's table
+(990 structured, 180 Complete) is all in `python3.12`, from `09d585e` (item 1).
 ### W1: goto structuring (G04-T5)
 
 Branch `agent/ir/G04-T5-goto-structuring`, measured on the fixed list (`tools/audit/results/list_final.json`,

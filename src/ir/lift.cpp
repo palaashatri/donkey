@@ -1985,15 +1985,20 @@ struct Lifter {
   }
 
   /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
-  /// call, in the callee's ABI order, and the result is rax at the callee's return width. Reads
-  /// after the call are checked by check_call_clobbers, not assumed here.
+  /// call, in the callee's ABI order, and the result is the whole of rax. Reads after the call are
+  /// checked by check_call_clobbers, not assumed here.
   static void resolve_call_statement(IrStatement& statement, const KnownCallee& callee) {
     for (const IrParameter& parameter : callee.signature.parameters) {
       statement.call_arguments.push_back(IrOperand::register_ref(
           parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
     }
     if (callee.signature.return_width > 0) {
-      statement.dest = IrOperand::register_ref("rax", callee.signature.return_width);
+      // After the call, the caller's rax is the callee's rax: all 64 bits, whatever width the
+      // callee's return value has. The inferred width (from the callee's last write in block
+      // order) can be narrower than what a path leaves in rax (`mov eax, 0x100; mov al, 1` leaves
+      // 0x101 with a width of 1), so a write of that width would keep stale bits of the caller's
+      // rax above it.
+      statement.dest = IrOperand::register_ref("rax", 8);
     }
     statement.signature_inferred = true;
     statement.call_writes = callee.writes;

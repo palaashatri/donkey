@@ -1383,16 +1383,25 @@ struct Structurer {
            a.constant == b.constant && a.width == b.width;
   }
 
-  /// How many operands of the function name register `name` directly.
+  /// How many operands of the function name register `name`: as the operand itself, as the base or
+  /// index of a memory operand, or as a call's argument.
   [[nodiscard]] std::size_t count_register_uses(const std::string& name) const {
     std::size_t uses = 0;
+    const auto count = [&](const IrOperand& operand) {
+      if (operand.kind == IrOperandKind::Register && operand.reg == name) {
+        ++uses;
+      } else if (operand.kind == IrOperandKind::Memory) {
+        uses += (operand.reg == name ? 1U : 0U) + (operand.index == name ? 1U : 0U);
+      }
+    };
     for (const IrBlock& block : function_.blocks) {
       for (const IrStatement& statement : block.statements) {
         for (const IrOperand* operand :
              {&statement.dest, &statement.a, &statement.b, &statement.c}) {
-          if (operand->kind == IrOperandKind::Register && operand->reg == name) {
-            ++uses;
-          }
+          count(*operand);
+        }
+        for (const IrOperand& argument : statement.call_arguments) {
+          count(argument);
         }
       }
     }

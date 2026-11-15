@@ -20,6 +20,7 @@
 #include <map>
 #include <set>
 #include <span>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -424,6 +425,8 @@ std::string describe_difference(const Observation& before, const Observation& af
 /// The callees of a call-heavy function, lifted on demand from the library under test (G21-T1):
 /// the interpreter runs a resolved call's callee from its own IR. The object hands out a pointer to
 /// its resolver, so it is neither copied nor moved.
+/// Lifts each callee once, on demand. The resolver fills its cache as calls are run, so instances
+/// are not const.
 class CalleeResolver {
  public:
   CalleeResolver(const donkey::BinaryImage& image, const donkey::AnalysisResult& analysis)
@@ -508,7 +511,7 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     eval_options.architecture = loaded.value().image.architecture;
     eval_options.convention = host_convention();
     // The interpreter runs a callee's own IR; the native call runs the compiled code.
-    const CalleeResolver callees(loaded.value().image, analysis.value());
+    CalleeResolver callees(loaded.value().image, analysis.value());
     eval_options.callees = callees.get();
 
     for (const CorpusFunction& entry : kCorpus) {
@@ -949,7 +952,7 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
     eval_options.convention = host_convention();
     // Without callees a resolved call fails in every snapshot alike, and a pass that changed the
     // code after the call would go unseen.
-    const CalleeResolver callees(loaded.value().image, analysis.value());
+    CalleeResolver callees(loaded.value().image, analysis.value());
     eval_options.callees = callees.get();
 
     for (const CorpusFunction& entry : kCorpus) {
@@ -1027,7 +1030,7 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
     donkey::IrEvalOptions eval_options;
     eval_options.architecture = loaded.value().image.architecture;
     eval_options.convention = host_convention();
-    const CalleeResolver callees(loaded.value().image, analysis.value());
+    CalleeResolver callees(loaded.value().image, analysis.value());
     eval_options.callees = callees.get();
     for (const CorpusFunction& entry : kCorpus) {
       if (std::string_view(entry.name).rfind("c_call_", 0) != 0) {
@@ -1737,6 +1740,12 @@ std::vector<const donkey::IrStatement*> unprinted_statements(const donkey::IrFun
                                                              std::size_t& checked) {
   std::set<std::uint64_t> printed_addresses;
   for (const donkey::PseudocodeLine& line : printed.lines) {
+    // A line that ends with a colon (a block's label, `case`, `default`) prints no statement, even
+    // when it carries the address of the block's first one.
+    const auto last = line.text.find_last_not_of(" \t");
+    if (last != std::string::npos && line.text[last] == ':') {
+      continue;
+    }
     printed_addresses.insert(line.source_address);
     printed_addresses.insert(line.folded_addresses.begin(), line.folded_addresses.end());
   }
@@ -1798,7 +1807,10 @@ TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
 // The guard is not vacuous. A counted loop whose latch holds a body statement and the step: the
 // printed function passes it. With the body statement's line removed, it reports that statement;
 // with the header's folded step removed, it reports the step. A latch is never exempt as a whole.
-TEST(DecompilerCorpus, ThePrintedStatementGuardReportsAMissingLatchStatement) {
+/// rax = 0; while (rax < 10) { rbx = rbx + 2; rax = rax + 1; } return rax; laid out as four blocks
+/// (0x1000, 0x1008, 0x100c, 0x1014). The latch holds a body statement (0x100c) and the step
+/// (0x1010), so it prints as a counted `for` loop.
+donkey::IrFunction counted_loop_with_a_body_statement() {
   using donkey::IrOp;
   using donkey::IrOperand;
   donkey::IrFunction function;
@@ -1856,6 +1868,11 @@ TEST(DecompilerCorpus, ThePrintedStatementGuardReportsAMissingLatchStatement) {
   function.blocks[1].statements = {compare, leave};
   function.blocks[2].statements = {body, step, back};
   function.blocks[3].statements = {ret};
+  return function;
+}
+
+TEST(DecompilerCorpus, ThePrintedStatementGuardReportsAMissingLatchStatement) {
+  const donkey::IrFunction function = counted_loop_with_a_body_statement();
   ASSERT_TRUE(donkey::verify_ir(function).has_value());
 
   auto printed = donkey::format_pseudocode_lines(function);
@@ -1879,5 +1896,38 @@ TEST(DecompilerCorpus, ThePrintedStatementGuardReportsAMissingLatchStatement) {
   const auto step_missing = unprinted_statements(function, without_step, checked);
   ASSERT_EQ(step_missing.size(), 1U);
   EXPECT_EQ(step_missing.front()->source_address, 0x1010U);
+}
+
+TEST(DecompilerCorpus, ThePrintedStatementGuardDoesNotCountALabelAsAStatement) {
+  // The labelled form starts each block with `loc_X:` at the block's address, which is the address
+  // of the block's first statement. A printer that dropped that statement and kept the label must
+  // still be reported.
+  const donkey::IrFunction function = counted_loop_with_a_body_statement();
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+  donkey::Pseudocode labelled;
+  for (const donkey::IrBlock& block : function.blocks) {
+    std::ostringstream label;
+    label << "loc_" << std::hex << block.address << ":";
+    labelled.lines.push_back(donkey::PseudocodeLine{label.str(), block.address, {}});
+    for (const donkey::IrStatement& statement : block.statements) {
+      labelled.lines.push_back(
+          donkey::PseudocodeLine{"  statement;", statement.source_address, {}});
+    }
+  }
+  std::size_t checked = 0;
+  EXPECT_TRUE(unprinted_statements(function, labelled, checked).empty());
+
+  // Drop the first statement of the entry block (rax = 0 at 0x1000); its label stays.
+  donkey::Pseudocode without_first = labelled;
+  const auto first =
+      std::find_if(without_first.lines.begin(), without_first.lines.end(),
+                   [](const donkey::PseudocodeLine& line) {
+                     return line.source_address == 0x1000 && line.text == "  statement;";
+                   });
+  ASSERT_NE(first, without_first.lines.end());
+  without_first.lines.erase(first);
+  const auto missing = unprinted_statements(function, without_first, checked);
+  ASSERT_EQ(missing.size(), 1U);
+  EXPECT_EQ(missing.front()->source_address, 0x1000U);
 }
 }  // namespace
