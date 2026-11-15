@@ -2289,6 +2289,51 @@ TEST(Ir, EvaluatorChargesACalleeAgainstTheCallersStepBudget) {
   EXPECT_EQ(result.diagnostic().code, "ir.eval_step_limit");
 }
 
+TEST(Ir, AResolvedCallDefinesTheCalleesWholeRax) {
+  // caller (0x1000): mov eax, 0x200; call 0x100f; shr rax, 8; ret.
+  // leaf (0x100f): mov eax, 0x100; mov al, 1; ret.
+  // After the call rax is the leaf's rax, 0x101, so the caller returns 1. The leaf's inferred
+  // return width is 1 (its last write is al): writing only that byte into the caller's rax would
+  // keep the caller's 0x200 above it and return 2.
+  const std::uint8_t bytes[] = {
+      0xb8, 0x00, 0x02, 0x00, 0x00,  // 0x1000: mov eax, 0x200
+      0xe8, 0x05, 0x00, 0x00, 0x00,  // 0x1005: call 0x100f
+      0x48, 0xc1, 0xe8, 0x08,        // 0x100a: shr rax, 8
+      0xc3,                          // 0x100e: ret
+      0xb8, 0x00, 0x01, 0x00, 0x00,  // 0x100f: mov eax, 0x100
+      0xb0, 0x01,                    // 0x1014: mov al, 1
+      0xc3,                          // 0x1016: ret
+  };
+  std::vector<std::byte> data(sizeof(bytes));
+  for (std::size_t i = 0; i < sizeof(bytes); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  const donkey::Function* leaf = nullptr;
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    } else if (function.address == 0x100f) {
+      leaf = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_NE(leaf, nullptr);
+  auto lifted_caller = donkey::lift_function(image, analyzed.value(), *caller);
+  ASSERT_TRUE(lifted_caller.has_value()) << lifted_caller.diagnostic().message;
+  donkey::LiftOptions leaf_options;
+  leaf_options.resolve_calls = false;
+  auto lifted_leaf = donkey::lift_function(image, analyzed.value(), *leaf, leaf_options);
+  ASSERT_TRUE(lifted_leaf.has_value()) << lifted_leaf.diagnostic().message;
+  ASSERT_FALSE(lifted_caller.value().partial);
+  auto result = run_with_callee(lifted_caller.value(), lifted_leaf.value(), 1000);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 1u);
+}
+
 TEST(Ir, X86AddWithCarryMatchesHardwareFlags) {
   // add rdi, rsi; adc rdx, rcx; mov rax, rdx; ret
   donkey::IrFunction f;
@@ -2784,6 +2829,49 @@ TEST(Ir, StructuresCounterInMemoryAsFor) {
   // The update is printed once, in the header; the body keeps no copy of it.
   EXPECT_EQ(code.find("+ 0x1;"), std::string::npos) << code;
   EXPECT_EQ(code.find("goto "), std::string::npos) << code;
+}
+
+TEST(Ir, ACounterTemporaryThatACallReadsAfterTheLoopIsNotFolded) {
+  // The loop of StructuresCounterInMemoryAsFor, with a resolved call after it that takes the
+  // step's temporary as its argument. Folding the step into the header would replace the load,
+  // add and store with `*(u32 *)(rbp - 0x8) = ... + 0x1` and drop the assignment that gives the
+  // call its argument, so the loop is not printed as `for`.
+  donkey::IrFunction function;
+  ASSERT_TRUE(lift_raw_x86_64({0xc7, 0x45, 0xf8, 0x00, 0x00, 0x00, 0x00, 0xeb, 0x04, 0x83, 0x45,
+                               0xf8, 0x01, 0x39, 0x7d, 0xf8, 0x7c, 0xf7, 0x8b, 0x45, 0xf8, 0xc3},
+                              function));
+  std::string temporary;
+  for (const donkey::IrBlock& block : function.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Add &&
+          statement.dest.kind == donkey::IrOperandKind::Register &&
+          statement.b.kind == donkey::IrOperandKind::Constant && statement.b.constant == 1) {
+        temporary = statement.dest.reg;
+      }
+    }
+  }
+  ASSERT_FALSE(temporary.empty());
+  {
+    // Without the call the step folds (the control for this test).
+    auto text = donkey::format_pseudocode(function);
+    ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+    ASSERT_NE(text.value().find("for ("), std::string::npos) << text.value();
+  }
+  donkey::IrBlock& exit = function.blocks.back();
+  ASSERT_EQ(exit.statements.back().op, donkey::IrOp::Return);
+  donkey::IrStatement call;
+  call.op = donkey::IrOp::Call;
+  call.width = 8;
+  call.source_address = exit.statements.back().source_address;
+  call.a = donkey::IrOperand::constant_value(0x2000, 8);
+  call.call_arguments.push_back(donkey::IrOperand::register_ref(temporary, 4));
+  call.signature_inferred = true;
+  exit.statements.insert(exit.statements.end() - 1, call);
+  auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  const std::string& code = text.value();
+  EXPECT_EQ(code.find("for ("), std::string::npos) << code;
+  EXPECT_NE(code.find(temporary + " = " + temporary + " + 0x1;"), std::string::npos) << code;
 }
 
 TEST(Ir, ASpilledParameterReloadedFromItsSlotIsAccessedThroughTheParameter) {
