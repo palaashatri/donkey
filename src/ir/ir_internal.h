@@ -166,7 +166,8 @@ struct StructuredLine {
 
 /// How the printer shows a function (G04-T5). Structured: no goto. WithGotos: structured code with
 /// `goto` only for edges that have no structured form. Labelled: the whole-function labelled form,
-/// which only an invalid graph reaches.
+/// for an invalid graph, one that nests deeper than kMaxStructureNesting, or a candidate the
+/// control-flow check refuses.
 enum class StructureOutcome : std::uint8_t { Structured, WithGotos, Labelled };
 
 struct StructureResult {
@@ -211,8 +212,10 @@ struct GotoStructure {
 /// function cannot exhaust the stack of the thread that prints it, and the labelled form is shown.
 inline constexpr std::size_t kMaxStructureNesting = 128;
 
-/// The goto structurer: structured lines for any valid graph, with `goto` only for the edges that
-/// no enabled rule expresses. Nullopt only when the graph is not valid.
+/// The goto structurer: structured lines for a valid graph, with `goto` only for the edges that no
+/// enabled rule expresses. Nullopt, with the reason in `refusal`, when the graph is not valid, when
+/// the code would nest deeper than kMaxStructureNesting, or when a block is left unprinted (an
+/// internal error, never printed silently).
 std::optional<GotoStructure> structure_with_gotos(
     const IrFunction& function, const std::map<std::uint64_t, std::string>* string_literals,
     std::uint32_t rules = kGotoRuleAll, std::string* refusal = nullptr);

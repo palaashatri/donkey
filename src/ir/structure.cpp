@@ -2268,8 +2268,9 @@ StructureResult structure_function(const IrFunction& function,
     }
     result.legacy_reason = split_fallback.reason();
   }
-  // Last, the goto structurer: every valid graph is printed as structured code with gotos for the
-  // edges no structure expresses. It is checked like the candidates above.
+  // Last, the goto structurer: a valid graph is printed as structured code with gotos for the edges
+  // no structure expresses, unless it nests deeper than kMaxStructureNesting. It is checked like
+  // the candidates above; a refusal or a mismatch leaves the labelled form.
   std::string refusal;
   if (auto goto_structure =
           structure_with_gotos(function, string_literals, kGotoRuleAll, &refusal)) {
