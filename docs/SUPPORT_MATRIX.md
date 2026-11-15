@@ -19,8 +19,10 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   (`Cfg.*`). The CFG block bound is one block per decoded instruction, with a floor of 200,000
   (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`). An indirect tail jump (`jmp rax`) is a call
   through its operand (`Ir.IndirectTailJumpCallsItsOperand`).
-- Calls (G21): a direct call to a same-image integer callee that is Complete is resolved to its
-  inferred arguments and result (x86-64 only). A callee that reads a stack argument is not resolved,
+- Calls (G21): a direct call to a same-image integer callee is resolved to its inferred arguments
+  and result (x86-64 only) when the callee lifts Complete with its own calls left unresolved, in
+  practice a leaf. A callee that makes a call is Partial at that level, so its callers stay Partial
+  even when it is Complete on its own (resolution is one level deep). A callee that reads a stack argument is not resolved,
   so its caller is Partial (`Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial`,
   `cli.decompile_stack_argument_caller_is_partial`). The clobber check and the callee write set are
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
