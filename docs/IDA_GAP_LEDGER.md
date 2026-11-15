@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete without resolving its own calls, returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Six call-heavy corpus functions verified at -O0 and -O2, and at -O3) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 to T4 TODO; T2 needs an owner decision on header sources) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -2196,6 +2196,215 @@ precision of function starts both at least 98%.
 
 **Pitfalls.** Recall bought with false functions is worse than a gap. Measure
 precision in the same run.
+
+#### G24-T0 task-level plan (written 2026-11-15, before any G24-T3 code)
+
+**Measured on the analysis code of `origin/main`.** The numbers come from `donkey-cli decompile --json` over the fixed sample
+of 1,986 functions in `tools/audit/results/list_final.json` (seven system binaries, [`AUDIT.md`](AUDIT.md)). The binary
+is `/home/user/donkey-wt/W3/build/release-headless/apps/donkey-cli/donkey-cli`, built at `39f630b`. That commit is not
+an ancestor of `origin/main`, but `git diff --name-only 39f630b origin/main -- src include apps` lists only
+`include/donkey/project/typelib.h` and `src/project/typelib.cpp`. No file under `src/analysis`, `src/binary` or
+`src/ir` differs, so the analysis is the same as on `main`. The counting script is not in the repository; its
+method is below each number.
+
+Method. For each sampled function, the script reads the pseudocode and counts direct calls printed as `sub_<hex>(`
+(not comment lines, not the function header). A target is a stub when its address is inside `.plt`, `.plt.sec` or
+`.plt.got` (`readelf -SW`). The stub's import name is the `objdump -d` label `<name@plt>` at that address, which is an
+independent oracle for the names. No-return names are matched on that name. Commands:
+`python3 -I measure.py` (scratchpad `g24/measure.py`, with the decompile JSON in `g24/out/`).
+
+- (a) 9,272 call sites print a stub as `sub_<hex>(`, in 1,054 of the 1,986 functions. 0 stub addresses lack an
+  objdump name. Calls through a GOT slot (`*(u64 *)(0x...)`) into `.got`/`.got.plt`: 1 site (`__libc_start_main`).
+- (b) Top 20 stubs by call sites (name: sites / functions):
+  `BIO_printf` 1042/133, `free` 730/225, `__stack_chk_fail` 409/407, `strcmp` 383/125, `strlen` 367/174,
+  `dcgettext` 356/99, `malloc` 227/113, `ERR_print_errors` 155/73, `CRYPTO_free` 152/54, `__errno_location` 142/87,
+  `BIO_puts` 121/-, `__printf_chk` 112/33, `memcpy` 94/62, `strdup` 84/30, `OPENSSL_sk_num` 76/34,
+  `OPENSSL_sk_value` 74/35, `BIO_free` 70/34, `BIO_ctrl` 65/28, `__fprintf_chk` 64/-, `__strcpy_chk` 59/35.
+  (The per-function count for `BIO_puts` and `__fprintf_chk` is outside the top 20 list in the output, so it is shown as `-`.)
+- (c) No-return imports in the sample, call sites (functions): `__stack_chk_fail` 409 (407), `__assert_fail` 25 (21),
+  `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3). Total functions with a no-return call: 440.
+  `error` (not counted above, argument not checked): 14 sites. The other names on the list (`err`, `verr`,
+  `errx`, `verrx`, `longjmp`, `siglongjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
+  `__cxa_throw`, `__cxa_rethrow`, `_Unwind_Resume`, `_ZSt9terminatev`, `__libc_fatal`) have 0 sites in the sample.
+- (d) 288 functions are Partial with the note "the returned register is not determined by the definitions that reach
+  the return" and call a no-return import (of 1,151 Partial functions with that note, 183 Complete functions overall).
+- Of the 469 no-return call sites (excluding `error`), 322 are followed by a printed `return rax;`.
+
+**Example, checked by hand.** `/usr/bin/ls`, function `sub_4d7a`: `objdump -d` shows `4d7a: call 4750 <abort@plt>`,
+and `4d7f` is the next function (`sub_4d7f` exists in the output). The decompiler prints `sub_4750();` then
+`return rax;`. The `return` has source address `0x4d7f`, which is the next function's first byte, not an instruction
+of this function. The walk ends there and the lifter emits a synthetic return (below). The note on that function is the
+rax note from (d).
+
+**Checked against:**
+- `src/analysis/analysis.cpp`: `synthetic_function_name` 34-45 (`sub_` + address); seeds 469-491 (entry point 471-473,
+  function symbols 475-485, call xrefs into executable code 488-491); unwind seeds 493-523; user seeds 543-556; naming
+  572-584 (`naming_symbol` skips imported symbols at 567; otherwise `sub_<addr>`).
+- `src/analysis/cfg.cpp`: `fallback_name` 31-34; `function_starts` 980-983; `import_stubs` from `plt_stub_imports` 986;
+  the block walk: Call case 1093-1107 (a call always continues at `next` except when `next` is another function's start,
+  1103-1105); Jump 1109-1127 (a jump to another function start or to an import stub is not followed; otherwise it is);
+  ConditionalJump 1129-1150; Return/Interrupt 1152-1154; Unknown/Other 1155-1163; block edges 1324-1370, where a Call block
+  ending at another function's start gets a `ConditionalFalse` edge (1359-1369).
+- `include/donkey/analysis/cfg.h` 43-51: `CfgEdgeKind` has `Unknown, Jump, ConditionalTrue, ConditionalFalse, Indirect,
+  Call, JumpTable`. There is no tail-call kind.
+- `src/binary/plt.cpp`: `aarch64_plt_slot` 41; `plt_stub_imports` 73 (reads `.rela.plt` JUMP_SLOT only, 80);
+  `got_import_slots` 160 (GLOB_DAT in `.rela.dyn`). `include/donkey/binary/plt.h` 20-28 (the stub and GOT
+  readers, and the rule that a stub is never given a guessed name).
+- `src/analysis/link_calls.cpp` 25-27 (the only callers besides cfg.cpp 986); `include/donkey/analysis/link_calls.h` 28-35
+  (the link stage names a call `provided_fn@plt`).
+- `src/ir/lift.cpp`: `mark_partial` 569; `KnownCallee` 1941 and `known_callee` 1946 (x86-64 only, direct target, same
+  image, one level); `lift_call` 2021-2044 (a call to an unresolved target keeps only its target and marks the function
+  Partial with "outgoing call arguments and return values follow no modelled ABI"); `signature_inferred` 2137; the
+  rax note 2278-2280; the tail-call lowering of a jump that leaves the function 2845-2897 (note at 2897); the synthetic
+  return at a block end 3028-3045 (`Return` on the return register with `source_address = block->end_address`, 3039,
+  and `partial = true`); conditional tail call 3105.
+- `src/ir/lift_aarch64.cpp`: Call 2187-2204, with the same Partial note at 2202.
+- `src/ir/ir.cpp`: the call printer 372-395 (target is always `sub_` + the constant address, 384; the name table is not
+  consulted; `signature_inferred` comment).
+- `include/donkey/ir/ir.h` 18-58: the op list. `Call` is 35, `Return` 36, `Unsupported` 42. There is no halt,
+  trap or unreachable op.
+- `src/ir/eval.cpp` 965-975 (`Call` runs the callee's IR, depth 8, or fails); 1012 (`Unsupported` fails).
+- `apps/donkey-cli/commands.cpp`: `display_name` 101; `callgraph` `name_of` 599-604 (uses `function.name`); `functions`
+  650-690 (uses `function.name`); the link listing 2331 (`call.name`, from the link stage).
+- `src/ui/session.cpp` 239-250 (`apply_debug_names`: DWARF names for functions without a symbol); `src/ui/panels_view.cpp`
+  226 (`shown_function_name`: user renames on top).
+- `src/binary/elf.cpp` 533 (undefined dynamic symbols are `imported`); `src/binary/pe.cpp` 345 (IAT entries are
+  imported symbols whose address is the IAT slot); `src/binary/macho.cpp` 410 (undefined symbols are imported; their
+  address is not a stub address).
+- No no-return code exists: `grep -rn "noreturn\|no_return\|NoReturn" src include apps` finds nothing.
+
+**What exists today.**
+1. Every call continues the walk at the next instruction, unless that instruction starts another function (cfg.cpp
+   1093-1107). A call to an import stub is therefore followed by the bytes after it.
+2. Import names never name a function. A stub address becomes a seed when a call targets it (analysis.cpp 488-491) and
+   is named `sub_<addr>` (naming skips imported symbols, 567).
+3. The printed call target is always `sub_<hex>` from the constant address (ir.cpp 384). The function list, call graph,
+   xrefs and decompiler all print `function.name`, which is `sub_<addr>` for a stub.
+4. `plt_stub_imports` is used for tail-call decisions (cfg.cpp 986) and by the link stage (link_calls.cpp 25). It is
+   not used for naming.
+5. `got_import_slots` is used only by the link stage (link_calls.cpp 27). A `-fno-plt` GOT call is printed as
+   `((void (*)(void))*(u64 *)(0x...))();`.
+6. A block with no successor becomes `return <rax>;` at its end address, and the function becomes Partial
+   (lift.cpp 3028-3045). This is how a no-return call is printed today (the ls example).
+7. A jump to another function's start, or to an import stub, is not followed by the walk (cfg.cpp 1109-1121,
+   1129-1141). The lifter lowers such a jump to a call and marks the function Partial (lift.cpp 2845-2897).
+   The CFG does not record which jumps are tail calls.
+8. The desktop app takes names from the same `function.name` (session.cpp 239-250, panels_view.cpp 226). A change in
+   the analysis reaches the app with no UI code.
+9. PE import names exist as symbols with their IAT slot address (pe.cpp 345), but no code maps a PE call through its
+   slot to a name. Mach-O undefined symbols have no stub address (macho.cpp 410), and no `__stubs` reader exists.
+
+**Tasks.** Each one writes its own tests and updates the ledger row and `docs/SUPPORT_MATRIX.md` in its PR, as rule 7
+requires.
+
+**T3. No-return functions.**
+
+- *Known names first.* A fixed list in code, matched exactly on the import name of a stub (from `plt_stub_imports`, and
+  from the GOT slot of a `-fno-plt` call) and on a same-image symbol name. The list is the one in (c) above, without
+  `error`. `error` is a no-return only when its first argument is nonzero, so it stays a normal call (its argument is
+  not modelled). Each mark carries provenance: `known-name:<name>`.
+- *Propagation.* A same-image function is no-return when every path from its entry reaches a no-return call or a halt
+  It is bounded by a fixed iteration count and a
+  depth limit. It uses only marks already proven, and a function whose analysis is Partial for an unrelated reason
+  keeps its ordinary call semantics. Propagation is an owner decision (below).
+- *CFG effect.* In the Call case (cfg.cpp 1093-1107), a call to a no-return function `break`s the walk instead of
+  continuing at `next`, as the function-start case does now. The block gets no fall-through edge (1359-1369). Bytes after
+  the call are decoded only if another path reaches them. That is the safe form: a wrong mark can only hide the code that
+  follows that call, not code another path reaches.
+- *IR form.* The IR has no halt op (ir.h 18-58). The plan adds a flag, `IrStatement::no_return`, to `Call`, not a new
+  op, so the existing `Call` form and its operands stay as they are. Verifier rule: a `no_return` call is the last
+  statement of its block, and its block has no successor. The lifter does not emit the synthetic `Return` (3028-3045)
+  for such a block. Evaluator rule: reaching a `no_return` call fails with `ir.eval_no_return`, so a path that does not
+  return is never counted as returning. The printer prints `abort();` with no `return` after it.
+- *Still Partial, and why.* A no-return call is still an import call. Its arguments and its ABI effects are not
+  modelled, so a function that calls one keeps the "outgoing call arguments" note (`lift.cpp` 2137 for x86-64,
+  `lift_aarch64.cpp` 2202 for AArch64). T3 removes only the rax note and the synthetic return. A function is Complete only if the oracle
+  executes it and compares the returning paths with the compiled code. Paths through a no-return call are not compared,
+  because the real program does not return from them.
+- *Pitfalls.* A wrong no-return mark deletes real code (the bytes after the call become unreachable). Prevention: only
+  exact names from the fixed list, provenance on every mark, propagation only from proven marks, and the CFG keeps bytes
+  that another path reaches. Test: a function that calls `abort` on one path and returns on another.
+  `error` must never be on the list.
+- *Tests (names to add).*
+  - `Cfg.NoReturnCallEndsTheBlock` (unit: `call abort@plt` then bytes, no fall-through edge)
+  - `Cfg.BytesReachedByAnotherPathStayInTheFunction` (unit: a call to `abort` on one path, return on another; the return
+    path is kept)
+  - `Analysis.NoReturnNamesComeOnlyFromTheFixedList` (unit: `error` and an unknown name are not marked)
+  - `Analysis.PropagationUsesOnlyProvenMarks` (unit: a wrapper calling `exit` is no-return; a function with a path
+    that returns is not)
+  - `Ir.NoReturnCallHasNoSuccessorAndNoReturnStatement` (unit, lifted from bytes)
+  - `Ir.VerifierRejectsANoReturnCallWithASuccessor` (unit, hand-built IR)
+  - `DecompilerCorpus.NoReturnPathsAreNotCompared` (oracle: a corpus function whose only exit is `abort` is Partial,
+    and one that returns on some inputs is Complete when every returning input agrees with the compiled code)
+  - `cli.decompile_prints_no_return_call_without_return` (CLI, a committed fixture)
+- *Measurement.* Before (this plan, above): 469 no-return call sites, 322 followed by a printed `return`, 288
+  functions with the rax note that call a no-return import. Target after T3: 0 no-return sites followed by a printed
+  `return`, and the count in (d) falls. Functions that are still Partial are reported with the reason that remains.
+  Measured with `measure.py` over the same 1,986 functions, and the numbers go in the PR.
+- *Relation to G21-T5.* G21-T5 ("a call to a no-return function ends the block") is the IR-side part of this task.
+  It depends on T3 and is not a separate piece of work.
+
+**T4. Thunks and import stubs named.**
+
+- *Name form.* One rule: a stub is named by its import, `abort@plt`, in the function list, the call graph and xrefs.
+  That is the form the link stage already uses (`link_calls.h` 28-35), and it is the form `objdump` prints. The
+  pseudocode prints the import name as the call target, `abort();`, because `abort@plt()` is not valid C and the
+  decompiler's output should stay valid C. This is an owner decision on the pseudocode form (below).
+  A `-fno-plt` GOT call is named by the import of its GOT slot, the same way.
+- *Provenance.* Each stub name carries `import-stub` and the stub's address. A name from debug info or a symbol keeps
+  its own provenance (`session.cpp` 239-250 and `analysis.cpp` 572-584 are the existing sources).
+- *Where the names come from.* In `analysis.cpp`, when a stub is a seed, its name is set from `plt_stub_imports` or
+  `got_import_slots`, not from `synthetic_function_name`. That is one source for the function list (`donkey-cli
+  functions`), the call graph (`callgraph`, `name_of` 599-604), xrefs and the decompiler. The desktop app reads
+  `function.name` (session.cpp, panels_view.cpp 226), so it needs no UI change. Do not plan UI code beyond this.
+- *Thunks.* A same-image jump thunk (a function whose only instruction is an unconditional jump to another function's
+  start) is named after its target and marked `thunk`. The cfg already does not follow that jump (1109-1116), so the
+  thunk's own block is just the jump.
+- *Tail call or branch.* Today a jump to another function's start, or to an import stub, is not followed (cfg.cpp
+  1109-1121). Any other direct jump is followed as a branch. Neither is recorded: `CfgEdgeKind` has no tail-call value
+  (cfg.h 43-51). The plan adds a `TailCall` value for the first, and keeps the `Jump` value for branches. The lifter
+  note at lift.cpp 2897 and 3105 says "treated as a tail call" and stays.
+- *Formats.* ELF `.plt` and `.plt.sec` (x86-64, with `plt_stub_imports`), AArch64 `.plt` and `.plt.sec`
+  (`aarch64_plt_slot`, plt.cpp 41, already read) and `.plt.got` / `-fno-plt` GOT calls (`got_import_slots`).
+  PE: IAT symbols carry their slot address (pe.cpp 345), so a PE call through a slot can be named the same way. That is
+  the second slice of this task, after the ELF slice is measured. Mach-O: no stub reader exists (macho.cpp 410), so
+  Mach-O is out of this task and is a later step of G24-T2 or of G15.
+- *Tests (names to add).*
+  - `Analysis.PltStubIsNamedByItsImport` (ELF fixture, x86-64: a stub named `abort@plt`)
+  - `Analysis.GotCallIsNamedByItsImport` (ELF fixture built with `-fno-plt`)
+  - `Analysis.AArch64PltStubIsNamed` (AArch64 ELF fixture, read under `qemu-aarch64` per AGENTS.md section 7)
+  - `Analysis.ThunkTakesItsTargetsName` (unit: a one-jump function)
+  - `Cfg.JumpToAnotherFunctionIsATailCall` and `Cfg.JumpIntoUnknownCodeIsABranch` (unit)
+  - `cli.functions_lists_import_stubs_by_name` and `cli.decompile_prints_import_calls_by_name` (CLI, committed fixture)
+  The fixtures are built from a committed C source file with its provenance written down (rule 11.5). No binary is
+  copied from outside the repository.
+- *Measurement.* Target after T4: 0 stub call sites printed as `sub_<hex>` (the (a) count, from the same script; the
+  before value is 9,272 in 1,054 functions). The top-20 table (b) is the list of names that appear.
+
+**T5 (outline, to be refined before it starts).** Data in code: jump tables in `.text`, literal pools and padding.
+Files: `src/analysis/cfg.cpp` (the jump-table path at 1109-1127 and `resolve_jump_table`), `src/analysis/analysis.cpp`
+(seeds). First test: a fixture with a jump table placed after a function, with its bytes not decoded as code. The
+measurement is the count of functions whose blocks include bytes that the table covers. Owner: none.
+
+**T6 (outline, to be refined before it starts).** The stack-pointer delta at every instruction. Files:
+`src/ir/lift.cpp` (the `push`, `pop` and `leave` lowering: `lift_push`, `lift_pop`, `lift_leave`) and a new per-instruction table in
+`src/analysis/`. First test: a push/pop/call sequence whose delta at each instruction is checked. The measurement is
+the count of frame slots recovered without a frame pointer on the sample. Needed by G21-T3.
+
+**T7 (outline, to be refined before it starts).** Bounded value propagation for indirect branch and call targets.
+Files: `src/analysis/cfg.cpp` (the indirect path, `indirect = true`), and a value-set module in `src/analysis/`.
+First test: a `call *table(,%rax,8)` with a constant-bounded index gets its targets. The measurement is the count of
+indirect call sites resolved on the sample (the sample has 1 call through a GOT slot in the form the script matches). Partial for every target that is not proven.
+
+**Owner decisions.**
+1. Propagation of no-return marks (T3, second step): on by default, or only the fixed names. The fixed names are the
+   safe part, and propagation can delete code when a mark is wrong.
+2. The pseudocode name of an import call: `abort();` (valid C, the proposal above) or `abort@plt();` (matches the link
+   stage and `objdump`, not valid C).
+3. Whether a function that reaches a no-return call can be Complete. The proposal is yes, when every returning path
+   agrees with the compiled code. The paths through the no-return call are not compared.
+
+---
 
 ### G25 Language runtimes: Go, Rust, Objective-C, Swift (P1)
 
