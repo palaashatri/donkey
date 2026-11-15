@@ -2069,11 +2069,12 @@ what waiver. (5) Whether hand-written declarations are acceptable, and from whic
 - *How a library prototype drives a call.* The argument count comes from the prototype's fixed
   parameters, not from register use. Each argument's width and class come from the prototype. The
   operands are the ABI registers in order. Floating-point arguments wait for G21's floating-point step.
-  A register the caller reads for its own use is not evidence of an extra argument. A shorter
-  prototype is contradicted only when the caller writes an argument register beyond the prototype's
-  parameters before the call and nothing but the call can read that value (no read of it in the
-  caller after the write). Then the call prints the prototype's arguments, the extra write is
-  reported, and the caller stays Partial.
+  A register the caller reads for its own use is not evidence of an extra argument. An argument
+  register beyond the prototype's parameters that the caller writes before the call and never reads
+  afterwards is only a possible mismatch, not proof: the write can be dead code that the callee does
+  not read either. The prototype is applied as written, the call prints its arguments, the write is
+  reported as a possible mismatch (with its address), and the caller stays Partial as every caller of
+  an import does. Nothing in this check changes a prototype.
 - *Import calls.* `lift_call` (`src/ir/lift.cpp`) sees only the call target address. The import name comes
   from `plt_stub_imports` (`include/donkey/binary/plt.h`), which cfg.cpp already uses (`cfg.cpp` line
   986). T4 passes that name into the lifter for calls through a PLT stub. A call through a register
@@ -2093,8 +2094,12 @@ what waiver. (5) Whether hand-written declarations are acceptable, and from whic
   - `Ir.ImportCallNamesItsTargetThroughThePltStub` (unit).
   - `Ir.VariadicPrototypeLeavesTheCallPartial` (unit).
   - `Ir.LibraryCallerStaysPartial` (unit: the caller of an import is Partial).
-  - `Ir.ArgumentRegisterSetOnlyForTheCallContradictsAShorterPrototype` (negative: the caller sets `rdx`
-    just before calling a one-parameter function and never reads it).
+  - `Ir.UnreadArgumentRegisterWriteIsReportedAsAPossibleMismatch` (the caller sets `rdx` just before
+    calling a one-parameter function and never reads it: the prototype is applied unchanged and the
+    write is reported, not treated as an argument).
+  - `Ir.DeadArgumentRegisterWriteDoesNotChangeTheCall` (a dead `rdx` write before a call to a
+    one-parameter function that does not read `rdx`: the printed call has one argument, the report
+    says "possible mismatch", and nothing else changes).
   - `Ir.CallerReadOfAnArgumentRegisterIsNotAnExtraArgument` (the caller reads `rdx` for its own use around
     a call to a one-parameter function; the prototype is applied, no contradiction).
   - `DecompilerCorpus.LibraryCallsAreLabelledAndNotComplete` (oracle: the call prints with its
