@@ -752,3 +752,58 @@ compound conditions (`a && b`) are recovered as one `if` with a combined conditi
 multi-block condition in the tags and a check of its rendering; (3) whether 986 functions with gotos is
 acceptable as the decompiler's state for irreducible and shared-join control flow until (1) or (2) is
 decided.
+
+### W2: call summaries (G21-T2, nested callees)
+
+A direct call resolved only when its callee lifted Complete with its own calls left unresolved, so in
+practice only calls to leaves resolved, and each call site lifted its callee twice more. A callee's own
+calls now resolve the same way, bottom-up, through a `CallSummaryCache` that the command line and the
+corpus share across the lifts of one image:
+
+- A summary is the callee's System V parameters, its integer result, the registers it may change
+  (with those its own resolved callees change) and its height: 1 for a leaf, else one more than its
+  tallest resolved callee.
+- A call resolves only to a callee of height 8 or less: the evaluator runs calls 8 levels deep
+  (`kMaxCallDepth`), so it can run every call the lifter resolves.
+- A call back into a function being lifted (recursion, direct or mutual) is not resolved.
+- A summary is computed with a budget, one less at each level. A callee whose calls would go deeper
+  than its budget is cut there, and the cut is kept with that budget: a later query with that budget
+  or less is answered at once, and one with more budget computes it again. Keeping a cut without its
+  budget would make a result depend on which function was lifted first
+  (`Ir.ACutCalleeIsResolvedWhenALaterCallReachesItNearTheTop`, `Ir.CallSummariesDoNotDependOnLiftOrder`).
+
+Tests, each failing on `main`: `Ir.ANonLeafCalleeIsResolvedWhenItsOwnCallsAre`,
+`Ir.RegistersANestedCalleeWritesAreClobberedForTheCaller`,
+`Ir.CallChainsDeeperThanTheEvaluatorRunsStayUnresolved`, and the corpus function `c_call_nested` (a
+two-level chain), Partial on `main` at -O0, -O2 and -O3 and now Complete and verified against the
+compiled code at all three. `Ir.ARecursiveCalleeStaysUnresolved` guards recursion.
+
+Measured on the fixed list of 1,986 functions (before: `main` at `e26abbf`):
+
+| Binary | Complete | call note |
+|---|---|---|
+| `ls` (186) | 14 → 14 | 118 → 118 |
+| `openssl` (300) | 17 → 17 | 248 → 248 |
+| `bash` (300) | 28 → 28 | 226 → 226 |
+| `libsqlite3` (300) | 45 → 45 | 211 → 211 |
+| `libc` (300) | 39 → 39 | 185 → 185 |
+| `git` (300) | 15 → 15 | 269 → 269 |
+| `python3.12` (300) | 25 → 26 | 234 → 232 |
+| Total | 183 → 184 | 1,491 → 1,489 |
+
+Labelled 0, functions with gotos 986 and refused candidates 0 are unchanged. Over the whole of `libc`,
+3 functions go from Partial to Complete and none the other way. The gain is small because a callee that
+makes a call usually also calls an import or calls through a register: it stays Partial, and so do its
+callers. Imports (G22) and indirect calls (G21-T6) are what keeps the call note on most functions.
+
+Time and memory of `donkey-cli decompile --json` on every function (Release build):
+
+| Binary | `main` | this change |
+|---|---|---|
+| `bash` | 91.8 s, 247 MB | 28.8 s, 247 MB |
+| `libc.so.6` | 161.9 s, 348 MB | 41.2 s, 348 MB |
+| `ls` | 6.3 s, 32 MB | 2.6 s, 32 MB |
+
+The speed-up comes from summarising each callee once per image instead of lifting it again at each
+call site.
+

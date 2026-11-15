@@ -402,3 +402,14 @@ CORPUS long c_call_wide(long a, long b) {
 CORPUS int c_call_chain(int a, int b) {
   return k_triple(k_add2(a, b));
 }
+
+/* A helper that calls two helpers: a call to it resolves only when its own calls do (G21-T2, call
+   summaries computed bottom-up). */
+CORPUS_HELPER int k_scaled_sum(int a, int b) {
+  return k_triple(k_add2(a, b)) - a;
+}
+
+/* A call chain two levels deep: c_call_nested -> k_scaled_sum -> k_add2 and k_triple. */
+CORPUS int c_call_nested(int a, int b) {
+  return k_scaled_sum(a, b) + 1;
+}
