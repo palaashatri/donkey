@@ -26,18 +26,28 @@ struct CallSummaryCache::Impl {
     std::vector<IrParameter> parameters;  // the callee's System V integer arguments, in order
     std::uint8_t return_width = 0;        // the integer result's width; 0 for none
     std::vector<std::string> writes;      // every register family the callee's code may write
-    std::size_t height = 1;               // 1 + the tallest resolved callee below it; 1 for a leaf
+    std::size_t height = 1;               // 1 + the tallest callee below it; 1 for a leaf
   };
+  /// The verdict of a summary for the budget it is asked with. Positive: a summary of height at
+  /// most the budget exists (the one stored). Negative: none exists at any budget. Cut: none of
+  /// height at most `cut_at` exists (one may exist above it).
+  enum class Verdict : std::uint8_t { Positive, Negative, Cut };
   struct Entry {
-    bool resolved = false;  // false: a cached negative; the call stays unresolved
-    Summary summary;
+    Verdict kind = Verdict::Negative;
+    Summary summary;           // Positive only
+    std::uint64_t cut_at = 0;  // Cut only: the largest budget it was cut at
+  };
+  /// A function being lifted, with the budget it is lifted at (its callees are asked with one
+  /// less). `saw_*` record how its calls answered.
+  struct Frame {
+    std::uint64_t address = 0;
+    std::uint64_t budget = 0;
+    bool saw_negative = false;
+    bool saw_cut = false;
   };
   std::unordered_map<std::uint64_t, Entry> entries;
-  // The functions whose summaries are being computed (the lifted function first). A call back
-  // into this path is recursive.
-  std::vector<std::uint64_t> path;
-  // Depth cuts so far. A result is cached only when no cut happened while it was computed.
-  std::uint64_t cuts = 0;
+  // The functions being lifted, outermost first. A call back to one of them is a cycle.
+  std::vector<Frame> path;
 };
 
 class CallSummaryAccess {
@@ -511,18 +521,24 @@ IrOp arithmetic_op(const std::string& mnemonic) {
   return IrOp::Nop;
 }
 
-/// The largest number of nested calls a resolved call may run through (G21-T2). It is the
-/// evaluator's call depth: kMaxCallDepth in eval.cpp is 8, and it runs a callee at depth 1 to 8. A
-/// callee taller than this would run out of depth when it is interpreted, so it stays unresolved.
-constexpr std::size_t kMaxCallHeight = 8;
+/// The budget of a top-level call (G21-T2): a direct call resolves when the callee's summary has
+/// height at most this. It is the evaluator's call depth: kMaxCallDepth in eval.cpp is 8, and it
+/// runs a callee at depth 1 to 8. The budget falls by one at each level, so the summaries being
+/// computed are never more than kMaxCallHeight + 1 levels deep.
+constexpr std::uint64_t kMaxCallHeight = 8;
 
 using KnownCallee = CallSummaryCache::Impl::Summary;
+using Verdict = CallSummaryCache::Impl::Verdict;
 
-/// Keeps a function on the path of summaries being computed for the length of a lift.
+/// Pushes a function being lifted, with its budget, for the length of the lift.
 class PathFrame {
  public:
-  PathFrame(CallSummaryCache::Impl& cache, std::uint64_t address) : cache_(cache) {
-    cache_.path.push_back(address);
+  PathFrame(CallSummaryCache::Impl& cache, std::uint64_t address, std::uint64_t budget)
+      : cache_(cache) {
+    CallSummaryCache::Impl::Frame frame;
+    frame.address = address;
+    frame.budget = budget;
+    cache_.path.push_back(frame);
   }
   ~PathFrame() { cache_.path.pop_back(); }
   PathFrame(const PathFrame&) = delete;
@@ -535,24 +551,38 @@ class PathFrame {
 Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& analysis,
                              const Function& function, const LiftOptions& options);
 
-/// Lifts `callee` (with its own calls resolved) and reads its summary. The caller caches the
-/// result; this function does not.
+/// Lifts `callee` at `budget` and classifies it (G21-T2). A Negative callee makes it Negative for
+/// every budget. Otherwise a Cut callee makes it Cut at this budget. Only when all its calls
+/// resolved does its own lift decide: Positive, with height one more than its tallest callee, or
+/// Negative. The caller caches the result.
 CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
                                               const BinaryImage& image,
                                               const AnalysisResult& analysis,
-                                              const Function& callee, const LiftOptions& options) {
-  CallSummaryCache::Impl::Entry unresolved;
+                                              const Function& callee, std::uint64_t budget,
+                                              const LiftOptions& options) {
+  CallSummaryCache::Impl::Entry negative;
+  CallSummaryCache::Impl::Entry cut;
+  cut.kind = Verdict::Cut;
+  cut.cut_at = budget;
+  PathFrame frame(cache, callee.address, budget);
+  const std::size_t self = cache.path.size() - 1;
   LiftOptions nested = options;
   // The signature must not depend on how the caller is lifted: always with passes.
   nested.run_passes = true;
   auto lifted = lift_body(image, analysis, callee, nested);
+  if (cache.path[self].saw_negative) {
+    return negative;
+  }
+  if (cache.path[self].saw_cut) {
+    return cut;
+  }
   if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
-    return unresolved;
+    return negative;
   }
   static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
   for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
     if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
-      return unresolved;
+      return negative;
     }
   }
   // The passes remove a register write that nothing reads (dead-register removal), but the
@@ -560,15 +590,21 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
   LiftOptions unoptimised = nested;
   unoptimised.run_passes = false;
   auto raw = lift_body(image, analysis, callee, unoptimised);
+  if (cache.path[self].saw_negative) {
+    return negative;
+  }
+  if (cache.path[self].saw_cut) {
+    return cut;
+  }
   if (!raw || raw.value().partial) {
-    return unresolved;
+    return negative;
   }
   // A callee that reads a stack-passed argument has more parameters than the registers show.
   if (reads_incoming_stack_argument(raw.value())) {
-    return unresolved;
+    return negative;
   }
   CallSummaryCache::Impl::Entry result;
-  result.resolved = true;
+  result.kind = Verdict::Positive;
   KnownCallee& summary = result.summary;
   summary.parameters = lifted.value().parameters;
   summary.return_width = lifted.value().return_width;
@@ -581,16 +617,16 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
       if (statement.op != IrOp::Call || !statement.signature_inferred) {
         continue;
       }
-      // A resolved call of the callee: what its own callee writes changes here too, and the
-      // callee's height counts. Both are known: that call resolved, so its summary is cached.
+      // A resolved call of the callee: what its own callee writes changes here too, and its height
+      // counts. A resolved callee is Positive in the table, with a height within its budget.
       summary.writes.insert(summary.writes.end(), statement.call_writes.begin(),
                             statement.call_writes.end());
       if (statement.a.kind != IrOperandKind::Constant) {
-        return unresolved;
+        return negative;
       }
       const auto below = cache.entries.find(statement.a.constant);
-      if (below == cache.entries.end() || !below->second.resolved) {
-        return unresolved;
+      if (below == cache.entries.end() || below->second.kind != Verdict::Positive) {
+        return negative;
       }
       tallest = std::max(tallest, below->second.summary.height);
     }
@@ -602,21 +638,50 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
   return result;
 }
 
-/// The summary of the function at `target`, computed on first use and cached (G21-T2). Null when
-/// the call stays unresolved: no function of the image starts there, it is recursive (on the path
-/// being computed), its lift is partial, its arguments are not System V integer registers in order,
-/// it returns a floating-point value, or it reads a stack argument. A result that depends on the
-/// depth cut is returned as unresolved and not cached, because it depends on where the path began.
-const KnownCallee* callee_summary(const BinaryImage& image, const AnalysisResult& analysis,
-                                  std::uint64_t target, const LiftOptions& options) {
-  CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
-  if (const auto known = cache.entries.find(target); known != cache.entries.end()) {
-    return known->second.resolved ? &known->second.summary : nullptr;
+/// The answer of a summary query: Positive with its summary, Negative, or Cut.
+struct Answer {
+  Verdict verdict = Verdict::Negative;
+  const KnownCallee* summary = nullptr;
+};
+
+/// What a stored entry answers for `budget`. A Cut entry is not decided here (see answer_for).
+Answer answer_from(const CallSummaryCache::Impl::Entry& entry, std::uint64_t budget) {
+  Answer answer;
+  if (entry.kind == Verdict::Positive) {
+    if (entry.summary.height <= budget) {
+      answer.verdict = Verdict::Positive;
+      answer.summary = &entry.summary;
+    } else {
+      answer.verdict = Verdict::Cut;  // exists, but taller than this budget
+    }
+  } else {
+    answer.verdict = entry.kind;
   }
-  // A cycle: the caller whose summary is being computed records this as its own negative result,
-  // which is sound because every function on the cycle is recursive.
-  if (std::find(cache.path.begin(), cache.path.end(), target) != cache.path.end()) {
-    return nullptr;
+  return answer;
+}
+
+/// The answer for the function at `target` asked with `budget` (G21-T2). A cycle (the function is
+/// being lifted) is Negative. A Cut entry answers any budget up to the one it was cut at, and is
+/// computed again above it: a Cut is never final.
+Answer answer_for(const BinaryImage& image, const AnalysisResult& analysis, std::uint64_t target,
+                  std::uint64_t budget, const LiftOptions& options) {
+  CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
+  Answer none;
+  none.verdict = Verdict::Cut;
+  if (budget == 0) {
+    return none;  // no summary has height 0
+  }
+  if (const auto known = cache.entries.find(target); known != cache.entries.end()) {
+    if (known->second.kind != Verdict::Cut || budget <= known->second.cut_at) {
+      return answer_from(known->second, budget);
+    }
+  }
+  for (const CallSummaryCache::Impl::Frame& frame : cache.path) {
+    if (frame.address == target) {
+      Answer cycle;
+      cycle.verdict = Verdict::Negative;  // a function on a cycle is never resolved
+      return cycle;
+    }
   }
   const Function* callee = nullptr;
   for (const Function& candidate : analysis.functions) {
@@ -627,26 +692,13 @@ const KnownCallee* callee_summary(const BinaryImage& image, const AnalysisResult
   }
   if (callee == nullptr) {
     cache.entries[target] = CallSummaryCache::Impl::Entry{};
-    return nullptr;
+    return answer_from(cache.entries[target], budget);
   }
-  if (cache.path.size() > kMaxCallHeight) {
-    // Too deep to compute. The unresolved answer depends on where the path began, so it is not
-    // cached, and every result computed around it is not cached either.
-    ++cache.cuts;
-    return nullptr;
-  }
-  const std::uint64_t cuts_before = cache.cuts;
-  CallSummaryCache::Impl::Entry entry;
-  {
-    PathFrame frame(cache, target);
-    entry = compute_summary(cache, image, analysis, *callee, options);
-  }
-  if (cache.cuts != cuts_before) {
-    return nullptr;
-  }
+  CallSummaryCache::Impl::Entry computed =
+      compute_summary(cache, image, analysis, *callee, budget, options);
   CallSummaryCache::Impl::Entry& stored = cache.entries[target];
-  stored = std::move(entry);
-  return stored.resolved ? &stored.summary : nullptr;
+  stored = std::move(computed);
+  return answer_from(stored, budget);
 }
 
 struct Lifter {
@@ -2104,19 +2156,32 @@ struct Lifter {
     push(block, std::move(increment));
   }
 
-  /// The summary of the callee of a direct call to a function of this image (G21-T2), when the call
-  /// resolves: see callee_summary. A callee taller than kMaxCallHeight does not resolve.
+  /// The summary of the callee of a direct call to a function of this image (G21-T2), when the
+  /// call resolves: the callee is Positive at the budget the calling function's lift is asked with
+  /// one less. The call's answer is recorded on the calling function's frame.
   std::optional<KnownCallee> known_callee(const Instruction& instruction) const {
     if (image.architecture != Architecture::X86_64 || !options.resolve_calls ||
         !options.call_summaries || !instruction.direct_target.has_value()) {
       return std::nullopt;
     }
-    const KnownCallee* summary =
-        callee_summary(image, analysis, instruction.direct_target.value(), options);
-    if (summary == nullptr || summary->height > kMaxCallHeight) {
+    CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
+    if (cache.path.empty()) {
       return std::nullopt;
     }
-    return *summary;
+    const std::size_t caller = cache.path.size() - 1;
+    const std::uint64_t budget = cache.path[caller].budget - 1;
+    const Answer answer =
+        answer_for(image, analysis, instruction.direct_target.value(), budget, options);
+    // The query may have reallocated the path, so the caller's frame is found by index again.
+    if (answer.verdict == Verdict::Negative) {
+      cache.path[caller].saw_negative = true;
+    } else if (answer.verdict == Verdict::Cut) {
+      cache.path[caller].saw_cut = true;
+    }
+    if (answer.verdict != Verdict::Positive) {
+      return std::nullopt;
+    }
+    return *answer.summary;
   }
 
   /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
@@ -3278,8 +3343,10 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   if (shared.call_summaries == nullptr) {
     shared.call_summaries = std::make_shared<CallSummaryCache>();
   }
-  // The lifted function is on the path: a call back into it is recursive, so it is not resolved.
-  PathFrame frame(CallSummaryAccess::impl(*shared.call_summaries), function.address);
+  // The lifted function is on the path, asked with the budget its callees get: a call back into it
+  // is a cycle, and its direct callees may be as tall as kMaxCallHeight.
+  PathFrame frame(CallSummaryAccess::impl(*shared.call_summaries), function.address,
+                  kMaxCallHeight + 1);
   return lift_body(image, analysis, function, shared);
 }
 

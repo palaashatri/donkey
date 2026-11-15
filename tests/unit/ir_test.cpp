@@ -7184,8 +7184,10 @@ TEST(Ir, CallSummariesDoNotDependOnLiftOrder) {
   code.put(0x1405, {0x48, 0x89, 0xc8, 0xc3});  // mov rax, rcx; ret
   code.call(0x1500, 0x1000);
   code.put(0x1505, {0xc3});
+  code.call(0x1600, 0x1080);  // g7 of the nine-chain: resolvable at the top budget
+  code.put(0x1605, {0xc3});
   // Four of these are reached by no call (0x10c0, 0x1200, 0x1400, 0x1500): the user starts them.
-  const auto analysed = analyse_code(code.bytes(), {0x10c0, 0x1200, 0x1400, 0x1500});
+  const auto analysed = analyse_code(code.bytes(), {0x10c0, 0x1200, 0x1400, 0x1500, 0x1600});
   ASSERT_TRUE(analysed.has_value());
 
   // The rendering of a lift: the printed pseudocode, its partial flag and its notes.
@@ -7235,4 +7237,40 @@ TEST(Ir, CallSummariesDoNotDependOnLiftOrder) {
   EXPECT_NE(shared_forward.at(0x10c0).find("\npartial\n"), std::string::npos);
   EXPECT_NE(shared_forward.at(0x1400).find("\npartial\n"), std::string::npos);
   EXPECT_NE(shared_forward.at(0x1500).find("\npartial\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x1600).find("\ncomplete\n"), std::string::npos);
+}
+
+TEST(Ir, ACutCalleeIsResolvedWhenALaterCallReachesItNearTheTop) {
+  // A chain of ten at 0x1010 (g0 to g9; g9 returns 7). The caller A (0x1000) calls g0, so g7 is
+  // asked with budget 1 and is Cut there (g8 is out of budget). Then B (0x2000) calls g7 directly.
+  // g7 has height 3 and must resolve from B, so a Cut kept as final would make B Partial.
+  CodeLayout code(0x1000);
+  code.call(0x1000, 0x1010);
+  code.put(0x1005, {0xc3});
+  place_chain(code, 0x1010, 10);
+  code.call(0x2000, 0x1080);
+  code.put(0x2005, {0xc3});
+  const auto analysed = analyse_code(code.bytes(), {0x2000});  // B is reached by no call
+  ASSERT_TRUE(analysed.has_value());
+  auto cache = std::make_shared<donkey::CallSummaryCache>();
+  donkey::LiftOptions options;
+  options.call_summaries = cache;
+  const auto first = lift_at(*analysed, 0x1000, options);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_TRUE(first->partial);  // g0 is too tall for the top budget
+  const auto second = lift_at(*analysed, 0x2000, options);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_FALSE(second->partial);
+  const donkey::IrStatement* call = first_call(*second);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  std::map<std::uint64_t, donkey::IrFunction> callees;
+  for (std::uint64_t address = 0x1080; address <= 0x10a0; address += 0x10) {
+    const auto callee = lift_at(*analysed, address);
+    ASSERT_TRUE(callee.has_value());
+    callees.emplace(address, *callee);
+  }
+  auto result = run_program(*second, callees);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 7u);
 }
