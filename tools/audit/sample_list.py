@@ -34,6 +34,23 @@ CALL_NOTE = "outgoing call arguments and return values follow no modelled ABI"
 # The whole line the printer writes in front of a labelled function (src/ir/ir.cpp).
 STRUCTURE_NOTE_LINE = "// note: control flow not fully structured; showing labeled blocks"
 GOTO_NOTE = " goto(s) where control flow has no structured form"
+# Structure classes of the command-line JSON. Since G04-T5, "other" is the labelled form and the two
+# structured classes are not. Before it, "irreducible" and "reducible_rejected" named functions that
+# were printed labelled, with the note, and "other" named functions with no structure question.
+LABELLED_CLASSES = {"other"}
+STRUCTURED_CLASSES = {"structured", "goto_structured"}
+
+
+def is_labelled(structure, has_note):
+    """Whether a function was printed as labelled blocks: by its class when the class decides, by
+    the printer's note line for the classes of older tools ("irreducible", "reducible_rejected")
+    and for output with no class."""
+    cls = structure.get("class")
+    if cls in LABELLED_CLASSES:
+        return True
+    if cls in STRUCTURED_CLASSES:
+        return False
+    return has_note
 
 
 def run(args):
@@ -127,13 +144,7 @@ def measure(args):
             cls = structure.get("class", "none")
             classes[cls] = classes.get(cls, 0) + 1
             gotos = int(structure.get("gotos", 0))
-            # The class says how the function was printed; the note decides only for output that
-            # has no class (older command-line tools).
-            if "class" in structure:
-                labelled = cls == "other"
-            else:
-                labelled = has_note
-            counts["labelled"] += int(labelled)
+            counts["labelled"] += int(is_labelled(structure, has_note))
             if gotos > 0:
                 counts["goto_functions"] += 1
                 counts["gotos_total"] += gotos
