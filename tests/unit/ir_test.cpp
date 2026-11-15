@@ -5731,6 +5731,68 @@ TEST(Ir, CallerOfAFunctionThatIndexesFromItsStackPointerIsPartial) {
   EXPECT_TRUE(lifted.value().partial);
 }
 
+namespace {
+
+/// Whether the caller at 0x1000 of `bytes` (a call to the function right after it, then ret) lifts
+/// Partial.
+bool caller_is_partial(const std::vector<std::uint8_t>& bytes) {
+  std::vector<std::byte> data(bytes.size());
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    data[i] = static_cast<std::byte>(bytes[i]);
+  }
+  const auto image = synthetic_image(data.size());
+  auto analyzed = donkey::analyze(image, data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (!analyzed) {
+    return false;
+  }
+  for (const donkey::Function& function : analyzed.value().functions) {
+    if (function.address == 0x1000) {
+      auto lifted = donkey::lift_function(image, analyzed.value(), function);
+      EXPECT_TRUE(lifted.has_value());
+      return lifted && lifted.value().partial;
+    }
+  }
+  ADD_FAILURE() << "no caller at 0x1000";
+  return false;
+}
+
+}  // namespace
+
+TEST(Ir, CallerOfAFunctionThatReadsAStackArgumentThroughAConditionalMoveIsPartial) {
+  // caller (0x1000): call 0x1006; ret.  callee (0x1006): mov r10, rsp; mov ecx, 0; cmp ecx, 0;
+  // cmovne r10, rdi; mov eax, [r10 + 8]; ret. The move is not taken, so r10 is still the entry rsp
+  // and the load reads the first incoming stack argument.
+  EXPECT_TRUE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x49, 0x89, 0xe2,              // 0x1006: mov r10, rsp
+      0xb9, 0x00, 0x00, 0x00, 0x00,  // 0x1009: mov ecx, 0
+      0x83, 0xf9, 0x00,              // 0x100e: cmp ecx, 0
+      0x4c, 0x0f, 0x45, 0xd7,        // 0x1011: cmovne r10, rdi
+      0x41, 0x8b, 0x42, 0x08,        // 0x1015: mov eax, [r10 + 8]
+      0xc3,                          // 0x1019: ret
+  }));
+}
+
+TEST(Ir, CallerOfAFunctionWhoseLoadOverlapsAStackArgumentIsPartial) {
+  // caller (0x1000): call 0x1006; ret.  callee (0x1006): mov rax, [rsp + 7]; ret. The load starts
+  // inside the return address but its last seven bytes are the first incoming stack argument.
+  EXPECT_TRUE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x44, 0x24, 0x07,  // 0x1006: mov rax, [rsp + 7]
+      0xc3,                          // 0x100b: ret
+  }));
+  // The return address itself (entry rsp + 0, eight bytes) is not an argument.
+  EXPECT_FALSE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x04, 0x24,        // 0x1006: mov rax, [rsp]
+      0xc3,                          // 0x100a: ret
+  }));
+}
+
 TEST(Ir, CallerOfAFunctionThatStoresAStackAddressAndReadsItBackIsPartial) {
   // caller (0x1000): push 7; call 0x100c; add rsp, 8; ret.  callee (0x100c): sub rsp, 24;
   // lea rax, [rsp+8]; mov [rsp-8], rax; mov rcx, [rsp-8]; mov rax, [rcx+32]; add rsp, 24; ret.

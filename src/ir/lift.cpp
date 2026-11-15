@@ -58,7 +58,9 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
   };
   auto same = [](const StackValues& a, const StackValues& b) { return a == b; };
 
-  auto check_memory = [&](const IrOperand& operand, const StackValues& values) {
+  // `access` is false for a lea, which only computes the address; an access covers the operand's
+  // bytes, so it reaches an argument when any of them is at entry rsp + 8 or above.
+  auto check_memory = [&](const IrOperand& operand, const StackValues& values, bool access) {
     if (operand.kind != IrOperandKind::Memory) {
       return;
     }
@@ -87,16 +89,19 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
       return;
     }
     const auto displacement = static_cast<std::int64_t>(operand.constant);
-    if (*found->second + displacement >= 8) {
+    const std::int64_t first = *found->second + displacement;
+    const std::int64_t size = access ? (operand.width == 0 ? 8 : operand.width) : 1;
+    if (first + size > 8) {
       refused = true;  // an incoming stack argument (entry rsp + 8 and up)
     }
   };
 
   auto transfer = [&](const IrStatement& statement, StackValues& values) {
-    check_memory(statement.dest, values);
-    check_memory(statement.a, values);
-    check_memory(statement.b, values);
-    check_memory(statement.c, values);
+    const bool lea = statement.op == IrOp::Lea;
+    check_memory(statement.dest, values, true);
+    check_memory(statement.a, values, !lea);
+    check_memory(statement.b, values, true);
+    check_memory(statement.c, values, true);
     auto tracked = [&](const IrOperand& operand) {
       return operand.kind == IrOperandKind::Register &&
              values.count(internal::register_family(operand.reg)) != 0;
@@ -126,6 +131,15 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
       return;
     }
     const std::string dest = internal::register_family(statement.dest.reg);
+    // A write that can keep the destination's old value, in part or on some path (a conditional
+    // move, an 8- or 16-bit write, a merge into the register), leaves a stack address the register
+    // held in it: the tracking does not follow that, so it is refused.
+    const bool keeps_old_value = statement.op == IrOp::CondAssign || statement.merged_width != 0 ||
+                                 (statement.dest.width != 0 && statement.dest.width < 4);
+    if (keeps_old_value && values.count(dest) != 0) {
+      refused = true;
+      return;
+    }
     // The value the statement gives the destination: outer optional: is it a stack address; inner:
     // its offset from the entry rsp, when known.
     using StackAddress = std::optional<std::optional<std::int64_t>>;
