@@ -69,6 +69,15 @@ struct Graph {
 
 Graph build_graph(const IrFunction& function);
 std::vector<BitSet> compute_dominators(const Graph& graph);
+/// Whether some block cannot be reached from the entry (block 0). A block with predecessors can
+/// still be unreachable, as part of a cycle the entry does not reach.
+bool has_unreachable_block(const Graph& graph);
+/// The follow of the loop whose blocks are `body`: of the blocks outside the body that it branches
+/// to, the one the most body blocks reach on every path inside the loop, before any other exit that
+/// is not a return block (ties: the lower `rank`). kNoBlock when no body block counts for any exit.
+/// Linear in the size of the graph.
+BlockId choose_loop_follow(const Graph& graph, const std::vector<bool>& body,
+                           const std::vector<std::size_t>& rank);
 
 /// Render an operand into C-like expression text.
 std::string render_operand(const IrFunction& function, const IrOperand& operand,
@@ -150,6 +159,8 @@ struct StructuredLine {
   std::string text;
   std::uint64_t source_address = 0;
   LineTag tag;
+  /// The other statements printed in this line (the step of a `for` header).
+  std::vector<std::uint64_t> folded_addresses;
 };
 
 /// How the printer shows a function (G04-T5). Structured: no goto. WithGotos: structured code with

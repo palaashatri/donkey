@@ -74,6 +74,116 @@ Graph build_graph(const IrFunction& function) {
   return graph;
 }
 
+bool has_unreachable_block(const Graph& graph) {
+  const std::size_t count = graph.successors.size();
+  if (count == 0) {
+    return false;
+  }
+  std::vector<bool> seen(count, false);
+  std::vector<BlockId> stack{0};
+  seen[0] = true;
+  std::size_t reached = 1;
+  while (!stack.empty()) {
+    const BlockId block = stack.back();
+    stack.pop_back();
+    for (const BlockId successor : graph.successors[block]) {
+      if (successor < count && !seen[successor]) {
+        seen[successor] = true;
+        ++reached;
+        stack.push_back(successor);
+      }
+    }
+  }
+  return reached != count;
+}
+
+BlockId choose_loop_follow(const Graph& graph, const std::vector<bool>& body,
+                           const std::vector<std::size_t>& rank) {
+  const std::size_t count = graph.successors.size();
+  std::vector<BlockId> exits;
+  for (BlockId block = 0; block < count; ++block) {
+    if (!body[block]) {
+      continue;
+    }
+    for (const BlockId successor : graph.successors[block]) {
+      if (!body[successor]) {
+        exits.push_back(successor);
+      }
+    }
+  }
+  std::sort(exits.begin(), exits.end());
+  exits.erase(std::unique(exits.begin(), exits.end()), exits.end());
+  // A body block counts for an exit when every path from it reaches that exit before it leaves the
+  // loop by any other non-return exit (a return block is an exit that needs no follow). That
+  // depends only on the non-return exits the block can reach inside the loop: none, exactly one
+  // (which), or several. Each block is labelled once, backwards from the exits, so each candidate's
+  // count is a lookup (a search per exit and block was cubic). Labels only grow: none, one exit,
+  // several, so each block changes at most twice.
+  constexpr BlockId kNone = kNoBlock;
+  constexpr BlockId kSeveral = kNoBlock - 1;
+  const auto merge = [](BlockId current, BlockId incoming) {
+    if (incoming == kNone || current == incoming) {
+      return current;
+    }
+    if (current == kNone) {
+      return incoming;
+    }
+    return kSeveral;
+  };
+  std::vector<BlockId> label(count, kNone);
+  std::vector<BlockId> worklist;
+  for (BlockId block = 0; block < count; ++block) {
+    if (!body[block]) {
+      continue;
+    }
+    for (const BlockId successor : graph.successors[block]) {
+      if (!body[successor] && !graph.successors[successor].empty()) {
+        label[block] = merge(label[block], successor);
+      }
+    }
+    if (label[block] != kNone) {
+      worklist.push_back(block);
+    }
+  }
+  while (!worklist.empty()) {
+    const BlockId block = worklist.back();
+    worklist.pop_back();
+    for (const BlockId predecessor : graph.predecessors[block]) {
+      if (!body[predecessor]) {
+        continue;
+      }
+      const BlockId merged = merge(label[predecessor], label[block]);
+      if (merged != label[predecessor]) {
+        label[predecessor] = merged;
+        worklist.push_back(predecessor);
+      }
+    }
+  }
+  std::size_t reach_none = 0;
+  std::vector<std::size_t> reach_only(count, 0);
+  for (BlockId block = 0; block < count; ++block) {
+    if (!body[block]) {
+      continue;
+    }
+    if (label[block] == kNone) {
+      ++reach_none;
+    } else if (label[block] != kSeveral) {
+      ++reach_only[label[block]];
+    }
+  }
+  BlockId best = kNoBlock;
+  std::size_t best_count = 0;
+  for (const BlockId exit : exits) {
+    const std::size_t reach = reach_none + (graph.successors[exit].empty() ? 0 : reach_only[exit]);
+    if (reach > best_count ||
+        (reach == best_count && best != kNoBlock && rank[exit] < rank[best])) {
+      best_count = reach;
+      best = exit;
+    }
+  }
+  return best_count > 0 ? best : kNoBlock;
+}
+
 std::vector<BitSet> compute_dominators(const Graph& graph) {
   const std::size_t count = graph.successors.size();
   std::vector<BitSet> dominators(count, BitSet::full(count));
@@ -417,8 +527,20 @@ std::optional<IrFunction> split_irreducible(const IrFunction& function, std::str
           position[entries[i].node] = i;
         }
       }
-      IrFunction out = function;
-      out.blocks.clear();
+      // Every field of the function except its blocks, which are rebuilt below. The blocks are not
+      // copied first: a copy of every statement is the largest allocation of the split.
+      IrFunction out;
+      out.address = function.address;
+      out.name = function.name;
+      out.partial = function.partial;
+      out.notes = function.notes;
+      out.parameters = function.parameters;
+      out.return_width = function.return_width;
+      out.return_floating_point = function.return_floating_point;
+      out.signature_inferred = function.signature_inferred;
+      out.local_variables = function.local_variables;
+      out.pointer_structs = function.pointer_structs;
+      out.blocks.reserve(entries.size());
       for (const Entry& entry : entries) {
         IrBlock block;
         if (entry.trampoline) {
@@ -478,14 +600,25 @@ std::optional<IrFunction> split_irreducible(const IrFunction& function, std::str
       }
     }
     for (const BlockId holder : holders) {
+      if (holder == split) {
+        continue;  // the original is removed below, and its own edges with it
+      }
       for (std::size_t slot = 0; slot < nodes[holder].successors.size(); ++slot) {
         if (nodes[holder].successors[slot] != split) {
           continue;
         }
+        // One copy per edge into the target. A self-edge of the target becomes a self-edge of
+        // each copy, so no copy keeps an edge to the original.
         SplitNode copy = original;
         copy.live = true;
+        const BlockId copy_id = nodes.size();
+        for (BlockId& successor : copy.successors) {
+          if (successor == split) {
+            successor = copy_id;
+          }
+        }
         nodes.push_back(std::move(copy));
-        nodes[holder].successors[slot] = nodes.size() - 1;
+        nodes[holder].successors[slot] = copy_id;
       }
     }
     nodes[split].live = false;
@@ -673,13 +806,9 @@ struct Structurer {
       note("irreducible control flow");
       return std::nullopt;
     }
-    for (BlockId block = 1; block < count; ++block) {
-      if (graph_.predecessors[block].empty()) {
-        {
-          note("unreachable block");
-          return std::nullopt;
-        }  // unreachable block: do not guess a layout
-      }
+    if (has_unreachable_block(graph_)) {
+      note("unreachable block");
+      return std::nullopt;  // unreachable block: do not guess a layout
     }
     immediate_post_dominator_ = immediate_post_dominators_of(graph_);
     if (!find_loops()) {
@@ -738,11 +867,9 @@ struct Structurer {
       note("irreducible control flow");
       return std::nullopt;
     }
-    for (BlockId block = 1; block < count; ++block) {
-      if (graph_.predecessors[block].empty()) {
-        note("unreachable block");
-        return std::nullopt;
-      }
+    if (has_unreachable_block(graph_)) {
+      note("unreachable block");
+      return std::nullopt;
     }
     immediate_post_dominator_ = immediate_post_dominators_of(graph_);
     fb_find_loops();
@@ -813,33 +940,10 @@ struct Structurer {
 
   // Whether every path from `start` inside the loop reaches `follow`, or leaves the loop only by a
   // return block (a block with no successors).
-  [[nodiscard]] bool reaches_follow_or_return(const std::vector<bool>& body, BlockId start,
-                                              BlockId follow) const {
-    std::vector<bool> seen(function_.blocks.size(), false);
-    std::vector<BlockId> stack{start};
-    seen[start] = true;
-    while (!stack.empty()) {
-      const BlockId block = stack.back();
-      stack.pop_back();
-      if (block == follow) {
-        continue;
-      }
-      if (!body[block]) {
-        if (!graph_.successors[block].empty()) {
-          return false;  // leaves the loop by a non-return exit other than the follow
-        }
-        continue;
-      }
-      for (const BlockId successor : graph_.successors[block]) {
-        if (!seen[successor]) {
-          seen[successor] = true;
-          stack.push_back(successor);
-        }
-      }
-    }
-    return true;
-  }
-
+  /// For each block of a loop body: the non-return exit (a block outside the body that has
+  /// successors) that its paths inside the body reach, kNoBlock when they reach none, and
+  /// kNoBlock - 1 when they reach several. Labels only grow (none, one, several), so the backward
+  /// propagation changes each block at most twice: linear in the loop.
   void fb_find_loops() {
     const std::size_t count = function_.blocks.size();
     std::vector<std::vector<BlockId>> latches(count);
@@ -881,39 +985,10 @@ struct Structurer {
           }
         }
       }
-      std::vector<BlockId> exits;
-      for (BlockId block = 0; block < count; ++block) {
-        if (!loop.body[block]) {
-          continue;
-        }
-        for (const BlockId successor : graph_.successors[block]) {
-          if (!loop.body[successor]) {
-            exits.push_back(successor);
-          }
-        }
-      }
-      std::sort(exits.begin(), exits.end());
-      exits.erase(std::unique(exits.begin(), exits.end()), exits.end());
-      BlockId best = kNoBlock;
-      std::size_t best_count = 0;
-      for (const BlockId exit : exits) {
-        // A body block counts for this exit when every path from it reaches the exit before it
-        // leaves the loop by a non-return exit. A return block is an exit that needs no follow.
-        std::size_t post_count = 0;
-        for (BlockId block = 0; block < count; ++block) {
-          if (loop.body[block] && reaches_follow_or_return(loop.body, block, exit)) {
-            ++post_count;
-          }
-        }
-        if (post_count > best_count ||
-            (post_count == best_count && best != kNoBlock && rank[exit] < rank[best])) {
-          best_count = post_count;
-          best = exit;
-        }
-      }
-      if (best != kNoBlock && best_count > 0) {
+      // The follow: the exit most of the body reaches (ties: the earlier one in reverse postorder).
+      if (const BlockId follow = choose_loop_follow(graph_, loop.body, rank); follow != kNoBlock) {
         loop.has_follow = true;
-        loop.follow = best;
+        loop.follow = follow;
       }
       fb_loops_.push_back(std::move(loop));
     }
@@ -993,9 +1068,11 @@ struct Structurer {
   // Emits the blocks from `start` until `stop`, in control-flow order. `root` is the block the
   // region is dominated by: every block it emits must be dominated by it.
   void fb_region(BlockId start, BlockId stop, BlockId root) {
+    // Nesting is bounded: recursion and indentation both grow with it, so a deeper candidate is
+    // rejected and the next stage (or the labelled form) prints the function.
     NestScope scope(nest_);
     if (nest_ > static_cast<int>(kMaxStructureNesting)) {
-      fb_fail("control flow nests too deeply");
+      fb_fail("nesting deeper than 128 levels");
       return;
     }
     const std::size_t count = function_.blocks.size();
@@ -1081,6 +1158,31 @@ struct Structurer {
           }
           fb_region(target, arm_stop, block);
         };
+        // The flat form only when the fall-through is an ordinary next block of this region: not
+        // the stop, not a block already printed (a return block printed again is a copy, which the
+        // nested form makes), and not the innermost loop's header or follow (edges: continue,
+        // break).
+        const bool fallthrough_is_edge =
+            fallthrough == stop || fb_emitted_[fallthrough] ||
+            (!fb_active_.empty() &&
+             (fallthrough == fb_active_.back()->header ||
+              (fb_active_.back()->has_follow && fallthrough == fb_active_.back()->follow)));
+        if (join == count && taken != join && fallthrough != join && !fallthrough_is_edge) {
+          // Both arms leave by return (or an edge): the taken arm is an `if` of its own and the
+          // fall-through arm continues at this nesting level, so a chain of such tests stays flat.
+          // Tagged as an `if` without an else: the taken arm never falls out, and the code after
+          // the `}` is the fall-through.
+          line("if (" + condition_of(block, false) + ") {", 0, make_tag(LineKind::IfOpen, block));
+          ++indent_;
+          emit_arm(taken, join);
+          --indent_;
+          line("}", 0, make_tag(LineKind::Close));
+          if (fb_failed_) {
+            return;
+          }
+          block = fallthrough;
+          continue;
+        }
         if (taken == join) {
           line("if (" + condition_of(block, true) + ") {", 0,
                make_tag(LineKind::IfOpen, block, kNoBlock, true));
@@ -1125,16 +1227,19 @@ struct Structurer {
   }
 
  private:
-  void line(const std::string& text, std::uint64_t source_address = 0, LineTag tag = {}) {
+  void line(const std::string& text, std::uint64_t source_address = 0, LineTag tag = {},
+            std::vector<std::uint64_t> folded_addresses = {}) {
     if (text.empty()) {  // a marker: zero width, printed nowhere
-      lines_.push_back(StructuredLine{std::string(), source_address, tag});
+      lines_.push_back(
+          StructuredLine{std::string(), source_address, tag, std::move(folded_addresses)});
       return;
     }
     std::string indented(static_cast<std::size_t>(indent_) * 2, ' ');
     indented += text;
     out_ += indented;
     out_ += '\n';
-    lines_.push_back(StructuredLine{std::move(indented), source_address, tag});
+    lines_.push_back(
+        StructuredLine{std::move(indented), source_address, tag, std::move(folded_addresses)});
   }
 
   static std::uint64_t statement_key(BlockId block, std::size_t index) {
@@ -1325,11 +1430,14 @@ struct Structurer {
         out_ += '\n';
       }
     }
+    std::vector<std::uint64_t> step_addresses;
     for (std::size_t index = plan.step_first; index <= plan.step_last; ++index) {
       in_header_.insert(statement_key(plan.latch, index));
+      step_addresses.push_back(latch_block.statements[index].source_address);
     }
     line("for (" + init_text + "; " + condition + "; " + step_text + ") {", init.source_address,
-         make_tag(LineKind::ForOpen, loop.header, loop.exit, loop.negate_condition, true));
+         make_tag(LineKind::ForOpen, loop.header, loop.exit, loop.negate_condition, true),
+         std::move(step_addresses));
     ++indent_;
     frames_.push_back(LoopFrame{loop.exit, 0});
     emit_range(loop.header + 1, loop.exit, loop.header);
@@ -1629,9 +1737,11 @@ struct Structurer {
 
   void emit_range(BlockId first, BlockId last, BlockId loop_header = kNoBlock,
                   BlockId join_exit = kNoBlock) {
+    // Nesting is bounded, as in the fallback: a deeper region is refused and the next stage (or
+    // the labelled form) prints the function.
     NestScope scope(nest_);
     if (nest_ > static_cast<int>(kMaxStructureNesting)) {
-      note("control flow nests too deeply");
+      note("nesting deeper than 128 levels");
       ok_ = false;
       return;
     }
@@ -2109,10 +2219,14 @@ StructureResult structure_function(const IrFunction& function,
   }
   std::string note;
   if (auto split = split_if_irreducible(function, note)) {
-    Structurer structurer(*split, string_literals);
-    if (structurer.run().has_value() && accept(*split, structurer)) {
-      result.outcome = StructureOutcome::Structured;
-      return result;
+    // Each attempt is scoped: its dominator and post-dominator sets (quadratic in the block count)
+    // are freed before the next attempt builds its own.
+    {
+      Structurer structurer(*split, string_literals);
+      if (structurer.run().has_value() && accept(*split, structurer)) {
+        result.outcome = StructureOutcome::Structured;
+        return result;
+      }
     }
     Structurer split_fallback(*split, string_literals);
     if (split_fallback.run_fallback().has_value() && accept(*split, split_fallback)) {

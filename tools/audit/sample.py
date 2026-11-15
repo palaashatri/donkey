@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Decompile a random sample of .text functions, one process per function, and count outcomes."""
 import collections, concurrent.futures, json, os, random, re, subprocess, sys
-DONKEY = "/home/user/donkey/build/release-headless/apps/donkey-cli/donkey-cli"
+# The checkout this script belongs to (tools/audit/ is two levels below its root); DONKEY_CLI and
+# DONKEY_A64_CLI override the binaries it measures.
+REPO = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DONKEY = os.environ.get("DONKEY_CLI") or os.path.join(
+    REPO, "build", "release-headless", "apps", "donkey-cli", "donkey-cli")
+A64 = os.environ.get("DONKEY_A64_CLI") or os.path.join(
+    REPO, "build", "cross-a64", "apps", "donkey-cli", "donkey-cli")
 GENERIC = ("subset; locals are not recovered", "signature inferred from", "is assumed")
 CALL = "outgoing call arguments and return values follow no modelled ABI"
 
@@ -47,12 +53,17 @@ def run(path, tag, n, seed=7):
     print(json.dumps(row), flush=True)
 
 if __name__ == "__main__":
+    if not os.path.isfile(DONKEY):
+        sys.exit(f"sample.py: no donkey-cli at {DONKEY}; build release-headless or set DONKEY_CLI")
     for path, tag in [
         ("/usr/bin/ls", "ls"), ("/usr/bin/bash", "bash"), ("/usr/bin/openssl", "openssl"),
         ("/usr/lib/x86_64-linux-gnu/libsqlite3.so.0", "libsqlite3"),
         ("/usr/lib/x86_64-linux-gnu/libc.so.6", "libc"),
-        ("/home/user/donkey/build/release-headless/apps/donkey-cli/donkey-cli", "own-x86-64"),
-        ("/home/user/donkey/build/cross-a64/apps/donkey-cli/donkey-cli", "own-aarch64"),
+        (DONKEY, "own-x86-64"),
+        (A64, "own-aarch64"),
     ]:
+        if not os.path.isfile(path):
+            print(f"skipped {tag}: {path} does not exist", flush=True)
+            continue
         run(path, tag, 300)
     print("SAMPLE DONE", flush=True)

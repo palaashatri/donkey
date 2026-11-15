@@ -6,6 +6,7 @@ For each binary: function starts found by Donkey and by radare2, scored against 
 For a subset: decompiler status counts and the reasons functions are Partial.
 A robustness sweep runs Donkey over many system binaries and classifies how each run ends.
 """
+import argparse
 import collections
 import json
 import os
@@ -14,8 +15,15 @@ import subprocess
 import sys
 import time
 
-DONKEY = "/home/user/donkey/build/release-headless/apps/donkey-cli/donkey-cli"
 OUT = os.path.dirname(os.path.abspath(__file__))
+# The checkout this script belongs to: tools/audit/ is two levels below its root.
+REPO = os.path.dirname(os.path.dirname(OUT))
+DEFAULT_CLI = os.path.join(REPO, "build", "release-headless", "apps", "donkey-cli", "donkey-cli")
+DEFAULT_A64_CLI = os.path.join(REPO, "build", "cross-a64", "apps", "donkey-cli", "donkey-cli")
+DONKEY = DEFAULT_CLI  # set from --cli in main
+# Larger than any binary's function count, so a decompile run covers the whole population; the
+# run still reports `truncated`, and the statistics carry it.
+MAX_FUNCTIONS = "1000000"
 
 
 def timed(cmd, timeout, stdout_path):
@@ -107,8 +115,12 @@ def score(found, truth, rng, ignore=frozenset()):
 def decompile_stats(path, tag):
     """Stream the decompile JSON; count statuses and notes without holding it in memory."""
     start = time.time()
-    proc = subprocess.Popen(["timeout", "-k", "5", "1800", DONKEY, "decompile", path, "--json"],
+    proc = subprocess.Popen(["timeout", "-k", "5", "1800", DONKEY, "decompile", path, "--json",
+                             "--max-functions", MAX_FUNCTIONS],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    # The run's coverage, from the JSON header: every selected function must be shown.
+    coverage = {}
+    field = re.compile(rb'^\s*"(total_functions|shown_functions|truncated)": (\w+),')
     statuses = collections.Counter()
     notes = collections.Counter()
     only_call_partial = 0
@@ -118,6 +130,10 @@ def decompile_stats(path, tag):
     generic = (b"subset; locals are not recovered", b"signature inferred from", b"is assumed")
     call_note = b"outgoing call arguments and return values follow no modelled ABI"
     for line in proc.stdout:
+        f = field.match(line)
+        if f:
+            coverage[f.group(1).decode()] = f.group(2).decode()
+            continue
         m = head.match(line)
         if not m:
             continue
@@ -139,6 +155,9 @@ def decompile_stats(path, tag):
         "seconds": round(time.time() - start, 1),
         "rss_mib": round(usage.ru_maxrss / 1024.0, 1),
         "statuses": dict(statuses),
+        "total_functions": int(coverage.get("total_functions", "-1")),
+        "shown_functions": int(coverage.get("shown_functions", "-1")),
+        "truncated": coverage.get("truncated", "unknown"),
         "partial_with_call_note": with_call_note,
         "partial_only_because_of_calls": only_call_partial,
         "top_notes": notes.most_common(12),
@@ -205,9 +224,20 @@ def sweep(limit):
     return row
 
 
-if __name__ == "__main__":
+def main():
+    global DONKEY
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument("--cli", default=DEFAULT_CLI,
+                        help="the donkey-cli to measure (default: this checkout's Release build)")
+    parser.add_argument("--a64-cli", default=DEFAULT_A64_CLI,
+                        help="an AArch64 donkey-cli to score as well, when it exists")
+    args = parser.parse_args()
+    DONKEY = args.cli
+    if not os.path.isfile(DONKEY):
+        sys.exit(f"audit.py: no donkey-cli at {DONKEY}; build the release-headless preset or "
+                 "pass --cli")
     rows = []
-    own = "/home/user/donkey/build/release-headless/apps/donkey-cli/donkey-cli"
+    own = DONKEY
     stripped = os.path.join(OUT, "donkey-cli.stripped")
     subprocess.run(["strip", "-o", stripped, own], check=True)
     # The same program with and without symbols: symbols are the ground truth for both.
@@ -233,9 +263,13 @@ if __name__ == "__main__":
         ("/usr/bin/python3.12", "python3.12", False),
     ]:
         rows.append(analyse(path, tag, decompile=dec))
-    a64 = "/home/user/donkey/build/cross-a64/apps/donkey-cli/donkey-cli"
+    a64 = args.a64_cli
     if os.path.exists(a64):
         rows.append(analyse(a64, "own-aarch64", truth="symbols", decompile=True))
     rows.append(sweep(200))
     json.dump(rows, open(os.path.join(OUT, "results.json"), "w"), indent=1)
+
+
+if __name__ == "__main__":
+    main()
     print("AUDIT DONE", flush=True)

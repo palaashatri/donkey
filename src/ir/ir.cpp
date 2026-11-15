@@ -1482,8 +1482,9 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
 
   const Renderer renderer(function, &options.string_literals);
   Pseudocode out;
-  auto append_line = [&](const std::string& line, std::uint64_t source_address = 0) {
-    out.lines.push_back(PseudocodeLine{line, source_address});
+  auto append_line = [&](const std::string& line, std::uint64_t source_address = 0,
+                         std::vector<std::uint64_t> folded_addresses = {}) {
+    out.lines.push_back(PseudocodeLine{line, source_address, std::move(folded_addresses)});
     out.full_text += line + "\n";
   };
 
@@ -1571,7 +1572,7 @@ Result<Pseudocode> format_pseudocode_lines(const IrFunction& function,
     }
     for (const auto& sline : structure.lines) {
       if (!sline.text.empty()) {  // markers carry a block's start, not text
-        append_line(sline.text, sline.source_address);
+        append_line(sline.text, sline.source_address, sline.folded_addresses);
       }
     }
     append_line("}");

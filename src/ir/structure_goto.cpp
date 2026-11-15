@@ -236,35 +236,6 @@ class Emitter {
     return postorder;
   }
 
-  /// Whether every path from `start` inside the body reaches `follow`, or leaves the body only by a
-  /// return block.
-  [[nodiscard]] bool reaches_follow_or_return(const std::vector<bool>& body, BlockId start,
-                                              BlockId follow) const {
-    std::vector<bool> seen(function_.blocks.size(), false);
-    std::vector<BlockId> stack{start};
-    seen[start] = true;
-    while (!stack.empty()) {
-      const BlockId block = stack.back();
-      stack.pop_back();
-      if (block == follow) {
-        continue;
-      }
-      if (!body[block]) {
-        if (!graph_.successors[block].empty()) {
-          return false;
-        }
-        continue;
-      }
-      for (const BlockId successor : graph_.successors[block]) {
-        if (!seen[successor]) {
-          seen[successor] = true;
-          stack.push_back(successor);
-        }
-      }
-    }
-    return true;
-  }
-
   void find_loops() {
     const std::size_t count = function_.blocks.size();
     std::vector<std::vector<BlockId>> latches(count);
@@ -306,36 +277,7 @@ class Emitter {
         }
       }
       // The follow: the exit most of the body reaches (ties: the earlier one in reverse postorder).
-      std::vector<BlockId> exits;
-      for (BlockId block = 0; block < count; ++block) {
-        if (!loop.body[block]) {
-          continue;
-        }
-        for (const BlockId successor : graph_.successors[block]) {
-          if (!loop.body[successor]) {
-            exits.push_back(successor);
-          }
-        }
-      }
-      std::sort(exits.begin(), exits.end());
-      exits.erase(std::unique(exits.begin(), exits.end()), exits.end());
-      std::size_t best_count = 0;
-      for (const BlockId exit : exits) {
-        std::size_t reach = 0;
-        for (BlockId block = 0; block < count; ++block) {
-          if (loop.body[block] && reaches_follow_or_return(loop.body, block, exit)) {
-            ++reach;
-          }
-        }
-        if (reach > best_count ||
-            (reach == best_count && loop.follow != kNoBlock && rank[exit] < rank[loop.follow])) {
-          best_count = reach;
-          loop.follow = exit;
-        }
-      }
-      if (loop.follow != kNoBlock && best_count == 0) {
-        loop.follow = kNoBlock;
-      }
+      loop.follow = choose_loop_follow(graph_, loop.body, rank);
       // A pure test: the header's only statements are a flag setter and its branch, and one arm
       // stays in the body while the other is the follow.
       const IrBlock& header_block = function_.blocks[header];
@@ -373,7 +315,9 @@ class Emitter {
     lines_.push_back(
         StructuredLine{text.empty() ? std::string()
                                     : std::string(static_cast<std::size_t>(depth_) * 2, ' ') + text,
-                       address, tag});
+                       address,
+                       tag,
+                       {}});
     return lines_.size() - 1;
   }
 
@@ -382,7 +326,9 @@ class Emitter {
                    LineTag tag, int depth) {
     StructuredLine line{
         text.empty() ? std::string() : std::string(static_cast<std::size_t>(depth) * 2, ' ') + text,
-        address, tag};
+        address,
+        tag,
+        {}};
     lines_.insert(lines_.begin() + static_cast<std::ptrdiff_t>(position), std::move(line));
   }
 

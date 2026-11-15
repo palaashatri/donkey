@@ -20,6 +20,209 @@
 namespace donkey {
 namespace {
 
+// Whether a callee's code may read an argument passed on the stack (the seventh and later integer
+// arguments, at entry rsp + 8 and up). The check runs a dataflow over the callee's IR (the lift
+// without passes): every register is tracked as an offset from the entry rsp when it holds a stack
+// address, and an access, a lea or a stack address passed to a call at offset 8 or more is taken as
+// an incoming argument. Whatever cannot be followed (a stack address of unknown offset, or a stack
+// address stored into a register the tracking does not model) is taken as an incoming argument too,
+// so the caller is never resolved on a guess. Returns true when the callee may read one.
+bool reads_incoming_stack_argument(const IrFunction& function) {
+  // A register family's value: absent (not a stack address), a known offset from the entry rsp, or
+  // nullopt (a stack address of unknown offset).
+  using StackValues = std::map<std::string, std::optional<std::int64_t>>;
+  const std::size_t count = function.blocks.size();
+  if (count == 0) {
+    return false;
+  }
+  std::vector<std::optional<StackValues>> entry(count);
+  entry[0] = StackValues{{"rsp", 0}};
+  bool refused = false;
+
+  auto join = [](const StackValues& a, const StackValues& b) {
+    StackValues out;
+    for (const auto& [family, value] : a) {
+      const auto other = b.find(family);
+      if (other == b.end()) {
+        out[family] = std::nullopt;
+      } else {
+        out[family] = value == other->second ? value : std::nullopt;
+      }
+    }
+    for (const auto& [family, value] : b) {
+      if (a.find(family) == a.end()) {
+        out[family] = std::nullopt;
+      }
+    }
+    return out;
+  };
+  auto same = [](const StackValues& a, const StackValues& b) { return a == b; };
+
+  auto check_memory = [&](const IrOperand& operand, const StackValues& values) {
+    if (operand.kind != IrOperandKind::Memory) {
+      return;
+    }
+    const std::string base =
+        operand.reg.empty() ? std::string() : internal::register_family(operand.reg);
+    const std::string index =
+        operand.index.empty() ? std::string() : internal::register_family(operand.index);
+    if (!index.empty() && values.count(index) != 0) {
+      refused = true;  // an indexed stack address
+    }
+    if (base.empty()) {
+      return;
+    }
+    const auto found = values.find(base);
+    if (found == values.end()) {
+      return;
+    }
+    if (!found->second.has_value()) {
+      refused = true;
+      return;
+    }
+    if (!index.empty()) {
+      // A stack base with an index: nothing bounds the index, so the access can reach the incoming
+      // stack arguments whatever the displacement is.
+      refused = true;
+      return;
+    }
+    const auto displacement = static_cast<std::int64_t>(operand.constant);
+    if (*found->second + displacement >= 8) {
+      refused = true;  // an incoming stack argument (entry rsp + 8 and up)
+    }
+  };
+
+  auto transfer = [&](const IrStatement& statement, StackValues& values) {
+    check_memory(statement.dest, values);
+    check_memory(statement.a, values);
+    check_memory(statement.b, values);
+    check_memory(statement.c, values);
+    auto tracked = [&](const IrOperand& operand) {
+      return operand.kind == IrOperandKind::Register &&
+             values.count(internal::register_family(operand.reg)) != 0;
+    };
+    if (statement.op == IrOp::Call) {
+      for (const IrOperand& argument : statement.call_arguments) {
+        if (tracked(argument)) {
+          refused = true;  // a stack address escapes into the callee
+        }
+      }
+    }
+    // The statements the tracking models: a move, an add or subtract of a constant, a lea, a load
+    // and a call. Any other statement that reads a stack address (including a store of one, which
+    // would let a later load read it back) is not followed: it is refused.
+    const bool modelled = statement.op == IrOp::Assign || statement.op == IrOp::Lea ||
+                          statement.op == IrOp::Load || statement.op == IrOp::Call ||
+                          ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+                           statement.b.kind == IrOperandKind::Constant);
+    if (!modelled) {
+      for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
+        if (tracked(*operand)) {
+          refused = true;
+        }
+      }
+    }
+    if (statement.dest.kind != IrOperandKind::Register || statement.dest.reg.empty()) {
+      return;
+    }
+    const std::string dest = internal::register_family(statement.dest.reg);
+    // The value the statement gives the destination: outer optional: is it a stack address; inner:
+    // its offset from the entry rsp, when known.
+    using StackAddress = std::optional<std::optional<std::int64_t>>;
+    StackAddress result;
+    auto source_value = [&](const IrOperand& operand) -> StackAddress {
+      if (operand.kind != IrOperandKind::Register) {
+        return std::nullopt;
+      }
+      const auto found = values.find(internal::register_family(operand.reg));
+      if (found == values.end()) {
+        return std::nullopt;
+      }
+      return found->second;
+    };
+    if (statement.op == IrOp::Assign) {
+      result = source_value(statement.a);
+    } else if ((statement.op == IrOp::Add || statement.op == IrOp::Sub) &&
+               statement.b.kind == IrOperandKind::Constant) {
+      const auto source = source_value(statement.a);
+      if (source.has_value()) {
+        if (!source->has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto amount = static_cast<std::int64_t>(statement.b.constant);
+          result = statement.op == IrOp::Add ? **source + amount : **source - amount;
+        }
+      }
+    } else if (statement.op == IrOp::Lea && statement.a.kind == IrOperandKind::Memory) {
+      // The address of a memory operand. With an index register the offset is not known: refuse
+      // when the index or the base is a stack address; otherwise the base and displacement give it.
+      const bool index_tracked = !statement.a.index.empty() &&
+                                 values.count(internal::register_family(statement.a.index)) != 0;
+      const auto base = statement.a.reg.empty()
+                            ? values.end()
+                            : values.find(internal::register_family(statement.a.reg));
+      const bool base_tracked = base != values.end();
+      if (index_tracked || (base_tracked && !statement.a.index.empty())) {
+        refused = true;
+      } else if (base_tracked) {
+        if (!base->second.has_value()) {
+          result = std::optional<std::int64_t>{};
+        } else {
+          const auto displacement = static_cast<std::int64_t>(statement.a.constant);
+          result = *base->second + displacement;
+        }
+      }
+    }
+    if (result.has_value()) {
+      values[dest] = *result;
+    } else {
+      values.erase(dest);
+    }
+  };
+
+  std::vector<std::size_t> worklist{0};
+  while (!worklist.empty() && !refused) {
+    const std::size_t block = worklist.back();
+    worklist.pop_back();
+    if (!entry[block].has_value()) {
+      continue;
+    }
+    StackValues values = *entry[block];
+    for (const IrStatement& statement : function.blocks[block].statements) {
+      transfer(statement, values);
+      if (refused) {
+        return true;
+      }
+    }
+    const IrStatement& terminator = function.blocks[block].statements.back();
+    std::vector<std::size_t> successors;
+    if (terminator.op == IrOp::Branch) {
+      successors.push_back(terminator.a.block);
+    } else if (terminator.op == IrOp::CondBranch) {
+      successors.push_back(terminator.b.block);
+      successors.push_back(block + 1);
+    } else if (terminator.op == IrOp::Switch) {
+      return true;  // not followed through a jump table
+    }
+    for (const std::size_t successor : successors) {
+      if (successor >= count) {
+        return true;
+      }
+      if (!entry[successor].has_value()) {
+        entry[successor] = values;
+        worklist.push_back(successor);
+      } else {
+        StackValues merged = join(*entry[successor], values);
+        if (!same(merged, *entry[successor])) {
+          entry[successor] = std::move(merged);
+          worklist.push_back(successor);
+        }
+      }
+    }
+  }
+  return refused;
+}
+
 using namespace donkey;
 
 std::uint8_t register_width(const std::string& name) {
@@ -1765,6 +1968,10 @@ struct Lifter {
     if (!raw || raw.value().partial) {
       return std::nullopt;
     }
+    // A callee that reads a stack-passed argument has more parameters than the registers show.
+    if (reads_incoming_stack_argument(raw.value())) {
+      return std::nullopt;
+    }
     KnownCallee known;
     known.signature = std::move(lifted.value());
     for (const IrBlock& block : raw.value().blocks) {
@@ -2299,15 +2506,21 @@ void check_call_clobbers_impl(IrFunction& function) {
       continue;
     }
     const IrStatement& terminator = statements.back();
+    // A target outside the function is not a successor here (the verifier rejects it; this check
+    // must not index past `in` either way).
+    const auto add = [&](std::size_t target) {
+      if (target < count) {
+        successors[b].push_back(target);
+      }
+    };
     if (terminator.op == IrOp::Branch && terminator.a.kind == IrOperandKind::Block) {
-      successors[b].push_back(terminator.a.block);
+      add(terminator.a.block);
     } else if (terminator.op == IrOp::CondBranch) {
-      if (terminator.b.kind == IrOperandKind::Block) successors[b].push_back(terminator.b.block);
-      if (b + 1 < count) successors[b].push_back(b + 1);
+      if (terminator.b.kind == IrOperandKind::Block) add(terminator.b.block);
+      add(b + 1);
     } else if (terminator.op == IrOp::Switch) {
-      if (terminator.a.kind == IrOperandKind::Block) successors[b].push_back(terminator.a.block);
-      for (const IrSwitchCase& sc : terminator.switch_cases)
-        successors[b].push_back(sc.target_block);
+      if (terminator.a.kind == IrOperandKind::Block) add(terminator.a.block);
+      for (const IrSwitchCase& sc : terminator.switch_cases) add(sc.target_block);
     }
   }
   // Simulates one block from `state`; with `report`, the first read of a clobbered register is
@@ -2349,7 +2562,12 @@ void check_call_clobbers_impl(IrFunction& function) {
         if (statement.dest.kind == IrOperandKind::Register) {
           state.erase(internal::register_family(statement.dest.reg));
         }
-      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
+      } else if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty() &&
+                 statement.op != IrOp::CondAssign &&
+                 (statement.dest.width == 0 || statement.dest.width >= 4)) {
+        // Only a write of the whole register defines it: a conditional assignment keeps the old
+        // value when its condition is false, and an 8- or 16-bit write keeps the rest of the
+        // register, so a clobber stays on those paths.
         state.erase(internal::register_family(statement.dest.reg));
       }
     }
@@ -2457,6 +2675,16 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
             "not recovered and locals are not recovered"
           : "x86-64 subset; locals are not recovered");
 
+  // Conditional branches whose target is outside this function (a conditional tail call): each
+  // branches to an exit block, appended after the function's own blocks, that calls the target and
+  // returns its result. They are patched once every block is lifted.
+  struct ConditionalTailCall {
+    std::size_t block = 0;
+    std::size_t statement = 0;
+    const Instruction* instruction = nullptr;
+  };
+  std::vector<ConditionalTailCall> conditional_tail_calls;
+
   for (const BasicBlock* block : lifter.blocks) {
     IrBlock out_block;
     out_block.address = block->address;
@@ -2546,6 +2774,15 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
         const auto target = instruction.direct_target.has_value()
                                 ? lifter.block_by_address.find(instruction.direct_target.value())
                                 : lifter.block_by_address.end();
+        if (target == lifter.block_by_address.end() && instruction.direct_target.has_value()) {
+          // The target is another function's code: a conditional tail call. The branch goes to an
+          // exit block that calls it; the block is made after the loop.
+          statement.b = IrOperand::block_ref(0);
+          lifter.push(out_block, std::move(statement));
+          conditional_tail_calls.push_back(ConditionalTailCall{
+              lifter.out.blocks.size(), out_block.statements.size() - 1, &instruction});
+          continue;
+        }
         if (target == lifter.block_by_address.end()) {
           lifter.mark_partial("conditional branch target is outside this function");
           statement.b = IrOperand::block_ref(0);
@@ -2617,10 +2854,17 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
           call.op = IrOp::Call;
           call.source_address = instruction.address;
           call.width = lifter.pointer_width;
-          call.a = instruction.direct_target.has_value()
-                       ? IrOperand::constant_value(instruction.direct_target.value(),
-                                                   lifter.pointer_width)
-                       : IrOperand::constant_value(0, lifter.pointer_width);
+          if (instruction.direct_target.has_value()) {
+            call.a =
+                IrOperand::constant_value(instruction.direct_target.value(), lifter.pointer_width);
+          } else if (!instruction.structured_operands.empty()) {
+            // An indirect jump (jmp rax, jmp [rip+x]) is called through its own operand, as an
+            // indirect call is.
+            call.a = to_ir_operand(instruction.structured_operands.front(), instruction,
+                                   lifter.pointer_width);
+          } else {
+            call.a = IrOperand::constant_value(0, lifter.pointer_width);
+          }
           if (const auto callee = lifter.known_callee(instruction)) {
             // A tail call to a function of the image with a known signature: the callee runs with
             // the caller's argument registers, and its result is what this function returns.
@@ -2809,6 +3053,57 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     lifter.out.blocks.push_back(std::move(exit_block));
     lifter.out.partial = true;
     lifter.note("conditional fallthrough leaves the function; exit path is unmodelled");
+  }
+  // The exit blocks of conditional tail calls, one per target: a call of the target, with its
+  // inferred signature when it is a known function of the image, and a return of its result.
+  std::map<std::uint64_t, std::uint32_t> tail_exit_by_target;
+  for (const ConditionalTailCall& pending : conditional_tail_calls) {
+    if (pending.block >= lifter.out.blocks.size() ||
+        pending.statement >= lifter.out.blocks[pending.block].statements.size()) {
+      continue;  // the block was not kept (the statement limit stopped the lift)
+    }
+    const Instruction& instruction = *pending.instruction;
+    const std::uint64_t target = instruction.direct_target.value();
+    auto exit = tail_exit_by_target.find(target);
+    if (exit == tail_exit_by_target.end()) {
+      IrBlock exit_block;
+      exit_block.address = target;
+      IrStatement call;
+      call.op = IrOp::Call;
+      call.source_address = instruction.address;
+      call.width = lifter.pointer_width;
+      call.a = IrOperand::constant_value(target, lifter.pointer_width);
+      if (const auto callee = lifter.known_callee(instruction)) {
+        Lifter::resolve_call_statement(call, *callee);
+        const std::string note =
+            "a conditional jump to a known function is lifted as a branch to a call with its "
+            "inferred arguments and result, followed by a return";
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      } else {
+        const std::string note = "conditional jump leaves the function; treated as a tail call";
+        lifter.out.partial = true;
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      }
+      exit_block.statements.push_back(std::move(call));
+      IrStatement tail;
+      tail.op = IrOp::Return;
+      tail.source_address = instruction.address;
+      tail.width = lifter.pointer_width;
+      tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
+      exit_block.statements.push_back(std::move(tail));
+      exit =
+          tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
+              .first;
+      lifter.out.blocks.push_back(std::move(exit_block));
+    }
+    lifter.out.blocks[pending.block].statements[pending.statement].b =
+        IrOperand::block_ref(exit->second);
   }
   const ReturnRegisters return_registers = image.architecture == Architecture::AArch64
                                                ? ReturnRegisters{"x0", "v0", true}

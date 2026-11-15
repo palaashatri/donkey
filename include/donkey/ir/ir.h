@@ -319,6 +319,9 @@ void run_ir_passes(IrFunction& function, const PassOptions& options);
 struct PseudocodeLine {
   std::string text;
   std::uint64_t source_address = 0;
+  /// Addresses of other statements this line prints in place: the step of a counted loop is
+  /// printed in its `for (...)` header, which carries the init's address as `source_address`.
+  std::vector<std::uint64_t> folded_addresses;
 };
 
 struct Pseudocode {

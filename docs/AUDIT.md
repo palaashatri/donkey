@@ -105,11 +105,90 @@ has only 94. Total: **1,893 sampled functions**, drawn from 12,531 `.text` funct
    `rsi` assignment missing from the output). The IR oracle did not catch it because it
    executes the IR, not the printed text. Guard for this class: see goal 8, step 0.
 
+6. **Resource use of the fallback structurer (introduced on this branch, fixed on this branch).**
+   The fallback nested every `if` whose arm returns inside the rest of its region's `else`, so an
+   input of N chained early-return tests recursed N levels deep and indented each line by 2N spaces:
+   memory was quadratic and the recursion unbounded. On a 512 KiB thread (the macOS default for
+   secondary threads) N = 10,000 segfaulted; at N = 5,000 the branch used 438 MiB against main's 41
+   MiB. Fixed by (a) an `if` whose taken arm cannot fall out, when both arms leave by return, closes
+   and the fall-through continues at the same level (a chain stays flat), (b) a nesting bound of 128
+   (`kMaxStructureNesting`, `ir_internal.h`, used by the fallback and by the layout structurer's
+   `emit_range`): a deeper candidate is rejected with "nesting deeper than 128 levels" and the next
+   stage or the labelled form prints it, and (c) each structurer attempt is scoped, so its
+   dominator and post-dominator sets (quadratic in the block count) are freed before the next attempt
+   builds its own. Tests: `Ir.EarlyReturnChainPrintsFlatWhenShort`,
+   `Ir.EarlyReturnChainOf5000FormatsOnASmallStack` (512 KiB thread; it segfaults before the fix),
+   `Ir.NestingThatCannotBeFlatIsRejectedNotNested`, and
+   `Ir.NestedChainDeeperThanTheBoundPrintsLabelledOnASmallStack` (1,000 genuinely nested tests on a 512
+   KiB thread: it segfaults before the bound, and prints labelled after it).
+
+   Follow-up (`6af21ee`). As first written, the flat form also fired when the fall-through was an
+   edge rather than a block to print next: in a loop body whose `if` returns on one side and goes
+   back to the loop header on the other (openssl `sub_a9c60`), the walk reached the header a second
+   time and the function was rejected with "a block is reached twice" instead of printing
+   `continue;`. Nine functions of the fixed list became labelled (openssl 2, libsqlite3 1, libc 1,
+   git 5; on the whole binaries, 71). The flat form now applies only when the fall-through is not
+   the region's stop, not a block already printed, and not the innermost loop's header or follow;
+   otherwise the nested form prints it as before. Test:
+   `Ir.LoopBodyWithAnEarlyReturnFallsBackToContinueNotFlat` (the openssl shape; fails with the
+   guard removed). Checked on every function of openssl, libsqlite3, libc and git (13,472
+   functions, `decompile --json`): the structure class of each one is the same at `6af21ee` as at
+   `cedb9db` (7,496 structured before and after; none lost, none gained), so the fixed-list counts
+   are those of step 2 of goal 8 (990 structured, 996 labelled).
+
+Stress table (`stress N stack_KiB` through `rss.py`, which caps the address space at 1.5 GiB; N
+checks followed by the irreducible tail of `Ir.IrreducibleControlFlowPrintsGotoNotLabelledBlocks`,
+2N+4 blocks). Peak RSS and wall time:
+
+| N | main `1a92abf` | branch before (`cedb9db`) | branch after (`6af21ee`), 512 KiB stack |
+|---|---|---|---|
+| 2,500 | 16 MiB, 0.1 s | 152 MiB, 0.4 s | 31 MiB, 0.2 s |
+| 5,000 | 41 MiB, 0.2 s | 438 MiB, 1.2 s | 77 MiB, 0.8 s |
+| 10,000 | 126 MiB, 0.7 s | bad_alloc, abort | 209 MiB, 3.0 s |
+| 10,000 on 512 KiB | ok | segfault | ok (the row above) |
+
+All runs are Release builds of the IR library linked into the stress driver, one at a time on an
+otherwise idle machine. After the fix the ratio to main is 1.9 at 2,500, 1.9 at 5,000 and 1.7 at
+10,000, all within 2x, and no run aborts or segfaults. Every run prints the function labelled (the
+tail is irreducible), with a maximum indentation of 2 spaces. The genuinely nested chain (`nest.cpp`:
+block 2k tests and branches to 2k+2, block 2k+1 jumps to the return block; 512 KiB stack) prints
+labelled: 13 MiB and 0.1 s at D = 1,000, and 334 MiB and 5.5 s at D = 10,000 (20,001 blocks). Main
+segfaults on that shape at D = 10,000 on a 512 KiB stack.
+
+Not fixed here, and also on main: the dominator sets are bit sets, quadratic in the block count.
+At D = 50,000 (100,001 blocks) main and this branch both end in `std::bad_alloc` under a 1.5 GiB
+address-space cap, and the CFG bound allows 200,000 blocks. Replacing the sets with an immediate
+dominator tree and interval queries is the next task for this defect class.
+
+
 ## After
 
 Measured on this machine, Release build, the same scoring as the baseline. Each row says which
 commit it is, and what changed since the baseline. Numbers are never copied between populations:
 where the population changed, the table says so.
+
+### Function starts at `6af21ee`
+
+Same scoring as the baseline table (`.cold` fragments ignored), Release build. `donkey-cli functions
+--json` on each binary.
+
+| Binary | Ground truth | Baseline recall / precision | `6af21ee` recall / precision |
+|---|---|---|---|
+| own `donkey-cli`, stripped, vs symbols | 2,077 symbols (this build) | 85.8 / 100.0 (1,973 symbols) | 99.9 / 99.9 |
+| `/usr/bin/ls` | 185 FDEs | 50.3 / 98.9 | 100.0 / 99.5 |
+| `/usr/bin/openssl` | 534 FDEs | 55.8 / 99.7 | 100.0 / 99.8 |
+| `/usr/bin/bash` | 2,342 FDEs | 88.5 / 100.0 | 100.0 / 100.0 |
+| `libsqlite3.so.0` | 2,772 FDEs | 76.7 / 100.0 | 100.0 / 100.0 |
+| `libc.so.6` | 3,785 FDEs | 79.9 / 100.0 | 100.0 / 100.0 |
+| `/usr/bin/git` | 4,472 FDEs | 68.9 / 100.0 | 100.0 / 100.0 |
+| `/usr/bin/python3.12` | 11,415 FDEs | 33.0 / 100.0 | 100.0 / 100.0 |
+
+The rows scored against `.eh_frame` are no longer independent: since G23-T1, Donkey seeds function
+starts from the same FDEs, so 100% recall there shows that the seeds are read, not that discovery
+finds functions. The independent check is the stripped own binary scored against the symbols of
+its unstripped copy: 99.9% recall and 99.9% precision. Donkey also lists 549 `.cold` fragments of
+that binary as functions of their own (each has its own FDE); they are ignored in the scores, as
+in the baseline. A binary without unwind tables (G24) is not measured here.
 
 ### Population growth
 
@@ -362,7 +441,55 @@ Pinned clang-format (`cf2018`) passes over every changed file (`src/ir/structure
 `src/ir/ir.cpp`, `src/ir/ir_internal.h`, `tests/unit/ir_test.cpp`,
 `tests/unit/decompiler_corpus_test.cpp`).
 
+#### Verification at `6af21ee` (the head of the branch before this section)
+
+| Tree | Compiler and preset | Result |
+|---|---|---|
+| `build/headless-linux` | GCC 13.3, headless | 800 of 800 pass; 0 build warnings |
+| `build/clang-headless` | Clang, headless | 800 of 800 pass; 0 build warnings |
+| `build/release-headless` | Release, headless | 801 of 801 pass |
+| `build/dev-linux` | desktop shell, UI smoke tests under `xvfb-run -a -s "-screen 0 1600x1000x24"` | 827 of 827 pass (3 platform skips: process isolation unavailable, a refused attach, an unsupported host) |
+| `build/cross-a64` | AArch64 under `qemu-aarch64` (the tree's ctest launcher), whole suite | 769 of 795 pass; the 26 that fail need what qemu-user does not give: 18 native-debugger tests launch an AArch64 child under ptrace (the x86-64 kernel cannot exec it, exit status 126), and 8 CLI and Python script tests run the AArch64 `donkey-cli` directly rather than through the launcher (no binfmt handler, so `/bin/sh` reads the ELF file). Earlier rounds ran the decompiler subset only (DecompilerCorpus, Ir, Cfg), which passes. |
+
+The CI format command (`find include src apps tests -type f \( -name '*.h' -o -name '*.cpp' \) |
+xargs clang-format --dry-run --Werror`, pinned 20.1.8) is clean over the whole tree.
+
 Not run here: the FreeBSD, macOS and Windows presets, and the package targets.
+
+#### Review fixes and the re-measurement (after goal 8)
+
+Four findings from the review of this branch were fixed, each in its own commit:
+
+1. A callee that reads a stack argument was resolved with its register arguments only, and its
+   caller was Complete with the seventh argument missing (`gcc -O1 -fno-inline`, `caller` printed
+   `rax = sub_1129(rdi, rsi, rdx, rcx, r8, r9);`). `known_callee` now refuses such a callee: a
+   dataflow over the callee's IR tracks each register as an offset from the entry rsp, and any access,
+   lea or call argument at offset 8 or more, or any stack address it cannot follow, refuses the
+   callee. Tests: `Ir.CallerOfAFunctionThatReadsAStackArgumentIsPartial` (bytes) and
+   `cli.decompile_stack_argument_caller_is_partial` (fixture `tests/fixtures/calls/stack_argument-x86_64`,
+   with its provenance). Both fail without the check.
+2. An indirect tail jump (`jmp rax`) was lifted as a call to 0 (`ls` 0x6d60 printed
+   `((void (*)(void))0x0)();`). It is now a call through its operand, as an indirect call is. Test:
+   `Ir.IndirectTailJumpCallsItsOperand` (bytes `ff e0`), which fails on the old code. `ls` 0x6d60 now
+   prints `((void (*)(void))rax)();`.
+3. `tests/fixtures/link/libtailcall.so` has its recorded build in `tests/fixtures/link/PROVENANCE.md`:
+   GCC 13.3.0, `gcc -O2 -shared -fPIC -o libtailcall.so tail.c` from a copy named `tail.c`; rebuilt
+   byte-identical. Seeds committed for `fuzz_eh_frame` (`tests/fuzz/corpus/eh_frame`) and `fuzz_pdata`
+   (`tests/fuzz/corpus/pdata`). Each target ran 60 s from a scratch copy of its corpus, exit 0:
+   `fuzz_eh_frame` 3,692,837 runs; `fuzz_pdata` 25,531 runs.
+4. The documents now describe this work as part of `main` once it merges (README, AGENTS, PARITY,
+   SUPPORT_MATRIX, the G04 ledger entry, and DESIGN §17.2).
+
+Re-measurement on the same 1,986 functions, after the fixes (`tools/audit/sample_list.py measure`):
+
+| Structured | Irreducible | Reducible but rejected | Labelled | Share | Complete | InvalidIR | Unsupported |
+|---|---|---|---|---|---|---|---|
+| 990 | 106 | 890 | 996 | 50.2% | 180 (9.1%) | 0 | 0 |
+
+Against the measurement before the fixes (step 2), every binary is unchanged except `python3.12`,
+whose call-note count moved from 235 to 236 (the stack-argument refusal). No function changed its
+verdict. The Complete share is 180 of 1,986 (9.1%); an earlier draft of PARITY row 6 said 10.1%, which
+was wrong and is corrected.
 
 ### W1: goto structuring (G04-T5)
 

@@ -1,7 +1,10 @@
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
+#include <tuple>
+#include <vector>
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
@@ -76,4 +79,113 @@ TEST(Pdata, AnalysisSeedsHiddenFunctionWithUnwindProvenance) {
     }
   }
   EXPECT_TRUE(found);
+}
+
+namespace {
+
+void put_u32(std::vector<std::byte>& file, std::size_t at, std::uint32_t value) {
+  for (std::size_t i = 0; i < 4; ++i) {
+    file[at + i] = static_cast<std::byte>((value >> (8 * i)) & 0xFFU);
+  }
+}
+
+}  // namespace
+
+TEST(Pdata, AnEntryOutsideItsSectionIsNotReadFromTheNextFileBytes) {
+  // A two-entry directory at RVA 0x5008 (24 bytes). The section holding it maps RVAs 0x5000 to
+  // 0x5013 to file offsets 0x400 to 0x413, so only the first entry is in it. The second entry's
+  // RVA, 0x5014, is backed by no file data; the bytes at 0x414 that follow the first entry in the
+  // file belong to nothing here, yet hold a plausible entry, which must not become a function.
+  constexpr std::uint64_t kImageBase = 0x140000000ULL;
+  std::vector<std::byte> file(0x600, std::byte{0});
+  put_u32(file, 0x3c, 0x40);     // e_lfanew
+  file[0x58] = std::byte{0x0b};  // PE32+ magic 0x20b
+  file[0x59] = std::byte{0x02};
+  put_u32(file, 0x58 + 108, 16);              // NumberOfRvaAndSizes
+  put_u32(file, 0x58 + 112 + 3 * 8, 0x5008);  // exception directory RVA
+  put_u32(file, 0x58 + 112 + 3 * 8 + 4, 24);  // and size: two entries
+  put_u32(file, 0x408, 0x2000);               // entry 0: begin
+  put_u32(file, 0x40c, 0x2010);               //          end
+  put_u32(file, 0x410, 0x6000);               //          unwind info
+  put_u32(file, 0x414, 0x1000);               // bytes after it: a plausible begin,
+  put_u32(file, 0x418, 0x1010);               // end
+  put_u32(file, 0x41c, 0x6000);               // and unwind info
+  file[0x500] = std::byte{0x01};              // UNWIND_INFO version 1, no chain
+
+  donkey::BinaryImage image;
+  image.format = donkey::BinaryFormat::Pe;
+  image.architecture = donkey::Architecture::X86_64;
+  image.image_base = kImageBase;
+  image.file_size = file.size();
+  donkey::Section pdata;
+  pdata.name = ".pdata";
+  pdata.address = kImageBase + 0x5000;
+  pdata.file_offset = 0x400;
+  pdata.file_size = 0x14;
+  image.sections.push_back(pdata);
+  donkey::Section xdata;
+  xdata.name = ".xdata";
+  xdata.address = kImageBase + 0x6000;
+  xdata.file_offset = 0x500;
+  xdata.file_size = 0x10;
+  image.sections.push_back(xdata);
+
+  auto read = donkey::read_pdata_of_image(image, file, 1000);
+  ASSERT_TRUE(read.has_value()) << read.diagnostic().message;
+  ASSERT_EQ(read.value().functions.size(), 1U);
+  EXPECT_EQ(read.value().functions[0].start, kImageBase + 0x2000);
+  EXPECT_EQ(read.value().malformed, 1U);
+  EXPECT_EQ(find_start(read.value(), kImageBase + 0x1000), nullptr);
+
+  // The analysis seeds from the directory, so an entry it could not read leaves it Partial and
+  // says so: a function start may be missing.
+  auto analyzed = donkey::analyze(image, file);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  EXPECT_TRUE(analyzed.value().partial);
+  bool reported = false;
+  for (const donkey::Diagnostic& diagnostic : analyzed.value().diagnostics) {
+    reported = reported || diagnostic.code == "analysis.pdata_incomplete";
+  }
+  EXPECT_TRUE(reported);
+}
+
+TEST(Pdata, AnEntryWithAGapInItsMiddleIsNotRead) {
+  // One 12-byte entry at RVA 0x5000. Section A maps RVAs 0x5000 to 0x5003 to file 0x400, section B
+  // maps 0x5008 to 0x500b to file 0x408, and nothing maps 0x5004 to 0x5007. The entry's first and
+  // last bytes map to 0x400 and 0x40b, 11 apart, as if it were contiguous; its EndAddress field is
+  // not mapped at all, so the entry is not read (the bytes at file 0x404 belong to nothing here).
+  constexpr std::uint64_t kImageBase = 0x140000000ULL;
+  std::vector<std::byte> file(0x600, std::byte{0});
+  put_u32(file, 0x3c, 0x40);
+  file[0x58] = std::byte{0x0b};
+  file[0x59] = std::byte{0x02};
+  put_u32(file, 0x58 + 108, 16);
+  put_u32(file, 0x58 + 112 + 3 * 8, 0x5000);
+  put_u32(file, 0x58 + 112 + 3 * 8 + 4, 12);
+  put_u32(file, 0x400, 0x2000);  // BeginAddress (mapped by section A)
+  put_u32(file, 0x404, 0x2010);  // the bytes under the unmapped EndAddress RVAs
+  put_u32(file, 0x408, 0x6000);  // UnwindInfo (mapped by section B)
+  file[0x500] = std::byte{0x01};
+
+  donkey::BinaryImage image;
+  image.format = donkey::BinaryFormat::Pe;
+  image.architecture = donkey::Architecture::X86_64;
+  image.image_base = kImageBase;
+  image.file_size = file.size();
+  for (const auto& [name, rva, offset, size] :
+       {std::tuple<const char*, std::uint64_t, std::uint64_t, std::uint64_t>{".a", 0x5000, 0x400,
+                                                                             4},
+        {".b", 0x5008, 0x408, 4},
+        {".xdata", 0x6000, 0x500, 0x10}}) {
+    donkey::Section section;
+    section.name = name;
+    section.address = kImageBase + rva;
+    section.file_offset = offset;
+    section.file_size = size;
+    image.sections.push_back(section);
+  }
+  auto read = donkey::read_pdata_of_image(image, file, 1000);
+  ASSERT_TRUE(read.has_value()) << read.diagnostic().message;
+  EXPECT_TRUE(read.value().functions.empty());
+  EXPECT_EQ(read.value().malformed, 1U);
 }

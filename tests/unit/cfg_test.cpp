@@ -3,8 +3,10 @@
 #include <cstddef>
 #include <cstdint>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "donkey/analysis/analysis.h"
@@ -530,6 +532,119 @@ TEST(Cfg, TheBlockBoundHoldsAcrossFunctions) {
   EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.block_limit"), 1U);
 }
 
+namespace {
+
+/// Bytes, padded with int3 to `size`, and a function symbol at each of `starts`.
+std::pair<std::vector<std::byte>, BinaryImage> image_with_functions(
+    std::initializer_list<std::pair<std::size_t, std::vector<std::uint8_t>>> pieces,
+    std::size_t size, std::initializer_list<std::uint64_t> starts) {
+  std::vector<std::byte> data(size, std::byte{0xcc});
+  for (const auto& [offset, bytes] : pieces) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      data[offset + i] = static_cast<std::byte>(bytes[i]);
+    }
+  }
+  BinaryImage image = synthetic_image(data.size());
+  std::size_t n = 0;
+  for (const std::uint64_t start : starts) {
+    donkey::Symbol symbol;
+    symbol.name = "f" + std::to_string(n++);
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  return {std::move(data), std::move(image)};
+}
+
+}  // namespace
+
+// A conditional jump to another function's start is a conditional tail call, as an unconditional
+// one is: the caller does not take in the other function's body, and the edge is kept.
+TEST(Cfg, AConditionalJumpToAnotherFunctionDoesNotTakeInItsBody) {
+  // f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret.  f1 (0x1010): xor eax, eax; ret.
+  auto [data, image] =
+      image_with_functions({{0x0, {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}},
+                            {0x10, {0x31, 0xc0, 0xc3}}},
+                           0x20, {0x1000, 0x1010});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* caller = nullptr;
+  for (const donkey::Function& function : result.value().functions) {
+    if (function.address == 0x1000) {
+      caller = &function;
+    }
+  }
+  ASSERT_NE(caller, nullptr);
+  ASSERT_TRUE(caller->has_extent);
+  EXPECT_EQ(caller->end_address, 0x100aU);
+  EXPECT_EQ(caller->block_count, 2U);
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1002 && edge.to == 0x1010 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalTrue);
+  }
+  EXPECT_TRUE(kept);
+}
+
+// The instruction budget counts distinct instructions, so one that an earlier walk counted is
+// still followed after the budget is spent. f0 and f1 both jump to one unseeded ret; with a budget
+// of three, f0 counts its jump and the ret, f1 counts its jump, and then reaches the counted ret.
+TEST(Cfg, AnInstructionCountedByAnotherWalkIsFollowedAfterTheBudget) {
+  auto [data, image] =
+      image_with_functions({{0x0, {0xe9, 0x1b, 0x00, 0x00, 0x00}},   // 0x1000: jmp 0x1020
+                            {0x10, {0xe9, 0x0b, 0x00, 0x00, 0x00}},  // 0x1010: jmp 0x1020
+                            {0x20, {0xc3}}},                         // 0x1020: ret
+                           0x21, {0x1000, 0x1010});
+  auto full = donkey::analyze(image, data);
+  ASSERT_TRUE(full.has_value()) << full.diagnostic().message;
+  AnalysisOptions options;
+  options.max_instructions = 3;
+  auto cfg = donkey::build_control_flow_graph(image, full.value().instructions,
+                                              full.value().functions, options, data);
+  ASSERT_TRUE(cfg.has_value()) << cfg.diagnostic().message;
+  EXPECT_EQ(count_diagnostics(cfg.value(), "analysis.instruction_limit"), 0U);
+  for (const donkey::Function& function : cfg.value().functions) {
+    EXPECT_EQ(function.block_count, 2U) << std::hex << function.address;
+  }
+}
+
+// The traversal's work is bounded, not only its distinct instructions: 1,000 stubs each jump into
+// one shared run of 5,000 instructions that no seed starts, so every stub walks the whole run
+// again (5,000,000 visits of 6,001 distinct instructions). The walk stops at the work limit,
+// reports it once, and the graph is Partial.
+TEST(Cfg, RepeatedWalksOfSharedCodeStopAtTheWorkLimit) {
+  constexpr std::size_t kStubs = 1000;
+  constexpr std::size_t kRun = 5000;
+  std::vector<std::byte> data;
+  const std::size_t run_start = 5 * kStubs;
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    const auto rel = static_cast<std::uint32_t>(run_start - (5 * k + 5));
+    data.push_back(std::byte{0xE9});  // jmp rel32 to the shared run
+    for (int shift = 0; shift < 32; shift += 8) {
+      data.push_back(static_cast<std::byte>((rel >> shift) & 0xFFU));
+    }
+  }
+  for (std::size_t j = 0; j < kRun; ++j) {
+    data.push_back(std::byte{0x90});  // nop
+  }
+  data.push_back(std::byte{0xC3});  // ret
+  auto image = synthetic_image(data.size());
+  for (std::size_t k = 0; k < kStubs; ++k) {
+    donkey::Symbol symbol;
+    symbol.name = "stub" + std::to_string(k);
+    symbol.address = 0x1000 + 5 * k;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.partial);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.traversal_limit"), 1U);
+  EXPECT_EQ(count_diagnostics(result.value().cfg, "analysis.instruction_limit"), 0U);
+}
+
 // The traversal's instruction budget is reported once, with the number of functions it cut short,
 // not once per function. The graph is built directly from a full decode, with a smaller budget, so
 // the traversal (not the linear decode) is what runs out.
@@ -699,4 +814,12 @@ TEST(Cfg, CallThatFallsIntoAnotherFunctionEndsTheCaller) {
   ASSERT_TRUE(caller->has_extent);
   EXPECT_EQ(caller->end_address, 0x1005U);
   EXPECT_EQ(caller->block_count, 1U);
+  // The walk stops at 0x1005, but control goes on there: the graph keeps the edge from the call
+  // into the next function's start.
+  bool kept = false;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    kept = kept || (edge.from == 0x1000 && edge.to == 0x1005 &&
+                    edge.kind == donkey::CfgEdgeKind::ConditionalFalse);
+  }
+  EXPECT_TRUE(kept);
 }

@@ -492,6 +492,8 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
   // Unwind tables (G23-T1): every FDE of `.eh_frame` names a function's range, stripped or not.
   // A start found only here is marked with the unwind provenance.
+  // A table that could not be read in full may leave function starts out, so the result is
+  // Partial and says why.
   std::set<std::uint64_t> unwind_starts;
   if (auto frames = read_eh_frame_of_image(image, file); frames) {
     for (const EhFrameFunction& frame : frames.value().functions) {
@@ -500,7 +502,17 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         unwind_starts.insert(frame.start);
       }
     }
+    if (frames.value().malformed_records > 0 || frames.value().truncated) {
+      result.partial = true;
+      result.diagnostics.push_back(Diagnostic::make(
+          Status::Partial, "analysis.eh_frame_incomplete",
+          ".eh_frame was not read in full (" + std::to_string(frames.value().malformed_records) +
+              " unreadable records" + (frames.value().truncated ? ", walk stopped early" : "") +
+              "); function starts it names may be missing",
+          std::nullopt));
+    }
   } else {
+    result.partial = true;
     result.diagnostics.push_back(frames.diagnostic());
   }
   // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
@@ -511,7 +523,18 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         unwind_starts.insert(frame.start);
       }
     }
+    if (pdata.value().malformed > 0 || pdata.value().truncated) {
+      result.partial = true;
+      result.diagnostics.push_back(
+          Diagnostic::make(Status::Partial, "analysis.pdata_incomplete",
+                           "the exception directory was not read in full (" +
+                               std::to_string(pdata.value().malformed) + " unreadable entries" +
+                               (pdata.value().truncated ? ", entry limit reached" : "") +
+                               "); function starts it names may be missing",
+                           std::nullopt));
+    }
   } else {
+    result.partial = true;
     result.diagnostics.push_back(pdata.diagnostic());
   }
   std::set<std::uint64_t> user_defined;

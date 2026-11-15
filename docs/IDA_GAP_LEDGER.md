@@ -176,10 +176,10 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Measured only on the differential corpus; no whole-program measurement | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | A call prints as `sub_x();` with no arguments or result, and every function that makes a call is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Six call-heavy corpus functions verified at -O0 and -O2, and at -O3) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete without resolving its own calls, returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Six call-heavy corpus functions verified at -O0 and -O2, and at -O3) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | TODO (T2 needs an owner decision on header sources) |
-| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | Not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols and call targets only | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -1755,11 +1755,16 @@ Complete but not executed is not verified: report the two counts separately.
 **Why.** Both reference tools print `r = f(a, b);`. Donkey prints
 `sub_401000();`, with no arguments and no result.
 
-**Donkey today.** `lift_call` in `src/ir/lift.cpp` and
-`src/ir/lift_aarch64.cpp` keeps only the target and marks the function
-Partial ("outgoing call arguments and return values follow no modelled ABI").
-So every function that makes a call is Partial. Baseline ([`AUDIT.md`](AUDIT.md)): 1,009 of
-the 1,893 sampled functions carry that note.
+**Donkey today.** On x86-64 under System V (ELF and Mach-O; a Win64 callee's parameters are not
+in the System V order, so a PE call with arguments is not resolved), `lift_call` in
+`src/ir/lift.cpp` resolves a direct call to a same-image callee when that callee lifts Complete without resolving its own calls (in practice a
+leaf), returns an integer and reads no stack-passed argument (`known_callee`, T1 and T2 partial):
+the call carries the callee's System V arguments and result, `check_call_clobbers` refuses a read
+of a register the callee may have changed, and the caller can be Complete. Every other call, and
+every AArch64 call (`src/ir/lift_aarch64.cpp`), keeps only its target and marks the function
+Partial ("outgoing call arguments and return values follow no modelled ABI"). On the fixed list of
+1,986 functions, 1,497 carried that note at `665c9e4` ([`AUDIT.md`](AUDIT.md)). Baseline: 1,009 of the
+1,893 functions of the first sample carried it.
 
 **Tasks.**
 
@@ -1887,9 +1892,14 @@ Generate from headers and record the header version.
 every function in a stripped binary. Exception tables give the `try` and
 `catch` regions. Both reference tools read them.
 
-**Donkey today.** Not read. Baseline ([`AUDIT.md`](AUDIT.md)): the FDE starts of `.eh_frame` are
-not used as seeds, so function-start recall against them is 33.0% (`python3.12`) to 88.5%
-(`bash`) on the audited system binaries.
+**Donkey today.** `src/binary/eh_frame.cpp` reads the FDE ranges of ELF `.eh_frame` (CIE
+versions 1, 3 and 4; the pointer encodings the FDEs use) and `src/binary/pdata.cpp` the PE x64
+RUNTIME_FUNCTION entries, skipping chained ones; both seed function starts, and a table that cannot
+be read in full makes the analysis Partial with a diagnostic (T1 done, T2 partial). CFI programs,
+LSDA, `.xdata` and ARM64 unwind data are not read (T3 to T5). Baseline
+([`AUDIT.md`](AUDIT.md)): before T1, recall against the FDE starts was 33.0% (`python3.12`) to
+88.5% (`bash`); it is now 100%, which shows the seeds are read, not that discovery works without
+them.
 
 **Tasks.**
 
@@ -1914,8 +1924,12 @@ binaries, and a C++ fixture with `try`/`catch` shows its regions.
 reference tools. Everything else works on what this step finds.
 
 **Donkey today.** `src/analysis/analysis.cpp` seeds functions from the entry
-point, exported function symbols and call targets. There is no prologue scan,
-no no-return analysis, no thunk classification and no stack-depth analysis.
+point, exported function symbols, call targets and the unwind tables (G23-T1, T2). A walk stops
+at a jump or a fall-through into another function's start and at an import stub (T2 partial), and
+its traversal work is bounded. There is no prologue scan, no no-return analysis, no thunk
+classification and no stack-depth analysis, so a binary without unwind tables gets the first three
+seed sources only. On the stripped own CLI, recall against its symbols is 99.9% with 99.9%
+precision ([`AUDIT.md`](AUDIT.md), "Function starts at `6af21ee`").
 Baseline ([`AUDIT.md`](AUDIT.md)): function-start recall 85.8% on the stripped own CLI against
 its symbols (precision 100.0%); against `.eh_frame` entries, 68.0% on the stripped CLI, and
 33.0% to 88.5% on the system binaries, with precision 98.9% to 100%.

@@ -976,6 +976,12 @@ class Machine {
               fail("ir.eval_call", "the call has no callee IR to run");
               return std::nullopt;
             }
+            if (!s.signature_inferred) {
+              // Without a modelled signature the call has no argument or result mapping: running
+              // the callee would pass it no arguments and drop its result.
+              fail("ir.eval_call", "the call has no modelled signature");
+              return std::nullopt;
+            }
             std::vector<std::uint64_t> args;
             for (const IrOperand& argument : s.call_arguments) {
               const auto v = value_of(argument);
@@ -989,11 +995,16 @@ class Machine {
             IrEvalOptions nested = options_;
             nested.call_depth = options_.call_depth + 1;
             nested.call_stack_pointer = sp - 8;  // the return address the callee's entry expects
+            // The callee runs on what is left of this evaluation's step budget, and its steps
+            // count as this evaluation's.
+            nested.max_steps = options_.max_steps - steps;
             auto result = evaluate_ir(*callee, args, memory_, nested);
             if (!result) {
               fail(result.diagnostic().code, result.diagnostic().message);
               return std::nullopt;
             }
+            steps += result.value().steps;
+            steps_ = steps;
             ok = s.dest.kind != IrOperandKind::Register ||
                  assign(s.dest, w, result.value().return_value);
             break;

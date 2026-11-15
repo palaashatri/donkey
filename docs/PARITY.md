@@ -71,9 +71,9 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 
 State on 2026-11-13, with the work integrated that day (ledger rows G09, G10, G12, G14, G15,
 G16 and G17). The measured baseline of the audit that began the Wave 1 work is in
-[`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). On 2026-11-14 the branch
-`claude/funny-meitner-cpc7oc` (not merged) changed rows 4, 6 and 22 as described there; the levels
-did not change. The IDA Pro and Ghidra columns are short
+[`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). On 2026-11-14 the goal 1 to 10 work on
+branch `claude/funny-meitner-cpc7oc`, merged into `main` with this change, changed the evidence in
+rows 4, 6, 7 and 22 as described there. The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 
@@ -100,7 +100,7 @@ detail. "Gaps" names the ledger entries that move the row.
 | 19 | Diffing and version tracking | Lumina; third-party BinDiff and Diaphora | Version Tracking, Program Diff, BSim | None | None | G28 |
 | 20 | Collaboration | IDA Teams | Ghidra Server shared projects | Single-user SQLite projects with crash-safe backup and restore | None | G32 |
 | 21 | Managed code and other containers | Dalvik, .NET and more | DEX, Java class files and more | None | None | G30 |
-| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions and one real 123 MB library benchmarked. No incremental re-analysis. On the branch the CFG block bound follows the decoded instruction count (with a floor of 200,000); the AArch64 cross build of donkey-cli has 0 functions Unsupported (was 745). The stripped 8.3 MB own CLI analyses in 2.15 s and 645 MiB peak RSS ([AUDIT.md](AUDIT.md)) | Basic | G16 |
+| 22 | Scale | Tuned for very large binaries | Tuned for very large binaries | Files of 64 MiB and more are memory-mapped; generated programs up to 80,000 functions and one real 123 MB library benchmarked. No incremental re-analysis. Since the goal 1 to 10 work, the CFG block bound follows the decoded instruction count (with a floor of 200,000); the AArch64 cross build of donkey-cli has 0 functions Unsupported (was 745). The stripped 8.3 MB own CLI analyses in 2.15 s and 645 MiB peak RSS ([AUDIT.md](AUDIT.md)) | Basic | G16 |
 | 23 | Signed releases | Signed installers | Unsigned archive | Packages for four operating systems; ad-hoc signed `.app`, unsigned `.exe` | Blocked | G18 |
 | 24 | Accessibility | Platform accessibility APIs | Java accessibility | Keyboard-only use; no screen reader | Blocked | G19 |
 

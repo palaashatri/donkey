@@ -21,6 +21,11 @@ namespace {
 // instruction, and a function's blocks are built from its own walk, so the bound is linear in the
 // code that was decoded (which the file size limits): a large image is not cut at a fixed size.
 constexpr std::size_t kMinBlockBound = 200'000;
+// The traversal work bound: visits of instructions by all functions' walks, repeats included, at
+// most kVisitsPerInstruction per decoded instruction and never fewer than kMinVisitBudget. A real
+// binary visits each instruction about once (shared code is rare), so the bound is far above it.
+constexpr std::size_t kMinVisitBudget = 4'000'000;
+constexpr std::size_t kVisitsPerInstruction = 16;
 
 std::string fallback_name(std::uint64_t address) {
   char buffer[32];
@@ -954,6 +959,14 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       ++decoded;
     }
   };
+  // Distinct instructions bound the decoded coverage, not the work: many seeds that all reach one
+  // shared stretch of code would each walk it again. Every visit counts against this budget; when
+  // it runs out the current walk stops and no further seed is traversed.
+  const std::size_t visit_budget =
+      std::max(kMinVisitBudget, instructions.size() * kVisitsPerInstruction);
+  std::size_t visits = 0;
+  bool visit_budget_reached = false;
+  std::uint64_t work_limited_function = 0;
   // Set when a block would exceed the bound. Once it is set, no further seed is traversed, so
   // the graph never holds more blocks than the bound.
   bool block_bound_reached = false;
@@ -973,7 +986,7 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
   const std::map<std::uint64_t, std::string> import_stubs = plt_stub_imports(image, file);
 
   for (std::size_t seed_index = 0; seed_index < seeds.size(); ++seed_index) {
-    if (block_bound_reached) {
+    if (block_bound_reached || visit_budget_reached) {
       break;
     }
     if (options.cancellation_token.is_cancelled()) {
@@ -1020,10 +1033,18 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         if (visited.contains(address)) {
           break;
         }
-        if (decoded >= decoded_limit) {
+        // The budget counts distinct instructions: one that another walk already counted can be
+        // visited after it is spent.
+        if (decoded >= decoded_limit && !reached_anywhere.contains(address)) {
           truncated = true;
           break;
         }
+        if (visits >= visit_budget) {
+          truncated = true;
+          visit_budget_reached = true;
+          break;
+        }
+        ++visits;
         visited.insert(address);
         reached.push_back(address);
         count_distinct(address);
@@ -1042,10 +1063,16 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             indirect = true;  // the slot is not a decoded instruction of this path
             break;
           }
-          if (decoded >= decoded_limit) {
+          if (decoded >= decoded_limit && !reached_anywhere.contains(next)) {
             truncated = true;
             break;
           }
+          if (visits >= visit_budget) {
+            truncated = true;
+            visit_budget_reached = true;
+            break;
+          }
+          ++visits;
           const Instruction& delay = instructions[slot->second];
           if (is_branch_likely(instruction.mnemonic)) {
             note_once(graph, "analysis.mips_branch_likely",
@@ -1101,11 +1128,18 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             break;
           case InstructionClass::ConditionalJump:
             if (instruction.direct_target.has_value()) {
-              const std::size_t keep = std::min<std::size_t>(2, run.size());
-              entered_by.emplace(instruction.direct_target.value(),
-                                 std::vector<std::uint32_t>(
-                                     run.end() - static_cast<std::ptrdiff_t>(keep), run.end()));
-              worklist.push_back(instruction.direct_target.value());
+              const std::uint64_t target = instruction.direct_target.value();
+              // A conditional jump to another function's start (or to an import stub) is a
+              // conditional tail call, as an unconditional one is: the target's code is that
+              // function's, so it is not followed. The edge is kept.
+              if (target == function.address ||
+                  (!function_starts.contains(target) && !import_stubs.contains(target))) {
+                const std::size_t keep = std::min<std::size_t>(2, run.size());
+                entered_by.emplace(target,
+                                   std::vector<std::uint32_t>(
+                                       run.end() - static_cast<std::ptrdiff_t>(keep), run.end()));
+                worklist.push_back(target);
+              }
             } else {
               indirect = true;
             }
@@ -1136,10 +1170,14 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
 
     if (truncated) {
       graph.partial = true;
-      if (truncated_functions == 0) {
-        first_truncated = function.address;
+      if (visit_budget_reached) {
+        work_limited_function = function.address;  // reported on its own, below
+      } else {
+        if (truncated_functions == 0) {
+          first_truncated = function.address;
+        }
+        ++truncated_functions;
       }
-      ++truncated_functions;
     }
 
     if (reached.empty()) {
@@ -1305,7 +1343,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           } else {
             graph.edges.push_back(CfgEdge{last.address, 0, CfgEdgeKind::Indirect});
           }
-          if (block_by_address.contains(fallthrough)) {
+          if (block_by_address.contains(fallthrough) ||
+              (fallthrough != function.address && function_starts.contains(fallthrough))) {
+            // Also when the fall-through is another function's start: the walk stopped there
+            // (G24), but control still goes on into that function.
             graph.edges.push_back(
                 CfgEdge{last.address, fallthrough, CfgEdgeKind::ConditionalFalse});
           }
@@ -1323,6 +1364,11 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
               block.end_address == graph.blocks[index + 1].address) {
             graph.edges.push_back(CfgEdge{block.end_address, graph.blocks[index + 1].address,
                                           CfgEdgeKind::ConditionalFalse});
+          } else if (fallthrough != function.address && function_starts.contains(fallthrough)) {
+            // The block falls through into another function's start, where the walk stopped
+            // (G24): the edge leaves this function. Its source is the block's last instruction.
+            graph.edges.push_back(
+                CfgEdge{last_instruction.address, fallthrough, CfgEdgeKind::ConditionalFalse});
           }
           break;
       }
@@ -1335,6 +1381,14 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         "control-flow traversal hit the instruction limit in " +
             std::to_string(truncated_functions) + " function(s); their extents are lower bounds",
         first_truncated));
+  }
+  if (visit_budget_reached) {
+    graph.diagnostics.push_back(Diagnostic::make(
+        Status::ResourceLimit, "analysis.traversal_limit",
+        "control-flow traversal stopped after " + std::to_string(visits) +
+            " instruction visits (its work limit); the function it was walking is a lower bound "
+            "and the seeds after it are not traversed",
+        work_limited_function));
   }
   return graph;
 }

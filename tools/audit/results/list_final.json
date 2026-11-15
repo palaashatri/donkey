@@ -4,6 +4,7 @@
  "binaries": {
   "ls": {
    "path": "/usr/bin/ls",
+   "sha256": "2726eb35864608ff34969fbf45ef4afcbba95eefed5ce5653c9c0124c4cd26cf",
    "population": 186,
    "addresses": [
     19824,
@@ -196,6 +197,7 @@
   },
   "openssl": {
    "path": "/usr/bin/openssl",
+   "sha256": "b4f547c0f16272d1cc7f870330a6f2c243710c335e7a99c734ff7a0c6fdb2503",
    "population": 535,
    "addresses": [
     295848,
@@ -502,6 +504,7 @@
   },
   "bash": {
    "path": "/usr/bin/bash",
+   "sha256": "bc5945feb8bd26203ebfafea5ce1878bb2e32cb8fb50ab7ae395cfb1e1aaaef1",
    "population": 2343,
    "addresses": [
     204902,
@@ -808,6 +811,7 @@
   },
   "libsqlite3": {
    "path": "/usr/lib/x86_64-linux-gnu/libsqlite3.so.0",
+   "sha256": "85265a9d4afca6f4b325ceb078b669c754fb881abed4cafe91ccebe9d625d975",
    "population": 2773,
    "addresses": [
     132761,
@@ -1114,6 +1118,7 @@
   },
   "libc": {
    "path": "/usr/lib/x86_64-linux-gnu/libc.so.6",
+   "sha256": "3a15d66867d83762c7f2f1e37359cb8f6c5743edb369c65285cb0b1c4f7498bf",
    "population": 3786,
    "addresses": [
     166354,
@@ -1420,6 +1425,7 @@
   },
   "git": {
    "path": "/usr/bin/git",
+   "sha256": "eb54b535467e0975c1284d4c4d08eea779aeb248a5d34b02e2ee171382e22201",
    "population": 4473,
    "addresses": [
     130782,
@@ -1726,6 +1732,7 @@
   },
   "python3.12": {
    "path": "/usr/bin/python3.12",
+   "sha256": "e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f",
    "population": 11416,
    "addresses": [
     4336889,

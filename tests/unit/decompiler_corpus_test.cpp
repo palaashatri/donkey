@@ -34,6 +34,7 @@
 #include "donkey/project/types.h"
 #include "ir_internal.h"
 #include "lift_internal.h"
+#include "registers.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -420,6 +421,45 @@ std::string describe_difference(const Observation& before, const Observation& af
 /// Compares every version with the first (the lifter's output) on all corpus
 /// vectors. Returns "" when they all agree, otherwise a description of the
 /// first difference.
+/// The callees of a call-heavy function, lifted on demand from the library under test (G21-T1):
+/// the interpreter runs a resolved call's callee from its own IR. The object hands out a pointer to
+/// its resolver, so it is neither copied nor moved.
+class CalleeResolver {
+ public:
+  CalleeResolver(const donkey::BinaryImage& image, const donkey::AnalysisResult& analysis)
+      : image_(image),
+        analysis_(analysis),
+        resolve_([this](std::uint64_t address) { return lookup(address); }) {}
+  CalleeResolver(const CalleeResolver&) = delete;
+  CalleeResolver& operator=(const CalleeResolver&) = delete;
+
+  [[nodiscard]] const std::function<const donkey::IrFunction*(std::uint64_t)>* get() const {
+    return &resolve_;
+  }
+
+ private:
+  const donkey::IrFunction* lookup(std::uint64_t address) {
+    if (const auto known = lifted_.find(address); known != lifted_.end()) {
+      return &known->second;
+    }
+    for (const donkey::Function& candidate : analysis_.functions) {
+      if (candidate.address == address) {
+        auto callee = donkey::lift_function(image_, analysis_, candidate);
+        if (!callee) {
+          return nullptr;
+        }
+        return &(lifted_[address] = std::move(callee.value()));
+      }
+    }
+    return nullptr;
+  }
+
+  const donkey::BinaryImage& image_;
+  const donkey::AnalysisResult& analysis_;
+  std::map<std::uint64_t, donkey::IrFunction> lifted_;
+  std::function<const donkey::IrFunction*(std::uint64_t)> resolve_;
+};
+
 std::string first_difference(const std::vector<PassSnapshot>& versions, const CorpusFunction& entry,
                              const donkey::BinaryImage& image, std::span<const std::byte> file,
                              const donkey::IrEvalOptions& options) {
@@ -467,27 +507,9 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     donkey::IrEvalOptions eval_options;
     eval_options.architecture = loaded.value().image.architecture;
     eval_options.convention = host_convention();
-    // The callees of a call-heavy function, lifted on demand from this library (G21-T1). The
-    // interpreter runs the callee's own IR; the native call runs the compiled code.
-    std::map<std::uint64_t, donkey::IrFunction> callee_ir;
-    const std::function<const donkey::IrFunction*(std::uint64_t)> resolve_callee =
-        [&](std::uint64_t address) -> const donkey::IrFunction* {
-      if (const auto known = callee_ir.find(address); known != callee_ir.end()) {
-        return &known->second;
-      }
-      for (const donkey::Function& candidate : analysis.value().functions) {
-        if (candidate.address == address) {
-          auto lifted_callee =
-              donkey::lift_function(loaded.value().image, analysis.value(), candidate);
-          if (!lifted_callee) {
-            return nullptr;
-          }
-          return &(callee_ir[address] = std::move(lifted_callee.value()));
-        }
-      }
-      return nullptr;
-    };
-    eval_options.callees = &resolve_callee;
+    // The interpreter runs a callee's own IR; the native call runs the compiled code.
+    const CalleeResolver callees(loaded.value().image, analysis.value());
+    eval_options.callees = callees.get();
 
     for (const CorpusFunction& entry : kCorpus) {
       Outcome outcome;
@@ -925,6 +947,10 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
     donkey::IrEvalOptions eval_options;
     eval_options.architecture = loaded.value().image.architecture;
     eval_options.convention = host_convention();
+    // Without callees a resolved call fails in every snapshot alike, and a pass that changed the
+    // code after the call would go unseen.
+    const CalleeResolver callees(loaded.value().image, analysis.value());
+    eval_options.callees = callees.get();
 
     for (const CorpusFunction& entry : kCorpus) {
       const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
@@ -977,6 +1003,70 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
     }
   }
   EXPECT_EQ(checked, std::size(kLibraries) * std::size(kCorpus));
+}
+
+// The same holds after a call: a pass that turns an addition into rax after a resolved call into a
+// subtraction has to be reported. Without the callee resolver both snapshots fail at the call and
+// compare equal, so this also checks that the resolver is in place. Every library and every
+// call-heavy corpus function with such an addition is checked, and at least one must exist. Calls
+// resolve under System V only, so on a Win64 host the test is skipped.
+TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
+#if !(defined(__x86_64__) || defined(_M_X64))
+  GTEST_SKIP() << "calls are resolved on x86-64 only";
+#endif
+  if (host_convention() != donkey::IrCallingConvention::SysV64) {
+    GTEST_SKIP() << "calls are resolved under the System V convention only (G21-T1): the host's "
+                    "corpus is Win64, where every call with arguments stays unresolved";
+  }
+  std::size_t checked = 0;
+  for (const Library& library : kLibraries) {
+    auto loaded = donkey::load_binary(library.path);
+    ASSERT_TRUE(loaded.has_value()) << library.path;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    ASSERT_TRUE(analysis.has_value());
+    donkey::IrEvalOptions eval_options;
+    eval_options.architecture = loaded.value().image.architecture;
+    eval_options.convention = host_convention();
+    const CalleeResolver callees(loaded.value().image, analysis.value());
+    eval_options.callees = callees.get();
+    for (const CorpusFunction& entry : kCorpus) {
+      if (std::string_view(entry.name).rfind("c_call_", 0) != 0) {
+        continue;
+      }
+      const donkey::Function* function = find_corpus_function(analysis.value(), entry.name);
+      ASSERT_NE(function, nullptr) << library.level << " " << entry.name;
+      donkey::LiftOptions raw_options;
+      raw_options.run_passes = false;
+      auto raw =
+          donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
+      ASSERT_TRUE(raw.has_value());
+      donkey::IrFunction broken = raw.value();
+      bool after_call = false;
+      bool changed = false;
+      for (donkey::IrBlock& block : broken.blocks) {
+        for (donkey::IrStatement& statement : block.statements) {
+          if (statement.op == donkey::IrOp::Call && statement.signature_inferred) {
+            after_call = true;
+          } else if (after_call && !changed && statement.op == donkey::IrOp::Add &&
+                     statement.dest.kind == donkey::IrOperandKind::Register &&
+                     donkey::internal::register_family(statement.dest.reg) == "rax") {
+            statement.op = donkey::IrOp::Sub;
+            changed = true;
+          }
+        }
+      }
+      if (!changed) {
+        continue;
+      }
+      const std::vector<PassSnapshot> versions{{"lift", raw.value()}, {"broken", broken}};
+      EXPECT_NE(first_difference(versions, entry, loaded.value().image, loaded.value().data,
+                                 eval_options),
+                "")
+          << library.level << " " << entry.name;
+      ++checked;
+    }
+  }
+  EXPECT_GT(checked, 0U) << "no resolved call followed by an addition into rax in the corpus";
 }
 
 // The checker must not be vacuous: a pass that turns the first addition of
@@ -1581,9 +1671,6 @@ TEST(DecompilerCorpus, AppliedPrototypeThatContradictsTheFunctionIsRefused) {
   refused(bad_name, "ir.prototype_name");
 }
 
-// Every statement the lifter keeps must be printed, unless it is a flag setter that the printer
-// folds into the branch it feeds. The oracle interprets IR, not the printed text, so a statement
-// dropped by the printer would pass every other test; this check looks at the text.
 TEST(DecompilerCorpus, EveryPrintedFunctionPassesTheControlFlowCheck) {
   // G04-T5: every function with verified IR is printed, and the printed control flow is the IR's.
   // The gate in structure_function refuses a candidate that fails the check, so a labelled result
@@ -1638,6 +1725,39 @@ TEST(DecompilerCorpus, EveryPrintedFunctionPassesTheControlFlowCheck) {
   RecordProperty("oracle_rejections", static_cast<int>(rejections));
 }
 
+// Every statement the lifter keeps must be printed, unless it is a flag setter that the printer
+// folds into the branch it feeds. The oracle interprets IR, not the printed text, so a statement
+// dropped by the printer would pass every other test; this check looks at the text.
+/// The kept statements of `function` that `printed` leaves out: their source address is on no
+/// line, neither as the line's own statement nor as one it folds in (the step of a counted loop is
+/// printed in the `for (...)` header, whose line names the step's statements). Flag setters,
+/// control flow and statements without an address are not counted; `checked` counts the rest.
+std::vector<const donkey::IrStatement*> unprinted_statements(const donkey::IrFunction& function,
+                                                             const donkey::Pseudocode& printed,
+                                                             std::size_t& checked) {
+  std::set<std::uint64_t> printed_addresses;
+  for (const donkey::PseudocodeLine& line : printed.lines) {
+    printed_addresses.insert(line.source_address);
+    printed_addresses.insert(line.folded_addresses.begin(), line.folded_addresses.end());
+  }
+  std::vector<const donkey::IrStatement*> missing;
+  for (const donkey::IrBlock& block : function.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.source_address == 0 || statement.op == donkey::IrOp::Compare ||
+          statement.op == donkey::IrOp::Test || statement.op == donkey::IrOp::FCompare ||
+          statement.op == donkey::IrOp::Branch || statement.op == donkey::IrOp::CondBranch ||
+          statement.op == donkey::IrOp::Switch || statement.op == donkey::IrOp::Return) {
+        continue;
+      }
+      ++checked;
+      if (printed_addresses.count(statement.source_address) == 0) {
+        missing.push_back(&statement);
+      }
+    }
+  }
+  return missing;
+}
+
 TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
   std::size_t checked = 0;
   std::vector<std::string> missing;
@@ -1656,42 +1776,14 @@ TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
       if (!printed) {
         continue;
       }
-      std::set<std::uint64_t> printed_addresses;
-      for (const donkey::PseudocodeLine& line : printed.value().lines) {
-        printed_addresses.insert(line.source_address);
-      }
-      // The step of a counted loop is printed in the `for (...)` header, with its operand
-      // temporaries folded into it, and the header line carries only the address of the init
-      // statement. The exemption is the whole latch block of a back edge, and only in a function
-      // that prints a `for (` header; every other unprinted statement is reported.
-      const bool prints_for_header = printed.value().full_text.find("for (") != std::string::npos;
-      for (std::size_t block_index = 0; block_index < lifted.value().blocks.size(); ++block_index) {
-        const donkey::IrBlock& block = lifted.value().blocks[block_index];
-        bool loop_latch = false;
-        if (prints_for_header && !block.statements.empty()) {
-          const donkey::IrStatement& last = block.statements.back();
-          loop_latch = (last.op == donkey::IrOp::Branch && last.a.block <= block_index) ||
-                       (last.op == donkey::IrOp::CondBranch && last.b.block <= block_index);
-        }
-        for (std::size_t i = 0; i < block.statements.size(); ++i) {
-          const donkey::IrStatement& statement = block.statements[i];
-          if (loop_latch || statement.source_address == 0 ||
-              statement.op == donkey::IrOp::Compare || statement.op == donkey::IrOp::Test ||
-              statement.op == donkey::IrOp::FCompare || statement.op == donkey::IrOp::Branch ||
-              statement.op == donkey::IrOp::CondBranch || statement.op == donkey::IrOp::Switch ||
-              statement.op == donkey::IrOp::Return) {
-            continue;
-          }
-          ++checked;
-          if (printed_addresses.count(statement.source_address) == 0) {
-            char buffer[128];
-            std::snprintf(buffer, sizeof buffer, "%s %s@0x%llx op=%d", library.level,
-                          function.name.c_str(),
-                          static_cast<unsigned long long>(statement.source_address),
-                          static_cast<int>(statement.op));
-            missing.emplace_back(buffer);
-          }
-        }
+      for (const donkey::IrStatement* statement :
+           unprinted_statements(lifted.value(), printed.value(), checked)) {
+        char buffer[128];
+        std::snprintf(buffer, sizeof buffer, "%s %s@0x%llx op=%d", library.level,
+                      function.name.c_str(),
+                      static_cast<unsigned long long>(statement->source_address),
+                      static_cast<int>(statement->op));
+        missing.emplace_back(buffer);
       }
     }
   }
@@ -1703,4 +1795,89 @@ TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
   EXPECT_TRUE(missing.empty()) << missing.size() << " kept statements are not printed:\n" << report;
 }
 
+// The guard is not vacuous. A counted loop whose latch holds a body statement and the step: the
+// printed function passes it. With the body statement's line removed, it reports that statement;
+// with the header's folded step removed, it reports the step. A latch is never exempt as a whole.
+TEST(DecompilerCorpus, ThePrintedStatementGuardReportsAMissingLatchStatement) {
+  using donkey::IrOp;
+  using donkey::IrOperand;
+  donkey::IrFunction function;
+  function.address = 0x1000;
+  function.name = "counted";
+  function.return_width = 8;
+  for (const std::uint64_t address : {0x1000ULL, 0x1008ULL, 0x100cULL, 0x1014ULL}) {
+    donkey::IrBlock block;
+    block.address = address;
+    function.blocks.push_back(block);
+  }
+  const auto reg = [](const char* name) { return IrOperand::register_ref(name, 8); };
+  donkey::IrStatement init;  // rax = 0
+  init.op = IrOp::Assign;
+  init.dest = reg("rax");
+  init.a = IrOperand::constant_value(0, 8);
+  init.width = 8;
+  init.source_address = 0x1000;
+  donkey::IrStatement to_header;
+  to_header.op = IrOp::Branch;
+  to_header.a = IrOperand::block_ref(1);
+  to_header.width = 8;
+  donkey::IrStatement compare;  // rax >= 10 leaves the loop
+  compare.op = IrOp::Compare;
+  compare.a = reg("rax");
+  compare.b = IrOperand::constant_value(10, 8);
+  compare.condition = donkey::IrCondition::SignedGreaterEqual;
+  compare.width = 8;
+  compare.source_address = 0x1008;
+  donkey::IrStatement leave;
+  leave.op = IrOp::CondBranch;
+  leave.condition = donkey::IrCondition::SignedGreaterEqual;
+  leave.a = reg("rax");
+  leave.b = IrOperand::block_ref(3);
+  leave.width = 8;
+  leave.source_address = 0x100a;
+  donkey::IrStatement body;  // rbx = rbx + 2, in the latch
+  body.op = IrOp::Add;
+  body.dest = reg("rbx");
+  body.a = reg("rbx");
+  body.b = IrOperand::constant_value(2, 8);
+  body.width = 8;
+  body.source_address = 0x100c;
+  donkey::IrStatement step = body;  // rax = rax + 1, the step
+  step.dest = reg("rax");
+  step.a = reg("rax");
+  step.b = IrOperand::constant_value(1, 8);
+  step.source_address = 0x1010;
+  donkey::IrStatement back = to_header;
+  donkey::IrStatement ret;
+  ret.op = IrOp::Return;
+  ret.a = reg("rax");
+  ret.width = 8;
+  function.blocks[0].statements = {init, to_header};
+  function.blocks[1].statements = {compare, leave};
+  function.blocks[2].statements = {body, step, back};
+  function.blocks[3].statements = {ret};
+  ASSERT_TRUE(donkey::verify_ir(function).has_value());
+
+  auto printed = donkey::format_pseudocode_lines(function);
+  ASSERT_TRUE(printed.has_value()) << printed.diagnostic().message;
+  ASSERT_NE(printed.value().full_text.find("for ("), std::string::npos)
+      << printed.value().full_text;
+  std::size_t checked = 0;
+  EXPECT_TRUE(unprinted_statements(function, printed.value(), checked).empty());
+
+  donkey::Pseudocode without_body = printed.value();
+  std::erase_if(without_body.lines,
+                [](const donkey::PseudocodeLine& line) { return line.source_address == 0x100c; });
+  const auto body_missing = unprinted_statements(function, without_body, checked);
+  ASSERT_EQ(body_missing.size(), 1U);
+  EXPECT_EQ(body_missing.front()->source_address, 0x100cU);
+
+  donkey::Pseudocode without_step = printed.value();
+  for (donkey::PseudocodeLine& line : without_step.lines) {
+    line.folded_addresses.clear();
+  }
+  const auto step_missing = unprinted_statements(function, without_step, checked);
+  ASSERT_EQ(step_missing.size(), 1U);
+  EXPECT_EQ(step_missing.front()->source_address, 0x1010U);
+}
 }  // namespace
