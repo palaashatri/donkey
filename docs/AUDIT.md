@@ -807,3 +807,36 @@ Time and memory of `donkey-cli decompile --json` on every function (Release buil
 The speed-up comes from summarising each callee once per image instead of lifting it again at each
 call site.
 
+
+### Segment-relative memory (fs/gs) was lifted as absolute
+
+The x86 decoder dropped Capstone's `mem.segment`, so an `fs:`- or `gs:`-relative operand looked like
+an access to a fixed address. The stack-protector load `mov %fs:0x28,%rax` printed as
+`rax = *(u64 *)(0x28);`, a data reference to address 0x28 was recorded, and thread-local accesses
+(`errno`, the locale) were lifted as loads and stores of fixed addresses. `sigemptyset` in libc, for
+example, printed `errno = EINVAL` (`movl $0x16, %fs:(%rax)`) as `*(u32 *)(rax) = 0x16;` and was
+Complete.
+
+Fix: `MemoryOperand::segment` keeps `fs` or `gs`. Such an operand gets no data reference, the
+jump-table emulator gives it no address, and the lifter makes any instruction with one (`lea`
+excepted: it ignores segments) Unsupported with the note "fs- or gs-relative memory (thread-local
+storage) is not modelled". Tests: `Decode.X86FsRelativeOperandKeepsItsSegment`,
+`Ir.FsRelativeLoadIsNotLiftedAsAnAbsoluteAddress`, `Ir.StackCanaryCheckStaysPartial`.
+
+Measured on the fixed list of 1,986 functions (before: `main` at `ca53fcc`):
+
+| Binary | Complete |
+|---|---|
+| `ls` (186) | 14 → 14 |
+| `openssl` (300) | 17 → 17 |
+| `bash` (300) | 28 → 28 |
+| `libsqlite3` (300) | 45 → 45 |
+| `libc` (300) | 39 → 34 |
+| `git` (300) | 15 → 15 |
+| `python3.12` (300) | 26 → 24 |
+| Total | 184 → 177 |
+
+The 7 functions that lost Complete were Complete with a wrong meaning: `sigemptyset`, `__sysctl`,
+`__ns_name_unpack`, `iswupper` and `sub_144cc0` in libc, `sub_434942` and `sub_4311b6` in python3.12.
+No function changed the other way. Modelling thread-local storage (an opaque thread block that the
+evaluator reads and writes) would bring the canary checks and `errno` writes back; it is not done.
