@@ -69,11 +69,17 @@ def got_slot_names(path):
 
 
 def body_lines(pseudocode):
-    """The statement lines: no comment lines and no function header."""
+    """The statement lines: no comment lines and no function header. The header is the first line
+    that is not a comment, whatever the function is called (`u64 sub_4d7f(void) {` or a named one
+    such as `void siglongjmp(u64 a0) {`), so it is never counted as a call."""
     lines = []
+    header_seen = False
     for line in pseudocode.splitlines():
         text = line.strip()
-        if not text or text.startswith("//") or re.match(r"^\w[\w ]*\bsub_[0-9a-f]+\(.*\)\s*\{$", text):
+        if not text or text.startswith("//"):
+            continue
+        if not header_seen:
+            header_seen = True
             continue
         lines.append(text)
     return lines

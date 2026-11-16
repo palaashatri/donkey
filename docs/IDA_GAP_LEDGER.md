@@ -2217,10 +2217,10 @@ independent of Donkey's own stub reader. No-return names are matched on that nam
   `BIO_puts` 121/27, `__printf_chk` 112/33, `memcpy` 94/62, `strdup` 84/30, `OPENSSL_sk_num` 76/34,
   `OPENSSL_sk_value` 74/35, `BIO_free` 70/34, `BIO_ctrl` 65/28, `__fprintf_chk` 64/23, `__strcpy_chk` 59/35.
 - (c) No-return imports in the sample, call sites (functions): `__stack_chk_fail` 409 (407), `__assert_fail` 25 (21),
-  `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3), all through stubs; and 1 call printed by name
-  (`siglongjmp`, a same-image function in libc). Total functions with a no-return call: 441.
+  `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3), all through stubs (no call is printed
+  by a no-return name today). Total functions with a no-return call: 440.
   `error` (not counted above, argument not checked): 14 sites. The other names on the list (`err`, `verr`,
-  `errx`, `verrx`, `longjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
+  `errx`, `verrx`, `longjmp`, `siglongjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
   `__cxa_throw`, `__cxa_rethrow`, `_Unwind_Resume`, `_ZSt9terminatev`, `__libc_fatal`) have 0 sites in the sample.
 - (d) 288 functions are Partial with the note "the returned register is not determined by the definitions that reach
   the return" and call a no-return import (of 1,151 Partial functions with that note, 183 Complete functions overall).
@@ -2318,7 +2318,7 @@ requires.
   `lift_aarch64.cpp` 2202 for AArch64). T3 removes only the rax note and the synthetic return. Whether such a function
   may become Complete is owner decision 3 below; until it is decided, it stays Partial. A function is Complete only if
   the oracle executes it and compares the returning paths with the compiled code.
-- *Stack-protector checks.* 407 of the 441 functions with a no-return call call `__stack_chk_fail`. Their canary load
+- *Stack-protector checks.* 407 of the 440 functions with a no-return call call `__stack_chk_fail`. Their canary load
   is `mov %fs:0x28, %rax`. On `main` the decoder drops the `fs` override and the lifter prints it as
   `rax = *(u64 *)(0x28);`, a read of address 0x28. That defect is fixed separately (branch `agent/decode/fs-gs-segment-soundness`: the lifter refuses an
   `fs`- or `gs`-relative access as Unsupported). So a canary function stays Partial after T3 until thread-local reads
