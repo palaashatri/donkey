@@ -2225,6 +2225,10 @@ independent of Donkey's own stub reader. No-return names are matched on that nam
 - (d) 288 functions are Partial with the note "the returned register is not determined by the definitions that reach
   the return" and call a no-return import (of 1,151 Partial functions with that note, 183 Complete functions overall).
 - Of the 469 no-return call sites (excluding `error`), 322 are followed by a printed `return rax;`.
+- *After #64 (the fs/gs soundness fix, merged as `a7364d2`), the same tool on the same sample:* (a), (b), (c), the 440
+  functions and the 322 sites are unchanged. (d) becomes 295 of 1,163 Partial functions with the rax note, and 177
+  functions are Complete. The fs-relative accesses that #64 makes Unsupported account for the difference. T3's
+  before-values are the ones in this line.
 
 **Example, checked by hand.** `/usr/bin/ls`, function `sub_4d7a`: `objdump -d` shows `4d7a: call 4750 <abort@plt>`,
 and `4d7f` is the next function (`sub_4d7f` exists in the output). The decompiler prints `sub_4750();` then
@@ -2327,9 +2331,9 @@ requires.
   may become Complete is owner decision 3 below; until it is decided, it stays Partial. A function is Complete only if
   the oracle executes it and compares the returning paths with the compiled code.
 - *Stack-protector checks.* 407 of the 440 functions with a no-return call call `__stack_chk_fail`. Their canary load
-  is `mov %fs:0x28, %rax`. On `main` the decoder drops the `fs` override and the lifter prints it as
-  `rax = *(u64 *)(0x28);`, a read of address 0x28. That defect is fixed separately (branch `agent/decode/fs-gs-segment-soundness`: the lifter refuses an
-  `fs`- or `gs`-relative access as Unsupported). So a canary function stays Partial after T3 until thread-local reads
+  is `mov %fs:0x28, %rax`. At `7bba838` the decoder dropped the `fs` override and the lifter printed it as
+  `rax = *(u64 *)(0x28);`, a read of address 0x28. That defect was fixed separately in #64 (merged as `a7364d2`: the
+  lifter refuses an `fs`- or `gs`-relative access as Unsupported). So a canary function stays Partial after T3 until thread-local reads
   are modelled: the canary is read twice from one slot that the function does not write, and the evaluator would need
   that slot as an opaque value. That model is a later step, not part of T3.
 - *Pitfalls.* A wrong no-return mark deletes real code (the bytes after the call become unreachable). Prevention: only
@@ -2352,8 +2356,8 @@ requires.
     and one that returns on some inputs stays Partial until owner decision 3 is recorded; after that decision it may be
     Complete when every returning input agrees with the compiled code)
   - `cli.decompile_prints_no_return_call_without_return` (CLI, a committed fixture)
-- *Measurement.* Before (this plan, above): 469 no-return call sites, 322 followed by a printed `return`, 288
-  functions with the rax note that call a no-return import. Target after T3: 0 no-return sites followed by a printed
+- *Measurement.* Before (this plan, above, after #64): 469 no-return call sites, 322 followed by a printed `return`,
+  295 functions with the rax note that call a no-return import. Target after T3: 0 no-return sites followed by a printed
   `return`, and the count in (d) falls. Functions that are still Partial are reported with the reason that remains.
   Measured with `tools/audit/import_calls.py` over the same 1,986 functions, and the numbers go in the PR.
 - *Relation to G21-T5.* G21-T5 ("a call to a no-return function ends the block") is the IR-side part of this task.
