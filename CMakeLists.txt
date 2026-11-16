@@ -33,6 +33,15 @@ if(DONKEY_STATIC_RUNTIME)
   endif()
 endif()
 
+# A fuzz build instruments every target, the libraries and their dependencies included: libFuzzer
+# needs coverage from the parsers it drives, and ASan and UBSan must check their code, not only the
+# harness. `fuzzer-no-link` adds the coverage without libFuzzer's `main`; the fuzz executables
+# below link libFuzzer itself with `-fsanitize=fuzzer`.
+if(DONKEY_BUILD_FUZZERS AND CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-fsanitize=fuzzer-no-link,address,undefined -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=address,undefined)
+endif()
+
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
 include(DonkeyWarnings)
@@ -160,6 +169,7 @@ add_library(donkey_project STATIC
   src/project/cdecl.cpp
   src/project/project.cpp
   src/project/string_literals.cpp
+  src/project/typelib.cpp
   src/project/types.cpp
 )
 add_library(donkey::project ALIAS donkey_project)
@@ -377,6 +387,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_cdecl PRIVATE cxx_std_20)
   target_compile_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_cdecl PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_typelib fuzz/fuzz_typelib.cpp)
+  target_link_libraries(fuzz_typelib PRIVATE donkey::project)
+  target_compile_features(fuzz_typelib PRIVATE cxx_std_20)
+  target_compile_options(fuzz_typelib PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_typelib PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_sig fuzz/fuzz_sig.cpp)
   target_link_libraries(fuzz_sig PRIVATE donkey::analysis)
   target_compile_features(fuzz_sig PRIVATE cxx_std_20)

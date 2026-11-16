@@ -177,7 +177,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled; the type store, C declaration parser and CLI apply exist (G05) | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 to T4 TODO; T2 needs an owner decision on header sources) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 to T4 TODO; T2 needs an owner decision on header sources) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -1995,6 +1995,47 @@ and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/p
 - *Done when.* The tests and the fuzz run pass on Linux x86-64 with `-Werror`; a fixture library loads
   with provenance `Library`; each refusal above has a test and a stable code; the install rule is in
   `CMakeLists.txt` and the `install` target copies the directory (checked on Linux).
+
+**T1 report (2026-11-15).** Done. What was built and what was measured:
+- `include/donkey/project/typelib.h` and `src/project/typelib.cpp`: `read_type_library` (no file
+  access) and `load_type_library` (checks the file size before it reads anything). The format is
+  described in [`TYPELIBS.md`](TYPELIBS.md) and in the header comment. Every refusal in the list
+  above has a stable `typelib.` code, plus `typelib.carriage_return` (a CR byte: line endings must be
+  LF), `typelib.record_order` and `typelib.io`. A parser refusal keeps its `cdecl.` code, and its
+  `line L, column C:` names the line in the library file.
+- Two choices made here. (1) `declarations` counts the body parsed with the built-in names only, so
+  a library must parse on its own. It is parsed once, on its own, so the table it is read into
+  cannot change what its text means; its types are then moved up to take their ids from that
+  table's `next_id()`. (2) Names follow C's two name spaces: struct,
+  union and enum tags share one, and typedef and function names share the other. `struct stat` next
+  to the function `stat`, and `typedef struct point point`, are accepted. A typedef and a function
+  with one name is `typelib.type_and_function`, also when the typedef names an untagged struct. Any
+  other repeat within one name space is `typelib.duplicate_name`. The parser lists the names it
+  declares with their name space (`CDeclaredName`, a new optional output of
+  `parse_c_declarations`).
+- Tests: 32 `TypeLib.*` tests in `tests/unit/typelib_test.cpp`, the eight named above among them, one
+  for each refusal code, and one that accepts a tag and an ordinary name with one spelling. The fixture
+  is `tests/fixtures/types/typelib-small.dtl` (hand-written, MIT; 18 declarations), and it loads with
+  provenance `Library`.
+- Fuzz: `fuzz/fuzz_typelib.cpp`, registered next to `fuzz_cdecl`. The seed corpus is
+  `tests/fuzz/corpus/typelib/` (31 seeds: three valid files, an empty body, and one seed for each
+  refusal; each seed was checked to reach the outcome its name gives). Review found that a fuzz build
+  compiled only the harnesses with `-fsanitize`: the libraries, the parsers included, had no coverage
+  instrumentation and no ASan or UBSan, for every fuzz target. A fuzz build now compiles every target
+  with `-fsanitize=fuzzer-no-link,address,undefined` (`CMakeLists.txt`). With that, a 60 s run of
+  `fuzz_typelib` (Clang 18, Linux x86-64) started from 9,466 coverage edges, made 76,090 runs, grew the
+  corpus to 304 inputs and found nothing; `fuzz_cdecl` made 414,063 runs in 60 s and found nothing.
+- Install: `cmake/DonkeyPackaging.cmake` installs `typelibs/` to `share/donkey/typelibs` (Linux and
+  FreeBSD), `typelibs` (Windows) and `Donkey.app/Contents/Resources/typelibs` (the macOS app). Checked
+  on Linux only: `cmake --install build/headless-linux --prefix <dir>` installs
+  `share/donkey/typelibs/README.md`. No library is bundled: `typelibs/` holds a README, because the header
+  sources are T2's owner decision.
+- Per-user libraries: `src/project/project.cpp` has no per-user directory rule (the caller passes
+  the project path), so T1 defines none. `load_type_library` takes a path, and T3 chooses where user
+  libraries live.
+- Builds: GCC Debug 888/888 tests, Clang Debug 888/888, GCC Release 889/889 (each with `-Werror`), all on
+  Linux x86-64. The new files also pass a MinGW-w64 `-fsyntax-only -Werror` check. macOS, Windows and
+  FreeBSD are covered by CI only.
 
 **T2 — generator [owner decision].** The owner decides which header sources are allowed. This plan
 does not pick one. Licences below are as I understand them and must be checked in each source before

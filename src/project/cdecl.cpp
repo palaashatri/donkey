@@ -319,6 +319,9 @@ class Parser {
     }
   }
 
+  /// Lists the names the text declares in `names` (see `CDeclaredName`).
+  void record_names(std::vector<CDeclaredName>* names) { names_ = names; }
+
   Result<std::vector<TypeDefinition>> run() {
     while (!at_end()) {
       if (auto declared = parse_external_declaration(); !declared) {
@@ -432,6 +435,12 @@ class Parser {
       return std::nullopt;
     }
     return SizeAlign{size.value(), alignment.value()};
+  }
+
+  void note(const std::string& name, CNameSpace space, TypeKind kind) {
+    if (names_ != nullptr) {
+      names_->push_back(CDeclaredName{name, space, kind});
+    }
   }
 
   TypeId make_pointer(TypeId target) {
@@ -711,6 +720,7 @@ class Parser {
         id = add(std::move(shell));
         if (!tag.empty()) {
           tags.emplace(tag, id);
+          note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
         }
       }
       incomplete_.insert(id);
@@ -737,6 +747,7 @@ class Parser {
     shell.name = tag;
     const TypeId id = add(std::move(shell));
     tags.emplace(tag, id);
+    note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
     incomplete_.insert(id);
     return TagRef{id, false};
   }
@@ -899,6 +910,7 @@ class Parser {
     const TypeId id = add(std::move(definition));
     if (!tag.empty()) {
       enum_tags_.emplace(tag, id);
+      note(tag, CNameSpace::Tag, TypeKind::Enum);
     }
     return id;
   }
@@ -1121,6 +1133,7 @@ class Parser {
           named.name = declared.name;
           replace(named);
           typedef_names_.emplace(declared.name, declared.type);
+          note(declared.name, CNameSpace::Ordinary, TypeKind::Typedef);
         } else {
           TypeDefinition typedef_definition;
           typedef_definition.kind = TypeKind::Typedef;
@@ -1128,6 +1141,7 @@ class Parser {
           typedef_definition.target = declared.type;
           const TypeId id = add(std::move(typedef_definition));
           typedef_names_.emplace(declared.name, id);
+          note(declared.name, CNameSpace::Ordinary, TypeKind::Typedef);
         }
       } else if (declared.is_function) {
         // A prototype: the function type takes the function's name.
@@ -1137,6 +1151,7 @@ class Parser {
         }
         named.name = declared.name;
         replace(named);
+        note(declared.name, CNameSpace::Ordinary, TypeKind::Function);
       } else {
         return located<void>(declared.line, declared.column, "cdecl.variable",
                              "'" + declared.name +
@@ -1157,6 +1172,8 @@ class Parser {
   CDeclarationOptions options_;
   TypeTable working_;
   TypeId next_{};
+  /// Where the declared names go (`parse_c_declarations`'s `names`), or null.
+  std::vector<CDeclaredName>* names_ = nullptr;
   std::vector<TypeDefinition> out_;
   std::map<std::string, TypeId> struct_tags_;
   std::map<std::string, TypeId> union_tags_;
@@ -1171,7 +1188,11 @@ class Parser {
 
 Result<std::vector<TypeDefinition>> parse_c_declarations(std::string_view text,
                                                          const TypeTable& known,
-                                                         const CDeclarationOptions& options) {
+                                                         const CDeclarationOptions& options,
+                                                         std::vector<CDeclaredName>* names) {
+  if (names != nullptr) {
+    names->clear();
+  }
   if (text.size() > kMaxCDeclarationBytes) {
     return make_error<std::vector<TypeDefinition>>(Status::ResourceLimit, "cdecl.too_large",
                                                    "the declarations are larger than 1 MiB");
@@ -1189,6 +1210,7 @@ Result<std::vector<TypeDefinition>> parse_c_declarations(std::string_view text,
     return propagate<std::vector<TypeDefinition>>(tokens);
   }
   Parser parser(std::move(tokens.value()), known, options);
+  parser.record_names(names);
   auto declared = parser.run();
   if (!declared) {
     return declared;

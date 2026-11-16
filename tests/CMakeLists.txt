@@ -170,6 +170,7 @@ add_executable(donkey_unit_tests
   unit/user_ranges_test.cpp
   unit/foundation_test.cpp
   unit/json_test.cpp
+  unit/typelib_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp

@@ -1,0 +1,26 @@
+donkey-typelib 1
+library: donkey-typelib-fixture
+library_version: 1
+platform: linux
+architecture: x86_64
+abi: sysv
+data_model: LP64
+pointer_size: 8
+long_size: 8
+char_is_signed: true
+source: hand-written for the G22-T1 reader (tests/fixtures/types/typelib-small.dtl)
+source_sha256: d1e0d3920f76020abd355c0da29a0acbd220e9ece046e9d86c60c500e87969aa
+licence: MIT
+licence_file: LICENSE
+licence_sha256: c5ce9b9190d17c0832a887253d505ecf9d078910531f65c310a4f294789a2438
+generator: hand-written 1
+generator_command: none; the file was written by hand
+preprocessor: none
+created: 2026-11-15
+body_sha256: 6a2534a1880084ec7968cf03d7554fb886b036bd5c1a0521c43e610ff61802a0
+declarations: 9
+
+struct stat { int64_t size; };
+int32_t stat(const char *path, struct stat *out);
+struct point { int32_t x; int32_t y; };
+typedef struct point point;
