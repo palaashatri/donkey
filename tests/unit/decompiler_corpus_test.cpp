@@ -18,6 +18,7 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <span>
 #include <sstream>
@@ -102,6 +103,7 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_call_loop", 'i', "n"},
     {"c_call_wide", 'l', "ll"},
     {"c_call_chain", 'i', "ii"},
+    {"c_call_nested", 'i', "ii"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
     {"c_add128_hi", 'U', "UUUU"},
@@ -432,7 +434,10 @@ class CalleeResolver {
   CalleeResolver(const donkey::BinaryImage& image, const donkey::AnalysisResult& analysis)
       : image_(image),
         analysis_(analysis),
-        resolve_([this](std::uint64_t address) { return lookup(address); }) {}
+        resolve_([this](std::uint64_t address) { return lookup(address); }) {
+    // One cache of callee summaries for every callee of this image (G21-T2).
+    options_.call_summaries = std::make_shared<donkey::CallSummaryCache>();
+  }
   CalleeResolver(const CalleeResolver&) = delete;
   CalleeResolver& operator=(const CalleeResolver&) = delete;
 
@@ -447,7 +452,7 @@ class CalleeResolver {
     }
     for (const donkey::Function& candidate : analysis_.functions) {
       if (candidate.address == address) {
-        auto callee = donkey::lift_function(image_, analysis_, candidate);
+        auto callee = donkey::lift_function(image_, analysis_, candidate, options_);
         if (!callee) {
           return nullptr;
         }
@@ -459,6 +464,7 @@ class CalleeResolver {
 
   const donkey::BinaryImage& image_;
   const donkey::AnalysisResult& analysis_;
+  donkey::LiftOptions options_;
   std::map<std::uint64_t, donkey::IrFunction> lifted_;
   std::function<const donkey::IrFunction*(std::uint64_t)> resolve_;
 };
@@ -676,6 +682,22 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
       EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
     }
+  }
+  // A call chain two levels deep (G21-T2): the helper's own calls resolve first, so the caller's
+  // call resolves and the interpreter runs both levels. Measured Complete at every level under
+  // Clang 18.1 and GCC 13.3 where calls resolve (System V); before call summaries it was Partial.
+  if ((clang18 || gcc13_linux) && host_convention() == donkey::IrCallingConvention::SysV64) {
+    bool seen = false;
+    for (const Outcome& o : outcomes) {
+      if (o.function != "c_call_nested") {
+        continue;
+      }
+      seen = true;
+      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+    }
+    EXPECT_TRUE(seen) << "c_call_nested is missing from the corpus";
   }
 #endif
 }

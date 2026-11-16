@@ -12,6 +12,9 @@
 #include <initializer_list>
 #include <iterator>
 #include <limits>
+#include <map>
+#include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -6909,4 +6912,365 @@ TEST(Ir, AStructureBuiltOnTheReorderedCopyNamesTheCopysBlocks) {
   ASSERT_EQ(structure.outcome, donkey::detail::StructureOutcome::Structured) << structure.refusal;
   ASSERT_NE(structure.described, nullptr) << "the layout structured it: pick another layout";
   EXPECT_FALSE(check_structured_control_flow(*structure.described, structure.lines).has_value());
+}
+
+// G21-T2 continued: calls to non-leaf callees, resolved bottom-up.
+namespace {
+
+/// Machine code laid out at fixed addresses. Gaps are int3, and a call is a rel32 call instruction.
+class CodeLayout {
+ public:
+  explicit CodeLayout(std::uint64_t base) : base_(base) {}
+
+  void put(std::uint64_t address, std::initializer_list<std::uint8_t> bytes) {
+    const auto start = static_cast<std::size_t>(address - base_);
+    if (code_.size() < start + bytes.size()) {
+      code_.resize(start + bytes.size(), 0xcc);
+    }
+    std::copy(bytes.begin(), bytes.end(), code_.begin() + static_cast<std::ptrdiff_t>(start));
+  }
+
+  void call(std::uint64_t from, std::uint64_t target) {
+    const auto rel = static_cast<std::uint32_t>(static_cast<std::int32_t>(
+        static_cast<std::int64_t>(target) - static_cast<std::int64_t>(from + 5)));
+    put(from, {0xe8, static_cast<std::uint8_t>(rel), static_cast<std::uint8_t>(rel >> 8),
+               static_cast<std::uint8_t>(rel >> 16), static_cast<std::uint8_t>(rel >> 24)});
+  }
+
+  [[nodiscard]] const std::vector<std::uint8_t>& bytes() const { return code_; }
+
+ private:
+  std::uint64_t base_;
+  std::vector<std::uint8_t> code_;
+};
+
+struct AnalysedCode {
+  donkey::BinaryImage image;
+  donkey::AnalysisResult analysis;
+};
+
+/// Analyses `raw` (at 0x1000). `starts` are function starts the user gives, for functions that no
+/// call reaches.
+std::optional<AnalysedCode> analyse_code(const std::vector<std::uint8_t>& raw,
+                                         std::vector<std::uint64_t> starts = {}) {
+  std::vector<std::byte> data;
+  data.reserve(raw.size());
+  for (const std::uint8_t b : raw) {
+    data.push_back(static_cast<std::byte>(b));
+  }
+  AnalysedCode out{synthetic_image(data.size()), {}};
+  donkey::AnalysisOptions options;
+  options.user_function_starts = std::move(starts);
+  auto analyzed = donkey::analyze(out.image, data, options);
+  if (!analyzed.has_value()) {
+    ADD_FAILURE() << analyzed.diagnostic().message;
+    return std::nullopt;
+  }
+  out.analysis = std::move(analyzed.value());
+  return out;
+}
+
+std::optional<donkey::IrFunction> lift_at(const AnalysedCode& code, std::uint64_t address,
+                                          const donkey::LiftOptions& options = {}) {
+  const donkey::Function* function = function_at(code.analysis, address);
+  if (function == nullptr) {
+    ADD_FAILURE() << "no function at " << std::hex << address;
+    return std::nullopt;
+  }
+  auto lifted = donkey::lift_function(code.image, code.analysis, *function, options);
+  if (!lifted.has_value()) {
+    ADD_FAILURE() << lifted.diagnostic().message;
+    return std::nullopt;
+  }
+  return lifted.value();
+}
+
+const donkey::IrStatement* first_call(const donkey::IrFunction& function) {
+  for (const donkey::IrBlock& block : function.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call) {
+        return &statement;
+      }
+    }
+  }
+  return nullptr;
+}
+
+bool has_note(const donkey::IrFunction& function, const std::string& text) {
+  return std::any_of(function.notes.begin(), function.notes.end(),
+                     [&](const std::string& note) { return note.find(text) != std::string::npos; });
+}
+
+/// Runs `entry` in the interpreter, with `functions` (by address) as the callees' IR.
+donkey::Result<donkey::IrEvalResult> run_program(
+    const donkey::IrFunction& entry, const std::map<std::uint64_t, donkey::IrFunction>& functions) {
+  const std::function<const donkey::IrFunction*(std::uint64_t)> resolve =
+      [&](std::uint64_t address) -> const donkey::IrFunction* {
+    const auto found = functions.find(address);
+    return found == functions.end() ? nullptr : &found->second;
+  };
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.callees = &resolve;
+  return donkey::evaluate_ir(entry, {}, memory, options);
+}
+
+/// A chain of `callees` functions from `base`: each calls the next at +0x10, and the last one
+/// returns 7 without calling anything.
+void place_chain(CodeLayout& code, std::uint64_t base, std::size_t callees) {
+  for (std::size_t k = 0; k < callees; ++k) {
+    const std::uint64_t address = base + 0x10 * k;
+    if (k + 1 < callees) {
+      code.call(address, address + 0x10);
+      code.put(address + 5, {0xc3});
+    } else {
+      code.put(address, {0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3});  // mov eax, 7; ret
+    }
+  }
+}
+
+/// The layout of a caller at 0x1000 that calls a chain of `callees` functions at 0x1010.
+CodeLayout chain_layout(std::size_t callees) {
+  CodeLayout code(0x1000);
+  code.call(0x1000, 0x1010);
+  code.put(0x1005, {0xc3});
+  place_chain(code, 0x1010, callees);
+  return code;
+}
+
+}  // namespace
+
+TEST(Ir, ANonLeafCalleeIsResolvedWhenItsOwnCallsAre) {
+  // caller 0x1000: mov rdi, 3; mov rsi, 4; call mid; ret.
+  // mid 0x1020: call leaf; add rax, 1; ret.  leaf 0x1030: mov rax, rdi; add rax, rsi; ret.
+  // The result is 3 + 4 + 1 = 8.
+  CodeLayout code(0x1000);
+  code.put(0x1000, {0x48, 0xc7, 0xc7, 0x03, 0x00, 0x00, 0x00});  // mov rdi, 3
+  code.put(0x1007, {0x48, 0xc7, 0xc6, 0x04, 0x00, 0x00, 0x00});  // mov rsi, 4
+  code.call(0x100e, 0x1020);
+  code.put(0x1013, {0xc3});
+  code.call(0x1020, 0x1030);
+  code.put(0x1025, {0x48, 0x83, 0xc0, 0x01, 0xc3});              // add rax, 1; ret
+  code.put(0x1030, {0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0xc3});  // mov rax, rdi; add rax, rsi; ret
+  const auto analysed = analyse_code(code.bytes());
+  ASSERT_TRUE(analysed.has_value());
+  const auto caller = lift_at(*analysed, 0x1000);
+  const auto mid = lift_at(*analysed, 0x1020);
+  const auto leaf = lift_at(*analysed, 0x1030);
+  ASSERT_TRUE(caller.has_value() && mid.has_value() && leaf.has_value());
+  EXPECT_FALSE(leaf->partial);
+  EXPECT_FALSE(mid->partial);
+  EXPECT_FALSE(caller->partial);
+  const donkey::IrStatement* call = first_call(*caller);
+  ASSERT_NE(call, nullptr);
+  ASSERT_EQ(call->call_arguments.size(), 2u);
+  EXPECT_EQ(call->call_arguments[0].reg, "rdi");
+  EXPECT_EQ(call->call_arguments[1].reg, "rsi");
+  const std::map<std::uint64_t, donkey::IrFunction> callees{{0x1020, *mid}, {0x1030, *leaf}};
+  auto result = run_program(*caller, callees);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 8u);
+}
+
+TEST(Ir, ARecursiveCalleeStaysUnresolved) {
+  // Self recursion: the caller 0x1000 calls f 0x1010, and f calls itself.
+  CodeLayout self(0x1000);
+  self.call(0x1000, 0x1010);
+  self.put(0x1005, {0xc3});
+  self.call(0x1010, 0x1010);
+  self.put(0x1015, {0xc3});
+  // Mutual recursion: the caller calls f 0x1010, f calls g 0x1020, and g calls f.
+  CodeLayout mutual(0x1000);
+  mutual.call(0x1000, 0x1010);
+  mutual.put(0x1005, {0xc3});
+  mutual.call(0x1010, 0x1020);
+  mutual.put(0x1015, {0xc3});
+  mutual.call(0x1020, 0x1010);
+  mutual.put(0x1025, {0xc3});
+  for (const CodeLayout* code : {&self, &mutual}) {
+    const auto analysed = analyse_code(code->bytes());
+    ASSERT_TRUE(analysed.has_value());
+    const auto caller = lift_at(*analysed, 0x1000);
+    ASSERT_TRUE(caller.has_value());
+    EXPECT_TRUE(caller->partial);
+    EXPECT_TRUE(
+        has_note(*caller, "outgoing call arguments and return values follow no modelled ABI"));
+  }
+}
+
+TEST(Ir, RegistersANestedCalleeWritesAreClobberedForTheCaller) {
+  // caller 0x1000: call mid; mov rax, rcx; ret.  mid 0x1020: call leaf; ret.
+  // leaf 0x1030: mov ecx, 5; mov eax, 1; ret. The leaf writes rcx, so mid changes rcx when it
+  // returns, and the caller's read of rcx after the call is not its own value.
+  CodeLayout code(0x1000);
+  code.call(0x1000, 0x1020);
+  code.put(0x1005, {0x48, 0x89, 0xc8});  // mov rax, rcx
+  code.put(0x1008, {0xc3});
+  code.call(0x1020, 0x1030);
+  code.put(0x1025, {0xc3});
+  code.put(0x1030, {0xb9, 0x05, 0x00, 0x00, 0x00});        // mov ecx, 5
+  code.put(0x1035, {0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3});  // mov eax, 1; ret
+  const auto analysed = analyse_code(code.bytes());
+  ASSERT_TRUE(analysed.has_value());
+  const auto caller = lift_at(*analysed, 0x1000);
+  ASSERT_TRUE(caller.has_value());
+  // The call to mid resolves (its own call is resolved too), so the only reason the caller is
+  // Partial is the rcx that mid's leaf changed. An unresolved call would say "outgoing call".
+  const donkey::IrStatement* call = first_call(*caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  EXPECT_TRUE(caller->partial);
+  EXPECT_TRUE(has_note(*caller, "register rcx is read after a call"));
+  EXPECT_FALSE(
+      has_note(*caller, "outgoing call arguments and return values follow no modelled ABI"));
+}
+
+TEST(Ir, CallChainsDeeperThanTheEvaluatorRunsStayUnresolved) {
+  // A chain of nine callees below the caller: the caller's call is deeper than the evaluator runs
+  // (eight levels), so it stays unresolved and the caller is Partial.
+  {
+    const auto analysed = analyse_code(chain_layout(9).bytes());
+    ASSERT_TRUE(analysed.has_value());
+    const auto caller = lift_at(*analysed, 0x1000);
+    ASSERT_TRUE(caller.has_value());
+    EXPECT_TRUE(caller->partial);
+    EXPECT_TRUE(
+        has_note(*caller, "outgoing call arguments and return values follow no modelled ABI"));
+  }
+  // A chain of eight resolves, and the interpreter runs all of it: the leaf's 7 comes back.
+  {
+    const auto analysed = analyse_code(chain_layout(8).bytes());
+    ASSERT_TRUE(analysed.has_value());
+    const auto caller = lift_at(*analysed, 0x1000);
+    ASSERT_TRUE(caller.has_value());
+    EXPECT_FALSE(caller->partial);
+    std::map<std::uint64_t, donkey::IrFunction> callees;
+    for (std::size_t k = 0; k < 8; ++k) {
+      const std::uint64_t address = 0x1010 + 0x10 * k;
+      const auto callee = lift_at(*analysed, address);
+      ASSERT_TRUE(callee.has_value());
+      callees.emplace(address, *callee);
+    }
+    auto result = run_program(*caller, callees);
+    ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+    EXPECT_EQ(result.value().return_value, 7u);
+  }
+}
+
+TEST(Ir, CallSummariesDoNotDependOnLiftOrder) {
+  // One image with every case the summaries must handle the same way in any order:
+  //   0x1000 calls a chain of nine (0x1010..0x1090): nine is deeper than a call may resolve.
+  //   0x10a0 and 0x10b0 call each other (a cycle); 0x10c0 calls the cycle.
+  //   0x1200 calls a chain of eight (0x1100..0x1170): eight resolves all the way down.
+  //   0x1300 calls a leaf (0x1310) that writes rcx; 0x1400 reads rcx after calling 0x1300.
+  //   0x1500 calls 0x1000.
+  CodeLayout code(0x1000);
+  code.call(0x1000, 0x1010);
+  code.put(0x1005, {0xc3});
+  place_chain(code, 0x1010, 9);
+  code.call(0x10a0, 0x10b0);
+  code.put(0x10a5, {0xc3});
+  code.call(0x10b0, 0x10a0);
+  code.put(0x10b5, {0xc3});
+  code.call(0x10c0, 0x10a0);
+  code.put(0x10c5, {0xc3});
+  code.call(0x1200, 0x1100);
+  code.put(0x1205, {0xc3});
+  place_chain(code, 0x1100, 8);
+  code.call(0x1300, 0x1310);
+  code.put(0x1305, {0xc3});
+  code.put(0x1310, {0xb9, 0x05, 0x00, 0x00, 0x00, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3});
+  code.call(0x1400, 0x1300);
+  code.put(0x1405, {0x48, 0x89, 0xc8, 0xc3});  // mov rax, rcx; ret
+  code.call(0x1500, 0x1000);
+  code.put(0x1505, {0xc3});
+  code.call(0x1600, 0x1080);  // g7 of the nine-chain: resolvable at the top budget
+  code.put(0x1605, {0xc3});
+  // Four of these are reached by no call (0x10c0, 0x1200, 0x1400, 0x1500): the user starts them.
+  const auto analysed = analyse_code(code.bytes(), {0x10c0, 0x1200, 0x1400, 0x1500, 0x1600});
+  ASSERT_TRUE(analysed.has_value());
+
+  // The rendering of a lift: the printed pseudocode, its partial flag and its notes.
+  const auto render = [&](const donkey::Function& function,
+                          const donkey::LiftOptions& options) -> std::string {
+    auto lifted = donkey::lift_function(analysed->image, analysed->analysis, function, options);
+    if (!lifted.has_value()) {
+      return "error " + lifted.diagnostic().code;
+    }
+    auto text = donkey::format_pseudocode(lifted.value());
+    std::string out = text.has_value() ? text.value() : "print error " + text.diagnostic().code;
+    out += lifted.value().partial ? "\npartial\n" : "\ncomplete\n";
+    for (const std::string& note : lifted.value().notes) {
+      out += "note: " + note + "\n";
+    }
+    return out;
+  };
+  // Lifts every function in `order`, each with `cache` (null: a cache for each lift).
+  const auto render_all = [&](const std::vector<const donkey::Function*>& order,
+                              const std::shared_ptr<donkey::CallSummaryCache>& cache) {
+    std::map<std::uint64_t, std::string> rendered;
+    for (const donkey::Function* function : order) {
+      donkey::LiftOptions options;
+      options.call_summaries = cache;
+      rendered[function->address] = render(*function, options);
+    }
+    return rendered;
+  };
+
+  std::vector<const donkey::Function*> forward;
+  for (const donkey::Function& function : analysed->analysis.functions) {
+    forward.push_back(&function);
+  }
+  std::vector<const donkey::Function*> reverse(forward.rbegin(), forward.rend());
+  ASSERT_GE(forward.size(), 26u);
+
+  const auto shared_forward = render_all(forward, std::make_shared<donkey::CallSummaryCache>());
+  const auto shared_reverse = render_all(reverse, std::make_shared<donkey::CallSummaryCache>());
+  const auto unshared = render_all(forward, nullptr);
+  EXPECT_EQ(shared_forward, shared_reverse);
+  EXPECT_EQ(shared_forward, unshared);
+
+  // The cases themselves: nine deep stays unresolved, eight resolves, a cycle stays unresolved.
+  ASSERT_TRUE(shared_forward.count(0x1000) != 0);
+  EXPECT_NE(shared_forward.at(0x1000).find("\npartial\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x1200).find("\ncomplete\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x10c0).find("\npartial\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x1400).find("\npartial\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x1500).find("\npartial\n"), std::string::npos);
+  EXPECT_NE(shared_forward.at(0x1600).find("\ncomplete\n"), std::string::npos);
+}
+
+TEST(Ir, ACutCalleeIsResolvedWhenALaterCallReachesItNearTheTop) {
+  // A chain of ten at 0x1010 (g0 to g9; g9 returns 7). The caller A (0x1000) calls g0, so g7 is
+  // asked with budget 1 and is Cut there (g8 is out of budget). Then B (0x2000) calls g7 directly.
+  // g7 has height 3 and must resolve from B, so a Cut kept as final would make B Partial.
+  CodeLayout code(0x1000);
+  code.call(0x1000, 0x1010);
+  code.put(0x1005, {0xc3});
+  place_chain(code, 0x1010, 10);
+  code.call(0x2000, 0x1080);
+  code.put(0x2005, {0xc3});
+  const auto analysed = analyse_code(code.bytes(), {0x2000});  // B is reached by no call
+  ASSERT_TRUE(analysed.has_value());
+  auto cache = std::make_shared<donkey::CallSummaryCache>();
+  donkey::LiftOptions options;
+  options.call_summaries = cache;
+  const auto first = lift_at(*analysed, 0x1000, options);
+  ASSERT_TRUE(first.has_value());
+  EXPECT_TRUE(first->partial);  // g0 is too tall for the top budget
+  const auto second = lift_at(*analysed, 0x2000, options);
+  ASSERT_TRUE(second.has_value());
+  EXPECT_FALSE(second->partial);
+  const donkey::IrStatement* call = first_call(*second);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  std::map<std::uint64_t, donkey::IrFunction> callees;
+  for (std::uint64_t address = 0x1080; address <= 0x10a0; address += 0x10) {
+    const auto callee = lift_at(*analysed, address);
+    ASSERT_TRUE(callee.has_value());
+    callees.emplace(address, *callee);
+  }
+  auto result = run_program(*second, callees);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().return_value, 7u);
 }
