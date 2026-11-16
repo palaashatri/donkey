@@ -405,6 +405,78 @@ TEST(Cfg, AArch64TableEntryOutsideTheCodeIsNotRecovered) {
   EXPECT_TRUE(result.value().cfg.jump_tables.empty());
 }
 
+/// An x86-64 two-case switch at 0x1000 in one 0x100-byte section. `slice` is the 8 bytes at
+/// 0x1005 between `cmp edi, 1; ja 0x1020` and the cases, ending in an indirect jump. The cases
+/// are at 0x1013 and 0x1019, the default at 0x1020, and the table of two 8-byte addresses at
+/// 0x1080.
+struct X86Dispatch {
+  BinaryImage image;
+  std::vector<std::byte> data;
+};
+
+X86Dispatch x86_dispatch(std::initializer_list<std::uint8_t> slice) {
+  X86Dispatch out;
+  out.data.assign(0x100, std::byte{0x90});
+  std::vector<std::uint8_t> code = {0x83, 0xff, 0x01, 0x77, 0x1b};  // cmp edi, 1; ja 0x1020
+  code.insert(code.end(), slice.begin(), slice.end());
+  const std::uint8_t cases[] = {0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,   // 0x1013: mov eax, 1; ret
+                                0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3};  // 0x1019: mov eax, 2; ret
+  code.insert(code.end(), std::begin(cases), std::end(cases));
+  EXPECT_EQ(code.size(), 0x1fU);
+  code.push_back(0x90);                         // 0x101f: nop
+  code.insert(code.end(), {0x31, 0xc0, 0xc3});  // 0x1020: xor eax, eax; ret
+  for (std::size_t i = 0; i < code.size(); ++i) {
+    out.data[i] = static_cast<std::byte>(code[i]);
+  }
+  for (const std::uint64_t entry : {0x1013ULL, 0x1019ULL}) {
+    const std::size_t at = entry == 0x1013 ? 0x80 : 0x88;
+    for (std::size_t i = 0; i < 8; ++i) {
+      out.data[at + i] = static_cast<std::byte>((entry >> (8U * i)) & 0xffU);
+    }
+  }
+  out.image = synthetic_image(out.data.size());
+  return out;
+}
+
+std::vector<std::uint64_t> x86_table_targets(const X86Dispatch& dispatch) {
+  auto result = donkey::analyze(dispatch.image, dispatch.data);
+  EXPECT_TRUE(result.has_value()) << result.diagnostic().message;
+  if (!result.has_value() || result.value().cfg.jump_tables.size() != 1) {
+    return {};
+  }
+  return result.value().cfg.jump_tables.front().targets;
+}
+
+// `lea` ignores a segment override, so `lea rdx, fs:[rip+table]` still gives the table's
+// address, as the unprefixed `lea` does.
+TEST(Cfg, X86SegmentPrefixedLeaStillAddressesTheTable) {
+  const std::vector<std::uint64_t> expected = {0x1013, 0x1019};
+  // nop; lea rdx, [rip+0x73]; jmp [rdx+rdi*8]. Either lea ends at 0x100d, so a displacement
+  // of 0x73 reaches 0x1080.
+  EXPECT_EQ(x86_table_targets(x86_dispatch({0x90, 0x48, 0x8d, 0x15, 0x73, 0x00, 0x00, 0x00, 0xff,
+                                            0x24, 0xfa, 0x90, 0x90, 0x90})),
+            expected);
+  // lea rdx, fs:[rip+0x73]; jmp [rdx+rdi*8]
+  EXPECT_EQ(x86_table_targets(x86_dispatch({0x64, 0x48, 0x8d, 0x15, 0x73, 0x00, 0x00, 0x00, 0xff,
+                                            0x24, 0xfa, 0x90, 0x90, 0x90})),
+            expected);
+}
+
+// A spilled index read back through fs is thread-block memory, not the stack slot it was
+// spilled to: its value is unknown, so no table is recovered.
+TEST(Cfg, X86SegmentedReloadIsNotTheSpilledStackSlot) {
+  // mov [rbp-8], edi; nop; mov eax, [rbp-8]; jmp [rax*8+0x1080]
+  EXPECT_EQ(x86_table_targets(x86_dispatch({0x89, 0x7d, 0xf8, 0x90, 0x8b, 0x45, 0xf8, 0xff, 0x24,
+                                            0xc5, 0x80, 0x10, 0x00, 0x00})),
+            (std::vector<std::uint64_t>{0x1013, 0x1019}));
+  // mov [rbp-8], edi; mov eax, fs:[rbp-8]; jmp [rax*8+0x1080]
+  auto segmented = x86_dispatch(
+      {0x89, 0x7d, 0xf8, 0x64, 0x8b, 0x45, 0xf8, 0xff, 0x24, 0xc5, 0x80, 0x10, 0x00, 0x00});
+  auto result = donkey::analyze(segmented.image, segmented.data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_TRUE(result.value().cfg.jump_tables.empty());
+}
+
 TEST(Cfg, RespectsInstructionLimit) {
   const auto data = branchy_function();
   const auto image = synthetic_image(data.size());

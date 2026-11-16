@@ -142,8 +142,9 @@ std::uint64_t sign_extend_bytes(std::uint64_t value, std::size_t bytes) {
 }
 
 bool same_memory(const MemoryOperand& a, const MemoryOperand& b) {
-  return x86_family(a.base) == x86_family(b.base) && x86_family(a.index) == x86_family(b.index) &&
-         a.scale == b.scale && a.displacement == b.displacement;
+  return a.segment == b.segment && x86_family(a.base) == x86_family(b.base) &&
+         x86_family(a.index) == x86_family(b.index) && a.scale == b.scale &&
+         a.displacement == b.displacement;
 }
 
 /// Instructions whose only register result is their first operand. Only these
@@ -213,7 +214,7 @@ class TableSlice {
       if (writes_selector) {
         return false;
       }
-      auto address = address_of(ops[1], instruction);
+      auto address = address_of(ops[1], instruction, /*effective_address=*/true);
       return address ? write_register(dest.reg, dest.size, *address) : forget_register(dest.reg);
     }
     auto source = value_of(ops[1], instruction);
@@ -303,11 +304,17 @@ class TableSlice {
     return true;
   }
 
-  std::optional<std::uint64_t> address_of(const Operand& operand, const Instruction& at) {
+  /// `effective_address`: the operand is `lea`'s, which ignores a segment override. Any other
+  /// fs- or gs-relative operand is an offset into the thread block, not an address.
+  std::optional<std::uint64_t> address_of(const Operand& operand, const Instruction& at,
+                                          bool effective_address = false) {
     if (operand.kind != OperandKind::Memory) {
       return std::nullopt;
     }
     const MemoryOperand& mem = operand.memory;
+    if (!mem.segment.empty() && !effective_address) {
+      return std::nullopt;
+    }
     std::uint64_t address = static_cast<std::uint64_t>(mem.displacement);
     if (mem.base == "rip") {
       address += at.address + at.length;
@@ -335,6 +342,9 @@ class TableSlice {
       case OperandKind::Register:
         return read_register(operand.reg, operand.size);
       case OperandKind::Memory: {
+        if (!operand.memory.segment.empty()) {
+          return std::nullopt;  // thread-block memory: neither the selector nor a stack slot
+        }
         if (selector_.kind == OperandKind::Memory &&
             same_memory(operand.memory, selector_.memory)) {
           return value_ & width_mask(operand.size);
@@ -374,10 +384,10 @@ class TableSlice {
  public:
   static bool is_stack_slot(const MemoryOperand& memory) {
     const std::string base = x86_family(memory.base);
-    return memory.index.empty() && (base == "rbp" || base == "rsp");
+    return memory.segment.empty() && memory.index.empty() && (base == "rbp" || base == "rsp");
   }
   static std::pair<std::string, std::int64_t> slot_key(const MemoryOperand& memory) {
-    return {x86_family(memory.base), memory.displacement};
+    return {memory.segment + x86_family(memory.base), memory.displacement};
   }
 };
 
@@ -829,6 +839,9 @@ std::optional<JumpTable> resolve_jump_table(
     return std::nullopt;
   }
   const Operand& selector = cmp.structured_operands[0];
+  if (selector.kind == OperandKind::Memory && !selector.memory.segment.empty()) {
+    return std::nullopt;  // a thread-block selector: its value is not modelled
+  }
   // Evaluation starts just after the compare or, when the check subtracts in
   // place, just after the selector register's last definition (so the slice
   // carries any spill of the original index).

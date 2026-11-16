@@ -415,6 +415,11 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
             parsed.memory.scale = operand.mem.scale;
             parsed.memory.displacement = operand.mem.disp;
             parsed.memory.size = parsed.size;
+            if (operand.mem.segment == X86_REG_FS) {
+              parsed.memory.segment = "fs";
+            } else if (operand.mem.segment == X86_REG_GS) {
+              parsed.memory.segment = "gs";
+            }
             break;
           default:
             break;
@@ -422,6 +427,12 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
         result.structured_operands.push_back(std::move(parsed));
 
         if (operand.type != X86_OP_MEM) {
+          continue;
+        }
+        if ((operand.mem.segment == X86_REG_FS || operand.mem.segment == X86_REG_GS) &&
+            instruction->id != X86_INS_LEA) {
+          // The displacement is an offset into the thread block, not an address. `lea`
+          // ignores the segment, so its effective address is still a reference.
           continue;
         }
         if (operand.mem.base == X86_REG_RIP) {

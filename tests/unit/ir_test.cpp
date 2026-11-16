@@ -7274,3 +7274,28 @@ TEST(Ir, ACutCalleeIsResolvedWhenALaterCallReachesItNearTheTop) {
   ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
   EXPECT_EQ(result.value().return_value, 7u);
 }
+
+// ---- fs/gs-relative memory (thread-local storage) is not lifted as an absolute address ----
+
+TEST(Ir, FsRelativeLoadIsNotLiftedAsAnAbsoluteAddress) {
+  // mov rax, fs:[0x28]; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, 0xc3}, f));
+  EXPECT_TRUE(f.partial);
+  EXPECT_TRUE(std::find(f.notes.begin(), f.notes.end(),
+                        "fs- or gs-relative memory (thread-local storage) is not modelled") !=
+              f.notes.end());
+  auto text = donkey::format_pseudocode(f);
+  ASSERT_TRUE(text.has_value());
+  EXPECT_EQ(text.value().find("*(u64 *)(0x28)"), std::string::npos) << text.value();
+}
+
+TEST(Ir, StackCanaryCheckStaysPartial) {
+  // mov rax, fs:[0x28]; mov [rsp-8], rax; mov rdx, [rsp-8]; sub rdx, fs:[0x28]; mov eax, edx; ret
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, 0x48, 0x89,
+                               0x44, 0x24, 0xf8, 0x48, 0x8b, 0x54, 0x24, 0xf8, 0x64, 0x48, 0x2b,
+                               0x14, 0x25, 0x28, 0x00, 0x00, 0x00, 0x89, 0xd0, 0xc3},
+                              f));
+  EXPECT_TRUE(f.partial);
+}
