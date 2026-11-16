@@ -389,6 +389,17 @@ TEST(Decode, X86FsRelativeOperandKeepsItsSegment) {
   ASSERT_EQ(none.value().instructions.size(), 1U);
   EXPECT_TRUE(none.value().instructions[0].structured_operands[1].memory.segment.empty());
 
+  // lea rdx, fs:[rip+0x10]: lea ignores the segment, so its effective address 0x1018 is
+  // still a data reference.
+  const std::vector<std::byte> fs_lea = {std::byte{0x64}, std::byte{0x48}, std::byte{0x8D},
+                                         std::byte{0x15}, std::byte{0x10}, std::byte{0x00},
+                                         std::byte{0x00}, std::byte{0x00}};
+  auto lea = decoder.value().decode(fs_lea, 0x1000, 1);
+  ASSERT_TRUE(lea.has_value());
+  ASSERT_EQ(lea.value().instructions.size(), 1U);
+  EXPECT_EQ(lea.value().instructions[0].structured_operands[1].memory.segment, "fs");
+  EXPECT_EQ(lea.value().instructions[0].data_references, (std::vector<std::uint64_t>{0x1018}));
+
   // 32-bit mode: mov eax, [0x28] with no prefix keeps its absolute data reference, and
   // mov eax, fs:[0x28] has the segment and no reference.
   auto x86 = donkey::Decoder::create(donkey::Architecture::X86, donkey::Endian::Little);

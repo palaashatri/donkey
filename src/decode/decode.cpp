@@ -429,8 +429,10 @@ Result<Instruction> Decoder::decode_one(std::span<const std::byte> bytes,
         if (operand.type != X86_OP_MEM) {
           continue;
         }
-        if (operand.mem.segment == X86_REG_FS || operand.mem.segment == X86_REG_GS) {
-          // The displacement is an offset into the thread block, not an address.
+        if ((operand.mem.segment == X86_REG_FS || operand.mem.segment == X86_REG_GS) &&
+            instruction->id != X86_INS_LEA) {
+          // The displacement is an offset into the thread block, not an address. `lea`
+          // ignores the segment, so its effective address is still a reference.
           continue;
         }
         if (operand.mem.base == X86_REG_RIP) {
