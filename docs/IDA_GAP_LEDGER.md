@@ -2220,7 +2220,7 @@ independent of Donkey's own stub reader. No-return names are matched on that nam
   `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3), all through stubs; and 1 call printed by name
   (`siglongjmp`, a same-image function in libc). Total functions with a no-return call: 441.
   `error` (not counted above, argument not checked): 14 sites. The other names on the list (`err`, `verr`,
-  `errx`, `verrx`, `longjmp`, `siglongjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
+  `errx`, `verrx`, `longjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
   `__cxa_throw`, `__cxa_rethrow`, `_Unwind_Resume`, `_ZSt9terminatev`, `__libc_fatal`) have 0 sites in the sample.
 - (d) 288 functions are Partial with the note "the returned register is not determined by the definitions that reach
   the return" and call a no-return import (of 1,151 Partial functions with that note, 183 Complete functions overall).
