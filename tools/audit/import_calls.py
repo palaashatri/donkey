@@ -68,20 +68,46 @@ def got_slot_names(path):
     return slots
 
 
+def is_signature(line):
+    """`type name(params) {` at column 0: the function signature, not an inferred struct."""
+    text = line.strip()
+    return (line == line.lstrip() and not text.startswith("struct ") and "(" in text
+            and text.endswith("{"))
+
+
 def body_lines(pseudocode):
-    """The statement lines: no comment lines and no function header. The header is the first line
-    that is not a comment, whatever the function is called (`u64 sub_4d7f(void) {` or a named one
-    such as `void siglongjmp(u64 a0) {`), so it is never counted as a call."""
+    """The statement lines after the function signature, without comment lines. Everything up to
+    and including the signature is dropped: the signature itself, whatever the function is called
+    (`u64 sub_4d7f(void) {` or a named one such as `void siglongjmp(u64 a0) {`), and any inferred
+    `struct` the printer puts before it (src/ir/ir.cpp), so neither is ever counted as a call.
+    Pseudocode with text but no signature is an error: the measurement is refused.
+
+    >>> body_lines("// note: x\\nu64 sub_10(void) {\\n  abort();\\n  return 0;\\n}")
+    ['abort();', 'return 0;', '}']
+    >>> body_lines("// note: struct a0_fields inferred from accesses through a0\\n"
+    ...            "struct a0_fields {\\n  u64 f_0;  // +0x0\\n  u32 f_8;  // +0x8\\n};\\n"
+    ...            "u64 exit(struct a0_fields *a0) {\\n  return a0->f_0;\\n}")
+    ['return a0->f_0;', '}']
+    >>> body_lines("void siglongjmp(u64 a0) {\\n  abort();\\n}")
+    ['abort();', '}']
+    >>> body_lines("")
+    []
+    """
     lines = []
     header_seen = False
+    preamble = False
     for line in pseudocode.splitlines():
         text = line.strip()
         if not text or text.startswith("//"):
             continue
         if not header_seen:
-            header_seen = True
+            header_seen = is_signature(line)
+            preamble = preamble or not header_seen
             continue
         lines.append(text)
+    if preamble and not header_seen:
+        sys.exit("import_calls.py: a function's pseudocode has no signature line; "
+                 "the measurement is refused")
     return lines
 
 

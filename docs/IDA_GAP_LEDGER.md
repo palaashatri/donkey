@@ -2300,6 +2300,14 @@ requires.
   `exit` may return); it is marked only by the propagation below. The list is the one in (c) above, without
   `error`. `error` is a no-return only when its first argument is nonzero, so it stays a normal call (its argument is
   not modelled). Each mark carries provenance: `known-name:<name>`.
+- *Provider binding.* A name alone does not say which library defines the import: a custom shared library may export
+  its own `exit` that returns. Until owner decision 4 (below) chooses how an import is bound to its provider, an import
+  whose provider is not shown to be a known runtime library keeps its fall-through and its ordinary call semantics.
+  Two kinds of evidence exist. The importer's DT_NEEDED entries are already read and matched against a provider's
+  DT_SONAME by `resolve_imports` (G15-T2 above). The import's ELF symbol version (`abort@GLIBC_2.2.5`, from
+  `.gnu.version` and `.gnu.version_r`) is not read by any code yet; using it would add a bounded reader with a fuzz
+  target. Decision 4 sets which of these counts and the list of runtime libraries. No name is marked before it is
+  recorded.
 - *Propagation.* A same-image function is no-return when every path from its entry reaches a no-return call (or an
   instruction that never falls through, such as `ud2` or `hlt`). It is bounded by a fixed iteration count and a
   depth limit. It uses only marks already proven, and a function whose analysis is Partial for an unrelated reason
@@ -2333,6 +2341,9 @@ requires.
   - `Cfg.BytesReachedByAnotherPathStayInTheFunction` (unit: a call to `abort` on one path, return on another; the return
     path is kept)
   - `Analysis.NoReturnNamesComeOnlyFromTheFixedList` (unit: `error` and an unknown name are not marked)
+  - `Analysis.ANoReturnNameFromAnotherLibraryKeepsItsFallThrough` (ELF fixture: an import named `exit` bound to a
+    committed non-runtime shared library, by version or DT_NEEDED, is not marked and its call keeps its fall-through
+    edge)
   - `Analysis.PropagationUsesOnlyProvenMarks` (unit: a wrapper calling `exit` is no-return; a function with a path
     that returns is not)
   - `Ir.NoReturnCallHasNoSuccessorAndNoReturnStatement` (unit, lifted from bytes)
@@ -2410,6 +2421,12 @@ indirect call sites resolved on the sample (the sample has 1 call through a GOT 
    stage and `objdump`, not valid C).
 3. Whether a function that reaches a no-return call can be Complete. The proposal is yes, when every returning path
    agrees with the compiled code. The paths through the no-return call are not compared.
+4. How a no-return name is bound to its provider (T3, first step). Options: (a) the ELF symbol version only
+   (`GLIBC_*`, and the FreeBSD libc equivalent; musl does not version its symbols): precise, but unversioned imports
+   are never marked, and it needs the new version reader; (b) DT_NEEDED matched against a fixed list of runtime SONAMEs (`libc.so.6`, `libc.musl-*.so.1`,
+   `libstdc++.so.6`, `libgcc_s.so.1`, ...): covers unversioned imports, but an import whose name is defined by more
+   than one needed library is ambiguous, and must then stay unmarked; (c) both, (a) when a version is present and (b)
+   otherwise. Until it is decided, T3 marks nothing by name, and its measurement target is not claimed.
 
 ---
 
