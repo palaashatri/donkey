@@ -13,7 +13,12 @@ per binary and counts, over every sampled function:
   - calls to the known no-return imports below, how many of them the printed code follows with a
     `return`, and how many Partial functions that call one carry the note "the returned register
     is not determined by the definitions that reach the return";
-  - calls through a GOT slot (`-fno-plt`), printed as `((void (*)(void))*(u64 *)(0x...))()`.
+  - calls through a GOT slot (`-fno-plt`), printed as `((void (*)(void))*(u64 *)(0x...))()`;
+  - calls printed by a no-return import's name (`abort(`), the form G24-T4 prints, so a `return` after
+    one is still counted once stubs are named.
+
+A sampled address that the CLI does not return is an error: the measurement is refused, not saved
+with fewer functions.
 
 Each binary must be the one the list was drawn from (its SHA-256 is checked, as sample_list.py
 does), and it is decompiled from a private copy.
@@ -29,6 +34,8 @@ NO_RETURN = {"abort", "exit", "_exit", "_Exit", "quick_exit", "__stack_chk_fail"
              "__cxa_rethrow", "_Unwind_Resume", "_ZSt9terminatev", "__libc_fatal"}
 # error() does not return only when its status argument is nonzero: counted apart, never as no-return.
 SOMETIMES_NO_RETURN = {"error"}
+# A call printed by the import's own name, as G24-T4 prints it.
+NAMED_NO_RETURN_CALL = re.compile(r"(?<![\w.])(" + "|".join(sorted(NO_RETURN)) + r")\(")
 RETURN_NOTE = "the returned register is not determined by the definitions that reach the return"
 STUB_SECTIONS = (".plt", ".plt.sec", ".plt.got")
 GOT_SECTIONS = (".got", ".got.plt")
@@ -98,6 +105,11 @@ def measure(args):
             slots = got_slot_names(copy)
             decompiled = json.loads(run([args.cli, "decompile", copy, "--json",
                                          "--max-functions", "1000000"]))
+        returned = {int(function["address"], 16) for function in decompiled["functions"]}
+        missing = sorted(wanted - returned)
+        if missing:
+            sys.exit(f"import_calls.py: {tag}: {len(missing)} sampled functions were not returned, "
+                     f"the first at {hex(missing[0])}; the measurement is refused")
         for function in decompiled["functions"]:
             if int(function["address"], 16) not in wanted:
                 continue
@@ -126,6 +138,13 @@ def measure(args):
                             counts["no_return_sites_followed_by_return"] += 1
                     elif name in SOMETIMES_NO_RETURN:
                         counts["sometimes_no_return_sites"] += 1
+                for m in NAMED_NO_RETURN_CALL.finditer(line):
+                    counts["named_no_return_call_sites"] += 1
+                    no_return_sites[m.group(1)] += 1
+                    no_return_called.add(m.group(1))
+                    following = lines[index + 1] if index + 1 < len(lines) else ""
+                    if following.startswith("return"):
+                        counts["no_return_sites_followed_by_return"] += 1
                 for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
                     slot = int(m.group(1), 16)
                     if inside(slot, gots):

@@ -2217,7 +2217,8 @@ independent of Donkey's own stub reader. No-return names are matched on that nam
   `BIO_puts` 121/27, `__printf_chk` 112/33, `memcpy` 94/62, `strdup` 84/30, `OPENSSL_sk_num` 76/34,
   `OPENSSL_sk_value` 74/35, `BIO_free` 70/34, `BIO_ctrl` 65/28, `__fprintf_chk` 64/23, `__strcpy_chk` 59/35.
 - (c) No-return imports in the sample, call sites (functions): `__stack_chk_fail` 409 (407), `__assert_fail` 25 (21),
-  `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3). Total functions with a no-return call: 440.
+  `exit` 16 (14), `abort` 11 (10), `_exit` 4 (2), `__longjmp_chk` 4 (3), all through stubs; and 1 call printed by name
+  (`siglongjmp`, a same-image function in libc). Total functions with a no-return call: 441.
   `error` (not counted above, argument not checked): 14 sites. The other names on the list (`err`, `verr`,
   `errx`, `verrx`, `longjmp`, `siglongjmp`, `quick_exit`, `_Exit`, `pthread_exit`, `__fortify_fail`, `__chk_fail`,
   `__cxa_throw`, `__cxa_rethrow`, `_Unwind_Resume`, `_ZSt9terminatev`, `__libc_fatal`) have 0 sites in the sample.
@@ -2295,7 +2296,8 @@ requires.
 **T3. No-return functions.**
 
 - *Known names first.* A fixed list in code, matched exactly on the import name of a stub (from `plt_stub_imports`, and
-  from the GOT slot of a `-fno-plt` call) and on a same-image symbol name. The list is the one in (c) above, without
+  from the GOT slot of a `-fno-plt` call). A same-image function gets no mark from its name (a local function named
+  `exit` may return); it is marked only by the propagation below. The list is the one in (c) above, without
   `error`. `error` is a no-return only when its first argument is nonzero, so it stays a normal call (its argument is
   not modelled). Each mark carries provenance: `known-name:<name>`.
 - *Propagation.* A same-image function is no-return when every path from its entry reaches a no-return call (or an
@@ -2316,7 +2318,7 @@ requires.
   `lift_aarch64.cpp` 2202 for AArch64). T3 removes only the rax note and the synthetic return. Whether such a function
   may become Complete is owner decision 3 below; until it is decided, it stays Partial. A function is Complete only if
   the oracle executes it and compares the returning paths with the compiled code.
-- *Stack-protector checks.* 407 of the 440 functions with a no-return call call `__stack_chk_fail`. Their canary load
+- *Stack-protector checks.* 407 of the 441 functions with a no-return call call `__stack_chk_fail`. Their canary load
   is `mov %fs:0x28, %rax`. On `main` the decoder drops the `fs` override and the lifter prints it as
   `rax = *(u64 *)(0x28);`, a read of address 0x28. That defect is fixed separately (branch `agent/decode/fs-gs-segment-soundness`: the lifter refuses an
   `fs`- or `gs`-relative access as Unsupported). So a canary function stays Partial after T3 until thread-local reads
@@ -2336,7 +2338,8 @@ requires.
   - `Ir.NoReturnCallHasNoSuccessorAndNoReturnStatement` (unit, lifted from bytes)
   - `Ir.VerifierRejectsANoReturnCallWithASuccessor` (unit, hand-built IR)
   - `DecompilerCorpus.NoReturnPathsAreNotCompared` (oracle: a corpus function whose only exit is `abort` is Partial,
-    and one that returns on some inputs is Complete when every returning input agrees with the compiled code)
+    and one that returns on some inputs stays Partial until owner decision 3 is recorded; after that decision it may be
+    Complete when every returning input agrees with the compiled code)
   - `cli.decompile_prints_no_return_call_without_return` (CLI, a committed fixture)
 - *Measurement.* Before (this plan, above): 469 no-return call sites, 322 followed by a printed `return`, 288
   functions with the rax note that call a no-return import. Target after T3: 0 no-return sites followed by a printed
@@ -2366,7 +2369,10 @@ requires.
   (cfg.h 43-51). The plan adds a `TailCall` value for the first, and keeps the `Jump` value for branches. The lifter
   note at lift.cpp 2897 and 3105 says "treated as a tail call" and stays.
 - *Formats.* ELF `.plt` and `.plt.sec` (x86-64, with `plt_stub_imports`), AArch64 `.plt` and `.plt.sec`
-  (`aarch64_plt_slot`, plt.cpp 41, already read) and `.plt.got` / `-fno-plt` GOT calls (`got_import_slots`).
+  (`aarch64_plt_slot`, plt.cpp 41, already read). `got_import_slots` names the GOT slots that `-fno-plt` calls read.
+  Neither reader maps a `.plt.got` stub address to its slot: `plt_stub_imports` reads only `.plt` and `.plt.sec`. T4
+  adds that mapping: decode each `.plt.got` entry's `ff 25 disp32` jump (after an optional ENDBR64 or BND prefix),
+  compute the slot address, and look it up in `got_import_slots`.
   PE: IAT symbols carry their slot address (pe.cpp 345), so a PE call through a slot can be named the same way. That is
   the second slice of this task, after the ELF slice is measured. Mach-O: no stub reader exists (macho.cpp 410), so
   Mach-O is out of this task and is a later step of G24-T2 or of G15.
