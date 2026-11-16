@@ -2348,6 +2348,10 @@ requires.
   - `Analysis.ANoReturnNameFromAnotherLibraryKeepsItsFallThrough` (ELF fixture: an import named `exit` bound to a
     committed non-runtime shared library, by version or DT_NEEDED, is not marked and its call keeps its fall-through
     edge)
+  - `Analysis.ANoReturnNameExportedByTwoNeededLibrariesIsNotMarked` (ELF fixture: two DT_NEEDED libraries both export
+    `exit`, the runtime one and an earlier one; the name is ambiguous, so the call keeps its fall-through edge).
+    Interposition through `LD_PRELOAD` is not in any file, so no fixture can show it; the provenance records the
+    assumption instead.
   - `Analysis.PropagationUsesOnlyProvenMarks` (unit: a wrapper calling `exit` is no-return; a function with a path
     that returns is not)
   - `Ir.NoReturnCallHasNoSuccessorAndNoReturnStatement` (unit, lifted from bytes)
@@ -2430,7 +2434,11 @@ indirect call sites resolved on the sample (the sample has 1 call through a GOT 
    are never marked, and it needs the new version reader; (b) DT_NEEDED matched against a fixed list of runtime SONAMEs (`libc.so.6`, `libc.musl-*.so.1`,
    `libstdc++.so.6`, `libgcc_s.so.1`, ...): covers unversioned imports, but an import whose name is defined by more
    than one needed library is ambiguous, and must then stay unmarked; (c) both, (a) when a version is present and (b)
-   otherwise. Until it is decided, T3 marks nothing by name, and its measurement target is not claimed.
+   otherwise. Neither option proves the provider at run time: a preloaded library (`LD_PRELOAD`) or a library loaded
+   earlier can define the same name, and the file shows neither. So a mark is always a static assumption, recorded in
+   its provenance (`known-name:<name>` with the evidence used), and the decision includes whether that assumption is
+   accepted. A name exported by more than one library the importer needs is ambiguous under every option and stays
+   unmarked. Until it is decided, T3 marks nothing by name, and its measurement target is not claimed.
 
 ---
 
