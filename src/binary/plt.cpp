@@ -170,7 +170,16 @@ std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
           continue;
         }
         if (const auto it = got_names.find(*got); it != got_names.end()) {
-          stubs[section.address + at] = it->second;
+          // lld starts an entry whose address escapes with `bti c` (any BTI form): the entry, and
+          // so the function, starts at the BTI, not at the ADRP after it.
+          std::uint64_t entry = at;
+          if (at >= 4) {
+            if (const auto before = reader.u32(section.file_offset + at - 4, Endian::Little);
+                before && (before.value() & 0xFFFF'FF3FU) == 0xD503'241FU) {
+              entry = at - 4;
+            }
+          }
+          stubs[section.address + entry] = it->second;
         }
       }
       continue;

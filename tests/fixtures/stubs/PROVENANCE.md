@@ -11,6 +11,14 @@
     x86_64-w64-mingw32-gcc -O1 -fno-inline -s -Wl,--no-insert-timestamp -o stubs_x86_64.exe stubs.c
     # (GCC 13-win32, MinGW-w64; built twice, the bytes are the same)
 
+`bti.c` (also written here, MIT) is built with Ubuntu clang 18.1.3 and LLD 18.1.3 against the same
+AArch64 cross sysroot. lld starts a PLT entry with `bti c` when the entry's address escapes, as it
+does for `puts` here (built twice, the bytes are the same):
+
+    clang --target=aarch64-linux-gnu --gcc-toolchain=/usr -O1 -fno-pic -no-pie -s \
+      -mbranch-protection=standard -fuse-ld=lld -Wl,-z,force-bti -Wl,-z,max-page-size=4096 \
+      -Wl,--build-id=none -o bti_aarch64 bti.c
+
 | File | SHA-256 | What it holds |
 |---|---|---|
 | `stubs_x86_64` | `3148bb3c0ffe68172d2def4e5a764f6ffc9a2cc55ca2cc953f584a80365ca005` | PIE with IBT: `abort@plt` and `puts@plt` in `.plt.sec`, `__cxa_finalize@plt` in `.plt.got` |
@@ -18,10 +26,11 @@
 | `stubs_x86_64.exe` | `3695ff7a81ff78768e392a7a64c96c123a28b8195a28e7e760f98735da4a4780` | PE32+ (MinGW): `call *slot(%rip)` through KERNEL32's IAT, and 8-byte `jmp *slot(%rip)` thunks for msvcrt imports |
 | `libifunc.so` | `cbc05ca0aea5d21bc7eb6ac2284a5328aec871a9219b284059d3299b9453a2fe` | from `ifunc.c`: the protected ifunc `pick`, called through `1050 <*ABS*+0x1121@plt>`, whose slot an IRELATIVE relocation with addend 0x1121 (the IFUNC symbol `pick`) fills |
 | `stubs_aarch64` | `d9d9941aba6761ad230ccd1526238bd5e8f0d7dc509d2161ce6ca0609996b8b8` | AArch64 PIE: `abort@plt` and `puts@plt` in `.plt` |
+| `bti_aarch64` | `ac2c4602baa858a2f7da9b29d627abc69958e634cb69eca17a2c4628af28672a` | AArch64 non-PIE, BTI: `2018f8 <puts@plt>` is `bti c; adrp; ldr; add; br`, `2018b0 <abort@plt>` has no BTI |
 
 The ELF binaries link glibc dynamically; only its small startup objects (`crt1.o`, `crti.o`,
 `crtn.o`, under the LGPL's exception for them) and GCC's `crtbegin`/`crtend` (GCC Runtime Library
-Exception) are in the files, as in any GCC-built program. The PE links the MinGW-w64 startup code
+Exception; `bti_aarch64` takes them from the same cross toolchain through clang) are in the files, as in any GCC-built program. The PE links the MinGW-w64 startup code
 statically (ZPL-2.1 for most of `mingw-w64-crt`, per Debian's copyright file for
 `mingw-w64-x86-64-dev`) and libgcc pieces (GCC Runtime Library Exception), as
 `tests/fixtures/pdata/pdata-pe-x86_64.dll` does, and imports msvcrt.dll and KERNEL32.dll.

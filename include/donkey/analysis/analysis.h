@@ -111,6 +111,10 @@ struct AnalysisResult {
   std::vector<Diagnostic> diagnostics;
 };
 
+/// The name a call to `function` prints: its import, its stub's target, or its own name; empty
+/// when that is the synthetic `sub_<hex>` name or not a C identifier.
+[[nodiscard]] std::string function_call_name(const Function& function);
+
 /// The name a call to `address` prints as in pseudocode (G24-T4): the import's own name for an
 /// import stub (`abort`, not `abort@plt`, so the output stays C), the function's name for a
 /// function with a symbol or a thunk name, and empty when the name is synthetic (`sub_<hex>`) or

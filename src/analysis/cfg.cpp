@@ -1339,7 +1339,10 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         case InstructionClass::Jump:
           if (last.direct_target.has_value()) {
             const std::uint64_t target = last.direct_target.value();
-            const bool leaves = target != function.address &&
+            // A jump to one of this function's own blocks (its seed entry included, which need
+            // not be its lowest address) stays inside it; one to another start leaves it.
+            const bool leaves = target != seeds[seed_index].address &&
+                                !block_by_address.contains(target) &&
                                 (function_starts.contains(target) || import_stubs.contains(target));
             graph.edges.push_back(
                 CfgEdge{last.address, target, leaves ? CfgEdgeKind::TailCall : CfgEdgeKind::Jump});

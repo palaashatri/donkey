@@ -13,6 +13,7 @@
 #include "donkey/binary/plt.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "donkey/ir/local_names.h"
 
 namespace {
 
@@ -129,6 +130,23 @@ TEST(Analysis, AArch64PltStubIsNamed) {
   EXPECT_EQ(puts_stub->name, "puts@plt");
 }
 
+// lld starts a PLT entry whose address escapes with `bti c`. bti_aarch64 (bti.c, non-PIE, takes the
+// address of puts): objdump shows `2018f8 <puts@plt>: bti c; adrp; ldr; add; br` and
+// `2018b0 <abort@plt>` without BTI. The stub starts at the BTI, not at the ADRP after it.
+TEST(Analysis, AArch64BtiPltEntryStartsAtTheBti) {
+  const Analyzed analyzed = analyze_fixture("stubs", "bti_aarch64");
+  const donkey::Function* puts_stub = function_at(analyzed.analysis, 0x2018f8);
+  ASSERT_NE(puts_stub, nullptr);
+  EXPECT_EQ(puts_stub->name, "puts@plt");
+  EXPECT_EQ(puts_stub->import_name, "puts");
+  ASSERT_TRUE(puts_stub->has_extent);
+  EXPECT_EQ(puts_stub->end_address, 0x20190cU);
+  EXPECT_EQ(function_at(analyzed.analysis, 0x2018fc), nullptr);
+  const donkey::Function* abort_stub = function_at(analyzed.analysis, 0x2018b0);
+  ASSERT_NE(abort_stub, nullptr);
+  EXPECT_EQ(abort_stub->name, "abort@plt");
+}
+
 TEST(Analysis, CallTargetNamesAreCIdentifiers) {
   EXPECT_TRUE(donkey::is_c_identifier("abort"));
   EXPECT_TRUE(donkey::is_c_identifier("_ZN3foo3barEv"));
@@ -180,6 +198,28 @@ TEST(Analysis, AStubForTheImagesOwnFunctionIsNamedButIsNotAnImport) {
   EXPECT_TRUE(targets.contains(0x1810));
   EXPECT_FALSE(
       donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data).contains(0x1810));
+  // Its own pseudocode is headed `own_fn`, as its callers print it, with no import note.
+  const std::string text = pseudocode_containing(analyzed, 0x1810);
+  EXPECT_NE(text.find("own_fn("), std::string::npos) << text;
+  EXPECT_EQ(text.find("own_fn@plt"), std::string::npos) << text;
+  EXPECT_EQ(text.find("import stub"), std::string::npos) << text;
+}
+
+// A call prints its target bare, so a user local of that name would read as the callee; it is
+// refused and the function is unchanged.
+TEST(Analysis, ALocalNamedLikeACallTargetIsRefused) {
+  donkey::IrFunction function;
+  function.name = "caller";
+  donkey::IrParameter parameter;
+  parameter.name = "a1";
+  parameter.abi_register = "rdi";
+  function.parameters.push_back(parameter);
+  function.call_names.emplace(0x1030, "abort");
+  const auto refused =
+      donkey::apply_user_local_names(function, {donkey::UserLocalName{"arg:0", "abort"}});
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "ir.local_name_collision");
+  EXPECT_EQ(function.parameters[0].name, "a1");
 }
 
 // An IRELATIVE slot (an ifunc that binds locally, as libc's strlen and memcpy do): objdump only

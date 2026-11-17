@@ -947,6 +947,26 @@ TEST(Cfg, JumpToAnotherFunctionIsATailCall) {
   EXPECT_STREQ(donkey::cfg_edge_kind_name(donkey::CfgEdgeKind::TailCall), "tail_call");
 }
 
+TEST(Cfg, JumpBackToTheSeedEntryStaysInsideTheFunction) {
+  // 0x1000 (the entry): ret. 0x1018 (a symbol): jmp 0x1008. 0x1008 (no seed): jmp 0x1018. The
+  // function at 0x1018 takes in 0x1008, its lowest address; the jump back to its seed entry is not
+  // a tail call.
+  auto [data, image] = image_with_functions({{0x0, {0xc3}},
+                                             {0x8, {0xe9, 0x0b, 0x00, 0x00, 0x00}},
+                                             {0x18, {0xe9, 0xeb, 0xff, 0xff, 0xff}}},
+                                            0x20, {0x1018});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  int jumps = 0;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    if (edge.from == 0x1008 || edge.from == 0x1018) {
+      EXPECT_EQ(edge.kind, donkey::CfgEdgeKind::Jump) << std::hex << edge.from;
+      ++jumps;
+    }
+  }
+  EXPECT_EQ(jumps, 2);
+}
+
 TEST(Cfg, JumpIntoUnknownCodeIsABranch) {
   // f0 (0x1000): jmp 0x1010; 0x1010: ret, which no function starts at.
   auto [data, image] =
