@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,341 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). Calls do not take their arguments from it yet (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 791 of 2,725 stubs of the seven audit binaries get a prototype; T4 TODO) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; no-return analysis and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T3, T5 to T7 TODO; owner decisions 1-4 decided 2026-11-17) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -2482,6 +2482,74 @@ requires.
   Measured with `tools/audit/import_calls.py` over the same 1,986 functions, and the numbers go in the PR.
 - *Relation to G21-T5.* G21-T5 ("a call to a no-return function ends the block") is the IR-side part of this task.
   It depends on T3 and is not a separate piece of work.
+
+**T3 report (2026-11-17).** Done, with the owner decisions of 2026-11-17 (1: propagation on; 3: Complete needs at
+least one returning path and every returning path compared; 4: option (c)). What was built:
+- `include/donkey/binary/elf_versions.h`, `src/binary/elf_versions.cpp`: `read_version_needs` (bounded: every chain
+  offset is checked, a loop, a reserved index, a duplicate index, a name outside `.dynstr` and the entry limit are
+  refused with `elf.version_needs.*`) and `read_import_versions` (import name -> file and version; an import with two
+  different needs is left out). Fuzzed: `fuzz/fuzz_elf_versions.cpp`, 5.87 million runs in 60 s, clean under ASan and
+  UBSan (seed corpus `tests/fuzz/corpus/elf_versions`).
+- `include/donkey/analysis/no_return.h`, `src/analysis/no_return.cpp`: the fixed list (each name with the runtime
+  that may provide it: C library, C++ runtime, unwinder, Windows kernel or CRT; `error`, `error_at_line`, `raise`,
+  `kill` and `RaiseException` are not on it) and `bind_no_return_imports`: a versioned ELF import is bound by the
+  file its version need names; an unversioned one only when every DT_NEEDED entry is a runtime library and one of
+  them provides the name's kind; a PE import by its DLL (a name imported from two DLLs is ambiguous). Provenance:
+  `known-name:abort version:GLIBC_2.2.5 file:libc.so.6`, `known-name:exit needed:libc.so.6`,
+  `known-name:abort dll:msvcrt.dll`. The import thunks of PE (MinGW `jmp *slot`) are found before the CFG so
+  they can be bound.
+- CFG: a call to a no-return target (a direct target, or the slot a `call *slot` reads) ends the walk and gets no
+  fall-through edge; the bytes after it stay in the function only if another path reaches them.
+- Propagation: `propagate_no_return` marks a same-image function whose every block ends in a no-return call,
+  `ud2` or `hlt`, or goes on inside the function; a return, a tail call or fall-through to a function that may
+  return, or an unresolved indirect jump keeps it unmarked. The graph is rebuilt with the new marks, at most 8
+  rounds. Marks carry `propagated:every path ends in a call that does not return`.
+- IR: `IrStatement::no_return` on the Call and `IrStatement::unreachable` on a Return that follows it, the block's
+  last statement. The verifier enforces the pair (`ir.no_return_call_not_last`,
+  `ir.unreachable_return_without_call`); the printer prints nothing for the unreachable Return but both structurers
+  tag it as the block's end, so the control-flow check sees no fall-through (without the tag the check refused every
+  candidate of 91 openssl functions); the evaluator stops at the call with `ir.eval_no_return`; the signature and
+  liveness passes ignore the unreachable Return. A lifted function with no returning path is Partial, with the note
+  "no path returns". A tail jump to a no-return function is a call with no return after it.
+- CLI: `functions` shows `no return: <evidence>`, and `--json` adds `no_return` and `no_return_reason`.
+- Tests: `ElfVersions.*` (3), `Analysis.NoReturnNamesComeOnlyFromTheFixedList`,
+  `Analysis.AVersionedRuntimeImportIsMarkedWithItsEvidence`,
+  `Analysis.ANoReturnNameFromAnotherLibraryKeepsItsFallThrough`,
+  `Analysis.ANoReturnNameExportedByTwoNeededLibrariesIsNotMarked`, `Analysis.PropagationUsesOnlyProvenMarks`,
+  `Cfg.NoReturnCallEndsTheBlock`, `Cfg.BytesReachedByAnotherPathStayInTheFunction`,
+  `Ir.NoReturnCallHasNoSuccessorAndNoReturnStatement`, `Ir.VerifierRejectsANoReturnCallWithASuccessor`,
+  `Ir.NoReturnPathsAreNotCompared` (owner decision 3: the evaluator returns check(5) = 10 as the compiled code does,
+  and stops on check(-1) at `abort`), `Ir.ANoReturnBlockIsStructured`, `Ir.AFunctionWithNoReturningPathStaysPartial`,
+  `cli.decompile_prints_no_return_call_without_return`, `cli.functions_list_no_return_evidence`. Fixtures:
+  `tests/fixtures/stubs/exit_consumer` and `libmyexit.so.1` (an `exit` from a non-runtime library listed before
+  libc), with provenance.
+- Measured over the same 1,986 functions, Release build (`tools/audit/import_calls.py` and `sample_list.py
+  measure`), before (T4) and after (re-measured after the review fixes, on `main` with T4 merged):
+
+  | | Before | After |
+  |---|---|---|
+  | No-return call sites followed by a printed `return` | 396 | **73** |
+  | Partial with the rax note | 1,163 | 1,017 |
+  | ... of which call a no-return function | 370 | 261 |
+  | Gotos (structured with gotos) | 16,232 | 15,712 |
+  | Functions printed as labelled blocks | 0 | 0 |
+  | Candidates the control-flow check refused | 0 | 0 |
+  | Complete | 177 | 177 |
+
+  The 73 that remain are all in libc: calls to libc's own `abort`, `__libc_fatal` and `__stack_chk_fail`, which
+  are same-image functions. They get no mark from their name (a same-image name is never trusted), and propagation
+  cannot prove them, since their bodies call `raise` and other functions that return. Complete does not move: the
+  407 canary functions stay Partial on their `fs`-relative load (#64), and the import call itself keeps the
+  "outgoing call arguments" note. (The rax-note count before is the post-T4 value; the plan's 295 counted only
+  `sub_` calls to stubs.)
+- Not done: interposition (`LD_PRELOAD`) is assumed absent, as decision 4 records; AArch64 GOT calls are not bound
+  (no AArch64 GOT reader); Mach-O imports are not bound.
+- Known limitation (owner, 2026-11-17, from review of #67): a versioned import (`exit@GLIBC_2.2.5`) is bound by its
+  version alone, even when another needed library comes earlier in DT_NEEDED order. glibc lets a library without
+  symbol versioning that is found first satisfy a versioned reference, so such a library exporting `exit` would make
+  the mark wrong. Requiring every needed library to be a runtime library (as the unversioned rule does) would remove
+  nearly all marks on real programs, which almost always also need libz, libssl or the like; the owner kept the
+  version as the evidence. A name that also has an unversioned import carries no version evidence.
 
 **T4. Thunks and import stubs named.**
 

@@ -91,6 +91,7 @@ add_library(donkey_binary STATIC
   src/binary/rtti.cpp
   src/binary/rtti_msvc.cpp
   src/binary/link.cpp
+  src/binary/elf_versions.cpp
   src/binary/plt.cpp
   src/binary/elf_dynamic.cpp
   src/binary/core.cpp
@@ -126,6 +127,7 @@ donkey_apply_warnings(donkey_decode)
 add_library(donkey_analysis STATIC
   src/analysis/analysis.cpp
   src/analysis/cfg.cpp
+  src/analysis/no_return.cpp
   src/analysis/signatures.cpp
   src/analysis/signature_gen.cpp
   src/analysis/link_calls.cpp
@@ -362,6 +364,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_eh_frame PRIVATE cxx_std_20)
   target_compile_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_elf_versions fuzz/fuzz_elf_versions.cpp)
+  target_link_libraries(fuzz_elf_versions PRIVATE donkey::binary)
+  target_compile_features(fuzz_elf_versions PRIVATE cxx_std_20)
+  target_compile_options(fuzz_elf_versions PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_elf_versions PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_core fuzz/fuzz_core.cpp)
   target_link_libraries(fuzz_core PRIVATE donkey::binary)
   target_compile_features(fuzz_core PRIVATE cxx_std_20)

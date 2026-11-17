@@ -677,7 +677,10 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                ", \"from_unwind\": " + (function.from_unwind ? "true" : "false") +
                ", \"import\": " +
                (function.import_name.empty() ? std::string("null") : quote(function.import_name)) +
-               ", \"thunk\": " + (function.thunk ? "true" : "false") + "}";
+               ", \"thunk\": " + (function.thunk ? "true" : "false") +
+               ", \"no_return\": " + (function.no_return ? "true" : "false") +
+               ", \"no_return_reason\": " +
+               (function.no_return ? quote(function.no_return_reason) : std::string("null")) + "}";
       }
       out += analysis.functions.empty() ? "]\n" : "\n  ]\n";
       out += "}\n";
@@ -691,6 +694,9 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                     size.c_str(), function.block_count, display_name(function.name).c_str(),
                     function.exported ? " [export]" : "", function.estimated ? " [estimated]" : "",
                     function.thunk ? " [thunk]" : "");
+        if (function.no_return) {
+          std::printf("%-18s   no return: %s\n", "", function.no_return_reason.c_str());
+        }
       }
       std::printf("(%zu functions)\n", analysis.functions.size());
     }
