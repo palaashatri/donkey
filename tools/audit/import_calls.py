@@ -17,7 +17,12 @@ per binary and counts, over every sampled function:
   - calls printed by a no-return import's name (`abort(`), the form G24-T4 prints, so a `return` after
     one is still counted once stubs are named;
   - calls printed by the name of any import the binary has a stub or a GOT slot for (`puts(`), the
-    form G24-T4 prints in place of `sub_<hex>(`.
+    form G24-T4 prints in place of `sub_<hex>(`; a name the image defines itself behind a stub
+    (libc's `free@plt`) is counted apart, as local_stub_call_sites_printed_by_name. That count is
+    matched by name only, so it also includes direct calls to the image's own function of that
+    name, not only calls through its stub.
+
+Calls are matched in code only: string literals and comments in the pseudocode are skipped.
 
 A sampled address that the CLI does not return is an error: the measurement is refused, not saved
 with fewer functions.
@@ -137,6 +142,38 @@ def body_lines(pseudocode):
     return lines
 
 
+def code_of(line):
+    """`line` with its string and character literals emptied and its comments removed, so a call
+    is matched only in code: `puts("abort(")` keeps `puts(` and loses `abort(`.
+
+    >>> code_of('puts("abort(", 1); // exit(1)')
+    'puts("", 1); '
+    """
+    out = []
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c in "\"'":
+            out.append(c)
+            i += 1
+            while i < len(line) and line[i] != c:
+                i += 2 if line[i] == "\\" else 1
+            if i < len(line):
+                out.append(c)
+            i += 1
+        elif line.startswith("//", i):
+            break
+        elif line.startswith("/*", i):
+            end = line.find("*/", i + 2)
+            if end < 0:
+                break
+            i = end + 2
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
 def inside(address, ranges):
     return any(start <= address < end for start, end in ranges)
 
@@ -167,8 +204,9 @@ class Tally:
         lines = body_lines(pseudocode)
         called = set()
         no_return_called = set()
-        for index, line in enumerate(lines):
+        for index, raw in enumerate(lines):
             following = lines[index + 1] if index + 1 < len(lines) else ""
+            line = code_of(raw)
             for m in re.finditer(r"\bsub_([0-9a-f]+)\(", line):
                 target = int(m.group(1), 16)
                 if not inside(target, image.stubs):
@@ -204,6 +242,8 @@ class Tally:
                     counts["import_call_sites_printed_by_name"] += 1
                     called.add(m.group(1))
                 elif kind == "local":
+                    # Matched by name only: this also counts a direct call to the image's own
+                    # function of that name, not only a call through its stub.
                     counts["local_stub_call_sites_printed_by_name"] += 1
             for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
                 slot = int(m.group(1), 16)

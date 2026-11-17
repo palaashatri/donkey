@@ -23,18 +23,6 @@ constexpr std::uint64_t kJumpSlotAArch64 = 1026;   // R_AARCH64_JUMP_SLOT
 constexpr std::uint64_t kIRelativeX86_64 = 37;     // R_X86_64_IRELATIVE
 constexpr std::uint64_t kIRelativeAArch64 = 1032;  // R_AARCH64_IRELATIVE
 
-/// The names the image imports: its undefined dynamic symbols. A relocation can also name a symbol
-/// the image defines, and that is not an import.
-std::set<std::string> imported_names(const BinaryImage& image) {
-  std::set<std::string> imported;
-  for (const Symbol& symbol : image.symbols) {
-    if (symbol.imported) {
-      imported.insert(symbol.name);
-    }
-  }
-  return imported;
-}
-
 /// The GOT slot an AArch64 PLT entry jumps through: `adrp x16, page; ldr x17, [x16, #off];
 /// add x16, x16, #lo; br x17`, the 16-byte entry of `.plt` and `.plt.sec`. The slot is the page
 /// of the ADRP plus the LDR's offset, which the instruction scales by 8. The caller tries every
@@ -91,8 +79,11 @@ std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
   const std::uint64_t jump_slot = aarch64 ? kJumpSlotAArch64 : kJumpSlotX86_64;
   // The GOT slot each JUMP_SLOT relocation fills, and the import it names.
   std::map<std::uint64_t, std::string> got_names;
-  const std::set<std::string> imported = imported_names(image);
   const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
+  const std::vector<bool> undefined = binary::detail::dynamic_symbol_undefined(image, data);
+  const auto is_undefined = [&undefined](std::uint64_t symbol) {
+    return symbol < undefined.size() && undefined[symbol];
+  };
   const ByteReader reader(data);
   for (const Section& section : image.sections) {
     if (section.name != ".rela.plt" || !section.has_file_data) {
@@ -113,7 +104,9 @@ std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
       const std::string name = symbol < names.size() ? names[symbol] : std::string();
       // A JUMP_SLOT can name an interposable function the image defines and exports. Its stub is
       // a call to the image's own function, not to an import, so it is listed only on request.
-      if (name.empty() || (!include_defined && imported.count(name) == 0)) {
+      // The relocation's own symbol decides, not its name: an image can define one symbol and
+      // import another of the same name.
+      if (name.empty() || (!include_defined && !is_undefined(symbol))) {
         continue;
       }
       got_names[place.value()] = name;
@@ -262,8 +255,11 @@ std::map<std::uint64_t, std::string> glob_dat_slots(const BinaryImage& image,
   // A GLOB_DAT can also name a symbol the image defines (an address the image takes for itself).
   // Only the names the image imports are listed, so a call to its own function is never reported
   // as an unbound import.
-  const std::set<std::string> imported = imported_names(image);
   const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
+  const std::vector<bool> undefined = binary::detail::dynamic_symbol_undefined(image, data);
+  const auto is_undefined = [&undefined](std::uint64_t symbol) {
+    return symbol < undefined.size() && undefined[symbol];
+  };
   const ByteReader reader(data);
   for (const Section& section : image.sections) {
     if (section.name != ".rela.dyn" || !section.has_file_data) {
@@ -282,7 +278,7 @@ std::map<std::uint64_t, std::string> glob_dat_slots(const BinaryImage& image,
       }
       const std::uint64_t symbol = info_word.value() >> 32;
       if (symbol == 0 || symbol >= names.size() || names[symbol].empty() ||
-          (!include_defined && imported.count(names[symbol]) == 0)) {
+          (!include_defined && !is_undefined(symbol))) {
         continue;
       }
       slots[place.value()] = names[symbol];
