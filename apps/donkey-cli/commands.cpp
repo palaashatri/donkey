@@ -13,6 +13,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -672,7 +673,10 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                ", \"estimated\": " + (function.estimated ? "true" : "false") +
                ", \"exported\": " + (function.exported ? "true" : "false") +
                ", \"from_symbol\": " + (function.from_symbol ? "true" : "false") +
-               ", \"from_unwind\": " + (function.from_unwind ? "true" : "false") + "}";
+               ", \"from_unwind\": " + (function.from_unwind ? "true" : "false") +
+               ", \"import\": " +
+               (function.import_name.empty() ? std::string("null") : quote(function.import_name)) +
+               ", \"thunk\": " + (function.thunk ? "true" : "false") + "}";
       }
       out += analysis.functions.empty() ? "]\n" : "\n  ]\n";
       out += "}\n";
@@ -682,9 +686,10 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
         const std::string size =
             function.has_extent ? std::to_string(function.end_address - function.address) + " B"
                                 : std::string("? B");
-        std::printf("%-18s %-10s %3u blocks  %s%s%s\n", hex(function.address).c_str(), size.c_str(),
-                    function.block_count, display_name(function.name).c_str(),
-                    function.exported ? " [export]" : "", function.estimated ? " [estimated]" : "");
+        std::printf("%-18s %-10s %3u blocks  %s%s%s%s\n", hex(function.address).c_str(),
+                    size.c_str(), function.block_count, display_name(function.name).c_str(),
+                    function.exported ? " [export]" : "", function.estimated ? " [estimated]" : "",
+                    function.thunk ? " [thunk]" : "");
       }
       std::printf("(%zu functions)\n", analysis.functions.size());
     }
@@ -692,6 +697,19 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   }
 
   if (mode == "xrefs") {
+    // The name at each xref's target (G24-T4): a function's name (an import stub is `abort@plt`),
+    // or for a GOT slot that an import's relocation names, the import. Empty otherwise.
+    std::unordered_map<std::uint64_t, std::string> target_names;
+    for (const Function& function : analysis.functions) {
+      target_names.emplace(function.address, function.name);
+    }
+    for (const auto& [slot, name] : analysis.import_slots) {
+      target_names.emplace(slot, name);
+    }
+    auto target_name = [&](std::uint64_t address) {
+      const auto found = target_names.find(address);
+      return found == target_names.end() ? std::string() : found->second;
+    };
     std::vector<const Xref*> selected;
     for (const auto& xref : analysis.xrefs) {
       if (!request.address.has_value() || xref.to == request.address.value() ||
@@ -713,6 +731,7 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
         }
         out += written == 0 ? "\n" : ",\n";
         out += "    {\"from\": " + quote(hex(xref->from)) + ", \"to\": " + quote(hex(xref->to)) +
+               ", \"to_name\": " + quote(target_name(xref->to)) +
                ", \"kind\": " + quote(xref_kind_name(xref->kind)) + "}";
         ++written;
       }
@@ -721,8 +740,9 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
       std::fwrite(out.data(), 1, out.size(), stdout);
     } else {
       for (const Xref* xref : selected) {
-        std::printf("%-18s -> %-18s %s\n", hex(xref->from).c_str(), hex(xref->to).c_str(),
-                    xref_kind_name(xref->kind));
+        const std::string name = target_name(xref->to);
+        std::printf("%-18s -> %-18s %s%s%s\n", hex(xref->from).c_str(), hex(xref->to).c_str(),
+                    xref_kind_name(xref->kind), name.empty() ? "" : "  ", name.c_str());
       }
       std::printf("(%zu xrefs)\n", selected.size());
     }

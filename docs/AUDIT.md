@@ -155,10 +155,15 @@ block 2k tests and branches to 2k+2, block 2k+1 jumps to the return block; 512 K
 labelled: 13 MiB and 0.1 s at D = 1,000, and 334 MiB and 5.5 s at D = 10,000 (20,001 blocks). Main
 segfaults on that shape at D = 10,000 on a 512 KiB stack.
 
-Not fixed here, and also on main: the dominator sets are bit sets, quadratic in the block count.
-At D = 50,000 (100,001 blocks) main and this branch both end in `std::bad_alloc` under a 1.5 GiB
-address-space cap, and the CFG bound allows 200,000 blocks. Replacing the sets with an immediate
-dominator tree and interval queries is the next task for this defect class.
+Not fixed here, and also on main at the time: the dominator sets were bit sets, quadratic in the
+block count. At D = 50,000 (100,001 blocks) main and this branch both ended in `std::bad_alloc` under
+a 1.5 GiB address-space cap, and the CFG bound allows 200,000 blocks. Fixed later (branch
+`agent/ir/dominator-tree-memory`): `compute_dominators` builds the immediate-dominator tree (Cooper,
+Harvey and Kennedy, as the post-dominators already did) and answers "a dominates b" from preorder
+ranges, so memory is linear. `Ir.DominatorTreeMatchesTheBitSetAlgorithm` compares every pair against
+the old algorithm on 200 generated graphs (loops, joins, edges to the entry, unreachable blocks), and
+`Ir.DominatorTreeOfAHugeGraphIsLinear` builds the tree for 200,000 blocks. openssl decompiles with the
+same structure class and goto count for each of its 2,089 functions.
 
 
 ## After

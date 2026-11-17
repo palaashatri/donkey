@@ -144,6 +144,7 @@ add_executable(donkey_unit_tests
   unit/rtti_msvc_test.cpp
   unit/link_test.cpp
   unit/link_calls_test.cpp
+  unit/import_names_test.cpp
   unit/link_aarch64_test.cpp
   unit/condition_test.cpp
   unit/string_literals_test.cpp
@@ -289,6 +290,10 @@ if(Python3_Interpreter_FOUND)
       ENVIRONMENT "DONKEY_CLI=$<TARGET_FILE:donkey-cli>;PYTHONDONTWRITEBYTECODE=1"
       TIMEOUT 300)
   endif()
+  # The counting rules of the import-call audit (tools/audit/import_calls.py, G24-T4).
+  add_test(NAME tools.import_calls
+           COMMAND ${Python3_EXECUTABLE} -I -B -m unittest discover
+                   -s ${PROJECT_SOURCE_DIR}/tools/audit -p test_import_calls.py)
 endif()
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
@@ -446,7 +451,7 @@ set_tests_properties(cli.functions_elf_json PROPERTIES
 add_test(NAME cli.xrefs_elf_json
          COMMAND donkey-cli xrefs ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.xrefs_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"from\": \"0x400104\", \"to\": \"0x400109\", \"kind\": \"call\"")
+  PASS_REGULAR_EXPRESSION "\"from\": \"0x400104\", \"to\": \"0x400109\", \"to_name\": \"[^\"]*\", \"kind\": \"call\"")
 
 add_test(NAME cli.analyze_elf_json
          COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
@@ -661,7 +666,7 @@ add_test(NAME cli.decompile_truncation_text
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
                  --max-functions 1)
 set_tests_properties(cli.decompile_truncation_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions; raise the limit with --max-functions N")
+  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions. raise the limit with --max-functions N")
 
 add_test(NAME cli.decompile_no_truncation_at_the_limit
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
@@ -708,7 +713,7 @@ add_test(NAME cli.decompile_without_a_string_prints_the_address
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
                  --function 0x401130)
 set_tests_properties(cli.decompile_without_a_string_prints_the_address PROPERTIES
-  PASS_REGULAR_EXPRESSION "rdi = 0x402004;")
+  PASS_REGULAR_EXPRESSION "rdi = 0x402004.")
 set(DONKEY_CLI_STRING_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-string.db")
 add_test(NAME cli.project_string_reset
          COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_STRING_DB}
@@ -726,7 +731,7 @@ add_test(NAME cli.project_string_decompile_prints_the_literal
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
                  --project ${DONKEY_CLI_STRING_DB} --function 0x401130)
 set_tests_properties(cli.project_string_decompile_prints_the_literal PROPERTIES
-  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\);"
+  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\)."
   DEPENDS cli.project_string_define)
 add_test(NAME cli.project_string_refuses_an_unmapped_address
          COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x9999999)
@@ -1153,3 +1158,23 @@ add_test(NAME cli.typelib_show_musl
          COMMAND donkey-cli typelib show ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
 set_tests_properties(cli.typelib_show_musl PROPERTIES
   PASS_REGULAR_EXPRESSION "musl-libc 1.2.4 \\(linux x86_64 sysv LP64\\).*licence: MIT")
+
+# G24-T4: import stubs are listed by their import (`abort@plt`), and the decompiler prints a call
+# to one by the import's own name. Fixture: tests/fixtures/stubs (PROVENANCE.md there).
+add_test(NAME cli.functions_lists_import_stubs_by_name
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.functions_lists_import_stubs_by_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\", \"address\": \"0x1060\".*\"import\": \"abort\"")
+add_test(NAME cli.decompile_prints_import_calls_by_name
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+set_tests_properties(cli.decompile_prints_import_calls_by_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\n    abort\\(\\).\n"
+  FAIL_REGULAR_EXPRESSION "sub_1060\\(|abort@plt\\(")
+add_test(NAME cli.xrefs_name_import_stubs
+         COMMAND donkey-cli xrefs ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.xrefs_name_import_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"from\": \"0x1179\", \"to\": \"0x1060\", \"to_name\": \"abort@plt\"")
+add_test(NAME cli.callgraph_names_import_stubs
+         COMMAND donkey-cli callgraph ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"callee\": \"0x1060\", \"callee_name\": \"abort@plt\"")

@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3, T4 TODO) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO; owner decisions 1-4 decided 2026-11-17) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; no-return analysis and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T3, T5 to T7 TODO; owner decisions 1-4 decided 2026-11-17) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -2484,6 +2484,55 @@ requires.
   copied from outside the repository.
 - *Measurement.* Target after T4: 0 stub call sites printed as `sub_<hex>` (the (a) count, from the same script; the
   before value is 9,272 in 1,054 functions). The top-20 table (b) is the list of names that appear.
+
+**T4 report (2026-11-17).** Done for ELF (x86-64 and AArch64) and PE; Mach-O stays out (no `__stubs`
+reader). What was built:
+- `plt_stub_imports` also reads `.plt.got` (an 8-byte `jmp *slot(%rip)`, or 16 bytes after ENDBR64; the
+  slot is a GLOB_DAT for an import). `plt_stub_targets` lists the same stubs and also those whose
+  relocation names a function the image defines itself (an interposable export: libc's `free@plt`,
+  and IRELATIVE slots whose addend is an exported IFUNC symbol: libc's `strlen`). Those are named the
+  same way but are never imports: `plt_stub_imports` still leaves them out, so the link stage and
+  no-return binding do not see them.
+- Every named stub is a seed (a stub reached only by a conditional tail call was not, and printed as
+  `sub_<hex>`). `Function::import_name` and `Function::stub_target` carry the name; the function is
+  named `<name>@plt`. `AnalysisResult::import_slots` holds the GLOB_DAT slots of imports and, on PE,
+  every IAT slot (from the import symbols, whose address is the slot). A function that is one
+  `jmp *slot(%rip)` through such a slot is an import stub too (MinGW's msvcrt thunks), named by the
+  import on PE.
+- `call_target_name` gives the C name a call prints: the import, the stub target, or the function's
+  symbol or thunk name when it is a C identifier; `IrFunction::call_names` holds it per target or slot,
+  and the printer uses it, so `abort();`, `puts(`, `VirtualQuery(` and same-image `helper(` replace
+  `sub_<hex>(` and `((void (*)(void))*(u64 *)(0x...))(`. A stub's own pseudocode is headed by the
+  import's name with the note "import stub".
+- Thunks: a one-block function whose only instruction (after `endbr64`) is a direct jump to another
+  function start is marked `thunk`, with `thunk_target`, and named `j_<target>` unless a symbol names it;
+  a chain is followed up to 8 links. `CfgEdgeKind::TailCall` records an unconditional jump to another
+  function start or stub; a jump into code no function starts at stays `Jump`.
+- CLI: `functions --json` adds `import` and `thunk`; `xrefs` adds `to_name`; `callgraph` and the
+  function list print `abort@plt`.
+- Tests: `Analysis.PltStubIsNamedByItsImport`, `Analysis.DecompilerPrintsImportCallsByName`,
+  `Analysis.GotCallIsNamedByItsImport`, `Analysis.AArch64PltStubIsNamed`,
+  `Analysis.PeIatCallIsNamedByItsImport`, `Analysis.PeImportThunkIsNamedByItsImport`,
+  `Analysis.AStubForTheImagesOwnFunctionIsNamedButIsNotAnImport`,
+  `Analysis.AnIfuncStubIsNamedByItsIfuncSymbol`, `Analysis.CallTargetNamesAreCIdentifiers`,
+  `Analysis.ThunkTakesItsTargetsName`, `Analysis.ThunkChainsAndNamedThunks`,
+  `PltStubs.PltGotEntryIsNamedByItsGlobDatSlot`, `Cfg.JumpToAnotherFunctionIsATailCall`,
+  `Cfg.JumpIntoUnknownCodeIsABranch`, `cli.functions_lists_import_stubs_by_name`,
+  `cli.decompile_prints_import_calls_by_name`, `cli.xrefs_name_import_stubs`,
+  `cli.callgraph_names_import_stubs`. Fixtures in `tests/fixtures/stubs/` (provenance there): x86-64
+  with IBT, `-fno-plt`, AArch64, MinGW PE, and an ifunc library, each built from committed source.
+- Measured with `tools/audit/import_calls.py` (which now also counts calls printed by an import's
+  name) over the same 1,986 functions, Release build: stub call sites printed as `sub_<hex>`: **0**
+  (9,272 before). 8,990 sites print by an imported function's name (an undefined dynamic symbol);
+  150 print by the name of a function the image defines itself behind a stub (libc's interposable
+  `free@plt`), counted apart; the other 133 are libc's IRELATIVE stubs, which print by their IFUNC
+  symbol (`strlen(`), which `objdump` names only `*ABS*+0x...@plt`. Functions with a call to an
+  import: 979 (1,054 before, when the image's own stubs were counted as imports). Complete stays 177, and the Partial-with-rax-note count stays
+  1,163: naming changes no IR. Calls printed by a no-return name: 558 sites (469 before), because
+  same-image calls now print by their symbol too (libc's own `abort` and `exit`); 396 of them are
+  followed by a `return`, which T3 removes.
+- Not done here: Mach-O stubs; PE delay-load imports; an import by ordinal prints `ordinal_<n>`, which
+  `call_target_name` accepts as a C identifier.
 
 **T5 (outline, to be refined before it starts).** Data in code: jump tables in `.text`, literal pools and padding.
 Files: `src/analysis/cfg.cpp` (the jump-table path at 1109-1127 and `resolve_jump_table`), `src/analysis/analysis.cpp`

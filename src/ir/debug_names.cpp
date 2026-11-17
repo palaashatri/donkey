@@ -58,6 +58,16 @@ bool scalar_of(const DebugInfo& info, std::uint64_t type, std::uint8_t& width, b
   return false;
 }
 
+/// Whether `name` is what some call of `function` prints for its target.
+bool names_a_call(const IrFunction& function, const std::string& name) {
+  for (const auto& entry : function.call_names) {
+    if (entry.second == name) {
+      return true;
+    }
+  }
+  return false;
+}
+
 }  // namespace
 
 Result<bool> apply_debug_stack_names(IrFunction& function, const DebugFunction& debug,
@@ -76,7 +86,10 @@ Result<bool> apply_debug_stack_names(IrFunction& function, const DebugFunction& 
     Slot& entry = slots[slot.cfa_offset];
     std::uint8_t width = 0;
     bool floating = false;
-    entry.usable = is_identifier(slot.name) && scalar_of(info, slot.type, width, floating);
+    // A slot named like a called function would read as that function where a call prints it
+    // bare (G24-T4): it keeps its frame name.
+    entry.usable = is_identifier(slot.name) && !names_a_call(function, slot.name) &&
+                   scalar_of(info, slot.type, width, floating);
     entry.name = slot.name;
     entry.width = width;
   }
@@ -171,6 +184,11 @@ Result<bool> apply_debug_parameter_names(IrFunction& function, const DebugFuncti
     if (std::find(names.begin(), names.end(), parameter.name) != names.end()) {
       return refuse("ir.debug_names_name",
                     "the name '" + parameter.name + "' is used by two parameters");
+    }
+    if (names_a_call(function, parameter.name)) {
+      // A call prints its target bare (G24-T4): a parameter of that name would read as the callee.
+      return refuse("ir.debug_names_name",
+                    "the name '" + parameter.name + "' is the name of a called function");
     }
     names.push_back(parameter.name);
   }

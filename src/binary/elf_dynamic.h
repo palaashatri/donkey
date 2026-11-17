@@ -28,4 +28,10 @@ constexpr std::size_t kMaxRelocationEntries = 1'000'000;
     const BinaryImage& image, std::span<const std::byte> data,
     std::optional<std::uint64_t>* unreadable_at = nullptr);
 
+/// Whether each dynamic symbol, by the same index, is undefined in this image (`st_shndx` is
+/// SHN_UNDEF): an import. Index 0, the null symbol, is false. Entries past an unreadable one are
+/// missing, as in dynamic_symbol_names.
+[[nodiscard]] std::vector<bool> dynamic_symbol_undefined(const BinaryImage& image,
+                                                         std::span<const std::byte> data);
+
 }  // namespace donkey::binary::detail

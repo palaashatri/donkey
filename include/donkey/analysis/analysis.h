@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
@@ -102,9 +104,25 @@ struct AnalysisResult {
   CallGraph call_graph;
   std::vector<Xref> xrefs;
   std::vector<StringLiteral> strings;
+  /// GOT slots that a GLOB_DAT relocation for an import names (G24-T4), keyed by slot address:
+  /// a `-fno-plt` call reads its target from one of them.
+  std::map<std::uint64_t, std::string> import_slots;
   bool partial = false;
   std::vector<Diagnostic> diagnostics;
 };
+
+/// The name a call to `function` prints: its import, its stub's target, or its own name; empty
+/// when that is the synthetic `sub_<hex>` name or not a C identifier.
+[[nodiscard]] std::string function_call_name(const Function& function);
+
+/// The name a call to `address` prints as in pseudocode (G24-T4): the import's own name for an
+/// import stub (`abort`, not `abort@plt`, so the output stays C), the function's name for a
+/// function with a symbol or a thunk name, and empty when the name is synthetic (`sub_<hex>`) or
+/// is not a C identifier. An address that is not a function start gives empty.
+[[nodiscard]] std::string call_target_name(const AnalysisResult& analysis, std::uint64_t address);
+
+/// True for a C identifier: a letter or `_`, then letters, digits and `_`.
+[[nodiscard]] bool is_c_identifier(std::string_view text) noexcept;
 
 /// Bounded printable-ASCII and UTF-16LE string extraction. Scans only
 /// non-executable, file-backed sections when present, otherwise the whole file.

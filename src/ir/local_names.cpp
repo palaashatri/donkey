@@ -254,12 +254,16 @@ Result<LocalNameResult> apply_user_local_names(IrFunction& function,
       }
     }
   }
+  // A call prints its target's name bare (G24-T4), so a local of that name would shadow it.
+  for (const auto& entry : function.call_names) {
+    staying.insert(entry.second);
+  }
   std::set<std::string> distinct(applied_names.begin(), applied_names.end());
   for (const std::string& name : distinct) {
     if (staying.count(name) != 0 || applied_names.count(name) > 1) {
       return make_error<LocalNameResult>(
           Status::InvalidInput, "ir.local_name_collision",
-          "local name '" + name + "' is already the name of another local");
+          "local name '" + name + "' is already the name of another local or a called function");
     }
   }
 
