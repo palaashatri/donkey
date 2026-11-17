@@ -165,3 +165,21 @@ TEST(Analysis, PeImportThunkIsNamedByItsImport) {
   const std::string stub = pseudocode_containing(analyzed, 0x140002698);
   EXPECT_EQ(stub.find("  abort("), std::string::npos) << stub;
 }
+
+// A stub for a function the image defines itself (an interposable export, built with
+// -fsemantic-interposition): objdump names it `1810 <own_fn@plt>`. It is named like an import stub
+// and a call to it prints `own_fn(`, but it is not an import, so nothing binds or marks it as one.
+TEST(Analysis, AStubForTheImagesOwnFunctionIsNamedButIsNotAnImport) {
+  const Analyzed analyzed = analyze_fixture("link", "libconsumer_got.so");
+  const donkey::Function* stub = function_at(analyzed.analysis, 0x1810);
+  ASSERT_NE(stub, nullptr);
+  EXPECT_EQ(stub->name, "own_fn@plt");
+  EXPECT_EQ(stub->stub_target, "own_fn");
+  EXPECT_TRUE(stub->import_name.empty());
+  EXPECT_EQ(donkey::call_target_name(analyzed.analysis, 0x1810), "own_fn");
+  const auto targets =
+      donkey::plt_stub_targets(analyzed.binary.image, analyzed.binary.data);
+  EXPECT_TRUE(targets.contains(0x1810));
+  EXPECT_FALSE(donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data)
+                   .contains(0x1810));
+}

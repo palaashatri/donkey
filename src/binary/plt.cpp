@@ -69,10 +69,18 @@ std::optional<std::uint64_t> aarch64_plt_slot(const ByteReader& reader, std::uin
 
 }  // namespace
 
-/// Stub address -> imported name, for the PLT entries that jump through a JUMP_SLOT, and the
-/// `.plt.got` entries that jump through a GLOB_DAT slot.
-std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
-                                                      std::span<const std::byte> data) {
+namespace {
+
+std::map<std::uint64_t, std::string> glob_dat_slots(const BinaryImage& image,
+                                                    std::span<const std::byte> data,
+                                                    bool include_defined);
+
+/// Stub address -> the name its relocation names, for the PLT entries that jump through a
+/// JUMP_SLOT, and the `.plt.got` entries that jump through a GLOB_DAT slot. Only imports, unless
+/// `include_defined`: then also the image's own interposable functions.
+std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
+                                                std::span<const std::byte> data,
+                                                bool include_defined) {
   std::map<std::uint64_t, std::string> stubs;
   const bool aarch64 = image.architecture == Architecture::AArch64;
   if (!aarch64 && image.architecture != Architecture::X86_64) {
@@ -102,8 +110,8 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
       const std::uint64_t symbol = info_word.value() >> 32;
       const std::string name = symbol < names.size() ? names[symbol] : std::string();
       // A JUMP_SLOT can name an interposable function the image defines and exports. Its stub is
-      // a call to the image's own function, not to an import, so the stub gets no name.
-      if (imported.count(name) == 0) {
+      // a call to the image's own function, not to an import, so it is listed only on request.
+      if (name.empty() || (!include_defined && imported.count(name) == 0)) {
         continue;
       }
       got_names[place.value()] = name;
@@ -160,7 +168,7 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
   // Entries are 8 bytes (`jmp *slot(%rip); xchg %ax,%ax`) or 16 with IBT. Each 8-byte position is
   // searched; a match needs a slot that a GLOB_DAT for an import names, so other bytes get no name.
   if (!aarch64) {
-    const std::map<std::uint64_t, std::string> slots = got_import_slots(image, data);
+    const std::map<std::uint64_t, std::string> slots = glob_dat_slots(image, data, include_defined);
     for (const Section& section : image.sections) {
       if (section.name != ".plt.got" || !section.has_file_data) {
         continue;
@@ -200,8 +208,9 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
   return stubs;
 }
 
-std::map<std::uint64_t, std::string> got_import_slots(const BinaryImage& image,
-                                                      std::span<const std::byte> data) {
+std::map<std::uint64_t, std::string> glob_dat_slots(const BinaryImage& image,
+                                                    std::span<const std::byte> data,
+                                                    bool include_defined) {
   std::map<std::uint64_t, std::string> slots;
   if (image.architecture != Architecture::X86_64) {
     return slots;
@@ -228,13 +237,31 @@ std::map<std::uint64_t, std::string> got_import_slots(const BinaryImage& image,
         continue;
       }
       const std::uint64_t symbol = info_word.value() >> 32;
-      if (symbol == 0 || symbol >= names.size() || imported.count(names[symbol]) == 0) {
+      if (symbol == 0 || symbol >= names.size() || names[symbol].empty() ||
+          (!include_defined && imported.count(names[symbol]) == 0)) {
         continue;
       }
       slots[place.value()] = names[symbol];
     }
   }
   return slots;
+}
+
+}  // namespace
+
+std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
+                                                      std::span<const std::byte> data) {
+  return stub_names(image, data, false);
+}
+
+std::map<std::uint64_t, std::string> plt_stub_targets(const BinaryImage& image,
+                                                      std::span<const std::byte> data) {
+  return stub_names(image, data, true);
+}
+
+std::map<std::uint64_t, std::string> got_import_slots(const BinaryImage& image,
+                                                      std::span<const std::byte> data) {
+  return glob_dat_slots(image, data, false);
 }
 
 }  // namespace donkey

@@ -31,6 +31,10 @@ struct Function {
   /// relocation names the import it jumps to. `name` is then `<import>@plt`, and this field holds
   /// the import's own name, which the pseudocode prints as the call target.
   std::string import_name;
+  /// For any PLT stub, the name its relocation names (G24-T4): the import, or, for a stub of an
+  /// interposable function the image defines itself (libc's `free@plt`), that function's name.
+  /// The pseudocode prints a call to the stub by it. Only `import_name` marks an import.
+  std::string stub_target;
   /// The function is a thunk (G24-T4): its only instruction is an unconditional direct jump to
   /// another function's start. `name` is then `j_` and the target's name, unless a symbol names it.
   bool thunk = false;

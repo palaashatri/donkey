@@ -65,7 +65,8 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
   // The jump target of each one-block function that is only a jump.
   std::unordered_map<std::uint64_t, std::uint64_t> forwards;
   for (const Function& function : result.functions) {
-    if (function.block_count != 1 || !function.import_name.empty()) {
+    if (function.block_count != 1 || !function.import_name.empty() ||
+        !function.stub_target.empty()) {
       continue;
     }
     auto at = instruction_at.find(function.address);
@@ -90,6 +91,7 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
       if (slot != result.import_slots.end()) {
         Function& stub = result.functions[function_at.at(function.address)];
         stub.import_name = slot->second;
+        stub.stub_target = slot->second;
         if (!stub.from_symbol && stub.name == synthetic_function_name(stub.address)) {
           stub.name = format == BinaryFormat::Elf ? slot->second + "@plt" : slot->second;
         }
@@ -122,7 +124,9 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
     if (forwards.contains(target) || end.name == synthetic_function_name(target)) {
       continue;  // a cycle, or a target with no name of its own: the thunk keeps sub_<hex>
     }
-    thunk.name = "j_" + (end.import_name.empty() ? end.name : end.import_name);
+    thunk.name = "j_" + (!end.import_name.empty()  ? end.import_name
+                         : !end.stub_target.empty() ? end.stub_target
+                                                    : end.name);
   }
 }
 
@@ -571,6 +575,14 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       seeds.insert(xref.to);
     }
   }
+  // Every named PLT stub is a function (G24-T4), also one that only a jump reaches (a tail call
+  // or a conditional tail call into it).
+  const std::map<std::uint64_t, std::string> stub_targets = plt_stub_targets(image, file);
+  for (const auto& [address, name] : stub_targets) {
+    if (executable_contains(image, address)) {
+      seeds.insert(address);
+    }
+  }
   // Unwind tables (G23-T1): every FDE of `.eh_frame` names a function's range, stripped or not.
   // A start found only here is marked with the unwind provenance.
   // A table that could not be read in full may leave function starts out, so the result is
@@ -672,8 +684,11 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       seed.name = symbol->second->name;
       seed.exported = symbol->second->exported;
     }
-    if (const auto stub = stubs.find(address); stub != stubs.end()) {
-      seed.import_name = stub->second;
+    if (const auto stub = stub_targets.find(address); stub != stub_targets.end()) {
+      seed.stub_target = stub->second;
+      if (stubs.contains(address)) {
+        seed.import_name = stub->second;
+      }
       if (seed.name.empty()) {
         seed.name = stub->second + "@plt";
       }
@@ -835,7 +850,9 @@ std::string call_target_name(const AnalysisResult& analysis, std::uint64_t addre
       return {};
     }
   }
-  const std::string& name = found->import_name.empty() ? found->name : found->import_name;
+  const std::string& name = !found->import_name.empty() ? found->import_name
+                            : !found->stub_target.empty() ? found->stub_target
+                                                          : found->name;
   if (name == synthetic_function_name(address) || !is_c_identifier(name)) {
     return {};
   }
