@@ -141,32 +141,121 @@ def inside(address, ranges):
     return any(start <= address < end for start, end in ranges)
 
 
+Image = collections.namedtuple(
+    "Image", ["stubs", "gots", "names", "slots", "import_names", "local_stub_names"])
+Image.__doc__ = """What one binary contributes to the count: its stub and GOT section ranges, objdump's
+name for each stub, the import each GOT slot names, and the stub and slot names split into imports
+(undefined dynamic symbols) and functions the image defines itself."""
+
+
+class Tally:
+    """The counts over every sampled function, as measure() writes them."""
+
+    def __init__(self):
+        self.counts = collections.Counter()
+        self.sites_by_name = collections.Counter()
+        self.functions_by_name = collections.Counter()
+        self.no_return_sites = collections.Counter()
+        self.no_return_functions = collections.Counter()
+        self.got_names = collections.Counter()
+
+    def add_function(self, function, image):
+        """Counts one function of `decompile --json` (its `pseudocode` and `status`)."""
+        counts = self.counts
+        counts["functions"] += 1
+        pseudocode = function.get("pseudocode") or ""
+        lines = body_lines(pseudocode)
+        called = set()
+        no_return_called = set()
+        for index, line in enumerate(lines):
+            following = lines[index + 1] if index + 1 < len(lines) else ""
+            for m in re.finditer(r"\bsub_([0-9a-f]+)\(", line):
+                target = int(m.group(1), 16)
+                if not inside(target, image.stubs):
+                    continue
+                counts["stub_call_sites"] += 1
+                name = image.names.get(target)
+                if name is None:
+                    counts["stub_call_sites_without_objdump_name"] += 1
+                    continue
+                if site_kind(name, image.import_names, image.local_stub_names) == "import":
+                    self.sites_by_name[name] += 1
+                    called.add(name)
+                else:
+                    # A stub of the image's own function: not an import call. Its no-return
+                    # accounting below still applies.
+                    counts["local_stub_call_sites_printed_as_sub"] += 1
+                if name in NO_RETURN:
+                    self.no_return_sites[name] += 1
+                    no_return_called.add(name)
+                    if following.startswith("return"):
+                        counts["no_return_sites_followed_by_return"] += 1
+                elif name in SOMETIMES_NO_RETURN:
+                    counts["sometimes_no_return_sites"] += 1
+            for m in NAMED_NO_RETURN_CALL.finditer(line):
+                counts["named_no_return_call_sites"] += 1
+                self.no_return_sites[m.group(1)] += 1
+                no_return_called.add(m.group(1))
+                if following.startswith("return"):
+                    counts["no_return_sites_followed_by_return"] += 1
+            for m in CALL_BY_NAME.finditer(line):
+                kind = site_kind(m.group(1), image.import_names, image.local_stub_names)
+                if kind == "import":
+                    counts["import_call_sites_printed_by_name"] += 1
+                    called.add(m.group(1))
+                elif kind == "local":
+                    counts["local_stub_call_sites_printed_by_name"] += 1
+            for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
+                slot = int(m.group(1), 16)
+                if inside(slot, image.gots):
+                    counts["got_call_sites"] += 1
+                    self.got_names[image.slots.get(slot, "<no relocation>")] += 1
+        if called:
+            counts["functions_with_a_stub_call"] += 1
+            self.functions_by_name.update(called)
+        if no_return_called:
+            counts["functions_with_a_no_return_call"] += 1
+            self.no_return_functions.update(no_return_called)
+        partial_with_note = function["status"] == "Partial" and RETURN_NOTE in pseudocode
+        counts["partial_with_the_return_note"] += int(partial_with_note)
+        counts["partial_with_the_return_note_and_a_no_return_call"] += int(
+            partial_with_note and bool(no_return_called))
+        counts["complete"] += int(function["status"] == "Complete")
+
+    def result(self):
+        return {
+            "counts": dict(self.counts),
+            "stub_call_sites_by_import": self.sites_by_name.most_common(),
+            "functions_by_import": self.functions_by_name.most_common(),
+            "no_return_call_sites": dict(self.no_return_sites),
+            "functions_by_no_return_import": dict(self.no_return_functions),
+            "got_call_sites_by_import": self.got_names.most_common(),
+        }
+
+
 def measure(args):
     with open(args.list) as handle:
         plan = json.load(handle)
     for tag, entry in plan["binaries"].items():
         check_identity(entry["path"], sha256_of(entry["path"]), entry["sha256"])
-    counts = collections.Counter()
-    sites_by_name = collections.Counter()
-    functions_by_name = collections.Counter()
-    no_return_sites = collections.Counter()
-    no_return_functions = collections.Counter()
-    got_names = collections.Counter()
+    tally = Tally()
     for tag, entry in plan["binaries"].items():
         wanted = set(entry["addresses"])
         with stable_copy(entry["path"]) as (copy, digest):
             check_identity(entry["path"], digest, entry["sha256"])
             ranges = sections(copy)
-            stubs = [ranges[name] for name in STUB_SECTIONS if name in ranges]
-            gots = [ranges[name] for name in GOT_SECTIONS if name in ranges]
             names = stub_names(copy)
             slots = got_slot_names(copy)
             # Only undefined symbols are imports: a stub or slot for a function the image defines
             # itself (libc's interposable free@plt, an ifunc) is counted on its own.
             undefined = undefined_symbols(copy)
             stub_and_slot_names = set(names.values()) | set(slots.values())
-            import_names = stub_and_slot_names & undefined
-            local_stub_names = stub_and_slot_names - undefined
+            image = Image(
+                stubs=[ranges[name] for name in STUB_SECTIONS if name in ranges],
+                gots=[ranges[name] for name in GOT_SECTIONS if name in ranges],
+                names=names, slots=slots,
+                import_names=stub_and_slot_names & undefined,
+                local_stub_names=stub_and_slot_names - undefined)
             decompiled = json.loads(run([args.cli, "decompile", copy, "--json",
                                          "--max-functions", "1000000"]))
         returned = {int(function["address"], 16) for function in decompiled["functions"]}
@@ -175,77 +264,10 @@ def measure(args):
             sys.exit(f"import_calls.py: {tag}: {len(missing)} sampled functions were not returned, "
                      f"the first at {hex(missing[0])}; the measurement is refused")
         for function in decompiled["functions"]:
-            if int(function["address"], 16) not in wanted:
-                continue
-            counts["functions"] += 1
-            pseudocode = function.get("pseudocode") or ""
-            lines = body_lines(pseudocode)
-            called = set()
-            no_return_called = set()
-            for index, line in enumerate(lines):
-                for m in re.finditer(r"\bsub_([0-9a-f]+)\(", line):
-                    target = int(m.group(1), 16)
-                    if not inside(target, stubs):
-                        continue
-                    counts["stub_call_sites"] += 1
-                    name = names.get(target)
-                    if name is None:
-                        counts["stub_call_sites_without_objdump_name"] += 1
-                        continue
-                    if site_kind(name, import_names, local_stub_names) == "import":
-                        sites_by_name[name] += 1
-                        called.add(name)
-                    else:
-                        # A stub of the image's own function: not an import call. Its no-return
-                        # accounting below still applies.
-                        counts["local_stub_call_sites_printed_as_sub"] += 1
-                    if name in NO_RETURN:
-                        no_return_sites[name] += 1
-                        no_return_called.add(name)
-                        following = lines[index + 1] if index + 1 < len(lines) else ""
-                        if following.startswith("return"):
-                            counts["no_return_sites_followed_by_return"] += 1
-                    elif name in SOMETIMES_NO_RETURN:
-                        counts["sometimes_no_return_sites"] += 1
-                for m in NAMED_NO_RETURN_CALL.finditer(line):
-                    counts["named_no_return_call_sites"] += 1
-                    no_return_sites[m.group(1)] += 1
-                    no_return_called.add(m.group(1))
-                    following = lines[index + 1] if index + 1 < len(lines) else ""
-                    if following.startswith("return"):
-                        counts["no_return_sites_followed_by_return"] += 1
-                for m in CALL_BY_NAME.finditer(line):
-                    kind = site_kind(m.group(1), import_names, local_stub_names)
-                    if kind == "import":
-                        counts["import_call_sites_printed_by_name"] += 1
-                        called.add(m.group(1))
-                    elif kind == "local":
-                        counts["local_stub_call_sites_printed_by_name"] += 1
-                for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
-                    slot = int(m.group(1), 16)
-                    if inside(slot, gots):
-                        counts["got_call_sites"] += 1
-                        got_names[slots.get(slot, "<no relocation>")] += 1
-            if called:
-                counts["functions_with_a_stub_call"] += 1
-                functions_by_name.update(called)
-            if no_return_called:
-                counts["functions_with_a_no_return_call"] += 1
-                no_return_functions.update(no_return_called)
-            partial_with_note = function["status"] == "Partial" and RETURN_NOTE in pseudocode
-            counts["partial_with_the_return_note"] += int(partial_with_note)
-            counts["partial_with_the_return_note_and_a_no_return_call"] += int(
-                partial_with_note and bool(no_return_called))
-            counts["complete"] += int(function["status"] == "Complete")
+            if int(function["address"], 16) in wanted:
+                tally.add_function(function, image)
         print(tag, "measured", flush=True)
-    result = {
-        "counts": dict(counts),
-        "stub_call_sites_by_import": sites_by_name.most_common(),
-        "functions_by_import": functions_by_name.most_common(),
-        "no_return_call_sites": dict(no_return_sites),
-        "functions_by_no_return_import": dict(no_return_functions),
-        "got_call_sites_by_import": got_names.most_common(),
-    }
+    result = tally.result()
     with open(args.out, "w") as handle:
         json.dump(result, handle, indent=1)
     print(json.dumps(result["counts"], indent=1))
