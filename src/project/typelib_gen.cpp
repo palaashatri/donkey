@@ -27,16 +27,16 @@ bool is_ident_start(char c) {
 
 /// Words that never change a type, removed from a declaration.
 bool dropped_word(std::string_view word) {
-  static const std::set<std::string_view> kDropped{
-      "restrict", "__restrict", "__restrict__", "__extension__", "__inline", "__inline__",
-      "_Noreturn", "__volatile__", "__const"};
+  static const std::set<std::string_view> kDropped{"restrict",      "__restrict",   "__restrict__",
+                                                   "__extension__", "__inline",     "__inline__",
+                                                   "_Noreturn",     "__volatile__", "__const"};
   return kDropped.contains(word);
 }
 
 /// Words followed by a parenthesised argument that is removed with them.
 bool dropped_call(std::string_view word) {
-  return word == "__attribute__" || word == "__attribute" || word == "__asm__" ||
-         word == "__asm" || word == "asm" || word == "__declspec";
+  return word == "__attribute__" || word == "__attribute" || word == "__asm__" || word == "__asm" ||
+         word == "asm" || word == "__declspec";
 }
 
 /// The index just past the parenthesised group that starts at the first '(' at or after `at`.
@@ -190,8 +190,8 @@ std::string record_text(std::string_view text, std::size_t limit, bool allow_col
 }
 
 std::string hex_digest(std::string_view text) {
-  return Sha256::hex(std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()),
-                                                text.size()));
+  return Sha256::hex(
+      std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
 }
 
 }  // namespace
@@ -262,16 +262,14 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   std::string body;
   for (const std::string& declaration : split_c_declarations(preprocessed)) {
     const std::string name = record_text(name_of(declaration), 96, false);
-    if (declaration.find('{') != std::string::npos &&
-        declaration.back() == '}') {
+    if (declaration.find('{') != std::string::npos && declaration.back() == '}') {
       made.skipped.push_back({name, "a function definition (only declarations are kept)"});
       continue;
     }
     std::vector<CDeclaredName> names;
     auto parsed = parse_c_declarations(declaration, kept_types, parse_options, &names);
     if (!parsed) {
-      made.skipped.push_back(
-          {name, parsed.diagnostic().code + " " + parsed.diagnostic().message});
+      made.skipped.push_back({name, parsed.diagnostic().code + " " + parsed.diagnostic().message});
       continue;
     }
     if (names.empty()) {
@@ -293,9 +291,8 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
     const std::string trial_body = body + declaration + "\n";
     auto whole = parse_c_declarations(trial_body, TypeTable{}, parse_options);
     if (!whole) {
-      made.skipped.push_back(
-          {name, whole.diagnostic().code + " (with the kept declarations) " +
-                     whole.diagnostic().message});
+      made.skipped.push_back({name, whole.diagnostic().code + " (with the kept declarations) " +
+                                        whole.diagnostic().message});
       continue;
     }
     TypeTable trial = kept_types;

@@ -41,9 +41,9 @@
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/string_literals.h"
 #include "donkey/project/typelib.h"
 #include "donkey/project/typelib_gen.h"
-#include "donkey/project/string_literals.h"
 #include "donkey/project/types.h"
 #include "json.h"
 
@@ -2204,8 +2204,8 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
     std::printf("%s %s (%s %s %s %s)\n", lib.library.c_str(), lib.library_version.c_str(),
                 lib.platform.c_str(), lib.architecture.c_str(), lib.abi.c_str(),
                 lib.data_model.c_str());
-    std::printf("source: %s\nlicence: %s\ngenerator: %s\n", lib.source.c_str(),
-                lib.licence.c_str(), lib.generator.c_str());
+    std::printf("source: %s\nlicence: %s\ngenerator: %s\n", lib.source.c_str(), lib.licence.c_str(),
+                lib.generator.c_str());
     std::printf("%zu types, %zu source files, %zu skipped declarations\n", lib.types.size(),
                 lib.source_files.size(), lib.skipped.size());
     return kExitOk;
@@ -2269,9 +2269,9 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
       options.source_files.push_back({value.substr(0, space), value.substr(space + 1)});
     } else if (arg == "--macro") {
       const std::size_t equals = value.find('=');
-      options.macros.push_back(
-          {value.substr(0, equals),
-           equals == std::string::npos ? std::string() : value.substr(equals + 1)});
+      options.macros.push_back({value.substr(0, equals), equals == std::string::npos
+                                                             ? std::string()
+                                                             : value.substr(equals + 1)});
     } else if (arg == "--note") {
       options.notes.push_back(value);
     } else {
