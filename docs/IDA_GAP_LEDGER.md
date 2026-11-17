@@ -2483,6 +2483,12 @@ least one returning path and every returning path compared; 4: option (c)). What
   `sub_` calls to stubs.)
 - Not done: interposition (`LD_PRELOAD`) is assumed absent, as decision 4 records; AArch64 GOT calls are not bound
   (no AArch64 GOT reader); Mach-O imports are not bound.
+- Known limitation (owner, 2026-11-17, from review of #67): a versioned import (`exit@GLIBC_2.2.5`) is bound by its
+  version alone, even when another needed library comes earlier in DT_NEEDED order. glibc lets a library without
+  symbol versioning that is found first satisfy a versioned reference, so such a library exporting `exit` would make
+  the mark wrong. Requiring every needed library to be a runtime library (as the unversioned rule does) would remove
+  nearly all marks on real programs, which almost always also need libz, libssl or the like; the owner kept the
+  version as the evidence. A name that also has an unversioned import carries no version evidence.
 
 **T4. Thunks and import stubs named.**
 

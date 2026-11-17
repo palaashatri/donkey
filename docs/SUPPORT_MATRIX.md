@@ -39,7 +39,9 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   `src/analysis/no_return.cpp`; not `error`) ends its path when the import is bound to a runtime library:
   by its ELF symbol version (`.gnu.version`/`.gnu.version_r`, read by a bounded reader, `fuzz_elf_versions`),
   otherwise by DT_NEEDED when every needed library is a runtime library, and on PE by the import's DLL.
-  Each mark records its evidence (`functions --json`: `no_return_reason`). Same-image functions whose
+  Each mark records its evidence (`functions --json`: `no_return_reason`). A versioned import is trusted by its
+  version alone: a library without symbol versioning that exports the same name and comes earlier in DT_NEEDED
+  order would make the mark wrong (a known limitation, kept by owner decision; `docs/IDA_GAP_LEDGER.md` G24-T3). Same-image functions whose
   every path ends in such a call, `ud2` or `hlt` are marked by propagation (8 rounds at most). The CFG gives
   the call no fall-through edge; the IR ends the block with an unreachable return that prints nothing; the
   evaluator stops at the call with `ir.eval_no_return`; a function with no returning path stays Partial.
