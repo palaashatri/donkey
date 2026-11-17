@@ -210,8 +210,8 @@ class Emitter {
   std::vector<StructuredLine> lines_;
   int depth_ = 1;
   std::size_t gotos_ = 0;
-  std::size_t copies_ = 0;      ///< blocks printed as a copy in place of a goto (W1b)
-  int copy_depth_ = 0;          ///< copies being printed inside a copy
+  std::size_t copies_ = 0;  ///< blocks printed as a copy in place of a goto (W1b)
+  int copy_depth_ = 0;      ///< copies being printed inside a copy
 
   // ---- analysis -----------------------------------------------------------------------------
 

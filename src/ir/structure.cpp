@@ -2272,8 +2272,9 @@ StructureResult structure_function(const IrFunction& function,
   // no structure expresses, unless it nests deeper than kMaxStructureNesting. It is checked like
   // the candidates above; a refusal or a mismatch leaves the labelled form.
   // W1b: first with small blocks copied in place of gotos; if the check refuses that candidate,
-  // without copies. (Copying small conditional blocks too, and keeping whichever of three candidates
-  // had the fewest gotos, removed 71 more of 16,232 but cost 38% more time on openssl: not done.)
+  // without copies. (Copying small conditional blocks too, and keeping whichever of three
+  // candidates had the fewest gotos, removed 71 more of 16,232 but cost 38% more time on openssl:
+  // not done.)
   std::string refusal;
   bool have_best = false;
   std::vector<StructuredLine> best_lines;
@@ -2301,8 +2302,7 @@ StructureResult structure_function(const IrFunction& function,
     result.refusal.clear();
     result.lines = std::move(best_lines);
     result.gotos = best_gotos;
-    result.outcome =
-        result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
+    result.outcome = result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
     return result;
   }
   result.lines.clear();
