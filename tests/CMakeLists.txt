@@ -175,6 +175,7 @@ add_executable(donkey_unit_tests
   unit/typelib_test.cpp
   unit/typelib_make_test.cpp
   unit/typelib_apply_test.cpp
+  unit/library_call_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp
@@ -1280,3 +1281,13 @@ add_test(NAME cli.functions_list_no_return_evidence
          COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
 set_tests_properties(cli.functions_list_no_return_evidence PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 file:libc.so.6\"")
+
+# G22-T4: a call through an import stub with a library prototype prints its arguments and result,
+# labelled with the library (`117e: call 1070 <puts@plt>` in stubs_x86_64).
+add_test(NAME cli.decompile_prints_library_call_arguments
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64
+                 --project ${DONKEY_CLI_TYPELIB_DB} --function 0x117e)
+set_tests_properties(cli.decompile_prints_library_call_arguments PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  PASS_REGULAR_EXPRESSION "rax = puts\\(rdi\\); /\\* prototype from musl-libc 1.2.4 \\*/"
+  FAIL_REGULAR_EXPRESSION "\\[complete\\]")

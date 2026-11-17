@@ -1,7 +1,10 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/image.h"
@@ -29,6 +32,19 @@ class CallSummaryCache {
   std::unique_ptr<Impl> impl_;
 };
 
+/// A callee's prototype from a type library (G22-T4), for a call through an import stub. Only
+/// integer and pointer parameters and results are described; anything else has no prototype here.
+struct CallPrototype {
+  /// The width in bytes (1 to 8) of each fixed parameter, in order.
+  std::vector<std::uint8_t> parameter_widths;
+  /// The width of the result; 0 for void.
+  std::uint8_t return_width = 0;
+  /// Variadic: only the fixed parameters are passed as arguments.
+  bool variadic = false;
+  /// The library that declared it (`musl-libc 1.2.4`), printed with the call.
+  std::string source;
+};
+
 struct LiftOptions {
   std::size_t max_statements = 200'000;
   std::size_t max_blocks = 20'000;
@@ -44,6 +60,9 @@ struct LiftOptions {
   /// summary depends on them. The cache is not thread-safe: use it from one thread. Null: the lift
   /// makes its own cache for the duration of the call.
   std::shared_ptr<CallSummaryCache> call_summaries;
+  /// Library prototypes by call target (an import stub's address), G22-T4. A direct call to one of
+  /// them, on x86-64 System V, carries the prototype's arguments and result; it stays Partial.
+  std::map<std::uint64_t, CallPrototype> call_prototypes;
 };
 
 /// Lift one function's basic blocks into IR. The lifters model a documented

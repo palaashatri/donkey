@@ -214,6 +214,10 @@ struct IrStatement {
   /// Complete and makes no calls, so these are every register it can change; a caller-saved
   /// register outside this set keeps its value across the call (the clobber check uses this).
   std::vector<std::string> call_writes;
+  /// Only for a Call whose arguments come from a library prototype (G22-T4): the library that
+  /// declared it (`musl-libc 1.2.4`). The callee is an import with no body here, so the call is
+  /// not executed and its caller is not Complete; `signature_inferred` stays false.
+  std::string signature_source;
 };
 
 struct IrBlock {

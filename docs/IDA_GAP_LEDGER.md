@@ -177,7 +177,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,341 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). Calls do not take their arguments from it yet (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 791 of 2,725 stubs of the seven audit binaries get a prototype; T4 TODO) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,341 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A call through such a stub prints the prototype's arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 791 of 2,725 stubs of the seven audit binaries get a prototype; T4 PARTIAL: x86-64 System V calls through a stub, integer and pointer arguments; 27,943 calls in 6,049 functions of the seven binaries print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -2238,6 +2238,42 @@ sources only, a preprocessor at build time). What was built and measured:
   and the reader must refuse a mismatch with the target.
 - A type library is a per-project table. A library type must not change a user, DWARF or PDB type.
 - Keep the ELF version suffix out of the library's names; keep it in the provenance.
+
+
+**T4 report (2026-11-17).** Partial: what was built and measured.
+- `CallPrototype` and `LiftOptions::call_prototypes` (`include/donkey/ir/lift.h`): a library prototype by call
+  target (an import stub's address), with the width of each fixed integer or pointer parameter, the result's
+  width (0 for void), whether it is variadic, and the library's name. `IrStatement::signature_source` records
+  the library on the call; `signature_inferred` stays false, so the evaluator never runs the call, and the
+  clobber check treats it as an unknown call (every caller-saved register changes, then rax is the result).
+- `lift_call` (`src/ir/lift.cpp`): a direct call to a target with a prototype, on x86-64 System V (not PE: a
+  Windows x64 call uses other registers), passes rdi, rsi, rdx, rcx, r8, r9 in order, each as wide as its
+  parameter, and its result is rax. A prototype with more than six parameters, or with a parameter or result
+  that is not an integer, enum or pointer (a float, a struct by value), is not used: the call stays as before.
+  The caller is Partial ("a call to an imported function is not executed, so its caller is not verified"); a
+  variadic call passes its fixed parameters only and says so. An argument register past the prototype's that
+  the block writes and does not read before the call is noted as a possible mismatch, with both addresses; it
+  is never taken as an argument, and a variadic call is not checked (its callee may read any of them).
+- The verifier accepts call arguments from a library source as from an inferred one; arguments with neither
+  are still refused (`ir.call_signature`). The printer adds `/* prototype from musl-libc 1.2.4 */`.
+- `decompile --project` builds the prototypes from the project's library applications (T3): integer, enum and
+  pointer types through typedefs; anything else leaves that import without one.
+- Measured (`decompile --project` with the musl library applied, whole binaries): 27,943 calls in 6,049
+  functions print their library arguments (ls 547 in 99, openssl 537 in 134, bash 6,912 in 1,275, libsqlite3
+  653 in 332, git 16,586 in 2,970, python3.12 2,708 in 1,239, libc 0). 101 possible mismatches are noted; the
+  first one checked in openssl is the dead remainder of an `idiv` in rdx before `time(NULL)`, which is what
+  "possible" is for. The `docs/AUDIT.md` sample is unchanged: it runs without a project, and every caller of
+  an import was Partial already.
+- Tests: `Ir.LibraryPrototypeSuppliesTheArgumentsOfAnImportCall` (stubs_x86_64, `rax = puts(rdi);`),
+  `Ir.VariadicPrototypeLeavesTheCallPartial`, `Ir.UnreadArgumentRegisterWriteIsReportedAsAPossibleMismatch`,
+  `Ir.ArgumentRegisterWithinThePrototypeIsNotAMismatch`, `Ir.CallerReadOfAnArgumentRegisterIsNotAnExtraArgument`,
+  `Ir.APeCallTakesNoLibraryPrototype`, `Ir.APrototypeWithANonIntegerParameterIsNotUsed`,
+  `Ir.VerifierAcceptsLibraryArgumentsAndRefusesUnsourcedOnes`, `cli.decompile_prints_library_call_arguments`.
+- Not done: a call through a GOT slot without a stub (`-fno-plt`), AArch64 and Windows x64 calls, floating-point
+  and struct arguments (G21-T3), stack arguments past the sixth, a variadic call's other arguments (G21-T4),
+  the corpus oracle test `DecompilerCorpus.LibraryCallsAreLabelledAndNotComplete` (the corpus harness takes
+  no project; the unit tests check the Partial verdict), and a check of a prototype against the real callee
+  (options 1 and 2 above wait for the owner; option 3, labelled and Partial, is what the code does).
 
 ### G23 Unwind tables and exception handling (P1)
 
