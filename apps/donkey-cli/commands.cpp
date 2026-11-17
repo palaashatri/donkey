@@ -41,9 +41,10 @@
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
-#include "donkey/project/typelib.h"
-#include "donkey/project/typelib_gen.h"
 #include "donkey/project/string_literals.h"
+#include "donkey/project/typelib.h"
+#include "donkey/project/typelib_apply.h"
+#include "donkey/project/typelib_gen.h"
 #include "donkey/project/types.h"
 #include "json.h"
 
@@ -830,6 +831,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project local-names <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
+      "  donkey-cli project type library add <database> <library.dtl> [--json]\n"
+      "  donkey-cli project type library list <database> [--json]\n"
       "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
       "SYMBOL|ADDR CONDITION]... [--watch "
       "SYMBOL|ADDR[:LEN][:rw]]... [--watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION]... [--run]"
@@ -1901,11 +1904,11 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
 
 namespace {
 
-/// `project type add|list|apply`: the C types a project holds, and which address each
+/// `project type add|list|apply|library`: the C types a project holds, and which address each
 /// applies to (G05-T4). The declarations are read from a C header of the supported subset.
 int command_project_type(const std::vector<std::string_view>& positional, bool json) {
   if (positional.empty()) {
-    return usage_error("project type needs a subcommand: add, list or apply");
+    return usage_error("project type needs a subcommand: add, list, apply or library");
   }
   const std::string_view action = positional[0];
   const std::vector<std::string_view> rest(positional.begin() + 1, positional.end());
@@ -2071,7 +2074,133 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     return kExitOk;
   }
 
-  return usage_error("project type needs a subcommand: add, list or apply");
+  if (action == "library") {
+    // project type library add <db> <library.dtl> | project type library list <db>
+    if (rest.size() == 2 && rest[0] == "list") {
+      const std::string database(rest[1]);
+      auto project = Project::open(database);
+      if (!project) {
+        return fail(project.diagnostic());
+      }
+      auto loaded = project.value().type_libraries();
+      if (!loaded) {
+        return fail(loaded.diagnostic());
+      }
+      if (json) {
+        std::string out;
+        out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+        out += "  \"tool\": \"donkey-cli\",\n";
+        out += "  \"tool_version\": " + quote(version()) + ",\n";
+        out += "  \"database\": " + quote(database) + ",\n";
+        out += "  \"libraries\": [";
+        for (std::size_t i = 0; i < loaded.value().size(); ++i) {
+          const donkey::TypeLibraryRecord& record = loaded.value()[i];
+          out += i == 0 ? "\n" : ",\n";
+          out += "    {\"library\": " + quote(record.library) +
+                 ", \"library_version\": " + quote(record.library_version) +
+                 ", \"architecture\": " + quote(record.architecture) +
+                 ", \"body_sha256\": " + quote(record.body_sha256) +
+                 ", \"added_types\": " + std::to_string(record.added_types) +
+                 ", \"collisions\": " + std::to_string(record.collisions) + "}";
+        }
+        out += loaded.value().empty() ? "]\n" : "\n  ]\n";
+        out += "}\n";
+        std::fwrite(out.data(), 1, out.size(), stdout);
+      } else {
+        std::printf("%zu type libraries\n", loaded.value().size());
+        for (const donkey::TypeLibraryRecord& record : loaded.value()) {
+          std::printf("  %s %s (%s): %llu types added, %llu collisions\n", record.library.c_str(),
+                      record.library_version.c_str(), record.architecture.c_str(),
+                      static_cast<unsigned long long>(record.added_types),
+                      static_cast<unsigned long long>(record.collisions));
+        }
+      }
+      return kExitOk;
+    }
+    if (rest.size() != 3 || rest[0] != "add") {
+      return usage_error(
+          "project type library needs 'add <database> <library.dtl>' or 'list <database>'");
+    }
+    const std::string database(rest[1]);
+    const std::string path(rest[2]);
+    auto library = donkey::load_type_library(path);
+    if (!library) {
+      return fail(library.diagnostic());
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    auto loaded = project.value().type_libraries();
+    if (!loaded) {
+      return fail(loaded.diagnostic());
+    }
+    for (const donkey::TypeLibraryRecord& record : loaded.value()) {
+      if (record.library == library.value().library &&
+          record.library_version == library.value().library_version &&
+          record.architecture == library.value().architecture) {
+        return fail(Diagnostic{Status::InvalidInput, "project.type_library_loaded",
+                               "this type library is already loaded into the project",
+                               std::nullopt});
+      }
+    }
+    auto known = project.value().types();
+    if (!known) {
+      return fail(known.diagnostic());
+    }
+    auto merged = donkey::merge_type_library(known.value(), library.value());
+    if (!merged) {
+      return fail(merged.diagnostic());
+    }
+    auto saved = project.value().replace_types(merged.value().table);
+    if (!saved) {
+      return fail(saved.diagnostic());
+    }
+    donkey::TypeLibraryRecord record;
+    record.library = library.value().library;
+    record.library_version = library.value().library_version;
+    record.architecture = library.value().architecture;
+    record.body_sha256 = library.value().body_sha256;
+    record.added_types = merged.value().added;
+    record.collisions = merged.value().collisions.size();
+    auto recorded = project.value().add_type_library(record);
+    if (!recorded) {
+      return fail(recorded.diagnostic());
+    }
+    std::size_t differing = 0;
+    for (const donkey::TypeLibraryCollision& collision : merged.value().collisions) {
+      differing += collision.differs ? 1 : 0;
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"library\": " + quote(record.library) + ",\n";
+      out += "  \"library_version\": " + quote(record.library_version) + ",\n";
+      out += "  \"added_types\": " + std::to_string(record.added_types) + ",\n";
+      out += "  \"collisions\": [";
+      const auto& collisions = merged.value().collisions;
+      for (std::size_t i = 0; i < collisions.size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"name\": " + quote(collisions[i].name) +
+               ", \"kept\": " + std::to_string(collisions[i].existing.value()) +
+               ", \"differs\": " + (collisions[i].differs ? "true" : "false") + "}";
+      }
+      out += collisions.empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Loaded %s %s: %llu types added, %zu names kept from the project (%zu differ)\n",
+                  record.library.c_str(), record.library_version.c_str(),
+                  static_cast<unsigned long long>(record.added_types),
+                  merged.value().collisions.size(), differing);
+    }
+    return kExitOk;
+  }
+
+  return usage_error("project type needs a subcommand: add, list, apply or library");
 }
 
 }  // namespace
@@ -2204,8 +2333,8 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
     std::printf("%s %s (%s %s %s %s)\n", lib.library.c_str(), lib.library_version.c_str(),
                 lib.platform.c_str(), lib.architecture.c_str(), lib.abi.c_str(),
                 lib.data_model.c_str());
-    std::printf("source: %s\nlicence: %s\ngenerator: %s\n", lib.source.c_str(),
-                lib.licence.c_str(), lib.generator.c_str());
+    std::printf("source: %s\nlicence: %s\ngenerator: %s\n", lib.source.c_str(), lib.licence.c_str(),
+                lib.generator.c_str());
     std::printf("%zu types, %zu source files, %zu skipped declarations\n", lib.types.size(),
                 lib.source_files.size(), lib.skipped.size());
     return kExitOk;
@@ -2269,9 +2398,9 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
       options.source_files.push_back({value.substr(0, space), value.substr(space + 1)});
     } else if (arg == "--macro") {
       const std::size_t equals = value.find('=');
-      options.macros.push_back(
-          {value.substr(0, equals),
-           equals == std::string::npos ? std::string() : value.substr(equals + 1)});
+      options.macros.push_back({value.substr(0, equals), equals == std::string::npos
+                                                             ? std::string()
+                                                             : value.substr(equals + 1)});
     } else if (arg == "--note") {
       options.notes.push_back(value);
     } else {

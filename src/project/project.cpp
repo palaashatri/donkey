@@ -322,13 +322,48 @@ CREATE TABLE local_names (
 PRAGMA user_version=7;
 )sql";
 
-/// v8 records where each type application came from (G22-T3): 0 user, 1 DWARF, 2 PDB, 3 inferred,
-/// 4 a type library, as TypeProvenance numbers them. Existing rows were made by the user.
+/// v8 lists the type libraries loaded into the project, and records where each type application
+/// came from (G22-T3): 0 user, 1 DWARF, 2 PDB, 3 inferred, 4 a type library, as TypeProvenance
+/// numbers them. Existing rows were made by the user.
 constexpr const char* kMigrateV7ToV8 = R"sql(
-ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0
-  CHECK (source BETWEEN 0 AND 4);
+CREATE TABLE IF NOT EXISTS type_libraries (
+  id INTEGER PRIMARY KEY,
+  library TEXT NOT NULL,
+  library_version TEXT NOT NULL,
+  architecture TEXT NOT NULL,
+  body_sha256 TEXT NOT NULL,
+  added_types INTEGER NOT NULL CHECK (added_types >= 0),
+  collisions INTEGER NOT NULL CHECK (collisions >= 0),
+  UNIQUE (library, library_version, architecture)
+);
 PRAGMA user_version=8;
 )sql";
+
+/// The column of v8 that records the source of a type application. It is added only when missing.
+constexpr const char* kAddApplicationSource = R"sql(
+ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0
+  CHECK (source BETWEEN 0 AND 4);
+)sql";
+
+/// The two columns version 5 gained in place (see the v7 to v8 step of Project::open).
+constexpr const char* kRepairV5TypeColumns = R"sql(
+ALTER TABLE types ADD COLUMN count_known INTEGER NOT NULL DEFAULT 1 CHECK (count_known IN (0, 1));
+ALTER TABLE types ADD COLUMN alignment INTEGER NOT NULL DEFAULT 0 CHECK (alignment >= 0);
+)sql";
+
+/// Whether `table` has a column named `column`.
+bool table_has_column(sqlite3* db, const char* table, const char* column) {
+  sqlite3_stmt* statement = nullptr;
+  const std::string query =
+      std::string("SELECT 1 FROM pragma_table_info('") + table + "') WHERE name = ?1";
+  if (sqlite3_prepare_v2(db, query.c_str(), -1, &statement, nullptr) != SQLITE_OK) {
+    return false;
+  }
+  sqlite3_bind_text(statement, 1, column, -1, SQLITE_STATIC);
+  const bool found = sqlite3_step(statement) == SQLITE_ROW;
+  sqlite3_finalize(statement);
+  return found;
+}
 
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
@@ -628,7 +663,19 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 7) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
-      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+      // Version 5 gained the types table's count_known and alignment columns after some files
+      // had been written with it, so such a file reaches here without them. They are added with
+      // the values every type had before the change: a known count and the natural alignment.
+      int rc_repair = SQLITE_OK;
+      if (rc_begin == SQLITE_OK && !table_has_column(db, "types", "count_known")) {
+        rc_repair = sqlite3_exec(db, kRepairV5TypeColumns, nullptr, nullptr, nullptr);
+      }
+      if (rc_repair == SQLITE_OK && !table_has_column(db, "type_applications", "source")) {
+        rc_repair = sqlite3_exec(db, kAddApplicationSource, nullptr, nullptr, nullptr);
+      }
+      const int rc_migrate = rc_repair == SQLITE_OK
+                                 ? sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr)
+                                 : rc_repair;
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
                                 : rc_migrate;
@@ -2072,6 +2119,69 @@ Result<void> Project::restore(const std::string& database_path, const std::strin
     return replaced;
   }
   return {};
+}
+
+Result<std::vector<TypeLibraryRecord>> Project::type_libraries() const {
+  if (!is_open()) {
+    return make_error<std::vector<TypeLibraryRecord>>(Status::InvalidInput, "project.not_open",
+                                                      "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  Statement rows(db,
+                 "SELECT library, library_version, architecture, body_sha256, added_types, "
+                 "collisions FROM type_libraries ORDER BY id");
+  if (!rows.ok()) {
+    return make_error<std::vector<TypeLibraryRecord>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(db, "project.query_failed", "list type libraries").message);
+  }
+  std::vector<TypeLibraryRecord> out;
+  while (rows.step()) {
+    TypeLibraryRecord record;
+    record.library = rows.text(0);
+    record.library_version = rows.text(1);
+    record.architecture = rows.text(2);
+    record.body_sha256 = rows.text(3);
+    record.added_types = static_cast<std::uint64_t>(rows.integer(4));
+    record.collisions = static_cast<std::uint64_t>(rows.integer(5));
+    out.push_back(std::move(record));
+  }
+  if (!rows.done()) {
+    return make_error<std::vector<TypeLibraryRecord>>(
+        Status::InternalError, "project.query_failed",
+        storage_error(db, "project.query_failed", "list type libraries").message);
+  }
+  return out;
+}
+
+Result<void> Project::add_type_library(const TypeLibraryRecord& record) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  if (!fits_storage(record.added_types) || !fits_storage(record.collisions)) {
+    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
+                           "a type library count does not fit the storage integer range");
+  }
+  sqlite3* db = impl_->db;
+  Statement insert(db,
+                   "INSERT INTO type_libraries(library, library_version, architecture, "
+                   "body_sha256, added_types, collisions) VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
+  insert.bind(1, record.library);
+  insert.bind(2, record.library_version);
+  insert.bind(3, record.architecture);
+  insert.bind(4, record.body_sha256);
+  insert.bind(5, static_cast<std::int64_t>(record.added_types));
+  insert.bind(6, static_cast<std::int64_t>(record.collisions));
+  if (!insert.execute_statement()) {
+    if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
+      return make_void_error(Status::InvalidInput, "project.type_library_loaded",
+                             "this type library is already loaded into the project");
+    }
+    return make_void_error(
+        Status::InternalError, "project.type_library_failed",
+        storage_error(db, "project.type_library_failed", "record a type library").message);
+  }
+  return Result<void>();
 }
 
 }  // namespace donkey

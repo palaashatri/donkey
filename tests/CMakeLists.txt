@@ -832,6 +832,31 @@ set_tests_properties(cli.project_type_apply_prototype PROPERTIES
   PASS_REGULAR_EXPRESSION "\"applied_as\": \"prototype\""
   DEPENDS cli.project_type_apply_data)
 
+# A type library loaded into the project (G22-T3): its types join the table once, and the
+# project lists it. point and point_sum are the project's own names, not the library's.
+add_test(NAME cli.project_type_library_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPES_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl --json)
+set_tests_properties(cli.project_type_library_add PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"library\": \"musl-libc\".*\"added_types\": [1-9][0-9]*"
+  DEPENDS cli.project_type_apply_prototype)
+add_test(NAME cli.project_type_library_add_again
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPES_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_add_again PROPERTIES
+  PASS_REGULAR_EXPRESSION "project.type_library_loaded"
+  DEPENDS cli.project_type_library_add)
+add_test(NAME cli.project_type_library_list
+         COMMAND donkey-cli project type library list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_library_list PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"libraries\": \\[.*\"library_version\": \"1.2.4\""
+  DEPENDS cli.project_type_library_add)
+add_test(NAME cli.project_type_list_shows_library_types
+         COMMAND donkey-cli project type list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_list_shows_library_types PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"puts\", \"size\": 0, \"provenance\": \"library\""
+  DEPENDS cli.project_type_library_add)
+
 add_test(NAME cli.project_type_rejects_bad_header
          COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bad.h)

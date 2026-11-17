@@ -1929,8 +1929,8 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     // Version 8's column goes too, so the file is what version 6 wrote.
     ASSERT_EQ(sqlite3_exec(raw,
-                           "DROP TABLE local_names; ALTER TABLE type_applications DROP COLUMN "
-                           "source; PRAGMA user_version=6",
+                           "DROP TABLE local_names; DROP TABLE type_libraries; ALTER TABLE "
+                           "type_applications DROP COLUMN source; PRAGMA user_version=6",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
@@ -2105,7 +2105,7 @@ TEST(Types, MigratesFromSchemaV7) {
     ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db,
                            "ALTER TABLE type_applications DROP COLUMN source; "
-                           "PRAGMA user_version=7;",
+                           "DROP TABLE type_libraries; PRAGMA user_version=7;",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(db);
@@ -2147,4 +2147,62 @@ TEST(Types, MigratesFromSchemaV7) {
   ASSERT_EQ(applications.value().size(), 2U);
   EXPECT_EQ(applications.value()[1].type_id, function_id);
   EXPECT_EQ(applications.value()[1].source, donkey::TypeProvenance::User);
+}
+
+// Version 5 gained two columns of the types table in place, after files had been written with
+// the first form (the committed fixture is one). Opening such a file adds them, and its types read.
+TEST(Types, OpensAVersionFiveFileWrittenBeforeItsTypeColumns) {
+  TempPath path("types-v5-early");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto types = project.value().types();
+  ASSERT_TRUE(types.has_value()) << types.diagnostic().message;
+  donkey::TypeTable table = types.value();
+  auto declared = donkey::parse_c_declarations("struct pair { int a; short b; };\n", table);
+  ASSERT_TRUE(declared.has_value()) << declared.diagnostic().message;
+  for (const auto& type : declared.value()) {
+    table.put(type);
+  }
+  ASSERT_TRUE(project.value().replace_types(table).has_value());
+  auto reread = project.value().types();
+  ASSERT_TRUE(reread.has_value()) << reread.diagnostic().message;
+  bool found = false;
+  for (const auto& type : reread.value().list()) {
+    found = found || (type.kind == donkey::TypeKind::Struct && type.name == "pair" &&
+                      type.size == 8 && type.count_known && type.alignment == 0);
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST(Types, RecordsALoadedTypeLibraryOnce) {
+  TempPath path("types-libraries");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto empty = project.value().type_libraries();
+  ASSERT_TRUE(empty.has_value()) << empty.diagnostic().message;
+  EXPECT_TRUE(empty.value().empty());
+  donkey::TypeLibraryRecord record;
+  record.library = "musl-libc";
+  record.library_version = "1.2.4";
+  record.architecture = "x86_64";
+  record.body_sha256 = std::string(64, 'a');
+  record.added_types = 10;
+  record.collisions = 2;
+  ASSERT_TRUE(project.value().add_type_library(record).has_value());
+  const auto again = project.value().add_type_library(record);
+  ASSERT_FALSE(again.has_value());
+  EXPECT_EQ(again.diagnostic().code, "project.type_library_loaded");
+  record.architecture = "aarch64";
+  ASSERT_TRUE(project.value().add_type_library(record).has_value());
+  auto listed = project.value().type_libraries();
+  ASSERT_TRUE(listed.has_value());
+  ASSERT_EQ(listed.value().size(), 2U);
+  EXPECT_EQ(listed.value()[0].architecture, "x86_64");
+  EXPECT_EQ(listed.value()[0].added_types, 10U);
+  EXPECT_EQ(listed.value()[0].collisions, 2U);
+  EXPECT_EQ(listed.value()[1].architecture, "aarch64");
 }
