@@ -375,6 +375,12 @@ class Emitter {
       }
       const IrStatement* previous = flags_producer(block, index);
       const std::string text = render_statement(function_, statement, previous, literals_);
+      if (statement.op == IrOp::Return && statement.unreachable) {
+        // After a call that does not return (G24-T3): nothing is printed, but the line still
+        // tells the control-flow check that the block ends here.
+        push(std::string(), statement.source_address, make_tag(LineKind::Return, block_index));
+        continue;
+      }
       if (text.empty()) {
         continue;
       }

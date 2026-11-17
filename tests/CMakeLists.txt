@@ -145,6 +145,7 @@ add_executable(donkey_unit_tests
   unit/link_test.cpp
   unit/link_calls_test.cpp
   unit/import_names_test.cpp
+  unit/no_return_test.cpp
   unit/link_aarch64_test.cpp
   unit/condition_test.cpp
   unit/string_literals_test.cpp
@@ -1171,3 +1172,15 @@ add_test(NAME cli.callgraph_names_import_stubs
          COMMAND donkey-cli callgraph ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
 set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
   PASS_REGULAR_EXPRESSION "\"callee\": \"0x1060\", \"callee_name\": \"abort@plt\"")
+
+# G24-T3: a call to a bound no-return import ends its path; no `return` follows it, and the
+# function list says why the import does not return.
+add_test(NAME cli.decompile_prints_no_return_call_without_return
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+set_tests_properties(cli.decompile_prints_no_return_call_without_return PROPERTIES
+  PASS_REGULAR_EXPRESSION "    abort\\(\\).\n  } else {"
+  FAIL_REGULAR_EXPRESSION "abort\\(\\).\n *return")
+add_test(NAME cli.functions_list_no_return_evidence
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.functions_list_no_return_evidence PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 file:libc.so.6\"")

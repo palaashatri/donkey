@@ -1122,6 +1122,12 @@ std::optional<std::string> check_control_text(
         break;
       }
       case LineKind::Return:
+        // The end of a block after a call that does not return (G24-T3) prints no text.
+        if (text.empty() && tag.block < function.blocks.size() &&
+            !function.blocks[tag.block].statements.empty() &&
+            function.blocks[tag.block].statements.back().unreachable) {
+          break;
+        }
         if (!starts_with(text, "return") || !ends_with(text, ";")) return wrong("return ...;");
         break;
       case LineKind::Plain:

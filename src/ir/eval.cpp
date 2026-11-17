@@ -963,6 +963,12 @@ class Machine {
             }
             return value_of(s.a);
           case IrOp::Call: {
+            // A call that does not return (G24-T3) ends the path: the path is not compared, so it
+            // can never be counted as agreeing with the compiled code.
+            if (s.no_return) {
+              fail("ir.eval_no_return", "the path reaches a call that does not return");
+              return std::nullopt;
+            }
             // A direct call (G21-T1): the callee's own IR runs with the argument values, on this
             // call's stack, and its result is the destination. Without a callee the call fails.
             constexpr unsigned kMaxCallDepth = 8;

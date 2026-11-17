@@ -2824,6 +2824,31 @@ void check_call_clobbers_impl(IrFunction& function) {
 
 namespace internal {
 
+bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
+                                 std::uint8_t pointer_width) {
+  if (block.statements.empty() || analysis.no_return.empty()) {
+    return false;
+  }
+  IrStatement& call = block.statements.back();
+  if (call.op != IrOp::Call) {
+    return false;
+  }
+  const bool direct = call.a.kind == IrOperandKind::Constant && call.a.constant != 0;
+  const bool slot =
+      call.a.kind == IrOperandKind::Memory && call.a.reg.empty() && call.a.index.empty();
+  if ((!direct && !slot) || !analysis.no_return.contains(call.a.constant)) {
+    return false;
+  }
+  call.no_return = true;
+  IrStatement end;
+  end.op = IrOp::Return;
+  end.unreachable = true;
+  end.width = pointer_width;
+  end.source_address = call.source_address;
+  block.statements.push_back(std::move(end));
+  return true;
+}
+
 void check_call_clobbers(IrFunction& function) {
   check_call_clobbers_impl(function);
 }
@@ -3108,6 +3133,10 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
             lifter.push(out_block, std::move(call));
             lifter.mark_partial("jump leaves the function; treated as a tail call");
           }
+          // A tail call to a function that does not return (G24-T3): nothing comes back to return.
+          if (internal::end_block_at_no_return_call(analysis, out_block, lifter.pointer_width)) {
+            continue;
+          }
           IrStatement tail;
           tail.op = IrOp::Return;
           tail.source_address = instruction.address;
@@ -3234,10 +3263,14 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
       }
     }
 
-    if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
-                                         out_block.statements.back().op != IrOp::CondBranch &&
-                                         out_block.statements.back().op != IrOp::Switch &&
-                                         out_block.statements.back().op != IrOp::Return)) {
+    if (!out_block.statements.empty() &&
+        internal::end_block_at_no_return_call(analysis, out_block, lifter.pointer_width)) {
+      // The block ends at a call that does not return (G24-T3): no fall-through, no return.
+    } else if (out_block.statements.empty() ||
+               (out_block.statements.back().op != IrOp::Branch &&
+                out_block.statements.back().op != IrOp::CondBranch &&
+                out_block.statements.back().op != IrOp::Switch &&
+                out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {
         IrStatement statement;
@@ -3322,12 +3355,15 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
         }
       }
       exit_block.statements.push_back(std::move(call));
-      IrStatement tail;
-      tail.op = IrOp::Return;
-      tail.source_address = instruction.address;
-      tail.width = lifter.pointer_width;
-      tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
-      exit_block.statements.push_back(std::move(tail));
+      // A conditional tail call to a function that does not return (G24-T3): nothing comes back.
+      if (!internal::end_block_at_no_return_call(analysis, exit_block, lifter.pointer_width)) {
+        IrStatement tail;
+        tail.op = IrOp::Return;
+        tail.source_address = instruction.address;
+        tail.width = lifter.pointer_width;
+        tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
+        exit_block.statements.push_back(std::move(tail));
+      }
       exit =
           tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
               .first;
@@ -3414,6 +3450,23 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                   kMaxCallHeight + 1);
   auto lifted = lift_body(image, analysis, function, shared);
   if (lifted) {
+    // Owner decision 3 (G24-T3): Complete needs at least one returning path. A function whose
+    // every path ends in a call that does not return has nothing the oracle could compare.
+    bool returns = false;
+    bool ends_unreachable = false;
+    for (const IrBlock& block : lifted.value().blocks) {
+      for (const IrStatement& statement : block.statements) {
+        if (statement.op == IrOp::Return) {
+          (statement.unreachable ? ends_unreachable : returns) = true;
+        }
+      }
+    }
+    if (ends_unreachable && !returns) {
+      lifted.value().partial = true;
+      lifted.value().notes.push_back(
+          "no path returns: every path ends in a call that does not return, so nothing is "
+          "compared");
+    }
     name_call_targets(analysis, function, lifted.value());
     // An import stub prints under its import's own name (`abort`, not `abort@plt`), so the
     // pseudocode stays C; the note says what the function is.
