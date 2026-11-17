@@ -171,6 +171,7 @@ add_executable(donkey_unit_tests
   unit/foundation_test.cpp
   unit/json_test.cpp
   unit/typelib_test.cpp
+  unit/typelib_make_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp
@@ -1146,3 +1147,9 @@ set_tests_properties(cli.link_reports_calls_through_got_slots PROPERTIES
 add_test(NAME cli.link_needs_a_library
          COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so)
 set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
+
+# G22-T2: the shipped musl type library loads and describes itself.
+add_test(NAME cli.typelib_show_musl
+         COMMAND donkey-cli typelib show ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.typelib_show_musl PROPERTIES
+  PASS_REGULAR_EXPRESSION "musl-libc 1.2.4 \\(linux x86_64 sysv LP64\\).*licence: MIT")

@@ -177,7 +177,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 to T4 TODO; T2 needs an owner decision on header sources) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3, T4 TODO) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -2063,6 +2063,29 @@ Skipped declarations are listed, never dropped quietly.
 preprocessor tool may run in the generator (a build-time dependency). (3) Whether a metadata reader for
 `.winmd` is in scope, and under which task. (4) Whether any LGPL or GPL headers may be used, and under
 what waiver. (5) Whether hand-written declarations are acceptable, and from which sources.
+
+**T2 report (2026-11-17).** Done for musl, the first source the owner allowed (decision of 2026-11-17: permissive
+sources only, a preprocessor at build time). What was built and measured:
+- `include/donkey/project/typelib_gen.h`, `src/project/typelib_gen.cpp`: `split_c_declarations` (top-level
+  declarations of preprocessed text, one line each, with the words that do not change a type dropped) and
+  `make_type_library`: a declaration is kept only when the parser accepts it against the kept table and the
+  whole kept text plus it parses on its own (a struct whose member's type was skipped parses against the table,
+  which knows the type from a pointer, but not on its own); everything else is listed as `skipped` with the
+  reason, never dropped. The output is read back with `read_type_library` before it is returned.
+- `donkey-cli typelib make` and `typelib show`. `tools/typelib/make-musl.sh` runs `gcc -E -P -nostdinc
+  -D_GNU_SOURCE` on every top-level header of the `musl-dev` 1.2.4-2 package (90; `wait.h`, which only
+  redirects, is left out), with each header's path and SHA-256 recorded.
+- `typelibs/musl-1.2.4-x86_64-linux.dtl`: 1,341 declarations kept, 2,742 types (scalars, pointers and arrays
+  included), 445 skipped and listed (variables, enum constants written as expressions, `pthread_*_t` and
+  `sigset_t` whose array bounds use `sizeof` or `?:`, `__builtin_va_list` and the `v*printf` family that uses it,
+  bit-fields, and what depends on them). 104 KiB. Generated twice with `CREATED=2026-11-17`: byte-identical.
+- Tests: `TypeLibMake.SplitsTopLevelDeclarations`, `TypeLibMake.KeepsWhatParsesAndListsTheRest`,
+  `TypeLibMake.RefusesAnInputWithNothingKept`, `TypeLibMake.RefusesOptionsTheFormatRefuses`,
+  `TypeLibMake.ShippedMuslLibraryLoads` (`puts`, `memcpy`, `strlen`, `malloc`, `open`, `fopen` as Library
+  functions, `printf` variadic, `struct stat`, and `pthread_create` listed as skipped), `cli.typelib_show_musl`.
+- Not done here: FreeBSD and MinGW-w64 libraries (allowed, each file's licence to be checked), the `.winmd`
+  reader, and an expression evaluator for `sizeof` and `?:` in array bounds (it would keep the pthread types).
+  Applying a library to code is T3.
 
 **T3 — application.**
 

@@ -41,6 +41,8 @@
 #include "donkey/plugin/plugin.h"
 #include "donkey/project/cdecl.h"
 #include "donkey/project/project.h"
+#include "donkey/project/typelib.h"
+#include "donkey/project/typelib_gen.h"
 #include "donkey/project/string_literals.h"
 #include "donkey/project/types.h"
 #include "json.h"
@@ -812,6 +814,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       " [--json]\n"
+      "  donkey-cli typelib make <preprocessed.i> --out FILE --library NAME ... (tools/typelib)\n"
+      "  donkey-cli typelib show <library.dtl>\n"
       "  donkey-cli link <executable> <library>... [--json]\n"
       "  donkey-cli project link <database> [--json]\n"
       "  donkey-cli project string <database> <image-id> <address> [--json]\n"
@@ -2181,6 +2185,122 @@ int command_sig(const std::vector<std::string_view>& arguments) {
   if (result.partial) {
     std::printf("  note: reading stopped early, so the set may be incomplete\n");
   }
+  return kExitOk;
+}
+
+int command_typelib(const std::vector<std::string_view>& arguments) {
+  if (arguments.empty() || (arguments[0] != "make" && arguments[0] != "show")) {
+    return usage_error("typelib needs a subcommand: make or show");
+  }
+  if (arguments[0] == "show") {
+    if (arguments.size() != 2) {
+      return usage_error("typelib show takes one library file");
+    }
+    auto library = donkey::load_type_library(std::filesystem::path(std::string(arguments[1])));
+    if (!library) {
+      return fail(library.diagnostic());
+    }
+    const donkey::TypeLibrary& lib = library.value();
+    std::printf("%s %s (%s %s %s %s)\n", lib.library.c_str(), lib.library_version.c_str(),
+                lib.platform.c_str(), lib.architecture.c_str(), lib.abi.c_str(),
+                lib.data_model.c_str());
+    std::printf("source: %s\nlicence: %s\ngenerator: %s\n", lib.source.c_str(),
+                lib.licence.c_str(), lib.generator.c_str());
+    std::printf("%zu types, %zu source files, %zu skipped declarations\n", lib.types.size(),
+                lib.source_files.size(), lib.skipped.size());
+    return kExitOk;
+  }
+  // typelib make <preprocessed.i> --out FILE, and one --<key> VALUE per header value.
+  std::string input;
+  std::string out;
+  donkey::TypeLibraryMakeOptions options;
+  for (std::size_t i = 1; i < arguments.size(); ++i) {
+    const std::string_view arg = arguments[i];
+    if (arg.empty() || arg.front() != '-') {
+      if (!input.empty()) {
+        return usage_error("typelib make takes one preprocessed C file");
+      }
+      input = std::string(arg);
+      continue;
+    }
+    std::string_view value_view;
+    if (!take_value(arguments, i, value_view)) {
+      return usage_error("typelib make: every option needs a value");
+    }
+    const std::string value(value_view);
+    if (arg == "--out") {
+      out = value;
+    } else if (arg == "--library") {
+      options.library = value;
+    } else if (arg == "--library-version") {
+      options.library_version = value;
+    } else if (arg == "--platform") {
+      options.platform = value;
+    } else if (arg == "--architecture") {
+      options.architecture = value;
+    } else if (arg == "--abi") {
+      options.abi = value;
+    } else if (arg == "--data-model") {
+      options.data_model = value;
+      options.long_size = value == "LLP64" ? 4 : 8;
+    } else if (arg == "--char-signed") {
+      options.char_is_signed = value == "true";
+    } else if (arg == "--source") {
+      options.source = value;
+    } else if (arg == "--source-sha256") {
+      options.source_sha256 = value;
+    } else if (arg == "--licence") {
+      options.licence = value;
+    } else if (arg == "--licence-file") {
+      options.licence_file = value;
+    } else if (arg == "--licence-sha256") {
+      options.licence_sha256 = value;
+    } else if (arg == "--command") {
+      options.generator_command = value;
+    } else if (arg == "--preprocessor") {
+      options.preprocessor = value;
+    } else if (arg == "--created") {
+      options.created = value;
+    } else if (arg == "--source-file") {
+      const std::size_t space = value.rfind(' ');
+      if (space == std::string::npos) {
+        return usage_error("typelib make: --source-file takes 'PATH SHA256'");
+      }
+      options.source_files.push_back({value.substr(0, space), value.substr(space + 1)});
+    } else if (arg == "--macro") {
+      const std::size_t equals = value.find('=');
+      options.macros.push_back(
+          {value.substr(0, equals),
+           equals == std::string::npos ? std::string() : value.substr(equals + 1)});
+    } else if (arg == "--note") {
+      options.notes.push_back(value);
+    } else {
+      return usage_error("unknown option for typelib make");
+    }
+  }
+  if (input.empty() || out.empty()) {
+    return usage_error("typelib make needs a preprocessed C file and --out FILE");
+  }
+  constexpr std::uintmax_t kMaxInputBytes = std::uintmax_t{16} << 20;
+  std::error_code size_error;
+  const std::uintmax_t size = std::filesystem::file_size(input, size_error);
+  if (size_error || size > kMaxInputBytes) {
+    return usage_error("cannot read the preprocessed C file (missing, or over 16 MiB)");
+  }
+  std::ifstream file(input, std::ios::binary);
+  std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  auto made = donkey::make_type_library(text, options);
+  if (!made) {
+    return fail(made.diagnostic());
+  }
+  std::ofstream written(out, std::ios::binary | std::ios::trunc);
+  written << made.value().text;
+  if (!written) {
+    return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
+                           "cannot write the library file", std::nullopt});
+  }
+  std::printf("wrote %s: %zu declarations kept, %zu skipped\n", out.c_str(), made.value().kept,
+              made.value().skipped.size());
   return kExitOk;
 }
 

@@ -170,6 +170,7 @@ add_library(donkey_project STATIC
   src/project/project.cpp
   src/project/string_literals.cpp
   src/project/typelib.cpp
+  src/project/typelib_gen.cpp
   src/project/types.cpp
 )
 add_library(donkey::project ALIAS donkey_project)

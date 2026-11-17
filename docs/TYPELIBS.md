@@ -5,9 +5,23 @@ its source. The reader is `read_type_library` in `include/donkey/project/typelib
 read, not applied: no code gets a type from a library yet (G22-T3 does that).
 
 **Status.** The reader and its format exist and are tested (`TypeLib.*` in
-`tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). No library is bundled
-(`typelibs/` holds a README only; the sources are an owner decision, G22-T2). A library's types do
-not appear in the decompiler or the CLI yet.
+`tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). One library is bundled:
+`typelibs/musl-1.2.4-x86_64-linux.dtl`, generated from the musl 1.2.4 headers (G22-T2, see
+"Generating a library" below). A library's types do not appear in the decompiler yet (G22-T3);
+`donkey-cli typelib show` reads one and summarises it.
+
+## Generating a library
+
+`donkey-cli typelib make <preprocessed.i> --out FILE` with one `--<key> VALUE` per header value
+(`include/donkey/project/typelib_gen.h`). The input is the preprocessor's output: a script runs the
+preprocessor at build time (`tools/typelib/make-musl.sh` runs `gcc -E -P -nostdinc` on musl's own
+headers), never Donkey at run time. The generator keeps each top-level declaration that Donkey's C
+parser accepts together with every declaration kept before it, and lists each other one as
+`skipped: <name>: <reason>`: a variable, a function definition, a name declared twice, a type the
+parser does not model (an array bound with `sizeof`, a bit-field, `__builtin_va_list`), and anything
+that needs one of those. It drops the words that do not change a type (`restrict`, `__attribute__((...))`,
+`__extension__`, `_Noreturn`, `__inline`, `__asm__(...)`). Before it writes, it reads its own output
+back with `read_type_library`, so a file it writes always loads.
 
 ## File layout
 
