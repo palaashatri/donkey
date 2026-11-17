@@ -2,6 +2,7 @@
 
 #include "donkey/binary/eh_frame.h"
 #include "donkey/binary/pdata.h"
+#include "donkey/binary/plt.h"
 
 #include <algorithm>
 #include <iterator>
@@ -43,6 +44,90 @@ std::string synthetic_function_name(std::uint64_t address) {
     }
   }
   return out;
+}
+
+/// Thunks (G24-T4): a function whose one block is an unconditional direct jump to another
+/// function's start, after an optional `endbr64`. The jump is a tail call, so the function only
+/// forwards to its target: it is marked `thunk` and, unless a symbol names it, named `j_` and the
+/// target's name (`j_abort` for a jump to `abort@plt`). A chain of thunks takes the name of the
+/// function at its end, followed for at most 8 links. A function that is one indirect jump through
+/// an import's slot is an import stub instead, named by the import.
+void name_thunks(AnalysisResult& result, BinaryFormat format) {
+  std::unordered_map<std::uint64_t, std::size_t> function_at;
+  for (std::size_t index = 0; index < result.functions.size(); ++index) {
+    function_at.emplace(result.functions[index].address, index);
+  }
+  std::unordered_map<std::uint64_t, std::size_t> instruction_at;
+  instruction_at.reserve(result.instructions.size());
+  for (std::size_t index = 0; index < result.instructions.size(); ++index) {
+    instruction_at.emplace(result.instructions[index].address, index);
+  }
+  // The jump target of each one-block function that is only a jump.
+  std::unordered_map<std::uint64_t, std::uint64_t> forwards;
+  for (const Function& function : result.functions) {
+    if (function.block_count != 1 || !function.import_name.empty() ||
+        !function.stub_target.empty()) {
+      continue;
+    }
+    auto at = instruction_at.find(function.address);
+    if (at == instruction_at.end()) {
+      continue;
+    }
+    std::size_t index = at->second;
+    if (result.instructions[index].mnemonic == "endbr64" ||
+        result.instructions[index].mnemonic == "endbr32") {
+      ++index;
+    }
+    if (index >= result.instructions.size()) {
+      continue;
+    }
+    const Instruction& jump = result.instructions[index];
+    // An import thunk: one indirect jump through an import's slot (`jmp *slot(%rip)`), as MinGW
+    // emits for msvcrt imports and as a `.plt.got`-style entry outside the PLT sections is. It is
+    // named by the import: `puts` on PE, `puts@plt` on ELF, the form its PLT stubs take.
+    if (jump.classification == InstructionClass::Jump && !jump.direct_target.has_value() &&
+        jump.data_references.size() == 1 && jump.address + jump.length == function.end_address) {
+      const auto slot = result.import_slots.find(jump.data_references.front());
+      if (slot != result.import_slots.end()) {
+        Function& stub = result.functions[function_at.at(function.address)];
+        stub.import_name = slot->second;
+        stub.stub_target = slot->second;
+        if (!stub.from_symbol && stub.name == synthetic_function_name(stub.address)) {
+          stub.name = format == BinaryFormat::Elf ? slot->second + "@plt" : slot->second;
+        }
+      }
+      continue;
+    }
+    if (jump.classification != InstructionClass::Jump || !jump.direct_target.has_value() ||
+        *jump.direct_target == function.address || !function_at.contains(*jump.direct_target) ||
+        jump.address + jump.length != function.end_address) {
+      continue;
+    }
+    forwards.emplace(function.address, *jump.direct_target);
+  }
+  for (const auto& [address, first_target] : forwards) {
+    Function& thunk = result.functions[function_at.at(address)];
+    thunk.thunk = true;
+    thunk.thunk_target = first_target;
+    if (thunk.from_symbol || thunk.name != synthetic_function_name(address)) {
+      continue;
+    }
+    std::uint64_t target = first_target;
+    for (int link = 0; link < 8; ++link) {
+      const auto next = forwards.find(target);
+      if (next == forwards.end() || next->second == address) {
+        break;
+      }
+      target = next->second;
+    }
+    const Function& end = result.functions[function_at.at(target)];
+    if (forwards.contains(target) || end.name == synthetic_function_name(target)) {
+      continue;  // a cycle, or a target with no name of its own: the thunk keeps sub_<hex>
+    }
+    thunk.name = "j_" + (!end.import_name.empty()   ? end.import_name
+                         : !end.stub_target.empty() ? end.stub_target
+                                                    : end.name);
+  }
 }
 
 /// Disjoint, sorted [start, end) byte ranges covering every user data range (G12-T1). Ranges
@@ -490,6 +575,14 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       seeds.insert(xref.to);
     }
   }
+  // Every named PLT stub is a function (G24-T4), also one that only a jump reaches (a tail call
+  // or a conditional tail call into it).
+  const std::map<std::uint64_t, std::string> stub_targets = plt_stub_targets(image, file);
+  for (const auto& [address, name] : stub_targets) {
+    if (executable_contains(image, address)) {
+      seeds.insert(address);
+    }
+  }
   // Unwind tables (G23-T1): every FDE of `.eh_frame` names a function's range, stripped or not.
   // A start found only here is marked with the unwind provenance.
   // A table that could not be read in full may leave function starts out, so the result is
@@ -569,6 +662,19 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       naming_symbol.emplace(symbol.address, &symbol);
     }
   }
+  // Import stubs (G24-T4): a PLT entry is named by the import its relocation names, `abort@plt`,
+  // the form `objdump` and the link stage use. A symbol at the same address names it first.
+  const std::map<std::uint64_t, std::string> stubs = plt_stub_imports(image, file);
+  result.import_slots = got_import_slots(image, file);
+  // PE: each imported name's IAT slot (pe.cpp gives the import symbol the slot's address). A call
+  // or a jump through the slot (`call *slot(%rip)`) goes to that import.
+  if (image.format == BinaryFormat::Pe) {
+    for (const Symbol& symbol : image.symbols) {
+      if (symbol.imported && symbol.address != 0 && !symbol.name.empty()) {
+        result.import_slots.emplace(symbol.address, symbol.name);
+      }
+    }
+  }
   for (const std::uint64_t address : seeds) {
     Function seed;
     seed.address = address;
@@ -577,6 +683,15 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
       seed.name = symbol->second->name;
       seed.exported = symbol->second->exported;
+    }
+    if (const auto stub = stub_targets.find(address); stub != stub_targets.end()) {
+      seed.stub_target = stub->second;
+      if (stubs.contains(address)) {
+        seed.import_name = stub->second;
+      }
+      if (seed.name.empty()) {
+        seed.name = stub->second + "@plt";
+      }
     }
     if (seed.name.empty()) {
       seed.name = synthetic_function_name(address);
@@ -610,6 +725,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
           existing.estimated = function.estimated;
         }
       }
+      name_thunks(result, image.format);
       result.call_graph = build_call_graph(result.cfg, result.instructions);
       if (result.cfg.partial) {
         result.partial = true;
@@ -704,6 +820,40 @@ std::vector<CallGraphEdge> CallGraph::callees_of(std::uint64_t function) const {
     }
   }
   return out;
+}
+
+bool is_c_identifier(std::string_view text) noexcept {
+  if (text.empty()) {
+    return false;
+  }
+  for (std::size_t i = 0; i < text.size(); ++i) {
+    const char c = text[i];
+    const bool letter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_';
+    const bool digit = c >= '0' && c <= '9';
+    if (!letter && !(digit && i > 0)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+std::string function_call_name(const Function& function) {
+  const std::string& name = !function.import_name.empty()   ? function.import_name
+                            : !function.stub_target.empty() ? function.stub_target
+                                                            : function.name;
+  if (name == synthetic_function_name(function.address) || !is_c_identifier(name)) {
+    return {};
+  }
+  return name;
+}
+
+std::string call_target_name(const AnalysisResult& analysis, std::uint64_t address) {
+  // Functions are not assumed to be in address order (a caller may add them in any order), so the
+  // lookup is linear.
+  const auto found =
+      std::find_if(analysis.functions.begin(), analysis.functions.end(),
+                   [address](const Function& function) { return function.address == address; });
+  return found == analysis.functions.end() ? std::string() : function_call_name(*found);
 }
 
 }  // namespace donkey

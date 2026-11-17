@@ -16,9 +16,24 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   `tests/fuzz/corpus/pdata`). Chained `.pdata` entries are skipped and not covered by a fixture.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
-  (`Cfg.*`). The CFG block bound is one block per decoded instruction, with a floor of 200,000
+  (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into
+  code no function starts at stays a `Jump`). The CFG block bound is one block per decoded instruction, with a floor of 200,000
   (`Cfg.BlockBoundFollowsTheDecodedInstructionCount`). An indirect tail jump (`jmp rax`) is a call
   through its operand (`Ir.IndirectTailJumpCallsItsOperand`).
+- Import stubs and thunks named (G24-T4): ELF stubs in `.plt` and `.plt.sec` (x86-64 and AArch64,
+  BTI entries included) and in x86-64 `.plt.got` are functions named `<import>@plt`; the PLT0 header
+  is not named. A `-fno-plt` call through a GLOB_DAT slot and a PE call through an IAT slot are
+  named by the import, and a MinGW `jmp *slot` thunk is an import stub named by its import. The
+  pseudocode prints such a call by the import's own name when that name is a C identifier
+  (`abort();`, valid C); a name that is not (`foo.bar`) prints as before. The function list, call
+  graph and xrefs use `abort@plt`. A stub for a function the image defines itself (`free@plt` in
+  libc; the relocation's own dynamic symbol is defined) is named the same way but is not an
+  import. A function that is only a jump to another function is a thunk named `j_<target>`.
+  Tested on committed fixtures built from `tests/fixtures/stubs/stubs.c` (`Analysis.*Stub*`,
+  `Analysis.*Thunk*`, `Analysis.GotCallIsNamedByItsImport`, `Analysis.PeIatCallIsNamedByItsImport`,
+  `PltStubs.PltGotEntryIsNamedByItsGlobDatSlot`, `cli.*import_stubs*`,
+  `cli.decompile_prints_import_calls_by_name`). Not done: AArch64 `.plt.got` entries, Mach-O stubs (no `__stubs` reader), PE
+  delay-load imports, and imports by ordinal print as `ordinal_<n>`.
 - Calls (G21): a direct call to a same-image integer callee is resolved to its inferred arguments
   and result (x86-64 System V; Win64 (PE) calls with arguments stay Partial) when the callee lifts Complete,
   with its own calls resolved the same way up to 8 levels deep (G21-T2: call summaries computed bottom-up

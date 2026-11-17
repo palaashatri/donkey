@@ -42,4 +42,32 @@ std::vector<std::string> dynamic_symbol_names(const BinaryImage& image,
   return names;
 }
 
+std::vector<bool> dynamic_symbol_undefined(const BinaryImage& image,
+                                           std::span<const std::byte> data) {
+  const Section* symbols = nullptr;
+  for (const Section& section : image.sections) {
+    if (section.name == ".dynsym") {
+      symbols = &section;
+    }
+  }
+  std::vector<bool> undefined;
+  if (symbols == nullptr || !symbols->has_file_data) {
+    return undefined;
+  }
+  const ByteReader reader(data);
+  const std::uint64_t count = symbols->file_size / kSymbolEntrySize;
+  undefined.reserve(
+      static_cast<std::size_t>(std::min<std::uint64_t>(count, kMaxRelocationEntries)));
+  for (std::uint64_t i = 0; i < count && i < kMaxRelocationEntries; ++i) {
+    // Elf64_Sym: st_name (4), st_info (1), st_other (1), st_shndx (2).
+    const auto section_index =
+        reader.u16(symbols->file_offset + i * kSymbolEntrySize + 6, Endian::Little);
+    if (!section_index) {
+      break;
+    }
+    undefined.push_back(i != 0 && section_index.value() == 0);
+  }
+  return undefined;
+}
+
 }  // namespace donkey::binary::detail

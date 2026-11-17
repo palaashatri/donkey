@@ -379,10 +379,22 @@ class Renderer {
         return operand(statement.a) + " = " + operand(statement.b) + ";";
       case IrOp::Call: {
         // `r = f(a, b);` when the result is used; the arguments are the callee's inferred ones.
-        std::string target =
-            statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0
-                ? "sub_" + hex(statement.a.constant)
-                : "((void (*)(void))" + operand(statement.a) + ")";
+        // A named target (an import, a symbol or a thunk, G24-T4) prints by its name; a GOT
+        // slot that an import's relocation names prints as that import.
+        std::string target;
+        const auto named = function_.call_names.find(statement.a.constant);
+        const bool by_name =
+            named != function_.call_names.end() &&
+            ((statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0) ||
+             (statement.a.kind == IrOperandKind::Memory && statement.a.reg.empty() &&
+              statement.a.index.empty()));
+        if (by_name) {
+          target = named->second;
+        } else if (statement.a.kind == IrOperandKind::Constant && statement.a.constant != 0) {
+          target = "sub_" + hex(statement.a.constant);
+        } else {
+          target = "((void (*)(void))" + operand(statement.a) + ")";
+        }
         std::string arguments;
         for (const IrOperand& argument : statement.call_arguments) {
           arguments += (arguments.empty() ? "" : ", ") + operand(argument);
