@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 to T4 TODO; T2 needs an owner decision on header sources) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. A binary without unwind tables gets no seeds beyond the first three; no-return, thunk and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 to T7 TODO; owner decisions 1-4 decided 2026-11-17) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -936,12 +936,14 @@ for Partial functions.
   refuses; one function joined it (`libsqlite3` `0xa5c40`). Gotos: 986 functions, 16,232 in all,
   largest 409. Measured at `d5e9350` and again at `443a2da`, after the merges of phase A's
   review rounds (the same counts).
-  The open decision is whether to copy small shared blocks and recover compound conditions to remove
-  most of them (owner decision; not made here).
+  The open decision, whether to copy small shared blocks and recover compound conditions to remove
+  most of them, was decided on 2026-11-17: yes (W1b below), with the copy bounded by block size and
+  by total growth, and every result still passing the control-flow check.
 - **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two
   gotos for one exit: `case 0x1: goto loc_4010;`, where `loc_4010` only jumps on to the loop's exit.
   The goto to the block that only jumps should go straight to the jump's target, or the block should
-  be copied where it is small. Same family as the shared-join gotos above; part of the owner decision.
+  be copied where it is small. Same family as the shared-join gotos above. Decided 2026-11-17: do all
+  three (thread through jump-only blocks, copy small shared blocks, recover `&&`/`||`).
 
 ### G05 Type system and user types
 
@@ -2064,6 +2066,14 @@ preprocessor tool may run in the generator (a build-time dependency). (3) Whethe
 `.winmd` is in scope, and under which task. (4) Whether any LGPL or GPL headers may be used, and under
 what waiver. (5) Whether hand-written declarations are acceptable, and from which sources.
 
+*Decided (owner, 2026-11-17).* (1) Permissive sources only: musl 1.2.4 headers (MIT) first, then FreeBSD headers
+(BSD-style, each file's licence checked), and MinGW-w64 files whose own licence is permissive (each file checked;
+a file with a mixed or copyleft licence is skipped and listed). (2) A C preprocessor (`gcc -E` or `clang -E`) may run
+in the generator at build time; it is never a runtime dependency. (3) A `.winmd` reader for win32metadata (MIT) is in
+scope as its own later task, with its own fuzz target. (4) No LGPL or GPL headers (glibc, Linux UAPI). (5)
+Hand-written declarations are acceptable only to fill a gap a permissive source leaves, each citing the section of
+the public standard it follows.
+
 **T3 — application.**
 
 1. *Name matching.* ELF: strip a version suffix (`@VERSION` or `@@VERSION`) before matching, and keep the
@@ -2484,6 +2494,19 @@ indirect call sites resolved on the sample (the sample has 1 call through a GOT 
    its provenance (`known-name:<name>` with the evidence used), and the decision includes whether that assumption is
    accepted. A name exported by more than one library the importer needs is ambiguous under every option and stays
    unmarked. Until it is decided, T3 marks nothing by name, and its measurement target is not claimed.
+
+**Decided (owner, 2026-11-17).** The owner asked for the options that make the product the most complete without
+weakening `Complete`.
+1. Propagation is on by default. It starts only from proven marks (the fixed list bound by decision 4, and
+   instructions that never fall through), is bounded, and skips a function that is Partial for another reason.
+2. `abort();` in pseudocode; `abort@plt` in the function list, the call graph and xrefs.
+3. Yes: a function that reaches a no-return call may be Complete when every returning path is executed by the oracle
+   and agrees with the compiled code. The paths through the no-return call are not compared, and the evaluator fails
+   on them with `ir.eval_no_return`, so they can never be counted as agreeing.
+4. Option (c): the ELF symbol version when the import has one (a bounded `.gnu.version`/`.gnu.version_r` reader with a
+   fuzz target), otherwise DT_NEEDED against the fixed runtime SONAME list. The static assumption (no interposition)
+   is accepted and written into each mark's provenance, `known-name:<name>` with `version:<ver>` or
+   `needed:<soname>`. A name exported by two needed libraries stays unmarked.
 
 ---
 

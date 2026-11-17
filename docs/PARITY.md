@@ -146,11 +146,22 @@ These are not for an agent to settle. Stop and report when a task needs one.
 | Processor strategy: hand-written lifters, SLEIGH specifications, or both | Rows 2 and 3 beyond three or four ISAs | G26 |
 | Thresholds for the measures, after the first baseline | Calling any row "Parity" | G20, G24 |
 | Running Ghidra as a reference in CI | Row-by-row comparison in CI | Section 2 |
-| Header sources for type libraries, by licence | G22-T2 | G22 |
 | Assembler: LLVM MC, a small own encoder, or SLEIGH | G29-T2 | G29 |
 | Scope of managed code (DEX, Java, .NET, WebAssembly) | G30-T4 and T5 | G30 |
 | Collaboration model | G32 | G32 |
 | Signing certificates; accessibility waiver | Rows 23 and 24 | G18, G19 |
+
+Decided by the owner on 2026-11-17 (the owner asked for the options that make the product the most
+complete without weakening `Complete`; the reasons are in the ledger next to each option):
+
+| Decision | Chosen | Recorded in |
+|---|---|---|
+| No-return propagation | On by default, from proven marks only, bounded | G24, owner decision 1 |
+| Pseudocode name of an import call | `abort();` (valid C); lists, call graph and xrefs say `abort@plt` | G24, owner decision 2 |
+| Complete with a no-return call | Yes, when every returning path is executed and agrees with the compiled code | G24, owner decision 3 |
+| Binding a no-return name to its provider | Both: the ELF symbol version when present, else DT_NEEDED against fixed runtime SONAMEs; the static assumption is accepted and recorded in provenance | G24, owner decision 4 |
+| Goto reduction | Thread gotos through jump-only blocks, copy small shared blocks (bounded), recover `&&`/`\|\|` | G04-T5 (W1b), `AUDIT.md` W1 |
+| Header sources for type libraries | Permissive sources only: musl (MIT) first, FreeBSD (BSD, per file), MinGW-w64 files whose own licence is permissive, MIT win32metadata through a separate reader task; a preprocessor may run at build time; no LGPL or GPL headers; hand-written declarations only where a permissive source has a gap, citing the standard | G22-T2 |
 
 ## 6. Keeping this file true
 
