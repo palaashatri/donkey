@@ -289,7 +289,9 @@ BlockId Dominators::immediate(BlockId block) const {
   return block < idom_.size() ? idom_[block] : kNoBlock;
 }
 
-Dominators compute_dominators(const Graph& graph) { return Dominators(graph); }
+Dominators compute_dominators(const Graph& graph) {
+  return Dominators(graph);
+}
 
 namespace {
 

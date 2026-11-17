@@ -79,7 +79,9 @@ class Dominators {
   class Row {
    public:
     Row(const Dominators* owner, BlockId block) : owner_(owner), block_(block) {}
-    [[nodiscard]] bool test(BlockId dominator) const { return owner_->dominates(dominator, block_); }
+    [[nodiscard]] bool test(BlockId dominator) const {
+      return owner_->dominates(dominator, block_);
+    }
 
    private:
     const Dominators* owner_;
