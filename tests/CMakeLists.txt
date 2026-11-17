@@ -1115,10 +1115,16 @@ set_tests_properties(cli.plugin_run_trusted_non_terminated PROPERTIES
 
 # Every CLI project test reads or writes the same database files; CTest must
 # never run two of them at once (`ctest -j`).
+# The desktop tests open windows on one display: a window another test's window covers can get no
+# frames on macOS and Windows (the compositor stops presenting it), so a test that waits for a
+# number of frames would wait for its timeout. One desktop test runs at a time.
 get_property(_donkey_all_tests DIRECTORY PROPERTY TESTS)
 foreach(_donkey_test IN LISTS _donkey_all_tests)
   if(_donkey_test MATCHES "^cli\\.project_")
     set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_cli_project_db)
+  endif()
+  if(_donkey_test MATCHES "^ui\\.")
+    set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_display)
   endif()
 endforeach()
 
