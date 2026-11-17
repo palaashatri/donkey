@@ -5571,6 +5571,24 @@ TEST(Ir, RuleCompoundPrintsTwoTestsAsOneCondition) {
   const auto pseudocode = donkey::format_pseudocode(function);
   ASSERT_TRUE(pseudocode.has_value()) << pseudocode.diagnostic().message;
   EXPECT_EQ(pseudocode.value().find("goto"), std::string::npos) << pseudocode.value();
+  // The second test's instructions map to the combined condition's line: its block prints no
+  // line of its own.
+  IrFunction addressed = function;
+  std::vector<std::uint64_t> second_test;
+  for (std::size_t i = 0; i < addressed.blocks[1].statements.size(); ++i) {
+    addressed.blocks[1].statements[i].source_address = 0x2010 + i * 4;
+    second_test.push_back(0x2010 + i * 4);
+  }
+  const GotoStructure mapped = structured_with(addressed, kGotoRuleDefault);
+  bool found = false;
+  for (const StructuredLine& line : mapped.lines) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen &&
+        line.tag.second != donkey::detail::kNoBlock) {
+      found = true;
+      EXPECT_EQ(line.folded_addresses, second_test) << line.text;
+    }
+  }
+  EXPECT_TRUE(found) << printed(mapped.lines);
 }
 
 // The check reads a compound condition from its tag: a tag that complements the second test, or

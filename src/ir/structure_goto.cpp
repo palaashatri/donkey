@@ -327,12 +327,10 @@ class Emitter {
 
   /// Inserts a line before `position`, indented for `depth`.
   void insert_line(std::size_t position, const std::string& text, std::uint64_t address,
-                   LineTag tag, int depth) {
+                   LineTag tag, int depth, std::vector<std::uint64_t> folded = {}) {
     StructuredLine line{
         text.empty() ? std::string() : std::string(static_cast<std::size_t>(depth) * 2, ' ') + text,
-        address,
-        tag,
-        {}};
+        address, tag, std::move(folded)};
     lines_.insert(lines_.begin() + static_cast<std::ptrdiff_t>(position), std::move(line));
   }
 
@@ -471,11 +469,13 @@ class Emitter {
     return done(Outcome::Jumps);
   }
 
-  /// The statements a block prints, its terminator left out.
-  [[nodiscard]] std::size_t printed_statements(BlockId block) const {
+  /// The statements a block prints, its terminator left out, counted up to `limit` + 1: past the
+  /// limit the exact count does not matter, so a large block is not rendered in full each time a
+  /// copy of it is considered.
+  [[nodiscard]] std::size_t printed_statements(BlockId block, std::size_t limit) const {
     const IrBlock& ir = function_.blocks[block];
     std::size_t printed = 0;
-    for (std::size_t index = 0; index + 1 < ir.statements.size(); ++index) {
+    for (std::size_t index = 0; index + 1 < ir.statements.size() && printed <= limit; ++index) {
       const IrStatement* previous = flags_producer(ir, index);
       if (!render_statement(function_, ir.statements[index], previous, literals_).empty()) {
         ++printed;
@@ -514,7 +514,7 @@ class Emitter {
     if (terminator.op != IrOp::Return && terminator.op != IrOp::Branch) {
       return false;
     }
-    if (printed_statements(target) > kMaxCopiedStatements) {
+    if (printed_statements(target, kMaxCopiedStatements) > kMaxCopiedStatements) {
       return false;
     }
     if (terminator.op == IrOp::Return) {
@@ -533,7 +533,7 @@ class Emitter {
     }
     // One more level: the next block returns and is small.
     return function_.blocks[next].statements.back().op == IrOp::Return &&
-           printed_statements(next) <= kMaxCopiedStatements;
+           printed_statements(next, kMaxCopiedStatements) <= kMaxCopiedStatements;
   }
 
   /// Prints a copy of `target` where a goto to it would be: its statements, then its exit.
@@ -826,9 +826,17 @@ class Emitter {
       tag.second_or = form.joined_by_or;
       return tag;
     };
+    // A test block printed inside the condition, never on its own: its instructions map to the
+    // `if` line that says it.
+    std::vector<std::uint64_t> folded;
     if (compound.test != kNoBlock) {
-      // The test block is printed inside the condition, never on its own.
       emitted_[compound.test] = true;
+      for (const IrStatement& statement : function_.blocks[compound.test].statements) {
+        if (statement.source_address != 0 && statement.source_address != address &&
+            std::find(folded.begin(), folded.end(), statement.source_address) == folded.end()) {
+          folded.push_back(statement.source_address);
+        }
+      }
     }
 
     const std::size_t first_begin = lines_.size();
@@ -839,7 +847,7 @@ class Emitter {
 
     if (first_outcome == Outcome::Jumps) {
       // The first arm never falls out: `if (cond) { first }`, then the second arm is the rest here.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
       return decide(second, ctx);
     }
@@ -861,13 +869,13 @@ class Emitter {
                     lines_.begin() + static_cast<std::ptrdiff_t>(first_end),
                     lines_.begin() + static_cast<std::ptrdiff_t>(second_end));
       }
-      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth, folded);
       insert_line(first_begin + 1 + second_length, "}", 0, make_tag(LineKind::Close), depth);
       dedent_from(first_begin + 2 + second_length);
     } else if (first_empty && second_empty) {
       // Both arms are empty: the branch's two targets are the same block, the join. The test is
       // still printed, as an empty `if`, so that the printed code has the block's branch.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else if (first_empty) {
       insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
