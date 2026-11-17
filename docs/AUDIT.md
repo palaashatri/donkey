@@ -696,6 +696,20 @@ python3.12 2,058. Time, whole-binary `decompile --json` of openssl, alternating,
 compound conditions, such as `if ((rax & rax) != 0 && *(u8 *)(rax) != 0x0) {`, where the second test
 reads memory only when the first holds, as in the binary.
 
+Re-measured after G24-T3 (#67, no-return calls end their block) merged into both sides:
+
+| | `main` (04c4bd3) | W1b on that `main` |
+|---|---|---|
+| Gotos, total | 15,712 | **13,713** (-12.7%) |
+| Functions with gotos | 984 | 913 |
+| Largest in one function | 407 | 385 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos, `main` / W1b): ls 1,589 / 1,351; openssl 3,237 / 2,929; bash 1,881 / 1,658; libsqlite3
+1,694 / 1,464; libc 1,359 / 1,117; git 3,543 / 3,141; python3.12 2,409 / 2,053.
+
 
 ### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
 
