@@ -2167,12 +2167,15 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
                        : IrOperand::constant_value(0, kPointerWidth);
           lifter.push(out_block, std::move(call));
           lifter.mark_partial("jump leaves the function; treated as a tail call");
-          IrStatement tail;
-          tail.op = IrOp::Return;
-          tail.source_address = instruction.address;
-          tail.width = kPointerWidth;
-          tail.a = IrOperand::register_ref("x0", kPointerWidth);
-          lifter.push(out_block, std::move(tail));
+          // A tail call to a function that does not return (G24-T3): nothing comes back.
+          if (!end_block_at_no_return_call(analysis, out_block, kPointerWidth)) {
+            IrStatement tail;
+            tail.op = IrOp::Return;
+            tail.source_address = instruction.address;
+            tail.width = kPointerWidth;
+            tail.a = IrOperand::register_ref("x0", kPointerWidth);
+            lifter.push(out_block, std::move(tail));
+          }
         } else {
           IrStatement statement;
           statement.op = IrOp::Branch;

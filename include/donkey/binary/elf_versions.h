@@ -35,18 +35,22 @@ inline constexpr std::size_t kMaxVersionNeedEntries = 65'536;
 /// Reads the little-endian `.gnu.version_r` bytes `section`, whose names are offsets into
 /// `strings` (`.dynstr`). Each Verneed is 16 bytes (version, count, file, aux, next) and each
 /// Vernaux 16 bytes (hash, flags, index, name, next); the chains follow the `next` offsets. A chain
-/// that leaves the section, loops, or runs past `max_entries` is refused (`elf.version_needs.*`),
-/// and so is a name that is not a terminated string inside `strings`, an index of 0 or 1 (the
+/// that leaves the section, loops, overlaps a record already read, or runs past `max_entries` is
+/// refused (`elf.version_needs.*`), and so is a Verneed whose last Vernaux (by its count) links to
+/// another, a name that is not a terminated string inside `strings`, an index of 0 or 1 (the
 /// reserved local and global indexes), and two entries with one index.
 [[nodiscard]] Result<ElfVersionNeeds> read_version_needs(
     std::span<const std::byte> section, std::span<const std::byte> strings,
     std::size_t max_entries = kMaxVersionNeedEntries);
 
 /// The version need of each versioned import of a 64-bit little-endian ELF image, keyed by the
-/// import's name. An import whose `.gnu.version` index is 0 or 1 (unversioned), or whose index no
-/// need names, is not listed. An image without the two sections gives an empty map; a malformed
-/// table gives the reader's diagnostic. An import listed twice with two different needs is left
-/// out, so its provider stays unknown.
+/// import's name. An import is a dynamic symbol that is undefined in the image (by its own
+/// `st_shndx`, not by its name). An import whose `.gnu.version` index is 0 or 1 (unversioned), or
+/// whose index no need names, is not listed, and neither is any other import of the same name: one
+/// unversioned reference leaves the name's provider unknown. A name imported twice with two
+/// different needs is left out too. An image without the two sections gives an empty map; a
+/// malformed version need table gives the reader's diagnostic, and a `.gnu.version` that ends
+/// before an import's entry gives `elf.version_symbols.truncated`.
 [[nodiscard]] Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
     const BinaryImage& image, std::span<const std::byte> data);
 

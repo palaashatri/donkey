@@ -1234,7 +1234,15 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
       if (no_return_call(instruction)) {
         // The block ends at the call; code after it starts a block of its own when another path
         // reaches it.
-        if (const std::uint64_t after = address + instruction.length; visited.contains(after)) {
+        std::uint64_t after = address + instruction.length;
+        // A MIPS call's delay slot runs with it and belongs to its block: the next block starts
+        // after the slot.
+        if (has_delay_slot(image.architecture, instruction)) {
+          if (const auto slot = index_by_address.find(after); slot != index_by_address.end()) {
+            after += instructions[slot->second].length;
+          }
+        }
+        if (visited.contains(after)) {
           leaders.push_back(after);
         }
         continue;

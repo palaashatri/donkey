@@ -2463,13 +2463,13 @@ least one returning path and every returning path compared; 4: option (c)). What
   `tests/fixtures/stubs/exit_consumer` and `libmyexit.so.1` (an `exit` from a non-runtime library listed before
   libc), with provenance.
 - Measured over the same 1,986 functions, Release build (`tools/audit/import_calls.py` and `sample_list.py
-  measure`), before (T4) and after:
+  measure`), before (T4) and after (re-measured after the review fixes, on `main` with T4 merged):
 
   | | Before | After |
   |---|---|---|
   | No-return call sites followed by a printed `return` | 396 | **73** |
-  | Partial with the rax note | 1,163 | 1,025 |
-  | ... of which call a no-return function | 370 | 264 |
+  | Partial with the rax note | 1,163 | 1,017 |
+  | ... of which call a no-return function | 370 | 261 |
   | Gotos (structured with gotos) | 16,232 | 15,712 |
   | Functions printed as labelled blocks | 0 | 0 |
   | Candidates the control-flow check refused | 0 | 0 |

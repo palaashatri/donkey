@@ -3355,12 +3355,15 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
         }
       }
       exit_block.statements.push_back(std::move(call));
-      IrStatement tail;
-      tail.op = IrOp::Return;
-      tail.source_address = instruction.address;
-      tail.width = lifter.pointer_width;
-      tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
-      exit_block.statements.push_back(std::move(tail));
+      // A conditional tail call to a function that does not return (G24-T3): nothing comes back.
+      if (!internal::end_block_at_no_return_call(analysis, exit_block, lifter.pointer_width)) {
+        IrStatement tail;
+        tail.op = IrOp::Return;
+        tail.source_address = instruction.address;
+        tail.width = lifter.pointer_width;
+        tail.a = IrOperand::register_ref(lifter.return_register, lifter.pointer_width);
+        exit_block.statements.push_back(std::move(tail));
+      }
       exit =
           tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
               .first;

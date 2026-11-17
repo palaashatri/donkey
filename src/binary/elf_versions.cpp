@@ -1,6 +1,7 @@
 #include "donkey/binary/elf_versions.h"
 
 #include <cstdint>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <set>
@@ -28,6 +29,28 @@ Result<std::string> name_at(const ByteReader& strings, std::uint32_t offset, std
   return std::string(text.value());
 }
 
+/// The 16-byte records read so far, as [start, end) ranges keyed by start. A record that overlaps
+/// one already read (the same start, or any byte in common) is refused, so a table cannot loop or
+/// make two records share bytes.
+class RecordRanges {
+ public:
+  [[nodiscard]] bool add(std::uint64_t start) {
+    const std::uint64_t end = start + kEntrySize;
+    const auto after = ranges_.lower_bound(start);
+    if (after != ranges_.end() && after->first < end) {
+      return false;
+    }
+    if (after != ranges_.begin() && std::prev(after)->second > start) {
+      return false;
+    }
+    ranges_.emplace(start, end);
+    return true;
+  }
+
+ private:
+  std::map<std::uint64_t, std::uint64_t> ranges_;
+};
+
 const Section* section_named(const BinaryImage& image, const char* name) {
   for (const Section& section : image.sections) {
     if (section.name == name && section.has_file_data) {
@@ -45,7 +68,7 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
   ElfVersionNeeds needs;
   const ByteReader reader(section);
   const ByteReader names(strings);
-  std::set<std::uint64_t> seen;  // offsets of the entries read, so a loop is refused
+  RecordRanges seen;  // the records read, so a loop or an overlap is refused
   std::uint64_t at = 0;
   bool more = !section.empty();
   while (more) {
@@ -53,9 +76,9 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
       return make_error<ElfVersionNeeds>(Status::ResourceLimit, "elf.version_needs.limit",
                                          "the version needs exceed the entry limit", at);
     }
-    if (!seen.insert(at).second) {
+    if (!seen.add(at)) {
       return make_error<ElfVersionNeeds>(Status::InvalidInput, "elf.version_needs.loop",
-                                         "the version needs loop back to an entry", at);
+                                         "a version need overlaps or loops back to a record", at);
     }
     const auto count = reader.u16(at + 2, Endian::Little);
     const auto file_name = reader.u32(at + 4, Endian::Little);
@@ -76,9 +99,9 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
         return make_error<ElfVersionNeeds>(Status::ResourceLimit, "elf.version_needs.limit",
                                            "the version needs exceed the entry limit", entry);
       }
-      if (entry < at || !seen.insert(entry).second) {
+      if (entry < at || !seen.add(entry)) {
         return make_error<ElfVersionNeeds>(Status::InvalidInput, "elf.version_needs.loop",
-                                           "a version need's entries loop", entry);
+                                           "a version need's entries overlap or loop", entry);
       }
       const auto other = reader.u16(entry + 6, Endian::Little);
       const auto name = reader.u32(entry + 8, Endian::Little);
@@ -109,6 +132,12 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
                                              entry);
         }
         break;
+      }
+      if (i + 1 == count.value()) {
+        // The last entry the count allows must end the chain: a link past it points at bytes
+        // no entry accounts for.
+        return make_error<ElfVersionNeeds>(Status::InvalidInput, "elf.version_needs.count",
+                                           "a version need's last entry links to another", entry);
       }
       entry += entry_next.value();
     }
@@ -142,25 +171,32 @@ Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
   if (!needs) {
     return Result<std::map<std::string, ElfVersionNeed>>(needs.diagnostic());
   }
-  std::set<std::string> imported;
-  for (const Symbol& symbol : image.symbols) {
-    if (symbol.imported) {
-      imported.insert(symbol.name);
-    }
-  }
+  // Each dynamic symbol's own definedness decides whether it is an import: a name can be both
+  // defined and imported by different symbols.
   const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
+  const std::vector<bool> undefined = binary::detail::dynamic_symbol_undefined(image, data);
   std::set<std::string> conflicting;
   for (std::size_t index = 0; index < names.size(); ++index) {
-    if (imported.count(names[index]) == 0) {
+    if (index >= undefined.size() || !undefined[index] || names[index].empty()) {
       continue;
     }
+    if (index * 2 + 2 > versym->file_size) {
+      return make_error<std::map<std::string, ElfVersionNeed>>(
+          Status::InvalidInput, "elf.version_symbols.truncated",
+          "the symbol version table ends before an imported symbol's entry", versym->file_offset);
+    }
     const auto value = file.u16(versym->file_offset + index * 2, Endian::Little);
-    if (!value || index * 2 + 2 > versym->file_size) {
-      break;
+    if (!value) {
+      return make_error<std::map<std::string, ElfVersionNeed>>(
+          Status::InvalidInput, "elf.version_symbols.truncated",
+          "the symbol version table lies outside the file", versym->file_offset);
     }
     const auto version = static_cast<std::uint16_t>(value.value() & ~kHiddenBit);
     const auto need = needs.value().by_index.find(version);
     if (version < kFirstNeedIndex || need == needs.value().by_index.end()) {
+      // An unversioned (or unresolved) import of a name another import has a version for: which
+      // library provides it is not known, so the name carries no version evidence.
+      conflicting.insert(names[index]);
       continue;
     }
     const auto [it, added] = imports.emplace(names[index], need->second);

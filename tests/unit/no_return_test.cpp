@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -197,6 +199,17 @@ TEST(ElfVersions, RefusesBrokenTables) {
   EXPECT_EQ(
       donkey::read_version_needs(version_needs(1, {{2, 11}, {3, 11}}), names, 2).diagnostic().code,
       "elf.version_needs.limit");
+  // The last Vernaux the count allows links on (next = 16, past the 32-byte table).
+  auto dangling = version_needs(1, {{2, 11}});
+  dangling[28] = std::byte{0x10};
+  EXPECT_EQ(donkey::read_version_needs(dangling, names).diagnostic().code,
+            "elf.version_needs.count");
+  // A Vernaux at offset 12 overlaps the last four bytes of its Verneed (28 bytes in all).
+  auto overlap = version_needs(1, {{2, 11}});
+  overlap[8] = std::byte{12};  // aux = 12
+  std::copy(overlap.begin() + 16, overlap.begin() + 32, overlap.begin() + 12);
+  overlap.resize(28);
+  EXPECT_EQ(donkey::read_version_needs(overlap, names).diagnostic().code, "elf.version_needs.loop");
 }
 
 // readelf -V on stubs_x86_64: abort's version index names GLIBC_2.2.5 of libc.so.6.
@@ -208,6 +221,52 @@ TEST(ElfVersions, NamesTheProviderOfEachVersionedImport) {
   ASSERT_TRUE(versions.value().contains("abort"));
   EXPECT_EQ(versions.value().at("abort").file, "libc.so.6");
   EXPECT_EQ(versions.value().at("abort").version, "GLIBC_2.2.5");
+}
+
+namespace {
+
+const donkey::Section* section_of(const donkey::BinaryImage& image, const char* name) {
+  for (const donkey::Section& section : image.sections) {
+    if (section.name == name) {
+      return &section;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+// A `.gnu.version` that ends before an import's entry is an error, not a shorter map: a missing
+// entry would read as unversioned and let the DT_NEEDED rule mark the name.
+TEST(ElfVersions, ATruncatedSymbolVersionTableIsAnError) {
+  auto loaded = donkey::load_binary(fixture("stubs", "stubs_x86_64"));
+  ASSERT_TRUE(loaded.has_value());
+  donkey::BinaryImage image = loaded.value().image;
+  for (donkey::Section& section : image.sections) {
+    if (section.name == ".gnu.version") {
+      section.file_size = 2;  // the null symbol's entry only
+    }
+  }
+  const auto versions = donkey::read_import_versions(image, loaded.value().data);
+  ASSERT_FALSE(versions.has_value());
+  EXPECT_EQ(versions.diagnostic().code, "elf.version_symbols.truncated");
+}
+
+// An import whose `.gnu.version` index is 1 (global, unversioned) carries no version evidence.
+TEST(ElfVersions, AnUnversionedImportIsNotListed) {
+  auto loaded = donkey::load_binary(fixture("stubs", "stubs_x86_64"));
+  ASSERT_TRUE(loaded.has_value());
+  const donkey::Section* versym = section_of(loaded.value().image, ".gnu.version");
+  ASSERT_NE(versym, nullptr);
+  std::vector<std::byte> data(loaded.value().data.begin(), loaded.value().data.end());
+  // Every entry becomes index 1.
+  for (std::uint64_t at = 2; at + 2 <= versym->file_size; at += 2) {
+    data[versym->file_offset + at] = std::byte{1};
+    data[versym->file_offset + at + 1] = std::byte{0};
+  }
+  const auto versions = donkey::read_import_versions(loaded.value().image, data);
+  ASSERT_TRUE(versions.has_value()) << versions.diagnostic().message;
+  EXPECT_FALSE(versions.value().contains("abort"));
 }
 
 // --- The fixed list and its binding -------------------------------------------------------------
@@ -376,6 +435,59 @@ TEST(Ir, NoReturnCallHasNoSuccessorAndNoReturnStatement) {
       << text.value();
   EXPECT_EQ(text.value().find("some return paths carry no value"), std::string::npos)
       << text.value();
+}
+
+namespace {
+
+/// Whether `lifted` holds a no-return call to `target` that ends its block, followed by the
+/// unreachable return and nothing else.
+bool ends_at_no_return_call(const donkey::IrFunction& lifted, std::uint64_t target) {
+  for (const donkey::IrBlock& block : lifted.blocks) {
+    const std::size_t n = block.statements.size();
+    if (n < 2) {
+      continue;
+    }
+    const donkey::IrStatement& call = block.statements[n - 2];
+    const donkey::IrStatement& end = block.statements[n - 1];
+    if (call.op == donkey::IrOp::Call && call.a.constant == target && call.no_return &&
+        end.op == donkey::IrOp::Return && end.unreachable) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+// x86-64, f0 (0x1000): test edi, edi; je 0x1010; mov eax, 1; ret. The je leaves the function for
+// f1 (0x1010), which the caller marks no-return: the exit block that calls f1 ends at the call.
+TEST(Ir, AConditionalTailCallToANoReturnFunctionEndsAtTheCall) {
+  auto [data, image] = raw_image(
+      {{0x0, {0x85, 0xff, 0x74, 0x0c, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3}}, {0x10, {0xc3}}}, 0x11,
+      {0x1000, 0x1010});
+  AnalysisOptions options;
+  options.no_return_targets.insert(0x1010);
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  auto lifted = donkey::lift_function(image, result.value(), function_ref(result.value(), 0x1000));
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(ends_at_no_return_call(lifted.value(), 0x1010));
+  ASSERT_TRUE(donkey::verify_ir(lifted.value()).has_value());
+}
+
+// AArch64, f0 (0x1000): b 0x1010, a tail jump to f1, which the caller marks no-return.
+TEST(Ir, AnAArch64TailJumpToANoReturnFunctionEndsAtTheCall) {
+  auto [data, image] = raw_image(
+      {{0x0, {0x04, 0x00, 0x00, 0x14}}, {0x10, {0xc0, 0x03, 0x5f, 0xd6}}}, 0x14, {0x1000, 0x1010});
+  image.architecture = donkey::Architecture::AArch64;
+  AnalysisOptions options;
+  options.no_return_targets.insert(0x1010);
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  auto lifted = donkey::lift_function(image, result.value(), function_ref(result.value(), 0x1000));
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(ends_at_no_return_call(lifted.value(), 0x1010));
+  ASSERT_TRUE(donkey::verify_ir(lifted.value()).has_value());
 }
 
 TEST(Ir, VerifierRejectsANoReturnCallWithASuccessor) {

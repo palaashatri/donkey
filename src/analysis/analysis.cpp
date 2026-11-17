@@ -78,7 +78,14 @@ void name_thunks(AnalysisResult& result) {
     std::size_t index = at->second;
     if (result.instructions[index].mnemonic == "endbr64" ||
         result.instructions[index].mnemonic == "endbr32") {
+      // The jump must follow the ENDBR directly: the next decoded instruction can belong to
+      // another code range.
+      const std::uint64_t after =
+          result.instructions[index].address + result.instructions[index].length;
       ++index;
+      if (index >= result.instructions.size() || result.instructions[index].address != after) {
+        continue;
+      }
     }
     if (index >= result.instructions.size()) {
       continue;
