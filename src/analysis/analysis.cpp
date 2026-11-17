@@ -850,6 +850,10 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       walk.no_return_targets.insert(address);
     }
   }
+  // Targets the caller gave are marks too, so the CFG and the lifter agree on every one.
+  for (const std::uint64_t address : options.no_return_targets) {
+    result.no_return.emplace(address, "given by the caller of the analysis");
+  }
 
   if (options.build_control_flow) {
     auto graph =

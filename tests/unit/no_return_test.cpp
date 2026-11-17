@@ -507,3 +507,25 @@ TEST(Ir, ANoReturnBlockIsStructured) {
   const auto mismatch = donkey::detail::check_structured_control_flow(function, gotos->lines);
   EXPECT_FALSE(mismatch.has_value()) << mismatch.value_or("");
 }
+
+// Owner decision 3: Complete needs at least one returning path. f0 (0x1000) is only `call 0x1010`,
+// and 0x1010 is marked no-return by the caller: f0 has no path that returns, so it stays Partial,
+// whatever else its lift resolved.
+TEST(Ir, AFunctionWithNoReturningPathStaysPartial) {
+  auto [data, image] =
+      raw_image({{0x0, {0xe8, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}}, 0x11, {0x1000, 0x1010});
+  AnalysisOptions options;
+  options.no_return_targets.insert(0x1010);
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* f0 = function_at(result.value(), 0x1000);
+  ASSERT_NE(f0, nullptr);
+  auto lifted = donkey::lift_function(image, result.value(), *f0);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  EXPECT_TRUE(lifted.value().partial);
+  bool noted = false;
+  for (const std::string& note : lifted.value().notes) {
+    noted = noted || note.find("no path returns") != std::string::npos;
+  }
+  EXPECT_TRUE(noted);
+}

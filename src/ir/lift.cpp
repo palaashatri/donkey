@@ -3437,6 +3437,22 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
                   kMaxCallHeight + 1);
   auto lifted = lift_body(image, analysis, function, shared);
   if (lifted) {
+    // Owner decision 3 (G24-T3): Complete needs at least one returning path. A function whose
+    // every path ends in a call that does not return has nothing the oracle could compare.
+    bool returns = false;
+    bool ends_unreachable = false;
+    for (const IrBlock& block : lifted.value().blocks) {
+      for (const IrStatement& statement : block.statements) {
+        if (statement.op == IrOp::Return) {
+          (statement.unreachable ? ends_unreachable : returns) = true;
+        }
+      }
+    }
+    if (ends_unreachable && !returns) {
+      lifted.value().partial = true;
+      lifted.value().notes.push_back(
+          "no path returns: every path ends in a call that does not return, so nothing is compared");
+    }
     name_call_targets(analysis, function, lifted.value());
     // An import stub prints under its import's own name (`abort`, not `abort@plt`), so the
     // pseudocode stays C; the note says what the function is.
