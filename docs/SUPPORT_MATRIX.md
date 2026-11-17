@@ -32,6 +32,21 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   `PltStubs.PltGotEntryIsNamedByItsGlobDatSlot`, `cli.*import_stubs*`,
   `cli.decompile_prints_import_calls_by_name`). Not done: Mach-O stubs (no `__stubs` reader), PE
   delay-load imports, and imports by ordinal print as `ordinal_<n>`.
+- No-return calls (G24-T3): a call to a name on the fixed list (`abort`, `exit`, `__stack_chk_fail`,
+  `__assert_fail`, `longjmp`, `__cxa_throw`, `_Unwind_Resume`, `ExitProcess`, and the rest in
+  `src/analysis/no_return.cpp`; not `error`) ends its path when the import is bound to a runtime library:
+  by its ELF symbol version (`.gnu.version`/`.gnu.version_r`, read by a bounded reader, `fuzz_elf_versions`),
+  otherwise by DT_NEEDED when every needed library is a runtime library, and on PE by the import's DLL.
+  Each mark records its evidence (`functions --json`: `no_return_reason`). Same-image functions whose
+  every path ends in such a call, `ud2` or `hlt` are marked by propagation (8 rounds at most). The CFG gives
+  the call no fall-through edge; the IR ends the block with an unreachable return that prints nothing; the
+  evaluator stops at the call with `ir.eval_no_return`; a function with no returning path stays Partial.
+  Tested: `ElfVersions.*`, `Analysis.*NoReturn*`, `Analysis.PropagationUsesOnlyProvenMarks`,
+  `Cfg.NoReturnCallEndsTheBlock`, `Cfg.BytesReachedByAnotherPathStayInTheFunction`, `Ir.NoReturn*`,
+  `Ir.ANoReturnBlockIsStructured`, `Ir.AFunctionWithNoReturningPathStaysPartial`,
+  `cli.decompile_prints_no_return_call_without_return`, `cli.functions_list_no_return_evidence`. Not
+  done: a same-image function is never marked by its name (libc's own `abort`); interposition
+  (`LD_PRELOAD`) is assumed absent and recorded as such; AArch64 GOT calls are not bound.
 - Calls (G21): a direct call to a same-image integer callee is resolved to its inferred arguments
   and result (x86-64 System V; Win64 (PE) calls with arguments stay Partial) when the callee lifts Complete,
   with its own calls resolved the same way up to 8 levels deep (G21-T2: call summaries computed bottom-up
