@@ -592,7 +592,8 @@ structurer, so each decision counted twice; shares are what matter):
 | return blocks (any target above) | 5% | copying returns would remove little |
 
 Copying small blocks into each arm that reaches them would remove the first group (not measured; it is
-the candidate for the owner decision below, because it grows the output). It is not done.
+the candidate for the owner decision below, because it grows the output). It is not done here; the owner
+decided on 2026-11-17 to do it (W1b in the ledger, G04-T5).
 
 Control-flow check. Every candidate structure (the layout-based ones, their reverse-postorder copy,
 the fallback, the split function, and the goto structurer) is rebuilt from its tags and compared with the
