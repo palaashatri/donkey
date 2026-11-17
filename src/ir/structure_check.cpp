@@ -44,6 +44,9 @@ struct Node {
   bool negated = false;
   bool pure = false;
   bool has_alt = false;
+  BlockId second = kNoBlock;  ///< If with a compound condition: the second test (see LineTag)
+  bool second_negated = false;
+  bool second_or = false;
   LineKind jump = LineKind::Plain;  ///< IfJump: the jump it guards
   std::size_t line = 0;             ///< index of the line the node came from
   std::string
@@ -246,6 +249,9 @@ class TagParser {
           node.shape = Shape::If;
           node.block = tag.block;
           node.negated = tag.negated;
+          node.second = tag.second;
+          node.second_negated = tag.second_negated;
+          node.second_or = tag.second_or;
           node.line = pos_;
           ++pos_;
           if (!sequence(node.body)) {
@@ -533,7 +539,21 @@ class Lowerer {
         const std::size_t then_label = new_label();
         const std::size_t end = new_label();
         const std::size_t else_label = node.has_alt ? new_label() : end;
-        ops.back().labels = {then_label, else_label};
+        if (node.second == kNoBlock) {
+          ops.back().labels = {then_label, else_label};
+        } else {
+          // `if (C1 && C2)`: C1 true goes on to the second test, false to the else arm.
+          // `if (C1 || C2)`: C1 true enters the then arm, false goes on to the second test. The
+          // second test is its block's code (only its test) and its branch.
+          const std::size_t second_label = new_label();
+          ops.back().labels = node.second_or ? std::vector<std::size_t>{then_label, second_label}
+                                             : std::vector<std::size_t>{second_label, else_label};
+          place(second_label);
+          emit(Op::Kind::Block, node.second, node.line);
+          emit(Op::Kind::CJump, node.second, node.line);
+          ops.back().negated = node.second_negated;
+          ops.back().labels = {then_label, else_label};
+        }
         place(then_label);
         if (!lower(node.body)) {
           return false;
@@ -1001,8 +1021,22 @@ std::optional<std::string> check_control_text(
     switch (tag.kind) {
       case LineKind::IfOpen: {
         if (!block_ok(tag.block)) return wrong("a block the function does not have");
-        const std::string condition =
-            expected_condition(function, tag.block, tag.negated, literals);
+        std::string condition = expected_condition(function, tag.block, tag.negated, literals);
+        if (tag.second != kNoBlock) {
+          if (!block_ok(tag.second)) return wrong("a second test the function does not have");
+          const IrBlock& second = function.blocks[tag.second];
+          if (second.statements.empty() || second.statements.back().op != IrOp::CondBranch) {
+            return wrong("a second test whose block has no condition");
+          }
+          const auto part = [](const std::string& side) {
+            const bool wrap = side.find("&&") != std::string::npos ||
+                              side.find("||") != std::string::npos ||
+                              side.find('?') != std::string::npos;
+            return wrap ? "(" + side + ")" : side;
+          };
+          condition = part(condition) + (tag.second_or ? " || " : " && ") +
+                      part(expected_condition(function, tag.second, tag.second_negated, literals));
+        }
         if (text != "if (" + condition + ") {") return wrong("if (" + condition + ") {");
         break;
       }

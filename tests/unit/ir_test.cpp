@@ -5323,9 +5323,11 @@ TEST(Ir, FallbackDoesNotCopyAReturnBlockOverEightStatements) {
     big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
   }
   big.push_back(fb_return());
+  // Block 1 sets rsi before its test, so it is not a test-only block and the two tests are not
+  // printed as one compound condition (which would need no copy and no goto).
   const IrFunction f = fb_function({
       {fb_compare(), fb_branch(3)},
-      {fb_compare(), fb_branch(3)},
+      {fb_set("rsi", 1), fb_compare(), fb_branch(3)},
       {fb_set("rdx", 5), fb_return()},
       big,
   });
@@ -5479,6 +5481,7 @@ namespace {
 using donkey::detail::check_structured_control_flow;
 using donkey::detail::GotoStructure;
 using donkey::detail::kGotoRuleAll;
+using donkey::detail::kGotoRuleCopy;
 using donkey::detail::kGotoRuleDefault;
 using donkey::detail::structure_with_gotos;
 using donkey::detail::StructuredLine;
@@ -5526,6 +5529,76 @@ TEST(Ir, RuleCopyPrintsASmallExitInPlaceOfItsGoto) {
   EXPECT_NE(printed(off.lines).find("goto loc_4010;"), std::string::npos) << printed(off.lines);
   const GotoStructure on = structured_with(function, kGotoRuleDefault);
   EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+}
+
+namespace {
+
+/// Two tests that share their taken target, block 3, which is too large to copy:
+///   0: if (rax == 0) goto 3;   1: if (rbx == 0) goto 3;   2: rdx = 5..9; return;   3: rcx = ...;
+/// The second test holds only its compare and branch, and only block 0 reaches it.
+IrFunction two_tests_function() {
+  IrStatement compare_rbx = fb_compare();
+  compare_rbx.a = IrOperand::register_ref("rbx", 8);
+  IrStatement branch_rbx = fb_branch(3);
+  branch_rbx.a = IrOperand::register_ref("rbx", 8);
+  std::vector<IrStatement> fall_arm;
+  std::vector<IrStatement> shared_arm;
+  for (std::uint64_t i = 0; i < 6; ++i) {
+    fall_arm.push_back(fb_set("rdx", 5 + i));
+    shared_arm.push_back(fb_set("rcx", i));
+  }
+  fall_arm.push_back(fb_return());
+  shared_arm.push_back(fb_return());
+  return fb_function(
+      {{fb_compare(), fb_branch(3)}, {compare_rbx, branch_rbx}, fall_arm, shared_arm});
+}
+
+}  // namespace
+
+// W1b: the compound rule. Without it, the second arrival at the shared block is a goto; with it,
+// the two tests are one condition and no goto is left. The control-flow check accepts both.
+TEST(Ir, RuleCompoundPrintsTwoTestsAsOneCondition) {
+  const IrFunction function = two_tests_function();
+  const GotoStructure off = structured_with(function, kGotoRuleAll | kGotoRuleCopy);
+  EXPECT_EQ(off.gotos, 1U) << printed(off.lines);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+  const std::string text = printed(on.lines);
+  const bool joined =
+      text.find(" || ") != std::string::npos || text.find(" && ") != std::string::npos;
+  EXPECT_TRUE(joined) << text;
+  // The whole printer takes the same form.
+  const auto pseudocode = donkey::format_pseudocode(function);
+  ASSERT_TRUE(pseudocode.has_value()) << pseudocode.diagnostic().message;
+  EXPECT_EQ(pseudocode.value().find("goto"), std::string::npos) << pseudocode.value();
+}
+
+// The check reads a compound condition from its tag: a tag that complements the second test, or
+// joins the tests with the other operator, describes other control flow and is refused.
+TEST(Ir, CheckRefusesACompoundConditionWithTheWrongForm) {
+  const IrFunction function = two_tests_function();
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  std::size_t compound_line = on.lines.size();
+  for (std::size_t i = 0; i < on.lines.size(); ++i) {
+    if (on.lines[i].tag.kind == donkey::detail::LineKind::IfOpen &&
+        on.lines[i].tag.second != donkey::detail::kNoBlock) {
+      compound_line = i;
+    }
+  }
+  ASSERT_LT(compound_line, on.lines.size()) << printed(on.lines);
+  std::vector<StructuredLine> flipped = on.lines;
+  flipped[compound_line].tag.second_negated = !flipped[compound_line].tag.second_negated;
+  EXPECT_TRUE(check_structured_control_flow(function, flipped).has_value());
+  std::vector<StructuredLine> other_operator = on.lines;
+  other_operator[compound_line].tag.second_or = !other_operator[compound_line].tag.second_or;
+  EXPECT_TRUE(check_structured_control_flow(function, other_operator).has_value());
+  // A block with statements of its own is never folded into a condition.
+  IrFunction busy = function;
+  busy.blocks[1].statements.insert(busy.blocks[1].statements.begin(), fb_set("rsi", 1));
+  const GotoStructure busy_on = structured_with(busy, kGotoRuleDefault);
+  for (const StructuredLine& line : busy_on.lines) {
+    EXPECT_EQ(line.tag.second, donkey::detail::kNoBlock) << line.text;
+  }
 }
 
 // A block too large to copy keeps its goto: more than kMaxCopiedStatements printed statements.

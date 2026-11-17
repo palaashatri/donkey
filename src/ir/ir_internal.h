@@ -143,6 +143,13 @@ struct LineTag {
   bool pure = false;
   LineKind jump = LineKind::Plain;  ///< IfJump: Break, Continue or Goto
   std::uint64_t value = 0;          ///< Case
+  /// IfOpen of a compound condition `if (C1 && C2) {` or `if (C1 || C2) {` (kGotoRuleCompound):
+  /// C1 is `block`'s condition (complemented when `negated`), C2 is the condition of `second`,
+  /// a block that holds only its test and is reached only from `block` (complemented when
+  /// `second_negated`). `second_or`: the two are joined by `||`, otherwise by `&&`.
+  BlockId second = kNoBlock;
+  bool second_negated = false;
+  bool second_or = false;
 };
 
 inline LineTag make_tag(LineKind kind, BlockId block = kNoBlock, BlockId follow = kNoBlock,
@@ -206,7 +213,11 @@ inline constexpr std::uint32_t kGotoRuleAll = 0x7FU;
 /// by kMaxCopiedStatements per block and kMaxBlockCopies per function. Not in kGotoRuleAll, so
 /// the tests that switch rules off keep their meaning; structure_function tries it first.
 inline constexpr std::uint32_t kGotoRuleCopy = 1U << 7;
-inline constexpr std::uint32_t kGotoRuleDefault = kGotoRuleAll | kGotoRuleCopy;
+/// Two tests where the second holds only its test, is reached only from the first, and shares one
+/// target with it, printed as one `if (a && b)` or `if (a || b)`. Not in kGotoRuleAll, so a
+/// candidate the check refuses falls back to the rules without it.
+inline constexpr std::uint32_t kGotoRuleCompound = 1U << 8;
+inline constexpr std::uint32_t kGotoRuleDefault = kGotoRuleAll | kGotoRuleCopy | kGotoRuleCompound;
 /// The most statements a copied block prints, and the most copies in one function.
 inline constexpr std::size_t kMaxCopiedStatements = 4;
 inline constexpr std::size_t kMaxBlockCopies = 64;

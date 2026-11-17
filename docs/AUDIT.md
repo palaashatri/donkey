@@ -667,8 +667,29 @@ Tried and not kept: copying small conditional blocks too (the second test of a s
 condition) and keeping whichever of three candidates (none, simple copies, copies of tests) has the
 fewest gotos: 14,573 gotos (71 fewer), but openssl took 38% longer, over the bar; copying tests alone
 gave 15,236, more than simple copies, because a copied test decides its arms again where it stands.
-Compound conditions (`a && b` printed as one `if`) need a tag the control-flow check can read for a
-condition of two blocks; they are not done here.
+Compound conditions (rule `kGotoRuleCompound`, branch `agent/ir/G04-T5-W1b-compound-conditions`): a
+test block that holds only its compare and branch, has one predecessor, and shares one target with that
+predecessor's branch is printed inside the predecessor's `if`: `if (a && b) { inner } else { shared }`,
+or `if (a || b) { shared } ...` when the shared arm is printed first. The tag of the `if` names the
+second test, its polarity and the operator; the control-flow check lowers it to the two branches (the
+second block's code, then its branch) and checks every edge of both blocks as for any other test. The
+candidate is tried first; if the check refused it, the structurer would fall back to copies only, then
+to neither.
+
+| | W1b copies | With compound conditions |
+|---|---|---|
+| Gotos, total | 14,644 | **14,319** (-2.2%) |
+| Functions with gotos | 919 | 916 |
+| Largest in one function | 394 | 387 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos): ls 1,448; openssl 3,020; bash 1,791; libsqlite3 1,509; libc 1,119; git 3,374;
+python3.12 2,058. Time, whole-binary `decompile --json` of openssl, alternating, three runs each: 5.76,
+5.63, 5.34 s before and 5.96, 4.87, 5.20 s after (no difference beyond the noise). `ls` prints 44
+compound conditions, such as `if ((rax & rax) != 0 && *(u8 *)(rax) != 0x0) {`, where the second test
+reads memory only when the first holds, as in the binary.
 
 
 ### W1: stack and nesting (blocker fixes, branch head `14b94a4`)

@@ -2271,15 +2271,15 @@ StructureResult structure_function(const IrFunction& function,
   // Last, the goto structurer: a valid graph is printed as structured code with gotos for the edges
   // no structure expresses, unless it nests deeper than kMaxStructureNesting. It is checked like
   // the candidates above; a refusal or a mismatch leaves the labelled form.
-  // W1b: first with small blocks copied in place of gotos; if the check refuses that candidate,
-  // without copies. (Copying small conditional blocks too, and keeping whichever of three
-  // candidates had the fewest gotos, removed 71 more of 16,232 but cost 38% more time on openssl:
-  // not done.)
+  // W1b: first with small blocks copied in place of gotos and compound conditions (`a && b`); if
+  // the check refuses that candidate, with copies only, then with neither. (Copying small
+  // conditional blocks too, and keeping whichever of three candidates had the fewest gotos, removed
+  // 71 more of 16,232 but cost 38% more time on openssl: not done.)
   std::string refusal;
   bool have_best = false;
   std::vector<StructuredLine> best_lines;
   std::size_t best_gotos = 0;
-  for (const std::uint32_t rules : {kGotoRuleDefault, kGotoRuleAll}) {
+  for (const std::uint32_t rules : {kGotoRuleDefault, kGotoRuleAll | kGotoRuleCopy, kGotoRuleAll}) {
     refusal.clear();
     auto goto_structure = structure_with_gotos(function, string_literals, rules, &refusal);
     if (!goto_structure) {

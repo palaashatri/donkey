@@ -673,6 +673,90 @@ class Emitter {
     return !walkable(start, ctx);
   }
 
+  /// A compound condition found by compound_of: `test` is kNoBlock when there is none.
+  struct Compound {
+    BlockId test = kNoBlock;    ///< the second test, a target of the first branch
+    BlockId inner = kNoBlock;   ///< the target of `test` that the first branch does not have
+    BlockId shared = kNoBlock;  ///< the target both tests have
+  };
+
+  /// How the condition that enters one arm of a compound condition is written.
+  struct CompoundArm {
+    bool first_negated = false;   ///< the first test's condition is complemented
+    bool second_negated = false;  ///< the second test's condition is complemented
+    bool joined_by_or = false;    ///< `||`; otherwise `&&`
+  };
+
+  /// The compound condition that starts at the branch of `block`, if any (kGotoRuleCompound).
+  [[nodiscard]] Compound compound_of(BlockId block) const {
+    Compound none;
+    if ((rules_ & kGotoRuleCompound) == 0) {
+      return none;
+    }
+    const std::size_t count = function_.blocks.size();
+    const IrStatement& branch = function_.blocks[block].statements.back();
+    const BlockId targets[2] = {branch.b.block, block + 1};
+    for (int i = 0; i < 2; ++i) {
+      const BlockId test = targets[i];
+      const BlockId other = targets[1 - i];
+      if (test == block || test >= count || other >= count || test == other || emitted_[test] ||
+          labelled_[test] || loop_of_[test] >= 0 || graph_.predecessors[test].size() != 1) {
+        continue;
+      }
+      const IrBlock& ir = function_.blocks[test];
+      const std::size_t size = ir.statements.size();
+      if (size == 0 || ir.statements.back().op != IrOp::CondBranch ||
+          !(size == 1 || (size == 2 && is_flag_setter(ir.statements[0])))) {
+        continue;
+      }
+      const BlockId test_taken = ir.statements.back().b.block;
+      const BlockId test_fall = test + 1;
+      if (test_taken == test_fall || test_fall >= count || test_taken >= count) {
+        continue;
+      }
+      BlockId inner = kNoBlock;
+      if (test_taken == other) {
+        inner = test_fall;
+      } else if (test_fall == other) {
+        inner = test_taken;
+      }
+      if (inner == kNoBlock || inner == block || inner == test) {
+        continue;
+      }
+      return Compound{test, inner, other};
+    }
+    return none;
+  }
+
+  /// The condition that enters `arm_block` (the compound's inner or shared end). Control enters
+  /// `inner` when the first test goes to the second and the second goes to `inner`: `a && b`.
+  /// It enters `shared` when either goes there: `a || b`.
+  [[nodiscard]] CompoundArm compound_arm(BlockId block, const Compound& compound,
+                                         BlockId arm_block) const {
+    const BlockId first_fall = block + 1;
+    const BlockId second_fall = compound.test + 1;
+    CompoundArm form;
+    if (arm_block == compound.inner) {
+      form.first_negated = compound.test == first_fall;
+      form.second_negated = compound.inner == second_fall;
+      form.joined_by_or = false;
+    } else {
+      form.first_negated = compound.shared == first_fall;
+      form.second_negated = compound.shared == second_fall;
+      form.joined_by_or = true;
+    }
+    return form;
+  }
+
+  /// One side of `&&` or `||`, in parentheses when it holds an operator that binds no tighter.
+  [[nodiscard]] static std::string compound_part(const std::string& condition) {
+    if (condition.find("&&") != std::string::npos || condition.find("||") != std::string::npos ||
+        condition.find('?') != std::string::npos) {
+      return "(" + condition + ")";
+    }
+    return condition;
+  }
+
   /// An if on the condition of `block`. Its two arms are printed one level deeper. When an arm
   /// jumps (it never falls out), the `if` closes after that arm and the other arm continues at the
   /// level of the `if`, as the rest of the region: `if (c) { jump }` and then the rest. So a chain
@@ -695,25 +779,51 @@ class Emitter {
     const bool has_join = join != kNoBlock && join < function_.blocks.size();
     const bool falls = falls_to_join(join, ctx);
     const BlockId arm_stop = has_join ? join : kNoBlock;
-    const Ctx taken_ctx{taken, arm_stop, falls};
-    const Ctx fall_ctx{fall, arm_stop, falls};
     const std::uint64_t address = function_.blocks[block].address;
     const int depth = depth_;
 
+    // A compound condition: one target of the branch is a block that holds only its test, is
+    // reached only from here, and shares its other target with this branch. Its two arms are then
+    // `inner` (the test block's own target) and `shared`.
+    const Compound compound = compound_of(block);
+    // The two arms: the branch's targets, or for a compound condition its two ends.
+    const BlockId arm_a = compound.test != kNoBlock ? compound.inner : taken;
+    const BlockId arm_b = compound.test != kNoBlock ? compound.shared : fall;
+    const Ctx a_ctx{arm_a, arm_stop, falls};
+    const Ctx b_ctx{arm_b, arm_stop, falls};
+
     // The arm printed first: a short one, when the other one is not short.
-    const bool fall_first = short_arm(fall, fall_ctx) && !short_arm(taken, taken_ctx);
-    const BlockId first = fall_first ? fall : taken;
-    const BlockId second = fall_first ? taken : fall;
-    const Ctx& first_ctx = fall_first ? fall_ctx : taken_ctx;
-    const Ctx& second_ctx = fall_first ? taken_ctx : fall_ctx;
-    // Whether an arm is the fall-through (its printed condition is the complement of the branch's).
-    const auto is_fall = [&](BlockId arm_block) { return arm_block == fall; };
+    const bool b_first = short_arm(arm_b, b_ctx) && !short_arm(arm_a, a_ctx);
+    const BlockId first = b_first ? arm_b : arm_a;
+    const BlockId second = b_first ? arm_a : arm_b;
+    const Ctx& first_ctx = b_first ? b_ctx : a_ctx;
+    const Ctx& second_ctx = b_first ? a_ctx : b_ctx;
+    // The condition under which control enters `arm_block`.
     const auto arm_open = [&](BlockId arm_block) {
-      return "if (" + condition_of(block, is_fall(arm_block)) + ") {";
+      if (compound.test == kNoBlock) {
+        // Whether the arm is the fall-through (its condition is the complement of the branch's).
+        return "if (" + condition_of(block, arm_block == fall) + ") {";
+      }
+      const CompoundArm form = compound_arm(block, compound, arm_block);
+      return "if (" + compound_part(condition_of(block, form.first_negated)) +
+             (form.joined_by_or ? " || " : " && ") +
+             compound_part(condition_of(compound.test, form.second_negated)) + ") {";
     };
     const auto arm_tag = [&](BlockId arm_block) {
-      return make_tag(LineKind::IfOpen, block, kNoBlock, is_fall(arm_block));
+      if (compound.test == kNoBlock) {
+        return make_tag(LineKind::IfOpen, block, kNoBlock, arm_block == fall);
+      }
+      const CompoundArm form = compound_arm(block, compound, arm_block);
+      LineTag tag = make_tag(LineKind::IfOpen, block, kNoBlock, form.first_negated);
+      tag.second = compound.test;
+      tag.second_negated = form.second_negated;
+      tag.second_or = form.joined_by_or;
+      return tag;
     };
+    if (compound.test != kNoBlock) {
+      // The test block is printed inside the condition, never on its own.
+      emitted_[compound.test] = true;
+    }
 
     const std::size_t first_begin = lines_.size();
     depth_ = depth + 1;
