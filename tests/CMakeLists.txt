@@ -661,7 +661,7 @@ add_test(NAME cli.decompile_truncation_text
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
                  --max-functions 1)
 set_tests_properties(cli.decompile_truncation_text PROPERTIES
-  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions; raise the limit with --max-functions N")
+  PASS_REGULAR_EXPRESSION "truncated: showing 1 of 2 functions. raise the limit with --max-functions N")
 
 add_test(NAME cli.decompile_no_truncation_at_the_limit
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64
@@ -708,7 +708,7 @@ add_test(NAME cli.decompile_without_a_string_prints_the_address
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
                  --function 0x401130)
 set_tests_properties(cli.decompile_without_a_string_prints_the_address PROPERTIES
-  PASS_REGULAR_EXPRESSION "rdi = 0x402004;")
+  PASS_REGULAR_EXPRESSION "rdi = 0x402004.")
 set(DONKEY_CLI_STRING_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-string.db")
 add_test(NAME cli.project_string_reset
          COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_STRING_DB}
@@ -726,7 +726,7 @@ add_test(NAME cli.project_string_decompile_prints_the_literal
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/strings/hello-x86_64
                  --project ${DONKEY_CLI_STRING_DB} --function 0x401130)
 set_tests_properties(cli.project_string_decompile_prints_the_literal PROPERTIES
-  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\);"
+  PASS_REGULAR_EXPRESSION "rdi = \\(u64\\)\\(\"hello, donkey\"\\)."
   DEPENDS cli.project_string_define)
 add_test(NAME cli.project_string_refuses_an_unmapped_address
          COMMAND donkey-cli project string ${DONKEY_CLI_STRING_DB} 1 0x9999999)
@@ -1157,7 +1157,7 @@ set_tests_properties(cli.functions_lists_import_stubs_by_name PROPERTIES
 add_test(NAME cli.decompile_prints_import_calls_by_name
          COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
 set_tests_properties(cli.decompile_prints_import_calls_by_name PROPERTIES
-  PASS_REGULAR_EXPRESSION "\n    abort\\(\\);\n"
+  PASS_REGULAR_EXPRESSION "\n    abort\\(\\).\n"
   FAIL_REGULAR_EXPRESSION "sub_1060\\(|abort@plt\\(")
 add_test(NAME cli.xrefs_name_import_stubs
          COMMAND donkey-cli xrefs ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
