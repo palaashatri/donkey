@@ -36,12 +36,13 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported, 177 Complete (8.9%; 184 before the fs/gs fix, 7 of them wrong); before G04-T5, 985 labelled (49.6%, under the 52% bar).
 - Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
-  blocks (985 before G04-T5). 1,000 print without a goto and 986 with gotos (16,232 in all; the
-  largest function has 409). Every printed structure is checked edge by edge against the IR before it
-  is shown (no candidate was refused on the sample). The gotos are the open part: most go to a block
-  that is already printed (shared joins), and removing them needs owner decisions (`docs/AUDIT.md`, W1).
+  blocks (985 before G04-T5). 1,067 print without a goto and 919 with gotos (14,644 in all, 16,232
+  before W1b copied small blocks in place of gotos; the largest function has 394). Every printed
+  structure is checked edge by edge against the IR before it is shown (no candidate was refused on the
+  sample). The gotos are the open part: most go to a block that is already printed (shared joins and
+  short-circuit conditions; `docs/AUDIT.md`, W1 and W1b).
 - Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
-  unwind; structured output without gotos for the 986 functions that G04-T5 prints with gotos.
+  unwind; structured output without gotos for the 919 functions that G04-T5 prints with gotos.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
 |---|---|---|---|---|

@@ -210,6 +210,8 @@ class Emitter {
   std::vector<StructuredLine> lines_;
   int depth_ = 1;
   std::size_t gotos_ = 0;
+  std::size_t copies_ = 0;      ///< blocks printed as a copy in place of a goto (W1b)
+  int copy_depth_ = 0;          ///< copies being printed inside a copy
 
   // ---- analysis -----------------------------------------------------------------------------
 
@@ -456,8 +458,94 @@ class Emitter {
     if (walkable(target, ctx)) {
       return walk(target);
     }
+    if (copyable(target, ctx)) {
+      return emit_copy(target, ctx);
+    }
     emit_goto(target);
     return done(Outcome::Jumps);
+  }
+
+  /// The statements a block prints, its terminator left out.
+  [[nodiscard]] std::size_t printed_statements(BlockId block) const {
+    const IrBlock& ir = function_.blocks[block];
+    std::size_t printed = 0;
+    for (std::size_t index = 0; index + 1 < ir.statements.size(); ++index) {
+      const IrStatement* previous = flags_producer(ir, index);
+      if (!render_statement(function_, ir.statements[index], previous, literals_).empty()) {
+        ++printed;
+      }
+    }
+    return printed;
+  }
+
+  /// Whether an edge to `target` leaves without a goto: it falls out, continues or breaks.
+  [[nodiscard]] bool exits_without_goto(BlockId target, const Ctx& ctx) const {
+    if (ctx.stop != kNoBlock && target == ctx.stop && ctx.stop_falls) {
+      return true;
+    }
+    if ((rules_ & kGotoRuleContinue) != 0) {
+      const Frame* loop = innermost_loop();
+      if (loop != nullptr && target == loop->header) {
+        return true;
+      }
+    }
+    return (rules_ & kGotoRuleBreak) != 0 && !frames_.empty() && frames_.back().breaks &&
+           frames_.back().follow != kNoBlock && target == frames_.back().follow;
+  }
+
+  /// W1b: a goto to `target` may print a copy of it instead. The target is small (at most
+  /// kMaxCopiedStatements printed statements), is not a loop header, and either returns or ends in
+  /// a plain branch whose own edge leaves without a goto (falls out, breaks, continues) or goes to
+  /// a block that may be copied in turn (one level). A copy changes no edge: the control-flow check
+  /// verifies it like any printed block.
+  [[nodiscard]] bool copyable(BlockId target, const Ctx& ctx) const {
+    if ((rules_ & kGotoRuleCopy) == 0 || target >= function_.blocks.size() ||
+        copies_ >= kMaxBlockCopies || copy_depth_ > 1 || loop_of_[target] >= 0 ||
+        function_.blocks[target].statements.empty()) {
+      return false;
+    }
+    const IrStatement& terminator = function_.blocks[target].statements.back();
+    if (terminator.op != IrOp::Return && terminator.op != IrOp::Branch) {
+      return false;
+    }
+    if (printed_statements(target) > kMaxCopiedStatements) {
+      return false;
+    }
+    if (terminator.op == IrOp::Return) {
+      return true;
+    }
+    const BlockId next = terminator.a.block;
+    if (next == target) {
+      return false;
+    }
+    if (exits_without_goto(next, ctx) || walkable(next, ctx)) {
+      return true;
+    }
+    if (copy_depth_ > 0 || next >= function_.blocks.size() || loop_of_[next] >= 0 ||
+        function_.blocks[next].statements.empty()) {
+      return false;
+    }
+    // One more level: the next block returns and is small.
+    return function_.blocks[next].statements.back().op == IrOp::Return &&
+           printed_statements(next) <= kMaxCopiedStatements;
+  }
+
+  /// Prints a copy of `target` where a goto to it would be: its statements, then its exit.
+  Next emit_copy(BlockId target, const Ctx& ctx) {
+    ++copies_;
+    ++copy_depth_;
+    // A copy carries no label: the label, if any, stays on the block's first printing.
+    push(std::string(), function_.blocks[target].address, make_tag(LineKind::Marker, target));
+    const IrStatement& terminator = function_.blocks[target].statements.back();
+    Next result = done(Outcome::Jumps);
+    if (terminator.op == IrOp::Return) {
+      emit_statements(target, true, false);
+    } else {
+      emit_statements(target, false, false);
+      result = decide(terminator.a.block, ctx);
+    }
+    --copy_depth_;
+    return result;
   }
 
   /// Prints the region from `start` until it stops, and returns how it ended.

@@ -201,6 +201,15 @@ inline constexpr std::uint32_t kGotoRuleBreak = 1U << 4;  ///< a branch to a loo
 inline constexpr std::uint32_t kGotoRuleContinue = 1U << 5;  ///< a branch to a loop header
 inline constexpr std::uint32_t kGotoRuleSwitch = 1U << 6;    ///< a switch with its arms printed
 inline constexpr std::uint32_t kGotoRuleAll = 0x7FU;
+/// W1b (owner decision of 2026-11-17): a goto to a small block that returns, or that only jumps on,
+/// prints a copy of that block in place of the goto when the copy's own exit is not a goto. Bounded
+/// by kMaxCopiedStatements per block and kMaxBlockCopies per function. Not in kGotoRuleAll, so
+/// the tests that switch rules off keep their meaning; structure_function tries it first.
+inline constexpr std::uint32_t kGotoRuleCopy = 1U << 7;
+inline constexpr std::uint32_t kGotoRuleDefault = kGotoRuleAll | kGotoRuleCopy;
+/// The most statements a copied block prints, and the most copies in one function.
+inline constexpr std::size_t kMaxCopiedStatements = 4;
+inline constexpr std::size_t kMaxBlockCopies = 64;
 
 struct GotoStructure {
   std::vector<StructuredLine> lines;

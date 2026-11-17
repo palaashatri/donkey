@@ -938,10 +938,11 @@ for Partial functions.
   review rounds (the same counts).
   The open decision is whether to copy small shared blocks and recover compound conditions to remove
   most of them (owner decision; not made here).
-- **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two
-  gotos for one exit: `case 0x1: goto loc_4010;`, where `loc_4010` only jumps on to the loop's exit.
-  The goto to the block that only jumps should go straight to the jump's target, or the block should
-  be copied where it is small. Same family as the shared-join gotos above; part of the owner decision.
+- **W1b (goto reduction):** DONE in part (2026-11-17, `docs/AUDIT.md` W1b): small blocks that return or
+  only jump on are copied in place of a goto (`kGotoRuleCopy`); gotos 16,232 -> 14,644, functions with
+  gotos 986 -> 919, 0 candidates refused, openssl +3.8% time. `Ir.LeavingTheLoopFromInsideASwitchCopiesTheExit`
+  (was `...PrintsGotos`), `Ir.RuleCopyPrintsASmallExitInPlaceOfItsGoto`, `Ir.RuleCopyLeavesALargeBlockAsAGoto`.
+  Compound conditions (`a && b`) remain: they need a tag for a two-block condition in the control-flow check.
 
 ### G05 Type system and user types
 

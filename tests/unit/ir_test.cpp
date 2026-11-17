@@ -1137,10 +1137,9 @@ TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
   EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
 }
 
-TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
-  // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
-  // return rax. A `break` inside the switch would leave the switch, not the loop, so the leave is a
-  // goto, and the loop's own structure is kept (G04-T5: no whole-function labelled form).
+// while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
+// return rax. Block 2 (case 1) only jumps on to the return (block 4).
+IrFunction switch_exit_function() {
   IrFunction function;
   function.address = 0x4000;
   function.name = "switch_exit";
@@ -1174,13 +1173,19 @@ TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
 
   function.blocks[4].statements.push_back(return_statement());
 
+  return function;
+}
+
+TEST(Ir, LeavingTheLoopFromInsideASwitchCopiesTheExit) {
+  // A `break` inside the switch would leave the switch, not the loop. Without W1b the leave is two
+  // gotos (`case 0x1: goto loc_4010;`, and loc_4010 only jumps on): see
+  // Ir.RuleCopyPrintsASmallExitInPlaceOfItsGoto. With it, the small exit is copied where the loop
+  // is left, and no goto is printed (G04-T5 W1b).
+  const IrFunction function = switch_exit_function();
   const auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
-  EXPECT_NE(text.value().find("// note: 2 goto(s) where control flow has no structured form"),
-            std::string::npos)
-      << text.value();
-  EXPECT_NE(text.value().find("case 0x1:\n          goto loc_4010;"), std::string::npos)
-      << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("case 0x1:\n          break;"), std::string::npos) << text.value();
   EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
 
@@ -5474,6 +5479,7 @@ namespace {
 using donkey::detail::check_structured_control_flow;
 using donkey::detail::GotoStructure;
 using donkey::detail::kGotoRuleAll;
+using donkey::detail::kGotoRuleDefault;
 using donkey::detail::structure_with_gotos;
 using donkey::detail::StructuredLine;
 
@@ -5508,6 +5514,42 @@ IrStatement switch_on_rax(std::uint32_t default_block, std::vector<IrSwitchCase>
   statement.switch_cases = std::move(cases);
   return statement;
 }
+
+}  // namespace
+
+// W1b: the copy rule. Off, the leave from inside the switch is two gotos; on, the small blocks are
+// copied in their place and no goto is left. Both are accepted by the control-flow check.
+TEST(Ir, RuleCopyPrintsASmallExitInPlaceOfItsGoto) {
+  const IrFunction function = switch_exit_function();
+  const GotoStructure off = structured_with(function, kGotoRuleAll);
+  EXPECT_EQ(off.gotos, 2U) << printed(off.lines);
+  EXPECT_NE(printed(off.lines).find("goto loc_4010;"), std::string::npos) << printed(off.lines);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+}
+
+// A block too large to copy keeps its goto: more than kMaxCopiedStatements printed statements.
+TEST(Ir, RuleCopyLeavesALargeBlockAsAGoto) {
+  IrFunction function = switch_exit_function();
+  // Five statements in the return block: too many to copy.
+  IrBlock& exit = function.blocks[4];
+  const IrStatement ret = exit.statements.back();
+  exit.statements.pop_back();
+  for (int i = 0; i < 5; ++i) {
+    IrStatement add;
+    add.op = IrOp::Add;
+    add.dest = IrOperand::register_ref("rax", 8);
+    add.a = IrOperand::register_ref("rax", 8);
+    add.b = IrOperand::constant_value(static_cast<std::uint64_t>(i + 1), 8);
+    add.width = 8;
+    exit.statements.push_back(add);
+  }
+  exit.statements.push_back(ret);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_GT(on.gotos, 0U) << printed(on.lines);
+}
+
+namespace {
 
 constexpr std::uint32_t kWithout(std::uint32_t rule) {
   return kGotoRuleAll & ~rule;

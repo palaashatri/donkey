@@ -631,6 +631,45 @@ the first pair (+40%) is treated as noise, and the median is the figure to read.
 `c101de2` (openssl +22%/+14%, git +1%/+5%) is superseded by these numbers. Structuring runs once per candidate, and the
 CLI also classifies each function (a second run of the structurers), so most of the added cost is the check.
 
+### W1b: goto reduction (G04-T5, owner decision of 2026-11-17)
+
+Branch `agent/ir/G04-T5-W1b-goto-reduction`, measured with `sample_list.py measure` on the fixed list
+(1,986 functions), Release builds. Before: `main` with G24-T4 (#66; the goto structurer is that of W1).
+
+Rule (`kGotoRuleCopy`, `src/ir/structure_goto.cpp`): where the goto structurer would print `goto T`, it
+prints a copy of T instead when T is small (at most 4 printed statements, `kMaxCopiedStatements`), is not
+a loop header, and either returns, or ends in a plain branch whose own edge leaves without a goto (it
+falls out of the region, breaks, continues, or reaches a block printed next), or goes on to a small
+block that returns (one level). A jump-only block (no statements) is the zero-statement case, so a goto
+to a block that only jumps on becomes that jump's own break, continue or fall-through. At most 64 copies
+per function (`kMaxBlockCopies`). The copy carries no label and changes no edge; the control-flow check
+verifies it like any printed block (it already accepts a block printed twice). `structure_function`
+tries the candidate with copies first and, if the check refuses it, the one without.
+
+| | Before | After |
+|---|---|---|
+| Gotos, total | 16,232 | **14,644** (-9.8%) |
+| Functions with gotos | 986 | 919 |
+| Structured, no goto | 1,000 | 1,067 |
+| Largest in one function | 409 | 394 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos before, after): ls 1,648 / 1,475; openssl 3,326 / 3,114; bash 1,997 / 1,833;
+libsqlite3 1,734 / 1,559; libc 1,362 / 1,156; git 3,749 / 3,406; python3.12 2,416 / 2,101.
+
+Timing, whole-binary `decompile --json`, one process at a time, before and after alternating (wall
+seconds): openssl 4.19 / 4.35, 3.74 / 4.35, 4.24 / 4.31 (median +3.8%); git 64.0 / 65.7 (+2.7%). Under the 25% bar.
+
+Tried and not kept: copying small conditional blocks too (the second test of a short-circuit
+condition) and keeping whichever of three candidates (none, simple copies, copies of tests) has the
+fewest gotos: 14,573 gotos (71 fewer), but openssl took 38% longer, over the bar; copying tests alone
+gave 15,236, more than simple copies, because a copied test decides its arms again where it stands.
+Compound conditions (`a && b` printed as one `if`) need a tag the control-flow check can read for a
+condition of two blocks; they are not done here.
+
+
 ### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
 
 A stress driver (`w1audit/stress`, not committed) builds N checks `if (rax == 0) return i;` followed by the
