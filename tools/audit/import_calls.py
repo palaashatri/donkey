@@ -61,6 +61,17 @@ def stub_names(path):
             for m in re.finditer(r"^([0-9a-f]+) <([^>]+)@plt>:$", out, re.M)}
 
 
+def site_kind(name, import_names, local_stub_names):
+    """How a call site to a stub or slot named `name` is counted: "import" for an undefined dynamic
+    symbol, "local" for a function the image defines itself behind a stub (libc's interposable
+    `free@plt`), and None for a name that is neither."""
+    if name in import_names:
+        return "import"
+    if name in local_stub_names:
+        return "local"
+    return None
+
+
 def undefined_symbols(path):
     """The names the image imports: dynamic symbols whose section index is UND."""
     out = subprocess.run(["readelf", "--dyn-syms", "-W", path], capture_output=True, text=True,
@@ -181,8 +192,13 @@ def measure(args):
                     if name is None:
                         counts["stub_call_sites_without_objdump_name"] += 1
                         continue
-                    sites_by_name[name] += 1
-                    called.add(name)
+                    if site_kind(name, import_names, local_stub_names) == "import":
+                        sites_by_name[name] += 1
+                        called.add(name)
+                    else:
+                        # A stub of the image's own function: not an import call. Its no-return
+                        # accounting below still applies.
+                        counts["local_stub_call_sites_printed_as_sub"] += 1
                     if name in NO_RETURN:
                         no_return_sites[name] += 1
                         no_return_called.add(name)
@@ -199,10 +215,11 @@ def measure(args):
                     if following.startswith("return"):
                         counts["no_return_sites_followed_by_return"] += 1
                 for m in CALL_BY_NAME.finditer(line):
-                    if m.group(1) in import_names:
+                    kind = site_kind(m.group(1), import_names, local_stub_names)
+                    if kind == "import":
                         counts["import_call_sites_printed_by_name"] += 1
                         called.add(m.group(1))
-                    elif m.group(1) in local_stub_names:
+                    elif kind == "local":
                         counts["local_stub_call_sites_printed_by_name"] += 1
                 for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
                     slot = int(m.group(1), 16)
