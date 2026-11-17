@@ -289,6 +289,10 @@ if(Python3_Interpreter_FOUND)
       ENVIRONMENT "DONKEY_CLI=$<TARGET_FILE:donkey-cli>;PYTHONDONTWRITEBYTECODE=1"
       TIMEOUT 300)
   endif()
+  # The counting rules of the import-call audit (tools/audit/import_calls.py, G24-T4).
+  add_test(NAME tools.import_calls
+           COMMAND ${Python3_EXECUTABLE} -I -B -m unittest discover
+                   -s ${PROJECT_SOURCE_DIR}/tools/audit -p test_import_calls.py)
 endif()
 add_test(NAME cli.callgraph_json
          COMMAND donkey-cli callgraph $<TARGET_FILE:donkey_test_debuggee> --json)
