@@ -20,6 +20,13 @@ namespace donkey {
 [[nodiscard]] std::map<std::uint64_t, std::string> plt_stub_imports(
     const BinaryImage& image, std::span<const std::byte> data);
 
+/// The same stubs as plt_stub_imports, and also the stubs whose relocation names a function the
+/// image defines and exports itself (an interposable function such as libc's own `free`, called
+/// through `free@plt`). Those are calls to the image's own code, not imports: use them for names
+/// only, never to bind or to mark an import.
+[[nodiscard]] std::map<std::uint64_t, std::string> plt_stub_targets(
+    const BinaryImage& image, std::span<const std::byte> data);
+
 /// The GOT slots of an x86-64 ELF image that a GLOB_DAT relocation in `.rela.dyn` names, keyed by
 /// slot address, each with the imported name. Code built with -fno-plt calls such an import with
 /// `call *slot(%rip)`, which reads the slot instead of going through a stub. A slot is listed only

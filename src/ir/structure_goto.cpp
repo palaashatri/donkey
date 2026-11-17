@@ -197,7 +197,7 @@ class Emitter {
   std::uint32_t rules_;
   std::vector<bool> labelled_;
   Graph graph_;
-  std::vector<BitSet> dominators_;
+  Dominators dominators_;
   std::vector<BlockId> ipdom_;
   std::vector<std::string> names_;
   std::vector<bool> emitted_;

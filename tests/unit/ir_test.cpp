@@ -7414,3 +7414,98 @@ TEST(Ir, StackCanaryCheckStaysPartial) {
                               f));
   EXPECT_TRUE(f.partial);
 }
+
+namespace {
+
+/// The iterative bit-set algorithm the dominator tree replaced, kept here as the reference.
+std::vector<std::vector<bool>> reference_dominators(const donkey::detail::Graph& graph) {
+  const std::size_t count = graph.successors.size();
+  std::vector<std::vector<bool>> sets(count, std::vector<bool>(count, true));
+  if (count == 0) {
+    return sets;
+  }
+  sets[0].assign(count, false);
+  sets[0][0] = true;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t block = 1; block < count; ++block) {
+      if (graph.predecessors[block].empty()) {
+        continue;
+      }
+      std::vector<bool> next(count, true);
+      for (const std::size_t predecessor : graph.predecessors[block]) {
+        for (std::size_t i = 0; i < count; ++i) {
+          next[i] = next[i] && sets[predecessor][i];
+        }
+      }
+      next[block] = true;
+      if (next != sets[block]) {
+        sets[block] = std::move(next);
+        changed = true;
+      }
+    }
+  }
+  return sets;
+}
+
+donkey::detail::Graph graph_of(std::size_t count,
+                               const std::vector<std::pair<std::size_t, std::size_t>>& edges) {
+  donkey::detail::Graph graph;
+  graph.successors.resize(count);
+  graph.predecessors.resize(count);
+  for (const auto& [from, to] : edges) {
+    graph.successors[from].push_back(to);
+    graph.predecessors[to].push_back(from);
+  }
+  return graph;
+}
+
+}  // namespace
+
+// The dominator tree answers exactly what the bit sets answered, on graphs with loops, joins,
+// edges back to the entry and blocks the entry does not reach (which every block dominates).
+TEST(Ir, DominatorTreeMatchesTheBitSetAlgorithm) {
+  std::uint64_t seed = 0x9E3779B97F4A7C15ULL;
+  const auto next = [&seed](std::size_t bound) {
+    seed ^= seed << 13U;
+    seed ^= seed >> 7U;
+    seed ^= seed << 17U;
+    return static_cast<std::size_t>(seed % bound);
+  };
+  for (int trial = 0; trial < 200; ++trial) {
+    const std::size_t count = 1 + next(40);
+    std::vector<std::pair<std::size_t, std::size_t>> edges;
+    const std::size_t edge_count = next(count * 3 + 1);
+    for (std::size_t i = 0; i < edge_count; ++i) {
+      edges.emplace_back(next(count), next(count));
+    }
+    const donkey::detail::Graph graph = graph_of(count, edges);
+    const auto reference = reference_dominators(graph);
+    const donkey::detail::Dominators tree = donkey::detail::compute_dominators(graph);
+    for (std::size_t block = 0; block < count; ++block) {
+      for (std::size_t dominator = 0; dominator < count; ++dominator) {
+        ASSERT_EQ(tree[block].test(dominator), static_cast<bool>(reference[block][dominator]))
+            << "trial " << trial << ": does " << dominator << " dominate " << block;
+      }
+    }
+  }
+}
+
+// Defect #40: the bit sets needed count^2 bits (200,000 blocks: 5 GB) and threw bad_alloc. The
+// tree is linear: a chain of 200,000 blocks with a loop back to its middle.
+TEST(Ir, DominatorTreeOfAHugeGraphIsLinear) {
+  constexpr std::size_t kCount = 200'000;
+  std::vector<std::pair<std::size_t, std::size_t>> edges;
+  edges.reserve(kCount);
+  for (std::size_t block = 0; block + 1 < kCount; ++block) {
+    edges.emplace_back(block, block + 1);
+  }
+  edges.emplace_back(kCount - 1, kCount / 2);
+  const donkey::detail::Dominators tree =
+      donkey::detail::compute_dominators(graph_of(kCount, edges));
+  EXPECT_TRUE(tree[kCount - 1].test(0));
+  EXPECT_TRUE(tree[kCount - 1].test(kCount / 2));
+  EXPECT_FALSE(tree[kCount / 2].test(kCount - 1));
+  EXPECT_EQ(tree.immediate(kCount / 2), kCount / 2 - 1);
+}

@@ -1403,6 +1403,15 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
   auto kept = donkey::format_pseudocode(unchanged);
   ASSERT_TRUE(kept.has_value());
   EXPECT_EQ(kept.value(), before.value());
+
+  // A debug name that a call prints bare (G24-T4) would read as the callee: it is refused, and
+  // the function keeps its inferred names.
+  donkey::IrFunction calls = lifted.value();
+  calls.call_names.emplace(0x1234, debug->parameters.front().name);
+  auto shadowing = donkey::apply_debug_parameter_names(calls, *debug, info.value());
+  ASSERT_FALSE(shadowing.has_value());
+  EXPECT_EQ(shadowing.diagnostic().code, "ir.debug_names_name");
+  EXPECT_EQ(calls.parameters.front().name, lifted.value().parameters.front().name);
 }
 
 #if defined(DONKEY_TEST_LOCALS_PATH)
@@ -1462,6 +1471,17 @@ TEST(DecompilerCorpus, FrameSlotsTakeTheNamesOfTheDebugInformation) {
   auto kept = donkey::format_pseudocode(unchanged);
   ASSERT_TRUE(kept.has_value());
   EXPECT_EQ(kept.value(), before.value());
+
+  // A slot named like a called function (G24-T4) keeps its frame form; the other slots are named.
+  donkey::IrFunction calls = lifted.value();
+  calls.call_names.emplace(0x1234, "total");
+  auto partly = donkey::apply_debug_stack_names(calls, *debug, info.value());
+  ASSERT_TRUE(partly.has_value());
+  auto partly_text = donkey::format_pseudocode(calls);
+  ASSERT_TRUE(partly_text.has_value());
+  EXPECT_EQ(partly_text.value().find("total = "), std::string::npos) << partly_text.value();
+  EXPECT_NE(partly_text.value().find("first = (u32)rdi;"), std::string::npos)
+      << partly_text.value();
 }
 #endif
 // G05-T3: a prototype applied to a recovered function names the structure and its
