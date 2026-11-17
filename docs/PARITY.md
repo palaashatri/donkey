@@ -158,7 +158,7 @@ complete without weakening `Complete`; the reasons are in the ledger next to eac
 |---|---|---|
 | No-return propagation | On by default, from proven marks only, bounded | G24, owner decision 1 |
 | Pseudocode name of an import call | `abort();` (valid C); lists, call graph and xrefs say `abort@plt` | G24, owner decision 2 |
-| Complete with a no-return call | Yes, when every returning path is executed and agrees with the compiled code | G24, owner decision 3 |
+| Complete with a no-return call | Yes, when it has at least one returning path and every returning path is executed and agrees with the compiled code; with no returning path it stays Partial | G24, owner decision 3 |
 | Binding a no-return name to its provider | Both: the ELF symbol version when present, else DT_NEEDED against fixed runtime SONAMEs; the static assumption is accepted and recorded in provenance | G24, owner decision 4 |
 | Goto reduction | Thread gotos through jump-only blocks, copy small shared blocks (bounded), recover `&&`/`\|\|` | G04-T5 (W1b), `AUDIT.md` W1 |
 | Header sources for type libraries | Permissive sources only: musl (MIT) first, FreeBSD (BSD, per file), MinGW-w64 files whose own licence is permissive, MIT win32metadata through a separate reader task; a preprocessor may run at build time; no LGPL or GPL headers; hand-written declarations only where a permissive source has a gap, citing the standard | G22-T2 |
