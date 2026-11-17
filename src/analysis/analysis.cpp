@@ -1020,27 +1020,23 @@ bool is_c_identifier(std::string_view text) noexcept {
   return true;
 }
 
-std::string call_target_name(const AnalysisResult& analysis, std::uint64_t address) {
-  // analyze() seeds functions in address order (the seeds are a std::set), so a binary search
-  // finds them; a caller that added functions out of order still gets a linear search.
-  auto found = std::lower_bound(
-      analysis.functions.begin(), analysis.functions.end(), address,
-      [](const Function& function, std::uint64_t value) { return function.address < value; });
-  if (found == analysis.functions.end() || found->address != address) {
-    found =
-        std::find_if(analysis.functions.begin(), analysis.functions.end(),
-                     [address](const Function& function) { return function.address == address; });
-    if (found == analysis.functions.end()) {
-      return {};
-    }
-  }
-  const std::string& name = !found->import_name.empty()   ? found->import_name
-                            : !found->stub_target.empty() ? found->stub_target
-                                                          : found->name;
-  if (name == synthetic_function_name(address) || !is_c_identifier(name)) {
+std::string function_call_name(const Function& function) {
+  const std::string& name = !function.import_name.empty()   ? function.import_name
+                            : !function.stub_target.empty() ? function.stub_target
+                                                            : function.name;
+  if (name == synthetic_function_name(function.address) || !is_c_identifier(name)) {
     return {};
   }
   return name;
+}
+
+std::string call_target_name(const AnalysisResult& analysis, std::uint64_t address) {
+  // Functions are not assumed to be in address order (a caller may add them in any order), so the
+  // lookup is linear.
+  const auto found =
+      std::find_if(analysis.functions.begin(), analysis.functions.end(),
+                   [address](const Function& function) { return function.address == address; });
+  return found == analysis.functions.end() ? std::string() : function_call_name(*found);
 }
 
 }  // namespace donkey

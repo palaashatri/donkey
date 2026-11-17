@@ -61,6 +61,18 @@ def stub_names(path):
             for m in re.finditer(r"^([0-9a-f]+) <([^>]+)@plt>:$", out, re.M)}
 
 
+def undefined_symbols(path):
+    """The names the image imports: dynamic symbols whose section index is UND."""
+    out = subprocess.run(["readelf", "--dyn-syms", "-W", path], capture_output=True, text=True,
+                         check=True).stdout
+    names = set()
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) >= 8 and fields[6] == "UND" and fields[7]:
+            names.add(fields[7].split("@")[0])
+    return names
+
+
 def got_slot_names(path):
     out = subprocess.run(["readelf", "-rW", path], capture_output=True, text=True, check=True).stdout
     slots = {}
@@ -138,7 +150,12 @@ def measure(args):
             gots = [ranges[name] for name in GOT_SECTIONS if name in ranges]
             names = stub_names(copy)
             slots = got_slot_names(copy)
-            import_names = set(names.values()) | set(slots.values())
+            # Only undefined symbols are imports: a stub or slot for a function the image defines
+            # itself (libc's interposable free@plt, an ifunc) is counted on its own.
+            undefined = undefined_symbols(copy)
+            stub_and_slot_names = set(names.values()) | set(slots.values())
+            import_names = stub_and_slot_names & undefined
+            local_stub_names = stub_and_slot_names - undefined
             decompiled = json.loads(run([args.cli, "decompile", copy, "--json",
                                          "--max-functions", "1000000"]))
         returned = {int(function["address"], 16) for function in decompiled["functions"]}
@@ -185,6 +202,8 @@ def measure(args):
                     if m.group(1) in import_names:
                         counts["import_call_sites_printed_by_name"] += 1
                         called.add(m.group(1))
+                    elif m.group(1) in local_stub_names:
+                        counts["local_stub_call_sites_printed_by_name"] += 1
                 for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
                     slot = int(m.group(1), 16)
                     if inside(slot, gots):

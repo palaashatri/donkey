@@ -3400,6 +3400,7 @@ namespace {
 /// of each GOT slot an indirect call reads (`call *slot(%rip)`, a `-fno-plt` call).
 void name_call_targets(const AnalysisResult& analysis, const Function& lifted_function,
                        IrFunction& function) {
+  std::set<std::uint64_t> direct_targets;
   for (const IrBlock& block : function.blocks) {
     for (const IrStatement& statement : block.statements) {
       if (statement.op != IrOp::Call) {
@@ -3407,9 +3408,7 @@ void name_call_targets(const AnalysisResult& analysis, const Function& lifted_fu
       }
       const IrOperand& target = statement.a;
       if (target.kind == IrOperandKind::Constant && target.constant != 0) {
-        if (std::string name = call_target_name(analysis, target.constant); !name.empty()) {
-          function.call_names.emplace(target.constant, std::move(name));
-        }
+        direct_targets.insert(target.constant);
       } else if (target.kind == IrOperandKind::Memory && target.reg.empty() &&
                  target.index.empty() && lifted_function.import_name.empty()) {
         // An import stub's own jump through its slot keeps its slot form: printed by name, it
@@ -3418,6 +3417,17 @@ void name_call_targets(const AnalysisResult& analysis, const Function& lifted_fu
             slot != analysis.import_slots.end() && is_c_identifier(slot->second)) {
           function.call_names.emplace(target.constant, slot->second);
         }
+      }
+    }
+  }
+  if (direct_targets.empty()) {
+    return;
+  }
+  // One pass over the functions, which are not assumed to be in address order.
+  for (const Function& callee : analysis.functions) {
+    if (direct_targets.contains(callee.address)) {
+      if (std::string name = function_call_name(callee); !name.empty()) {
+        function.call_names.emplace(callee.address, std::move(name));
       }
     }
   }
@@ -3461,6 +3471,12 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
       lifted.value().name = function.import_name;
       lifted.value().notes.push_back("import stub: jumps to the imported function " +
                                      function.import_name + " through its GOT slot");
+    } else if (!function.stub_target.empty() && is_c_identifier(function.stub_target)) {
+      // A stub of a function the image defines itself (`own_fn@plt`) prints under that name too,
+      // as its callers print it; it is not an import, so it gets no import note.
+      lifted.value().name = function.stub_target;
+      lifted.value().notes.push_back("PLT stub: jumps to " + function.stub_target +
+                                     " through its GOT slot");
     }
   }
   return lifted;

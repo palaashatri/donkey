@@ -69,7 +69,7 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 
 ## 3. Scorecard
 
-State on 2026-11-15: the work integrated on 2026-11-13 (ledger rows G09, G10, G12, G14, G15,
+State on 2026-11-17: the work integrated on 2026-11-13 (ledger rows G09, G10, G12, G14, G15,
 G16 and G17), and the changes below. The measured baseline of the audit that began the Wave 1 work is in
 [`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). On 2026-11-14 the goal 1 to 10 work on
 branch `claude/funny-meitner-cpc7oc`, merged into `main` with this change, changed the evidence in
@@ -77,7 +77,7 @@ rows 4, 6, 7 and 22 as described there. On 2026-11-15 G04-T5 (goto structuring) 
 and the G22-T0 plan corrected row 8: the CLI records prototype applications, and nothing applies
 them to code yet. G21-T2 (call summaries) changed row 6: calls resolve through callees whose own
 calls resolve, and Complete is 184 of the 1,986 sampled functions. A later fix found 7 of those
-Complete with a wrong meaning (they read thread-local storage as a fixed address), so Complete is 177. The IDA Pro and Ghidra columns are short
+Complete with a wrong meaning (they read thread-local storage as a fixed address), so Complete is 177. On 2026-11-17 G24-T4 (import stubs, GOT and IAT calls, thunks named) changed row 4. The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 
@@ -89,7 +89,7 @@ detail. "Gaps" names the ledger entries that move the row.
 | 4 | Analysis of stripped code | Function discovery from prologues, unwind data and heuristics; no-return, thunks, stack analysis | The same, as a pipeline of analyzers | Functions start at the entry point, exported symbols and call targets. x86 and AArch64 jump tables. Import stubs (ELF PLT, `.plt.got`, GOT, PE IAT and thunks) and one-jump thunks are named, and calls print by the import's name (G24-T4). No-return calls: a fixed list of runtime names bound by ELF symbol version, DT_NEEDED or the PE DLL, and same-image functions propagated from them (G24-T3). No prologue scan. The branch seeds functions from the ELF `.eh_frame` and the PE x64 `.pdata` (G23-T1, T2): own stripped CLI against its symbols 99.8% recall and 99.9% precision; `bash` and `python3.12` against their `.eh_frame` starts 100% and 100%. Baseline on `main` ([AUDIT.md](AUDIT.md)): 85.8% recall on the stripped own CLI, 33.0% to 88.5% against `.eh_frame` | Basic | G23, G24 |
 | 5 | Decompiler: correctness | Not machine-checked | Not machine-checked | Every `Complete` result on the differential corpus is executed against the compiled code | Donkey's strength | G20 |
 | 6 | Decompiler: coverage of real code | Nearly every function | Nearly every function | Integer and scalar floating-point subset. A direct call to a same-image integer callee carries its inferred arguments and result (x86-64 System V: arguments are matched to System V registers, so Win64 (PE) calls with arguments stay `Partial`) when the callee lifts Complete, its own calls resolved the same way up to 8 levels deep (a recursive callee stays `Partial`). A callee that reads a stack argument, AArch64 calls and other calls stay `Partial`. No SIMD, no varargs. Baseline on `main` at `1a92abf` ([AUDIT.md](AUDIT.md)): Complete 11.0%, InvalidIR 25.8%. Now, on 1,986 fixed sampled functions: 0 InvalidIR, 0 Unsupported, Complete 177 (8.9%) | Basic | G20, G21, G01, G08 |
-| 7 | Decompiler: readability | Merged variables, `for` loops, simplified conditions | Similar | Register aliases merged, copy propagation, `do`/`while`, `break`, `continue`; `for` for a counter set just before the loop and stepped by a constant at the end of its latch (a register, or a memory slot at `-O0`; loops that `-O2` and `-O3` rotate into guarded `do`/`while` forms do not); DWARF names at `-O0`. Before G04-T5, 49.6% (985) of a 1,986-function fixed sample were labelled (not structured), under the 52% bar: 106 irreducible functions that node splitting leaves irreducible and 879 reducible shapes the structurer and fallback reject. With G04-T5, no function of that sample is printed as labelled blocks: 1,000 print without a goto and 986 with gotos (16,232 gotos; the largest function has 409). Every printed structure is checked edge by edge against the IR. The gotos are the open gap: most go to a block that is already printed, and reducing them needs owner decisions (duplication of small blocks, compound conditions). Measured in [`AUDIT.md`](AUDIT.md), goal 8 and W1 | Basic | G04 |
+| 7 | Decompiler: readability | Merged variables, `for` loops, simplified conditions | Similar | Register aliases merged, copy propagation, `do`/`while`, `break`, `continue`; `for` for a counter set just before the loop and stepped by a constant at the end of its latch (a register, or a memory slot at `-O0`; loops that `-O2` and `-O3` rotate into guarded `do`/`while` forms do not); DWARF names at `-O0`. Before G04-T5, 49.6% (985) of a 1,986-function fixed sample were labelled (not structured), under the 52% bar: 106 irreducible functions that node splitting leaves irreducible and 879 reducible shapes the structurer and fallback reject. With G04-T5, no function of that sample is printed as labelled blocks: 1,000 print without a goto and 986 with gotos (16,232 gotos; the largest function has 409). Every printed structure is checked edge by edge against the IR. The gotos are the open gap: most go to a block that is already printed, and reducing them (copying small blocks, compound conditions) was decided on 2026-11-17 and is not started (section 5). Measured in [`AUDIT.md`](AUDIT.md), goal 8 and W1 | Basic | G04 |
 | 8 | Types | Type libraries for the major platforms; struct, enum and union editors; propagation | Data type archives, C parser, Data Type Manager; propagation | Type store, bounded C declaration parser, prototype applications recorded from the CLI (the decompiler does not read them yet), struct layouts behind pointer arguments. No type libraries, no editing UI | Basic | G05, G22 |
 | 9 | Debug information | DWARF, PDB | DWARF, PDB | DWARF 2-5; PDB 7.00 for C structs, enums, procedures and globals; separate debug files, `.dSYM` lookup, compressed DWARF. No C++ class layouts from PDB | Usable | G06 |
 | 10 | Library function identification | FLIRT signatures, Lumina | Function ID, BSim | A signature format, a matcher with naming rules, and a generator for x86-64 ELF objects and archives. One shipped set (musl 1.2.4): it names 34 of 67 known functions of a static musl program and none wrongly. Not wired into the desktop app | Basic | G09 |
@@ -146,11 +146,22 @@ These are not for an agent to settle. Stop and report when a task needs one.
 | Processor strategy: hand-written lifters, SLEIGH specifications, or both | Rows 2 and 3 beyond three or four ISAs | G26 |
 | Thresholds for the measures, after the first baseline | Calling any row "Parity" | G20, G24 |
 | Running Ghidra as a reference in CI | Row-by-row comparison in CI | Section 2 |
-| Header sources for type libraries, by licence | G22-T2 | G22 |
 | Assembler: LLVM MC, a small own encoder, or SLEIGH | G29-T2 | G29 |
 | Scope of managed code (DEX, Java, .NET, WebAssembly) | G30-T4 and T5 | G30 |
 | Collaboration model | G32 | G32 |
 | Signing certificates; accessibility waiver | Rows 23 and 24 | G18, G19 |
+
+Decided by the owner on 2026-11-17 (the owner asked for the options that make the product the most
+complete without weakening `Complete`; the reasons are in the ledger next to each option):
+
+| Decision | Chosen | Recorded in |
+|---|---|---|
+| No-return propagation | On by default, from proven marks only, bounded | G24, owner decision 1 |
+| Pseudocode name of an import call | `abort();` (valid C); lists, call graph and xrefs say `abort@plt` | G24, owner decision 2 |
+| Complete with a no-return call | Yes, when it has at least one returning path and every returning path is executed and agrees with the compiled code; with no returning path it stays Partial | G24, owner decision 3 |
+| Binding a no-return name to its provider | Both: the ELF symbol version when present, else DT_NEEDED against fixed runtime SONAMEs; the static assumption is accepted and recorded in provenance | G24, owner decision 4 |
+| Goto reduction | Thread gotos through jump-only blocks, copy small shared blocks (bounded), recover `&&`/`\|\|` | G04-T5 (W1b), `AUDIT.md` W1 |
+| Header sources for type libraries | Permissive sources only: musl (MIT) first, FreeBSD (BSD, per file), MinGW-w64 files whose own licence is permissive, MIT win32metadata through a separate reader task; a preprocessor may run at build time; no LGPL or GPL headers; hand-written declarations only where a permissive source has a gap, citing the standard | G22-T2 |
 
 ## 6. Keeping this file true
 
