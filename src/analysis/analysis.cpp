@@ -124,7 +124,7 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
     if (forwards.contains(target) || end.name == synthetic_function_name(target)) {
       continue;  // a cycle, or a target with no name of its own: the thunk keeps sub_<hex>
     }
-    thunk.name = "j_" + (!end.import_name.empty()  ? end.import_name
+    thunk.name = "j_" + (!end.import_name.empty()   ? end.import_name
                          : !end.stub_target.empty() ? end.stub_target
                                                     : end.name);
   }
@@ -844,13 +844,14 @@ std::string call_target_name(const AnalysisResult& analysis, std::uint64_t addre
       analysis.functions.begin(), analysis.functions.end(), address,
       [](const Function& function, std::uint64_t value) { return function.address < value; });
   if (found == analysis.functions.end() || found->address != address) {
-    found = std::find_if(analysis.functions.begin(), analysis.functions.end(),
-                         [address](const Function& function) { return function.address == address; });
+    found =
+        std::find_if(analysis.functions.begin(), analysis.functions.end(),
+                     [address](const Function& function) { return function.address == address; });
     if (found == analysis.functions.end()) {
       return {};
     }
   }
-  const std::string& name = !found->import_name.empty() ? found->import_name
+  const std::string& name = !found->import_name.empty()   ? found->import_name
                             : !found->stub_target.empty() ? found->stub_target
                                                           : found->name;
   if (name == synthetic_function_name(address) || !is_c_identifier(name)) {

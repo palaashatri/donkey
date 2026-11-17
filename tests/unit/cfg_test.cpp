@@ -931,8 +931,8 @@ TEST(Cfg, ManyFunctionsAreNamedAndMergedInLinearTime) {
 // into code no function starts at stays a branch.
 TEST(Cfg, JumpToAnotherFunctionIsATailCall) {
   // f0 (0x1000): jmp 0x1010.  f1 (0x1010): ret.
-  auto [data, image] = image_with_functions(
-      {{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}}, 0x11, {0x1000, 0x1010});
+  auto [data, image] = image_with_functions({{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}},
+                                            0x11, {0x1000, 0x1010});
   auto result = donkey::analyze(image, data);
   ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
   int tail = 0;

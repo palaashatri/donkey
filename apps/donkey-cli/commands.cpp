@@ -688,7 +688,6 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                     size.c_str(), function.block_count, display_name(function.name).c_str(),
                     function.exported ? " [export]" : "", function.estimated ? " [estimated]" : "",
                     function.thunk ? " [thunk]" : "");
-
       }
       std::printf("(%zu functions)\n", analysis.functions.size());
     }
