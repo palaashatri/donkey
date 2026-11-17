@@ -172,6 +172,7 @@ add_executable(donkey_unit_tests
   unit/json_test.cpp
   unit/typelib_test.cpp
   unit/typelib_make_test.cpp
+  unit/typelib_apply_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp
