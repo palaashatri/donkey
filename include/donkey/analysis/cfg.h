@@ -39,6 +39,12 @@ struct Function {
   /// another function's start. `name` is then `j_` and the target's name, unless a symbol names it.
   bool thunk = false;
   std::uint64_t thunk_target = 0;
+  /// A call to this function does not return (G24-T3): an import on the fixed list bound to a
+  /// runtime library, or a function of the image whose every path ends in such a call or in an
+  /// instruction that never falls through. `no_return_reason` is the evidence, for example
+  /// `known-name:abort version:GLIBC_2.2.5 file:libc.so.6` or `propagated:every path calls abort`.
+  bool no_return = false;
+  std::string no_return_reason;
 };
 
 struct BasicBlock {

@@ -8,6 +8,8 @@
     gcc -O1 -fno-inline -fno-plt -s -o stubs_noplt_x86_64 stubs.c
     aarch64-linux-gnu-gcc -O1 -fno-inline -s -Wl,-z,max-page-size=4096 -o stubs_aarch64 stubs.c
     gcc -O1 -fPIC -shared -s -o libifunc.so ifunc.c
+    gcc -w -O1 -fno-inline -fPIC -shared -s -Wl,-soname,libmyexit.so.1 -o libmyexit.so.1 myexit.c
+    gcc -O1 -fno-inline -fno-builtin -s -o exit_consumer exit_consumer.c ./libmyexit.so.1
     x86_64-w64-mingw32-gcc -O1 -fno-inline -s -Wl,--no-insert-timestamp -o stubs_x86_64.exe stubs.c
     # (GCC 13-win32, MinGW-w64; built twice, the bytes are the same)
 
@@ -17,6 +19,8 @@
 | `stubs_noplt_x86_64` | `09634211210b70f44227c11115115efd55ab7baaade360d22dc14ccd8962c8ee` | `-fno-plt`: `call *slot(%rip)` through the GLOB_DAT slots of `abort` and `puts` |
 | `stubs_x86_64.exe` | `3695ff7a81ff78768e392a7a64c96c123a28b8195a28e7e760f98735da4a4780` | PE32+ (MinGW): `call *slot(%rip)` through KERNEL32's IAT, and 8-byte `jmp *slot(%rip)` thunks for msvcrt imports |
 | `libifunc.so` | `cbc05ca0aea5d21bc7eb6ac2284a5328aec871a9219b284059d3299b9453a2fe` | from `ifunc.c`: the protected ifunc `pick`, called through `1050 <*ABS*+0x1121@plt>`, whose slot an IRELATIVE relocation with addend 0x1121 (the IFUNC symbol `pick`) fills |
+| `libmyexit.so.1` | `5f44cb1fb0420163a87fefca9d18740c4f758ba568bb27e82fb6e4cd0843fa19` | from `myexit.c`: exports an `exit` that returns (G24-T3) |
+| `exit_consumer` | `d1d796951bbbd2d1e4349b5723455cd4ee396a65a1f0bf8472da4e0efad3eb85` | from `exit_consumer.c`: needs `libmyexit.so.1` before `libc.so.6`, imports an unversioned `exit` (bound to libmyexit at run time), `1150: call 1050 <exit@plt>` |
 | `stubs_aarch64` | `d9d9941aba6761ad230ccd1526238bd5e8f0d7dc509d2161ce6ca0609996b8b8` | AArch64 PIE: `abort@plt` and `puts@plt` in `.plt` |
 
 The ELF binaries link glibc dynamically; only its small startup objects (`crt1.o`, `crti.o`,

@@ -3,6 +3,7 @@
 #include "donkey/binary/eh_frame.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
+#include "donkey/analysis/no_return.h"
 
 #include <algorithm>
 #include <iterator>
@@ -11,6 +12,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "donkey/core/checked.h"
@@ -52,7 +54,7 @@ std::string synthetic_function_name(std::uint64_t address) {
 /// target's name (`j_abort` for a jump to `abort@plt`). A chain of thunks takes the name of the
 /// function at its end, followed for at most 8 links. A function that is one indirect jump through
 /// an import's slot is an import stub instead, named by the import.
-void name_thunks(AnalysisResult& result, BinaryFormat format) {
+void name_thunks(AnalysisResult& result) {
   std::unordered_map<std::uint64_t, std::size_t> function_at;
   for (std::size_t index = 0; index < result.functions.size(); ++index) {
     function_at.emplace(result.functions[index].address, index);
@@ -82,22 +84,6 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
       continue;
     }
     const Instruction& jump = result.instructions[index];
-    // An import thunk: one indirect jump through an import's slot (`jmp *slot(%rip)`), as MinGW
-    // emits for msvcrt imports and as a `.plt.got`-style entry outside the PLT sections is. It is
-    // named by the import: `puts` on PE, `puts@plt` on ELF, the form its PLT stubs take.
-    if (jump.classification == InstructionClass::Jump && !jump.direct_target.has_value() &&
-        jump.data_references.size() == 1 && jump.address + jump.length == function.end_address) {
-      const auto slot = result.import_slots.find(jump.data_references.front());
-      if (slot != result.import_slots.end()) {
-        Function& stub = result.functions[function_at.at(function.address)];
-        stub.import_name = slot->second;
-        stub.stub_target = slot->second;
-        if (!stub.from_symbol && stub.name == synthetic_function_name(stub.address)) {
-          stub.name = format == BinaryFormat::Elf ? slot->second + "@plt" : slot->second;
-        }
-      }
-      continue;
-    }
     if (jump.classification != InstructionClass::Jump || !jump.direct_target.has_value() ||
         *jump.direct_target == function.address || !function_at.contains(*jump.direct_target) ||
         jump.address + jump.length != function.end_address) {
@@ -128,6 +114,145 @@ void name_thunks(AnalysisResult& result, BinaryFormat format) {
                          : !end.stub_target.empty() ? end.stub_target
                                                     : end.name);
   }
+}
+
+/// Import thunks (G24-T4): a function whose first instruction (after an optional `endbr64`) is
+/// an indirect jump through an import's slot (`jmp *slot(%rip)`), as MinGW emits for msvcrt
+/// imports. It is an import stub, named by the import: `puts` on PE, `puts@plt` on ELF, the form
+/// its PLT stubs take. Found from the decoded instructions, before the control-flow graph, so the
+/// no-return marks (G24-T3) can use it.
+void name_import_thunks(AnalysisResult& result, BinaryFormat format) {
+  if (result.import_slots.empty()) {
+    return;
+  }
+  std::unordered_map<std::uint64_t, std::size_t> instruction_at;
+  instruction_at.reserve(result.instructions.size());
+  for (std::size_t index = 0; index < result.instructions.size(); ++index) {
+    instruction_at.emplace(result.instructions[index].address, index);
+  }
+  for (Function& function : result.functions) {
+    if (!function.import_name.empty() || !function.stub_target.empty()) {
+      continue;
+    }
+    const auto at = instruction_at.find(function.address);
+    if (at == instruction_at.end()) {
+      continue;
+    }
+    std::size_t index = at->second;
+    if (result.instructions[index].mnemonic == "endbr64" ||
+        result.instructions[index].mnemonic == "endbr32") {
+      ++index;
+    }
+    if (index >= result.instructions.size()) {
+      continue;
+    }
+    const Instruction& jump = result.instructions[index];
+    if (jump.classification != InstructionClass::Jump || jump.direct_target.has_value() ||
+        jump.data_references.size() != 1) {
+      continue;
+    }
+    const auto slot = result.import_slots.find(jump.data_references.front());
+    if (slot == result.import_slots.end()) {
+      continue;
+    }
+    function.import_name = slot->second;
+    function.stub_target = slot->second;
+    if (!function.from_symbol && function.name == synthetic_function_name(function.address)) {
+      function.name = format == BinaryFormat::Elf ? slot->second + "@plt" : slot->second;
+    }
+  }
+}
+
+/// Functions of the image that do not return (G24-T3, propagation): every block of the function
+/// ends in a call that does not return, in `ud2` or `hlt`, or goes on to another block of the
+/// function. A return, a tail call or fall-through into a function that may return, an indirect
+/// jump that is not a recovered table, or a walk that stopped (a block with no known end) is a way
+/// out, and the function is not marked. Only functions with a known extent are considered.
+std::vector<std::uint64_t> propagate_no_return(const AnalysisResult& result,
+                                               const std::set<std::uint64_t>& targets) {
+  std::unordered_map<std::uint64_t, std::vector<const BasicBlock*>> blocks_of;
+  for (const BasicBlock& block : result.cfg.blocks) {
+    blocks_of[block.function.value()].push_back(&block);
+  }
+  std::unordered_map<std::uint64_t, std::vector<const CfgEdge*>> edges_from;
+  for (const CfgEdge& edge : result.cfg.edges) {
+    edges_from[edge.from].push_back(&edge);
+  }
+  std::vector<std::uint64_t> found;
+  for (const Function& function : result.functions) {
+    if (function.no_return || !function.has_extent || !function.import_name.empty() ||
+        !function.stub_target.empty()) {
+      continue;
+    }
+    const auto blocks = blocks_of.find(function.id.value());
+    if (blocks == blocks_of.end() || blocks->second.empty()) {
+      continue;
+    }
+    std::unordered_set<std::uint64_t> starts;
+    for (const BasicBlock* block : blocks->second) {
+      starts.insert(block->address);
+    }
+    const auto inside = [&](std::uint64_t address) { return starts.contains(address); };
+    bool returns = false;
+    for (const BasicBlock* block : blocks->second) {
+      if (block->instruction_count == 0) {
+        returns = true;
+        break;
+      }
+      const Instruction& last =
+          result.instructions[block->first_instruction + block->instruction_count - 1];
+      switch (last.classification) {
+        case InstructionClass::Return:
+          returns = true;
+          break;
+        case InstructionClass::Interrupt:
+          returns = last.mnemonic != "ud2" && last.mnemonic != "hlt";
+          break;
+        case InstructionClass::Call: {
+          const bool no_return =
+              last.direct_target.has_value()
+                  ? targets.contains(*last.direct_target)
+                  : last.data_references.size() == 1 && targets.contains(last.data_references[0]);
+          returns = !no_return && !inside(block->end_address);
+          break;
+        }
+        case InstructionClass::Jump:
+        case InstructionClass::ConditionalJump: {
+          // Every edge must stay inside, or go to a function that does not return. A conditional
+          // jump also falls through.
+          bool any = false;
+          for (const CfgEdge* edge : edges_from[last.address]) {
+            if (edge->kind == CfgEdgeKind::Call) {
+              continue;
+            }
+            any = true;
+            if (edge->to == 0 || (!inside(edge->to) && !targets.contains(edge->to))) {
+              returns = true;
+            }
+          }
+          if (!any) {
+            returns = true;  // an unresolved or unrecorded way out
+          }
+          if (last.classification == InstructionClass::ConditionalJump &&
+              !inside(block->end_address) && !targets.contains(block->end_address)) {
+            returns = true;
+          }
+          break;
+        }
+        case InstructionClass::Unknown:
+        case InstructionClass::Other:
+          returns = !inside(block->end_address) && !targets.contains(block->end_address);
+          break;
+      }
+      if (returns) {
+        break;
+      }
+    }
+    if (!returns) {
+      found.push_back(function.address);
+    }
+  }
+  return found;
 }
 
 /// Disjoint, sorted [start, end) byte ranges covering every user data range (G12-T1). Ranges
@@ -701,10 +826,66 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   for (std::size_t i = 0; i < result.functions.size(); ++i) {
     result.functions[i].id = FunctionId{i + 1};
   }
+  name_import_thunks(result, image.format);
+
+  // No-return imports (G24-T3): the stubs and slots of the fixed list's names, bound to a runtime
+  // library. The CFG walk stops after a call to one.
+  AnalysisOptions walk = options;
+  if (options.no_return_analysis) {
+    std::map<std::uint64_t, std::string> import_stubs;
+    for (const Function& function : result.functions) {
+      if (!function.import_name.empty()) {
+        import_stubs.emplace(function.address, function.import_name);
+      }
+    }
+    result.no_return = bind_no_return_imports(image, file, import_stubs, result.import_slots);
+    for (Function& function : result.functions) {
+      if (const auto mark = result.no_return.find(function.address);
+          mark != result.no_return.end()) {
+        function.no_return = true;
+        function.no_return_reason = mark->second;
+      }
+    }
+    for (const auto& [address, reason] : result.no_return) {
+      walk.no_return_targets.insert(address);
+    }
+  }
 
   if (options.build_control_flow) {
     auto graph =
-        build_control_flow_graph(image, result.instructions, result.functions, options, file);
+        build_control_flow_graph(image, result.instructions, result.functions, walk, file);
+    // Propagation (owner decision 1): a function of the image whose every path ends in a call
+    // that does not return is itself no-return. Each round rebuilds the graph with the new marks,
+    // so code after a call to a newly marked function leaves its callers; at most 8 rounds.
+    for (int round = 0; options.no_return_analysis && graph && round < 8; ++round) {
+      result.cfg = std::move(graph.value());
+      std::unordered_map<std::uint64_t, std::size_t> extent_at;
+      for (std::size_t index = 0; index < result.cfg.functions.size(); ++index) {
+        extent_at.emplace(result.cfg.functions[index].address, index);
+      }
+      for (Function& function : result.functions) {
+        if (const auto found = extent_at.find(function.address); found != extent_at.end()) {
+          function.has_extent = result.cfg.functions[found->second].has_extent;
+        }
+      }
+      const std::vector<std::uint64_t> marked =
+          propagate_no_return(result, walk.no_return_targets);
+      if (marked.empty()) {
+        graph = Result<ControlFlowGraph>(std::move(result.cfg));
+        result.cfg = ControlFlowGraph{};
+        break;
+      }
+      const std::unordered_set<std::uint64_t> newly(marked.begin(), marked.end());
+      for (Function& function : result.functions) {
+        if (newly.contains(function.address)) {
+          function.no_return = true;
+          function.no_return_reason = "propagated:every path ends in a call that does not return";
+          result.no_return.emplace(function.address, function.no_return_reason);
+          walk.no_return_targets.insert(function.address);
+        }
+      }
+      graph = build_control_flow_graph(image, result.instructions, result.functions, walk, file);
+    }
     if (!graph) {
       result.partial = true;
       result.diagnostics.push_back(graph.diagnostic());
@@ -725,7 +906,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
           existing.estimated = function.estimated;
         }
       }
-      name_thunks(result, image.format);
+      name_thunks(result);
       result.call_graph = build_call_graph(result.cfg, result.instructions);
       if (result.cfg.partial) {
         result.partial = true;

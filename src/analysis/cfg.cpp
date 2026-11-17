@@ -999,6 +999,26 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
   }
   // Import stubs (PLT entries whose imported name is known) are functions of their own too.
   const std::map<std::uint64_t, std::string> import_stubs = plt_stub_imports(image, file);
+  // A call that does not return (G24-T3): a direct call to a no-return target, or a call through
+  // a slot (`call *slot(%rip)`) that a no-return import's relocation names. Seeds marked
+  // no_return count as well.
+  std::unordered_set<std::uint64_t> no_return_targets(options.no_return_targets.begin(),
+                                                      options.no_return_targets.end());
+  for (const Function& seed : seeds) {
+    if (seed.no_return) {
+      no_return_targets.insert(seed.address);
+    }
+  }
+  const auto no_return_call = [&](const Instruction& instruction) {
+    if (instruction.classification != InstructionClass::Call || no_return_targets.empty()) {
+      return false;
+    }
+    if (instruction.direct_target.has_value()) {
+      return no_return_targets.contains(*instruction.direct_target);
+    }
+    return instruction.data_references.size() == 1 &&
+           no_return_targets.contains(instruction.data_references.front());
+  };
 
   for (std::size_t seed_index = 0; seed_index < seeds.size(); ++seed_index) {
     if (block_bound_reached || visit_budget_reached) {
@@ -1118,6 +1138,11 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
             if (!call_next && next != function.address && function_starts.contains(next)) {
               break;
             }
+            // A call that does not return ends the path: the bytes after it are this function's
+            // only if another path reaches them (G24-T3).
+            if (no_return_call(instruction)) {
+              break;
+            }
             address = next;
             continue;
           }
@@ -1206,6 +1231,14 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
     leaders.push_back(function.address);
     for (const std::uint64_t address : reached) {
       const Instruction& instruction = instructions[index_by_address[address]];
+      if (no_return_call(instruction)) {
+        // The block ends at the call; code after it starts a block of its own when another path
+        // reaches it.
+        if (const std::uint64_t after = address + instruction.length; visited.contains(after)) {
+          leaders.push_back(after);
+        }
+        continue;
+      }
       if (!terminates_flow(instruction.classification)) {
         continue;
       }
@@ -1375,6 +1408,9 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
         case InstructionClass::Unknown:
         case InstructionClass::Other:
         case InstructionClass::Call:
+          if (no_return_call(last)) {
+            break;  // a call that does not return has no fall-through edge (G24-T3)
+          }
           // A block that ends without a branch is a fallthrough tail; the next
           // block only exists when it is contiguous, which the leader scan
           // already guarantees.

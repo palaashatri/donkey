@@ -409,6 +409,9 @@ class Renderer {
         return line;
       }
       case IrOp::Return:
+        if (statement.unreachable) {
+          return std::string();  // after a call that does not return: nothing to print
+        }
         if (statement.a.kind == IrOperandKind::None) {
           return "return;";
         }
@@ -904,6 +907,27 @@ Result<bool> verify_ir(const IrFunction& function) {
       }
       if (is_terminator(statement.op)) {
         seen_terminator = true;
+      }
+      // G24-T3: a no-return call is followed by an unreachable Return, the block's last statement,
+      // and an unreachable Return follows only such a call.
+      if (statement.op == IrOp::Call && statement.no_return &&
+          (index + 2 != block.statements.size() ||
+           block.statements[index + 1].op != IrOp::Return ||
+           !block.statements[index + 1].unreachable)) {
+        return fail("ir.no_return_call_not_last",
+                    "a call that does not return is not followed by the block's unreachable end");
+      }
+      if (statement.op == IrOp::Return && statement.unreachable &&
+          (index == 0 || block.statements[index - 1].op != IrOp::Call ||
+           !block.statements[index - 1].no_return)) {
+        return fail("ir.unreachable_return_without_call",
+                    "an unreachable return does not follow a call that does not return");
+      }
+      if (statement.op != IrOp::Call && statement.no_return) {
+        return fail("ir.no_return_on_non_call", "only a call can be marked as not returning");
+      }
+      if (statement.op != IrOp::Return && statement.unreachable) {
+        return fail("ir.unreachable_on_non_return", "only a return can be marked unreachable");
       }
       auto check_operand = [&](const IrOperand& operand,
                                const char* role) -> std::optional<Diagnostic> {

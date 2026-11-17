@@ -2286,10 +2286,14 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
     }
 
-    if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
-                                         out_block.statements.back().op != IrOp::CondBranch &&
-                                         out_block.statements.back().op != IrOp::Switch &&
-                                         out_block.statements.back().op != IrOp::Return)) {
+    if (!out_block.statements.empty() &&
+        end_block_at_no_return_call(analysis, out_block, kPointerWidth)) {
+      // The block ends at a call that does not return (G24-T3).
+    } else if (out_block.statements.empty() ||
+               (out_block.statements.back().op != IrOp::Branch &&
+                out_block.statements.back().op != IrOp::CondBranch &&
+                out_block.statements.back().op != IrOp::Switch &&
+                out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {
         IrStatement statement;

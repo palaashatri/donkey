@@ -2824,6 +2824,31 @@ void check_call_clobbers_impl(IrFunction& function) {
 
 namespace internal {
 
+bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
+                                 std::uint8_t pointer_width) {
+  if (block.statements.empty() || analysis.no_return.empty()) {
+    return false;
+  }
+  IrStatement& call = block.statements.back();
+  if (call.op != IrOp::Call) {
+    return false;
+  }
+  const bool direct = call.a.kind == IrOperandKind::Constant && call.a.constant != 0;
+  const bool slot = call.a.kind == IrOperandKind::Memory && call.a.reg.empty() &&
+                    call.a.index.empty();
+  if ((!direct && !slot) || !analysis.no_return.contains(call.a.constant)) {
+    return false;
+  }
+  call.no_return = true;
+  IrStatement end;
+  end.op = IrOp::Return;
+  end.unreachable = true;
+  end.width = pointer_width;
+  end.source_address = call.source_address;
+  block.statements.push_back(std::move(end));
+  return true;
+}
+
 void check_call_clobbers(IrFunction& function) {
   check_call_clobbers_impl(function);
 }
@@ -3108,6 +3133,10 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
             lifter.push(out_block, std::move(call));
             lifter.mark_partial("jump leaves the function; treated as a tail call");
           }
+          // A tail call to a function that does not return (G24-T3): nothing comes back to return.
+          if (internal::end_block_at_no_return_call(analysis, out_block, lifter.pointer_width)) {
+            continue;
+          }
           IrStatement tail;
           tail.op = IrOp::Return;
           tail.source_address = instruction.address;
@@ -3234,10 +3263,14 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
       }
     }
 
-    if (out_block.statements.empty() || (out_block.statements.back().op != IrOp::Branch &&
-                                         out_block.statements.back().op != IrOp::CondBranch &&
-                                         out_block.statements.back().op != IrOp::Switch &&
-                                         out_block.statements.back().op != IrOp::Return)) {
+    if (!out_block.statements.empty() &&
+        internal::end_block_at_no_return_call(analysis, out_block, lifter.pointer_width)) {
+      // The block ends at a call that does not return (G24-T3): no fall-through, no return.
+    } else if (out_block.statements.empty() ||
+               (out_block.statements.back().op != IrOp::Branch &&
+                out_block.statements.back().op != IrOp::CondBranch &&
+                out_block.statements.back().op != IrOp::Switch &&
+                out_block.statements.back().op != IrOp::Return)) {
       const auto next = lifter.block_by_address.find(block->end_address);
       if (next != lifter.block_by_address.end()) {
         IrStatement statement;

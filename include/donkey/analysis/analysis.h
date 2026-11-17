@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <map>
+#include <set>
 #include <string_view>
 #include <span>
 #include <string>
@@ -92,6 +93,13 @@ struct AnalysisOptions {
   std::vector<std::uint64_t> user_code_starts;
   /// Byte ranges the user declared to be data (G12-T1). See UserDataRange.
   std::vector<UserDataRange> user_data_ranges;
+  /// Mark calls that do not return (G24-T3): calls to the no-return imports bound to a runtime
+  /// library, then, propagated, to the image's functions whose every path ends in one.
+  bool no_return_analysis = true;
+  /// Addresses a call does not return from (G24-T3): function starts, and GOT or IAT slots that
+  /// a `call *slot` reads. analyze() fills it from the analysis; a direct caller of
+  /// build_control_flow_graph may set it. The walk does not continue after such a call.
+  std::set<std::uint64_t> no_return_targets;
 };
 
 struct AnalysisResult {
@@ -107,6 +115,9 @@ struct AnalysisResult {
   /// GOT slots that a GLOB_DAT relocation for an import names (G24-T4), keyed by slot address:
   /// a `-fno-plt` call reads its target from one of them.
   std::map<std::uint64_t, std::string> import_slots;
+  /// Every address a call does not return from (G24-T3), with its evidence: the stub and slot
+  /// addresses of bound no-return imports, and the starts of functions propagated from them.
+  std::map<std::uint64_t, std::string> no_return;
   bool partial = false;
   std::vector<Diagnostic> diagnostics;
 };
