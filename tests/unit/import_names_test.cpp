@@ -183,3 +183,18 @@ TEST(Analysis, AStubForTheImagesOwnFunctionIsNamedButIsNotAnImport) {
   EXPECT_FALSE(donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data)
                    .contains(0x1810));
 }
+
+// An IRELATIVE slot (an ifunc that binds locally, as libc's strlen and memcpy do): objdump only
+// says `1050 <*ABS*+0x1121@plt>`; the addend 0x1121 is the exported IFUNC symbol `pick`. The stub
+// is named `pick@plt` and the call `1135: call 1050` prints `pick(`; it is not an import.
+TEST(Analysis, AnIfuncStubIsNamedByItsIfuncSymbol) {
+  const Analyzed analyzed = analyze_fixture("stubs", "libifunc.so");
+  const donkey::Function* stub = function_at(analyzed.analysis, 0x1050);
+  ASSERT_NE(stub, nullptr);
+  EXPECT_EQ(stub->name, "pick@plt");
+  EXPECT_TRUE(stub->import_name.empty());
+  const std::string caller = pseudocode_containing(analyzed, 0x1135);
+  EXPECT_NE(caller.find("pick("), std::string::npos) << caller;
+  EXPECT_FALSE(donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data)
+                   .contains(0x1050));
+}

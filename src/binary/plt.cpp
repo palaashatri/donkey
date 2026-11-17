@@ -20,6 +20,8 @@ using binary::detail::kRelaEntrySize;
 constexpr std::uint64_t kJumpSlotX86_64 = 7;      // R_X86_64_JUMP_SLOT
 constexpr std::uint64_t kGlobDatX86_64 = 6;       // R_X86_64_GLOB_DAT
 constexpr std::uint64_t kJumpSlotAArch64 = 1026;  // R_AARCH64_JUMP_SLOT
+constexpr std::uint64_t kIRelativeX86_64 = 37;    // R_X86_64_IRELATIVE
+constexpr std::uint64_t kIRelativeAArch64 = 1032; // R_AARCH64_IRELATIVE
 
 /// The names the image imports: its undefined dynamic symbols. A relocation can also name a symbol
 /// the image defines, and that is not an import.
@@ -115,6 +117,40 @@ std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
         continue;
       }
       got_names[place.value()] = name;
+    }
+  }
+  // An IRELATIVE slot holds what an ifunc resolver chose (libc's memcpy, strlen). Its addend is the
+  // resolver, which an exported IFUNC symbol names: the stub is named by that symbol. The ifunc is
+  // the image's own function, so these are listed only with `include_defined`.
+  if (include_defined) {
+    std::map<std::uint64_t, std::string> exported_at;
+    for (const Symbol& symbol : image.symbols) {
+      if (symbol.exported && !symbol.imported && !symbol.name.empty() && symbol.address != 0) {
+        exported_at.emplace(symbol.address, symbol.name);
+      }
+    }
+    const std::uint64_t irelative = aarch64 ? kIRelativeAArch64 : kIRelativeX86_64;
+    for (const Section& section : image.sections) {
+      if ((section.name != ".rela.plt" && section.name != ".rela.dyn") ||
+          !section.has_file_data) {
+        continue;
+      }
+      const std::uint64_t count = section.file_size / kRelaEntrySize;
+      for (std::uint64_t i = 0; i < count && i < kMaxRelocationEntries; ++i) {
+        const std::uint64_t entry = section.file_offset + i * kRelaEntrySize;
+        const auto place = reader.u64(entry, Endian::Little);
+        const auto info_word = reader.u64(entry + 8, Endian::Little);
+        const auto addend = reader.u64(entry + 16, Endian::Little);
+        if (!place || !info_word || !addend) {
+          break;
+        }
+        if ((info_word.value() & 0xffffffffU) != irelative) {
+          continue;
+        }
+        if (const auto name = exported_at.find(addend.value()); name != exported_at.end()) {
+          got_names.emplace(place.value(), name->second);
+        }
+      }
     }
   }
   // x86-64: each PLT entry starts with an indirect jump through its GOT slot (`ff 25 disp32`).
