@@ -204,6 +204,12 @@ struct IrStatement {
   /// Only for Call (G21): the argument list and the result come from the callee's signature as
   /// this lifter inferred it from the callee's register use (an inference, not debug information).
   bool signature_inferred = false;
+  /// Only for a Call (G24-T3): the callee does not return (a bound no-return import, or a function
+  /// propagated from one). The call is followed, in its block, by a Return marked `unreachable`.
+  bool no_return = false;
+  /// Only for a Return (G24-T3): the block's last statement after a `no_return` call. It is never
+  /// reached: it prints nothing, and the evaluator stops at the call before it.
+  bool unreachable = false;
   /// Only for a resolved Call: the register families the callee's own IR writes. The callee is
   /// Complete and makes no calls, so these are every register it can change; a caller-saved
   /// register outside this set keeps its value across the call (the clobber check uses this).
