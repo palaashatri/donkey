@@ -2308,7 +2308,9 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
     return usage_error("cannot read the preprocessed C file (missing, or over 16 MiB)");
   }
   std::ifstream file(input, std::ios::binary);
-  std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+  std::string text(static_cast<std::size_t>(size), '\0');
+  file.read(text.data(), static_cast<std::streamsize>(text.size()));
+  text.resize(static_cast<std::size_t>(file.gcount()));
   auto made = donkey::make_type_library(text, options);
   if (!made) {
     return fail(made.diagnostic());
