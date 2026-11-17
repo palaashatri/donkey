@@ -69,7 +69,42 @@ struct Graph {
 };
 
 Graph build_graph(const IrFunction& function);
-std::vector<BitSet> compute_dominators(const Graph& graph);
+/// Dominance over a graph, from its immediate-dominator tree: linear memory, where a bit set per
+/// block was quadratic (100,000 blocks needed 1.25 GB). `dominators[b].test(a)` is true when `a`
+/// dominates `b`, the same question the bit sets answered. A block the entry (block 0) does not
+/// reach is dominated by every block, as the iterative bit-set algorithm left it (its set full).
+class Dominators {
+ public:
+  /// The dominators of one block, asked one at a time.
+  class Row {
+   public:
+    Row(const Dominators* owner, BlockId block) : owner_(owner), block_(block) {}
+    [[nodiscard]] bool test(BlockId dominator) const { return owner_->dominates(dominator, block_); }
+
+   private:
+    const Dominators* owner_;
+    BlockId block_;
+  };
+
+  Dominators() = default;
+  explicit Dominators(const Graph& graph);
+
+  [[nodiscard]] Row operator[](BlockId block) const { return Row(this, block); }
+  /// Whether `dominator` dominates `block` (every block dominates itself).
+  [[nodiscard]] bool dominates(BlockId dominator, BlockId block) const;
+  /// The immediate dominator of a block the entry reaches; kNoBlock for the entry and for a block
+  /// it does not reach.
+  [[nodiscard]] BlockId immediate(BlockId block) const;
+  [[nodiscard]] std::size_t size() const noexcept { return idom_.size(); }
+
+ private:
+  std::vector<BlockId> idom_;
+  std::vector<bool> reachable_;
+  std::vector<std::uint32_t> enter_;  ///< preorder number in the dominator tree
+  std::vector<std::uint32_t> leave_;  ///< the last preorder number in the block's subtree
+};
+
+Dominators compute_dominators(const Graph& graph);
 /// Whether some block cannot be reached from the entry (block 0). A block with predecessors can
 /// still be unreachable, as part of a cycle the entry does not reach.
 bool has_unreachable_block(const Graph& graph);

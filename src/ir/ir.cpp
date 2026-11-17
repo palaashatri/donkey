@@ -1374,7 +1374,7 @@ Result<bool> verify_ir(const IrFunction& function) {
       }
     }
 
-    std::vector<detail::BitSet> dominators = detail::compute_dominators(graph);
+    const detail::Dominators dominators = detail::compute_dominators(graph);
 
     struct VarDef {
       std::size_t block_index = 0;

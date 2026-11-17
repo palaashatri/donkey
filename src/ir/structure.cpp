@@ -184,35 +184,112 @@ BlockId choose_loop_follow(const Graph& graph, const std::vector<bool>& body,
   return best_count > 0 ? best : kNoBlock;
 }
 
-std::vector<BitSet> compute_dominators(const Graph& graph) {
+Dominators::Dominators(const Graph& graph) {
   const std::size_t count = graph.successors.size();
-  std::vector<BitSet> dominators(count, BitSet::full(count));
+  idom_.assign(count, kNoBlock);
+  reachable_.assign(count, false);
+  enter_.assign(count, 0);
+  leave_.assign(count, 0);
   if (count == 0) {
-    return dominators;
+    return;
   }
-  dominators[0] = BitSet(count);
-  dominators[0].set(0);
-
+  // Reverse postorder from the entry, iteratively (no recursion on a deep graph).
+  std::vector<BlockId> postorder;
+  postorder.reserve(count);
+  std::vector<std::pair<BlockId, std::size_t>> path{{0, 0}};
+  reachable_[0] = true;
+  while (!path.empty()) {
+    auto& [block, next] = path.back();
+    if (next < graph.successors[block].size()) {
+      const BlockId successor = graph.successors[block][next++];
+      if (successor < count && !reachable_[successor]) {
+        reachable_[successor] = true;
+        path.emplace_back(successor, 0);
+      }
+      continue;
+    }
+    postorder.push_back(block);
+    path.pop_back();
+  }
+  std::vector<std::size_t> order_of(count, 0);  // postorder number
+  for (std::size_t i = 0; i < postorder.size(); ++i) {
+    order_of[postorder[i]] = i;
+  }
+  // Cooper, Harvey and Kennedy, "A Simple, Fast Dominance Algorithm": iterate in reverse postorder
+  // until no immediate dominator changes.
+  const auto intersect = [&](BlockId a, BlockId b) {
+    while (a != b) {
+      while (order_of[a] < order_of[b]) {
+        a = idom_[a];
+      }
+      while (order_of[b] < order_of[a]) {
+        b = idom_[b];
+      }
+    }
+    return a;
+  };
+  idom_[0] = 0;
   bool changed = true;
   while (changed) {
     changed = false;
-    for (BlockId index = 1; index < count; ++index) {
-      if (graph.predecessors[index].empty()) {
-        continue;  // unreachable from the entry
+    for (auto it = postorder.rbegin(); it != postorder.rend(); ++it) {
+      const BlockId block = *it;
+      if (block == 0) {
+        continue;
       }
-      BitSet next = BitSet::full(count);
-      for (const BlockId predecessor : graph.predecessors[index]) {
-        next.intersect(dominators[predecessor]);
+      BlockId chosen = kNoBlock;
+      for (const BlockId predecessor : graph.predecessors[block]) {
+        if (predecessor >= count || !reachable_[predecessor] || idom_[predecessor] == kNoBlock) {
+          continue;
+        }
+        chosen = chosen == kNoBlock ? predecessor : intersect(predecessor, chosen);
       }
-      next.set(index);
-      if (!next.equals(dominators[index])) {
-        dominators[index] = std::move(next);
+      if (chosen != kNoBlock && idom_[block] != chosen) {
+        idom_[block] = chosen;
         changed = true;
       }
     }
   }
-  return dominators;
+  // Number the dominator tree in preorder: `a` dominates `b` when b's number lies in a's range.
+  std::vector<std::vector<BlockId>> children(count);
+  for (BlockId block = 1; block < count; ++block) {
+    if (reachable_[block] && idom_[block] != kNoBlock) {
+      children[idom_[block]].push_back(block);
+    }
+  }
+  std::uint32_t number = 0;
+  std::vector<std::pair<BlockId, std::size_t>> walk{{0, 0}};
+  enter_[0] = number++;
+  while (!walk.empty()) {
+    auto& [block, next] = walk.back();
+    if (next < children[block].size()) {
+      const BlockId child = children[block][next++];
+      enter_[child] = number++;
+      walk.emplace_back(child, 0);
+      continue;
+    }
+    leave_[block] = number - 1;
+    walk.pop_back();
+  }
+  idom_[0] = kNoBlock;
 }
+
+bool Dominators::dominates(BlockId dominator, BlockId block) const {
+  if (block >= idom_.size() || dominator >= idom_.size()) {
+    return false;
+  }
+  if (!reachable_[block]) {
+    return true;  // a block the entry does not reach: every block, as its full bit set said
+  }
+  return reachable_[dominator] && enter_[dominator] <= enter_[block] &&
+         enter_[block] <= leave_[dominator];
+}
+
+BlockId Dominators::immediate(BlockId block) const {
+  return block < idom_.size() ? idom_[block] : kNoBlock;
+}
+
+Dominators compute_dominators(const Graph& graph) { return Dominators(graph); }
 
 namespace {
 
@@ -334,7 +411,7 @@ struct ForPlan {
 /// current path) whose target does not dominate its source. Such a graph is irreducible: no loop
 /// structure can name the target as a header. A reducible graph has only back edges, whose targets
 /// dominate their sources.
-bool has_irreducible_retreat(const Graph& graph, const std::vector<BitSet>& dominators) {
+bool has_irreducible_retreat(const Graph& graph, const Dominators& dominators) {
   const std::size_t count = graph.successors.size();
   if (count == 0) {
     return false;
@@ -454,7 +531,7 @@ std::optional<IrFunction> split_irreducible(const IrFunction& function, std::str
         graph.predecessors[successor].push_back(index);
       }
     }
-    const std::vector<BitSet> dominators = compute_dominators(graph);
+    const Dominators dominators = compute_dominators(graph);
     // The first retreating edge (by depth-first search from the entry) whose target does not
     // dominate its source names the node to split.
     std::optional<BlockId> target;
@@ -636,7 +713,7 @@ std::optional<IrFunction> split_if_irreducible(const IrFunction& function, std::
     note = "invalid graph";
     return std::nullopt;
   }
-  const std::vector<BitSet> dominators = compute_dominators(graph);
+  const Dominators dominators = compute_dominators(graph);
   if (!has_irreducible_retreat(graph, dominators)) {
     note = "reducible";
     return std::nullopt;
@@ -2147,7 +2224,7 @@ struct Structurer {
   const IrFunction& function_;
   const std::map<std::uint64_t, std::string>* string_literals_ = nullptr;
   Graph graph_;
-  std::vector<BitSet> dominators_;
+  Dominators dominators_;
   std::vector<BlockId> immediate_post_dominator_;
   std::unordered_map<BlockId, Loop> loops_;
   /// A while loop's `for` form, keyed by its header (see plan_for_loops).
