@@ -348,4 +348,4 @@ the listing draws no data rows, and the decompiler does not print string literal
 |---|---|---|---|
 | Format and reader (T1) | Done | `TypeLib.*`, `fuzz_typelib` | |
 | Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte | FreeBSD and MinGW-w64 libraries; `.winmd`; `sizeof` and `?:` in array bounds (445 musl declarations listed as skipped) |
-| Applying a library to code (T3) | Not done | | the decompiler and the CLI do not use a library's types yet |
+| Applying a library to code (T3) | Done for import stubs (ELF x86-64, PE) | `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`, `TypeLibApply.*`, `cli.project_type_library_apply*`, `cli.decompile_notes_a_library_prototype`; 791 of 2,725 stubs of the seven audit binaries get a musl prototype | calls take no arguments from a prototype (T4); GOT/IAT calls without a stub; versioned and ordinal imports not seen on a fixture; Mach-O not tried; no desktop UI |

@@ -83,6 +83,18 @@ the line in the library file. A refusal from the C text keeps the parser's `cdec
 `line L, column C:` is moved to the library file's line. The codes are listed in the header comment
 of `typelib.h`.
 
+## Applying a library (G22-T3)
+
+`donkey-cli project type library add <db> <library.dtl>` merges a library's types into a project (a
+name the project already has keeps the project's type and is counted as a collision) and records
+the library. `project type library apply <db> <image-id>` matches each import stub of the image to
+a library prototype by name (an ELF version suffix and one Mach-O underscore are removed first; an
+`ordinal_N` import and a name seen with two versions are not matched) and stores it as a prototype
+application with source `library`. A user, DWARF or PDB prototype at the same address is kept; a
+later user edit replaces a library one. Every library of the project must be for the image's
+architecture. `project type applications <db> <image-id>` lists the applications with their source,
+and `decompile --project` notes the prototype on the stub.
+
 ## Where libraries live
 
 The caller passes the path (`load_type_library`). Bundled libraries are installed from `typelibs/`

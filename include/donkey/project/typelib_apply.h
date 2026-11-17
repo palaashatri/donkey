@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "donkey/core/result.h"
+#include "donkey/project/project.h"
 #include "donkey/project/typelib.h"
 #include "donkey/project/types.h"
 
@@ -65,5 +66,34 @@ struct ImportPrototype {
 /// prototype per name and cannot tell the versions apart.
 [[nodiscard]] std::vector<ImportPrototype> match_import_prototypes(
     const std::vector<std::string>& imports, const TypeLibraryMerge& merge, bool mach_o = false);
+
+/// An import as the analysis found it: the stub or thunk that calls it, and the import's name.
+struct ImportSite {
+  std::string name;
+  std::uint64_t address = 0;
+};
+
+/// What `apply_library_prototypes` did at one import site.
+struct LibraryPrototypeApplication {
+  std::string import;
+  std::uint64_t address = 0;
+  TypeId prototype{};  ///< the applied function type; 0 when nothing was applied
+  /// Empty when applied; otherwise why not: the `match_import_prototypes` reasons, or `kept: user`
+  /// (`kept: dwarf`, ...) when the address already has a prototype of another source.
+  std::string reason;
+};
+
+/// The function prototypes a project's type libraries brought (`project type library add`): every
+/// named function type of `table` with provenance Library, by name. Types from other sources are
+/// not library prototypes, even when they share a name.
+[[nodiscard]] TypeLibraryMerge library_prototypes(const TypeTable& table);
+
+/// Applies the library prototypes of the project's type table to the import sites of one image,
+/// as FunctionPrototype applications with source Library. A site whose address already has an
+/// application of another source keeps it. The caller checks that the libraries fit the image
+/// (architecture); nothing here reads the binary.
+[[nodiscard]] Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
+    Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
+    bool mach_o = false);
 
 }  // namespace donkey

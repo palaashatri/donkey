@@ -127,6 +127,14 @@ class TypeTable {
   std::map<TypeId, TypeDefinition> types_;
 };
 
+/// The C declaration of `declarator` with type `id`: `int puts(char *)` for a function type and
+/// the declarator `puts`, `char *argv[4]` for an array of pointers. Struct, union and enum types
+/// print by tag (`struct stat`), typedefs by name; neither is expanded. The type store has no
+/// qualifiers, so `const` is never printed. An unknown id prints as `?`, and nesting deeper than
+/// 32 declarator levels stops with `...`.
+[[nodiscard]] std::string c_declaration(const TypeTable& table, TypeId id,
+                                        const std::string& declarator);
+
 /// Converts the DWARF types of a debuggee into a table. Ids are the DWARF
 /// offsets plus one, so every reference keeps its meaning. Qualifiers (const,
 /// volatile, restrict) do not get a type of their own; a reference to one names

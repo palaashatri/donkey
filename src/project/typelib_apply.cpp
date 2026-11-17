@@ -97,9 +97,9 @@ Result<TypeLibraryMerge> merge_type_library(const TypeTable& existing, const Typ
     ++merge.added;
   }
   if (auto valid = merge.table.validate(); !valid) {
-    return make_error<TypeLibraryMerge>(Status::InvalidInput, "typelib_apply.invalid",
-                                        "the merged type table is not valid: " +
-                                            valid.diagnostic().message);
+    return make_error<TypeLibraryMerge>(
+        Status::InvalidInput, "typelib_apply.invalid",
+        "the merged type table is not valid: " + valid.diagnostic().message);
   }
   for (const TypeDefinition& type : library.types) {
     const Space space = space_of(type);
@@ -126,8 +126,8 @@ std::vector<ImportPrototype> match_import_prototypes(const std::vector<std::stri
   std::map<std::string, std::set<std::string>> versions;
   for (const std::string& import : imports) {
     const std::size_t at = import.find('@');
-    versions[import_match_name(import, mach_o)].insert(
-        at == std::string::npos ? std::string() : import.substr(at));
+    versions[import_match_name(import, mach_o)].insert(at == std::string::npos ? std::string()
+                                                                               : import.substr(at));
   }
   std::vector<ImportPrototype> out;
   out.reserve(imports.size());
@@ -140,12 +140,72 @@ std::vector<ImportPrototype> match_import_prototypes(const std::vector<std::stri
     } else if (versions[name].size() > 1) {
       entry.reason = "ambiguous";
     } else if (const auto found = merge.ordinary.find(name);
-               found != merge.ordinary.end() &&
-               merge.table.find(found->second) != nullptr &&
+               found != merge.ordinary.end() && merge.table.find(found->second) != nullptr &&
                merge.table.find(found->second)->kind == TypeKind::Function) {
       entry.prototype = found->second;
     } else {
       entry.reason = "no prototype";
+    }
+    out.push_back(std::move(entry));
+  }
+  return out;
+}
+
+TypeLibraryMerge library_prototypes(const TypeTable& table) {
+  TypeLibraryMerge out;
+  out.table = table;
+  for (const TypeDefinition& type : table.list()) {
+    if (type.kind == TypeKind::Function && type.provenance == TypeProvenance::Library &&
+        !type.name.empty()) {
+      out.ordinary.emplace(type.name, type.id);
+    }
+  }
+  return out;
+}
+
+Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
+    Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites, bool mach_o) {
+  auto table = project.types();
+  if (!table) {
+    return table.diagnostic();
+  }
+  auto existing = project.type_applications(image_id);
+  if (!existing) {
+    return existing.diagnostic();
+  }
+  std::map<std::uint64_t, TypeProvenance> prototype_source;
+  for (const TypeApplication& application : existing.value()) {
+    if (application.kind == TypeApplicationKind::FunctionPrototype) {
+      prototype_source[application.address] = application.source;
+    }
+  }
+  const TypeLibraryMerge prototypes = library_prototypes(table.value());
+  std::vector<std::string> names;
+  names.reserve(sites.size());
+  for (const ImportSite& site : sites) {
+    names.push_back(site.name);
+  }
+  const std::vector<ImportPrototype> matched = match_import_prototypes(names, prototypes, mach_o);
+  std::vector<LibraryPrototypeApplication> out;
+  out.reserve(sites.size());
+  for (std::size_t index = 0; index < sites.size(); ++index) {
+    LibraryPrototypeApplication entry;
+    entry.import = sites[index].name;
+    entry.address = sites[index].address;
+    entry.reason = matched[index].reason;
+    if (entry.reason.empty()) {
+      const auto source = prototype_source.find(entry.address);
+      if (source != prototype_source.end() && source->second != TypeProvenance::Library) {
+        entry.reason = std::string("kept: ") + type_provenance_name(source->second);
+      } else {
+        auto applied = project.set_type_application(
+            image_id, TypeApplicationKind::FunctionPrototype, entry.address,
+            matched[index].prototype, TypeProvenance::Library);
+        if (!applied) {
+          return applied.diagnostic();
+        }
+        entry.prototype = matched[index].prototype;
+      }
     }
     out.push_back(std::move(entry));
   }

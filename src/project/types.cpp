@@ -407,6 +407,77 @@ bool TypeTable::remove(TypeId id) {
   return types_.erase(id) != 0;
 }
 
+namespace {
+
+std::string c_declaration_at(const TypeTable& table, TypeId id, const std::string& declarator,
+                             unsigned depth) {
+  const auto with = [&](std::string base) {
+    return declarator.empty() ? base : base + " " + declarator;
+  };
+  if (!id.valid()) {
+    return with("void");
+  }
+  if (depth >= 32) {
+    return with("...");
+  }
+  const TypeDefinition* type = table.find(id);
+  if (type == nullptr) {
+    return with("?");
+  }
+  const auto tagged = [&](const char* keyword) {
+    return with(std::string(keyword) + " " + (type->name.empty() ? "<anonymous>" : type->name));
+  };
+  switch (type->kind) {
+    case TypeKind::Void:
+    case TypeKind::Integer:
+    case TypeKind::Float:
+    case TypeKind::Typedef:
+      return with(type->name.empty() ? std::string("?") : type->name);
+    case TypeKind::Struct:
+      return tagged("struct");
+    case TypeKind::Union:
+      return tagged("union");
+    case TypeKind::Enum:
+      return tagged("enum");
+    case TypeKind::Pointer: {
+      const TypeDefinition* target = table.find(type->target);
+      const bool wraps = target != nullptr &&
+                         (target->kind == TypeKind::Array || target->kind == TypeKind::Function);
+      const std::string inner = "*" + declarator;
+      return c_declaration_at(table, type->target, wraps ? "(" + inner + ")" : inner, depth + 1);
+    }
+    case TypeKind::Array:
+      return c_declaration_at(
+          table, type->target,
+          declarator + "[" + (type->count_known ? std::to_string(type->count) : std::string()) +
+              "]",
+          depth + 1);
+    case TypeKind::Function: {
+      std::string parameters;
+      for (const TypeField& field : type->fields) {
+        if (!parameters.empty()) {
+          parameters += ", ";
+        }
+        parameters += c_declaration_at(table, field.type, field.name, depth + 1);
+      }
+      if (type->variadic) {
+        parameters += parameters.empty() ? "..." : ", ...";
+      }
+      if (parameters.empty()) {
+        parameters = "void";
+      }
+      return c_declaration_at(table, type->target, declarator + "(" + parameters + ")", depth + 1);
+    }
+  }
+  return with("?");
+}
+
+}  // namespace
+
+std::string c_declaration(const TypeTable& table, TypeId id, const std::string& declarator) {
+  return c_declaration_at(table, id, declarator, 0);
+}
+
 const TypeDefinition* TypeTable::find(TypeId id) const {
   const auto found = types_.find(id);
   return found == types_.end() ? nullptr : &found->second;

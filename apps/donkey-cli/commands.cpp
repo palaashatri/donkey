@@ -853,6 +853,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project restore <database> <backup> [--json]\n"
       "  donkey-cli project type library add <database> <library.dtl> [--json]\n"
       "  donkey-cli project type library list <database> [--json]\n"
+      "  donkey-cli project type library apply <database> <image-id> [--json]\n"
+      "  donkey-cli project type applications <database> <image-id> [--json]\n"
       "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
       "SYMBOL|ADDR CONDITION]... [--watch "
       "SYMBOL|ADDR[:LEN][:rw]]... [--watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION]... [--run]"
@@ -1753,6 +1755,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // The local names the project saved for this binary (G12-T3). They are applied after the debug
   // names, so a user name wins.
   std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
+  std::map<std::uint64_t, std::string> library_prototype_notes;
   // The strings the project defines, as the literals the pseudocode prints (G12-T2).
   PseudocodeOptions pseudo_options;
   if (!request.project_path.empty()) {
@@ -1788,6 +1791,35 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       return fail(rows.diagnostic());
     }
     pseudo_options.string_literals = string_literals(rows.value(), loaded.image, loaded.data);
+    // Library prototypes (G22-T3) are noted on the stub they apply to, with the libraries that
+    // brought them. Calls do not take their arguments from them yet (G22-T4).
+    auto applications = project.value().type_applications(*image_id);
+    if (!applications) {
+      return fail(applications.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    auto libraries = project.value().type_libraries();
+    if (!libraries) {
+      return fail(libraries.diagnostic());
+    }
+    std::string library_names;
+    for (const donkey::TypeLibraryRecord& library : libraries.value()) {
+      library_names +=
+          (library_names.empty() ? "" : ", ") + library.library + " " + library.library_version;
+    }
+    for (const donkey::TypeApplication& application : applications.value()) {
+      const donkey::TypeDefinition* type = table.value().find(application.type_id);
+      if (application.kind != donkey::TypeApplicationKind::FunctionPrototype ||
+          application.source != donkey::TypeProvenance::Library || type == nullptr) {
+        continue;
+      }
+      library_prototype_notes[application.address] =
+          "library prototype (" + library_names +
+          "): " + donkey::c_declaration(table.value(), application.type_id, type->name);
+    }
   }
 
   // The DWARF of the binary, when it has any, names the parameters and the frame slots of
@@ -1809,6 +1841,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       }
     }
     if (lifted) {
+      if (const auto note = library_prototype_notes.find(function.address);
+          note != library_prototype_notes.end()) {
+        lifted.value().notes.push_back(note->second);
+      }
       if (const auto found = user_names.find(function.address); found != user_names.end()) {
         auto applied = apply_user_local_names(lifted.value(), found->second);
         if (!applied) {
@@ -1924,11 +1960,206 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
 
 namespace {
 
+/// The image `image_id` of an open project, loaded from its recorded path and checked against its
+/// recorded hash. A changed file is refused (`project.image_changed`).
+Result<donkey::LoadedBinary> load_project_image(const Project& project, std::int64_t image_id,
+                                                ProjectImage* record) {
+  auto images = project.images();
+  if (!images) {
+    return images.diagnostic();
+  }
+  for (const ProjectImage& image : images.value()) {
+    if (image.id != image_id) {
+      continue;
+    }
+    auto loaded = donkey::load_binary(image.path);
+    if (!loaded) {
+      return loaded.diagnostic();
+    }
+    if (loaded.value().image.sha256 != image.sha256) {
+      return Diagnostic::make(Status::InvalidInput, "project.image_changed",
+                              image.path + " no longer matches the hash the project recorded");
+    }
+    if (record != nullptr) {
+      *record = image;
+    }
+    return std::move(loaded.value());
+  }
+  return Diagnostic::make(Status::InvalidInput, "project.image_missing",
+                          "no image with that id in the project");
+}
+
+/// `project type library apply`: the library prototypes of the project, applied to the image's
+/// import stubs and thunks (G22-T3).
+int command_project_type_library_apply(const std::string& database, std::string_view id_text,
+                                       bool json) {
+  std::uint64_t image_id = 0;
+  if (!parse_u64(id_text, image_id) || image_id == 0 ||
+      image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return usage_error("invalid image id");
+  }
+  auto project = Project::open(database);
+  if (!project) {
+    return fail(project.diagnostic());
+  }
+  auto libraries = project.value().type_libraries();
+  if (!libraries) {
+    return fail(libraries.diagnostic());
+  }
+  if (libraries.value().empty()) {
+    return fail(Diagnostic::make(Status::InvalidInput, "project.no_type_library",
+                                 "the project has no type library; load one with "
+                                 "'project type library add' first"));
+  }
+  ProjectImage record;
+  auto loaded = load_project_image(project.value(), static_cast<std::int64_t>(image_id), &record);
+  if (!loaded) {
+    return fail(loaded.diagnostic());
+  }
+  // The project's library prototypes are one set, whichever library brought each: every library
+  // must be for the image's architecture, or none applies.
+  const std::string architecture = architecture_name(loaded.value().image.architecture);
+  for (const donkey::TypeLibraryRecord& library : libraries.value()) {
+    if (library.architecture != architecture) {
+      return fail(Diagnostic::make(Status::InvalidInput, "project.type_library_architecture",
+                                   "the type library " + library.library + " " +
+                                       library.library_version + " is for " + library.architecture +
+                                       ", the image is " + architecture));
+    }
+  }
+  auto analysis = analyze(loaded.value().image, loaded.value().data);
+  if (!analysis) {
+    return fail(analysis.diagnostic());
+  }
+  std::vector<donkey::ImportSite> sites;
+  for (const Function& function : analysis.value().functions) {
+    if (!function.import_name.empty()) {
+      sites.push_back(donkey::ImportSite{function.import_name, function.address});
+    }
+  }
+  auto applied =
+      donkey::apply_library_prototypes(project.value(), static_cast<std::int64_t>(image_id), sites,
+                                       loaded.value().image.format == BinaryFormat::MachO);
+  if (!applied) {
+    return fail(applied.diagnostic());
+  }
+  auto table = project.value().types();
+  if (!table) {
+    return fail(table.diagnostic());
+  }
+  std::size_t count = 0;
+  for (const donkey::LibraryPrototypeApplication& entry : applied.value()) {
+    count += entry.prototype.valid() ? 1U : 0U;
+  }
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"database\": " + quote(database) + ",\n";
+    out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+    out += "  \"applied\": " + std::to_string(count) + ",\n";
+    out += "  \"imports\": [";
+    for (std::size_t i = 0; i < applied.value().size(); ++i) {
+      const donkey::LibraryPrototypeApplication& entry = applied.value()[i];
+      out += i == 0 ? "\n" : ",\n";
+      out +=
+          "    {\"import\": " + quote(entry.import) + ", \"address\": " + quote(hex(entry.address));
+      if (entry.prototype.valid()) {
+        out += ", \"prototype\": " +
+               quote(donkey::c_declaration(table.value(), entry.prototype,
+                                           donkey::import_match_name(entry.import))) +
+               ", \"source\": \"library\"}";
+      } else {
+        out += ", \"not_applied\": " + quote(entry.reason) + "}";
+      }
+    }
+    out += applied.value().empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("Applied %zu library prototypes to %zu imports of image %llu\n", count,
+                applied.value().size(), static_cast<unsigned long long>(image_id));
+    for (const donkey::LibraryPrototypeApplication& entry : applied.value()) {
+      if (entry.prototype.valid()) {
+        std::printf("  %s  %s;\n", hex(entry.address).c_str(),
+                    donkey::c_declaration(table.value(), entry.prototype,
+                                          donkey::import_match_name(entry.import))
+                        .c_str());
+      } else {
+        std::printf("  %s  %s: %s\n", hex(entry.address).c_str(), entry.import.c_str(),
+                    entry.reason.c_str());
+      }
+    }
+  }
+  return kExitOk;
+}
+
+/// `project type applications`: the types applied to one image, with who applied each.
+int command_project_type_applications(const std::string& database, std::string_view id_text,
+                                      bool json) {
+  std::uint64_t image_id = 0;
+  if (!parse_u64(id_text, image_id) || image_id == 0 ||
+      image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return usage_error("invalid image id");
+  }
+  auto project = Project::open(database);
+  if (!project) {
+    return fail(project.diagnostic());
+  }
+  auto table = project.value().types();
+  if (!table) {
+    return fail(table.diagnostic());
+  }
+  auto applications = project.value().type_applications(static_cast<std::int64_t>(image_id));
+  if (!applications) {
+    return fail(applications.diagnostic());
+  }
+  const auto declared = [&](const donkey::TypeApplication& application) {
+    const donkey::TypeDefinition* type = table.value().find(application.type_id);
+    const std::string name =
+        type != nullptr && type->kind == donkey::TypeKind::Function ? type->name : std::string();
+    return donkey::c_declaration(table.value(), application.type_id, name);
+  };
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"database\": " + quote(database) + ",\n";
+    out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+    out += "  \"applications\": [";
+    for (std::size_t i = 0; i < applications.value().size(); ++i) {
+      const donkey::TypeApplication& application = applications.value()[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"address\": " + quote(hex(application.address)) + ", \"kind\": " +
+             quote(application.kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype"
+                                                                                      : "data") +
+             ", \"type_id\": " + std::to_string(application.type_id.value()) +
+             ", \"type\": " + quote(declared(application)) +
+             ", \"source\": " + quote(donkey::type_provenance_name(application.source)) + "}";
+    }
+    out += applications.value().empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu type applications\n", applications.value().size());
+    for (const donkey::TypeApplication& application : applications.value()) {
+      std::printf(
+          "  %s  %-9s %-8s %s\n", hex(application.address).c_str(),
+          application.kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype" : "data",
+          donkey::type_provenance_name(application.source), declared(application).c_str());
+    }
+  }
+  return kExitOk;
+}
+
 /// `project type add|list|apply|library`: the C types a project holds, and which address each
 /// applies to (G05-T4). The declarations are read from a C header of the supported subset.
 int command_project_type(const std::vector<std::string_view>& positional, bool json) {
   if (positional.empty()) {
-    return usage_error("project type needs a subcommand: add, list, apply or library");
+    return usage_error(
+        "project type needs a subcommand: add, list, apply, applications or library");
   }
   const std::string_view action = positional[0];
   const std::vector<std::string_view> rest(positional.begin() + 1, positional.end());
@@ -2094,8 +2325,18 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     return kExitOk;
   }
 
+  if (action == "applications") {
+    if (rest.size() != 2) {
+      return usage_error("project type applications needs a database and an image id");
+    }
+    return command_project_type_applications(std::string(rest[0]), rest[1], json);
+  }
+
   if (action == "library") {
-    // project type library add <db> <library.dtl> | project type library list <db>
+    // project type library add <db> <library.dtl> | list <db> | apply <db> <image-id>
+    if (rest.size() == 3 && rest[0] == "apply") {
+      return command_project_type_library_apply(std::string(rest[1]), rest[2], json);
+    }
     if (rest.size() == 2 && rest[0] == "list") {
       const std::string database(rest[1]);
       auto project = Project::open(database);
@@ -2139,7 +2380,8 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     }
     if (rest.size() != 3 || rest[0] != "add") {
       return usage_error(
-          "project type library needs 'add <database> <library.dtl>' or 'list <database>'");
+          "project type library needs 'add <database> <library.dtl>', 'list <database>' or "
+          "'apply <database> <image-id>'");
     }
     const std::string database(rest[1]);
     const std::string path(rest[2]);
@@ -2220,7 +2462,7 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     return kExitOk;
   }
 
-  return usage_error("project type needs a subcommand: add, list, apply or library");
+  return usage_error("project type needs a subcommand: add, list, apply, applications or library");
 }
 
 }  // namespace

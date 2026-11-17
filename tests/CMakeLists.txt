@@ -1204,3 +1204,66 @@ add_test(NAME cli.callgraph_names_import_stubs
          COMMAND donkey-cli callgraph ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
 set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
   PASS_REGULAR_EXPRESSION "\"callee\": \"0x1060\", \"callee_name\": \"abort@plt\"")
+
+# G22-T3: the musl library's prototypes applied to the import stubs of stubs_x86_64 (abort, puts),
+# listed with their source, and noted on the stub in the decompiler's output.
+set(DONKEY_CLI_TYPELIB_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-typelib.db")
+add_test(NAME cli.project_type_library_apply_setup
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPELIB_DB}
+                 ${DONKEY_CLI_TYPELIB_DB}-shm ${DONKEY_CLI_TYPELIB_DB}-wal)
+set_tests_properties(cli.project_type_library_apply_setup PROPERTIES
+  FIXTURES_SETUP typelib_db_reset)
+add_test(NAME cli.project_type_library_apply_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+set_tests_properties(cli.project_type_library_apply_save PROPERTIES
+  FIXTURES_REQUIRED typelib_db_reset FIXTURES_SETUP typelib_db_saved)
+add_test(NAME cli.project_type_library_apply_needs_a_library
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_DB} 1)
+set_tests_properties(cli.project_type_library_apply_needs_a_library PROPERTIES
+  FIXTURES_REQUIRED typelib_db_saved FIXTURES_SETUP typelib_db_checked
+  PASS_REGULAR_EXPRESSION "project.no_type_library")
+add_test(NAME cli.project_type_library_apply_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPELIB_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_apply_add PROPERTIES
+  FIXTURES_REQUIRED "typelib_db_saved;typelib_db_checked" FIXTURES_SETUP typelib_db_loaded)
+add_test(NAME cli.project_type_library_apply
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_DB} 1 --json)
+set_tests_properties(cli.project_type_library_apply PROPERTIES
+  FIXTURES_REQUIRED typelib_db_loaded FIXTURES_SETUP typelib_db_applied
+  PASS_REGULAR_EXPRESSION "\"import\": \"__cxa_finalize\", \"address\": \"0x1050\", \"not_applied\": \"no prototype\".*\"import\": \"abort\", \"address\": \"0x1060\", \"prototype\": \"void abort\\(void\\)\", \"source\": \"library\".*\"prototype\": \"int puts\\(char \\*\\)\"")
+add_test(NAME cli.project_type_applications_show_the_source
+         COMMAND donkey-cli project type applications ${DONKEY_CLI_TYPELIB_DB} 1)
+set_tests_properties(cli.project_type_applications_show_the_source PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  PASS_REGULAR_EXPRESSION "0x1070  prototype library  int puts\\(char \\*\\)")
+add_test(NAME cli.decompile_notes_a_library_prototype
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64
+                 --project ${DONKEY_CLI_TYPELIB_DB} --function 0x1070)
+set_tests_properties(cli.decompile_notes_a_library_prototype PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  PASS_REGULAR_EXPRESSION "// note: library prototype \\(musl-libc 1.2.4\\): int puts\\(char \\*\\)")
+
+# A library for another architecture applies nothing (stubs_aarch64 with the x86_64 library).
+set(DONKEY_CLI_TYPELIB_ARM_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-typelib-arm.db")
+add_test(NAME cli.project_type_library_arch_setup
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPELIB_ARM_DB}
+                 ${DONKEY_CLI_TYPELIB_ARM_DB}-shm ${DONKEY_CLI_TYPELIB_ARM_DB}-wal)
+set_tests_properties(cli.project_type_library_arch_setup PROPERTIES
+  FIXTURES_SETUP typelib_arm_reset)
+add_test(NAME cli.project_type_library_arch_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_ARM_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_aarch64)
+set_tests_properties(cli.project_type_library_arch_save PROPERTIES
+  FIXTURES_REQUIRED typelib_arm_reset FIXTURES_SETUP typelib_arm_saved)
+add_test(NAME cli.project_type_library_arch_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPELIB_ARM_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_arch_add PROPERTIES
+  FIXTURES_REQUIRED typelib_arm_saved FIXTURES_SETUP typelib_arm_loaded)
+add_test(NAME cli.project_type_library_apply_refuses_another_architecture
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_ARM_DB} 1)
+set_tests_properties(cli.project_type_library_apply_refuses_another_architecture PROPERTIES
+  FIXTURES_REQUIRED typelib_arm_loaded
+  PASS_REGULAR_EXPRESSION "project.type_library_architecture.*is for x86_64, the image is aarch64")

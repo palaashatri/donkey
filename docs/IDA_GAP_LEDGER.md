@@ -177,7 +177,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,341 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3, T4 TODO) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,341 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). Calls do not take their arguments from it yet (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 791 of 2,725 stubs of the seven audit binaries get a prototype; T4 TODO) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; no-return analysis and prologue discovery are not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T3, T5 to T7 TODO; owner decisions 1-4 decided 2026-11-17) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -2135,6 +2135,44 @@ sources only, a preprocessor at build time). What was built and measured:
   `Library`; a user edit replaces the library application; the schema migration test passes; the PE
   ordinal and Mach-O checks are recorded in the PR. The R1 corpus check (G20-T1) comes later, when R1
   exists.
+
+**T3 report (2026-11-17).** What was built:
+- `include/donkey/project/typelib_apply.h`, `src/project/typelib_apply.cpp`: `merge_type_library` (library types
+  join the project's table with fresh ids; a name the table already has in the same C name space keeps the
+  existing type, references move to it, and the collision is listed, with `differs` when the layouts differ),
+  `import_match_name` (ELF `@VERSION`/`@@VERSION` and one Mach-O underscore removed), `match_import_prototypes`
+  (`ordinal_N` never matches; one name with two versions is `ambiguous`), `library_prototypes` (only function
+  types of provenance Library are prototypes) and `apply_library_prototypes` (a FunctionPrototype application with
+  source Library at each matched stub; an address that already has a prototype of another source keeps it, as
+  `kept: user`).
+- Schema v8: `type_applications.source` (existing rows become `user`) and a `type_libraries` table; the v8 step
+  also repairs the two type columns an early v5 database lacks. `Project::set_type_application` never lets a
+  library application replace another source, and any other source replaces a library one.
+- `c_declaration` (`types.h`): a type as C (`int puts(char *)`), used by the CLI and the note.
+- CLI: `project type library add <db> <library.dtl>`, `project type library list <db>`, `project type library
+  apply <db> <image-id>` (refused when the project has no library, `project.no_type_library`, or a library is
+  for another architecture, `project.type_library_architecture`), and `project type applications <db>
+  <image-id>` (each application with its source). `decompile --project` adds `note: library prototype (musl-libc
+  1.2.4): int puts(char *)` to the stub's own pseudocode.
+- Sites are the functions the analysis names by an import (G24-T4): PLT stubs and PE thunks. A GOT or IAT call
+  with no stub has no function to carry a prototype, so it gets none here; T4 types the call itself.
+- Measured on the seven binaries of `docs/AUDIT.md` (glibc programs, with the musl library): 791 of 2,725 import
+  stubs get a prototype (ls 77/108, bash 174/227, git 150/247, python3.12 299/502, libsqlite3 33/50, openssl
+  58/1,577 whose imports are mostly libssl and libcrypto, libc 0/14). The rest have no musl declaration
+  (`__cxa_finalize`, `__stack_chk_fail`, glibc extensions, other libraries).
+- Tests: `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`,
+  `TypeLibApply.*` (merge, collisions, `VersionedNameMatchesTheUnversionedLibraryName`, `AmbiguousVersionsApplyNothing`,
+  `OrdinalImportIsNotMatched`, `OnlyLibraryFunctionTypesArePrototypes`), `Types.CDeclarationPrintsCDeclarators`,
+  `Types.MigratesFromSchemaV7`, and the CLI chain `cli.project_type_library_apply*`,
+  `cli.project_type_applications_show_the_source`, `cli.decompile_notes_a_library_prototype`.
+- Checks recorded, not done: Donkey's ELF loader names an import without its version, so the two-version case is
+  tested on names only; the image's stubs never reach it yet (the G24-T3 version reader can supply versions once it
+  is on `main`). No PE fixture has an ordinal import, and the Mach-O underscore rule is tested on names only, not on
+  a Mach-O fixture (the stubs fixtures are ELF and PE). The musl library is applied to glibc programs: the libc
+  prototypes agree, but a struct a pointer argument names (`FILE`) has musl's layout, not glibc's, and nothing
+  reads through it yet.
+- Not done here: a per-user library directory (the caller passes the path), the desktop app, and typed call
+  arguments (T4, after G21).
 
 **T4 — typed arguments at calls (needs G21-T2 and the G21 ABI tables).**
 
