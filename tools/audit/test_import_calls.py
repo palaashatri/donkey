@@ -51,6 +51,16 @@ class Measure(unittest.TestCase):
         self.assertEqual(result["functions_by_import"], [("puts", 1)])
         self.assertNotIn("local_stub_call_sites_printed_as_sub", result["counts"])
 
+    def test_a_call_inside_a_string_or_a_comment_is_not_counted(self):
+        result = counted('u64 sub_2000(void) {\n  rax = (u64)("puts(");  // abort();\n'
+                         '  return rax;\n}')
+        counts = result["counts"]
+        self.assertNotIn("import_call_sites_printed_by_name", counts)
+        self.assertNotIn("named_no_return_call_sites", counts)
+        result = counted('u64 sub_2000(void) {\n  puts("abort(");\n  return rax;\n}')
+        self.assertEqual(result["counts"]["import_call_sites_printed_by_name"], 1)
+        self.assertNotIn("named_no_return_call_sites", result["counts"])
+
     def test_calls_printed_by_name_are_split_the_same_way(self):
         result = counted("u64 sub_2000(void) {\n  puts(rdi);\n  free(rdi);\n  return rax;\n}")
         counts = result["counts"]
