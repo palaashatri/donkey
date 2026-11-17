@@ -1273,7 +1273,11 @@ struct Structurer {
       const IrStatement* previous = flags_producer(body, index);
       const std::string text =
           render_statement(function_, body.statements[index], previous, string_literals_);
-      if (!text.empty()) {
+      if (body.statements[index].op == IrOp::Return && body.statements[index].unreachable) {
+        // After a call that does not return (G24-T3): no text, but the block's end is tagged.
+        line("", body.statements[index].source_address, make_tag(LineKind::Return, block));
+        line_of_[statement_key(block, index)] = lines_.size() - 1;
+      } else if (!text.empty()) {
         const LineKind kind =
             body.statements[index].op == IrOp::Return ? LineKind::Return : LineKind::Plain;
         line(text, body.statements[index].source_address, make_tag(kind, block));

@@ -16,6 +16,7 @@
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
+#include "ir_internal.h"
 
 namespace {
 
@@ -178,12 +179,10 @@ TEST(ElfVersions, RefusesBrokenTables) {
   // A name outside the string table.
   EXPECT_EQ(donkey::read_version_needs(version_needs(1, {{2, 400}}), names).diagnostic().code,
             "elf.version_needs.name");
-  // A Verneed whose next offset points back at itself.
-  auto loop = version_needs(1, {{2, 11}});
-  loop[12] = std::byte{0};  // next = 0 would end it; make it 0 then set aux chain to loop
+  // A Verneed whose next offset lands on its own Vernaux, which was already read: a loop.
   auto self = version_needs(1, {{2, 11}});
-  self[12] = std::byte{0x10};  // next = 16: lands on the Vernaux, read as a Verneed
-  EXPECT_FALSE(donkey::read_version_needs(self, names).has_value());
+  self[12] = std::byte{0x10};  // next = 16
+  EXPECT_EQ(donkey::read_version_needs(self, names).diagnostic().code, "elf.version_needs.loop");
   // The entry limit.
   EXPECT_EQ(donkey::read_version_needs(version_needs(1, {{2, 11}, {3, 11}}), names, 2)
                 .diagnostic()
@@ -433,4 +432,78 @@ TEST(Ir, NoReturnPathsAreNotCompared) {
   auto stopped = donkey::evaluate_ir(lifted.value(), negative, fresh);
   ASSERT_FALSE(stopped.has_value());
   EXPECT_EQ(stopped.diagnostic().code, "ir.eval_no_return");
+}
+
+namespace {
+
+/// if (rdi == 0) { abort(); } return rax; with abort a no-return call.
+donkey::IrFunction no_return_arm_function() {
+  donkey::IrFunction function;
+  function.address = 0x1000;
+  function.name = "checked";
+  donkey::IrBlock test;
+  test.address = 0x1000;
+  donkey::IrStatement compare;
+  compare.op = donkey::IrOp::Compare;
+  compare.a = donkey::IrOperand::register_ref("rdi", 8);
+  compare.b = donkey::IrOperand::constant_value(0, 8);
+  compare.condition = donkey::IrCondition::NotEqual;
+  compare.width = 8;
+  test.statements.push_back(compare);
+  donkey::IrStatement branch;
+  branch.op = donkey::IrOp::CondBranch;
+  branch.condition = donkey::IrCondition::NotEqual;
+  branch.a = donkey::IrOperand::register_ref("rax", 8);
+  branch.b = donkey::IrOperand::block_ref(2);
+  branch.width = 8;
+  test.statements.push_back(branch);
+  function.blocks.push_back(test);
+  donkey::IrBlock fail;
+  fail.address = 0x1008;
+  donkey::IrStatement call;
+  call.op = donkey::IrOp::Call;
+  call.width = 8;
+  call.a = donkey::IrOperand::constant_value(0x2000, 8);
+  call.no_return = true;
+  fail.statements.push_back(call);
+  donkey::IrStatement end;
+  end.op = donkey::IrOp::Return;
+  end.width = 8;
+  end.unreachable = true;
+  fail.statements.push_back(end);
+  function.blocks.push_back(fail);
+  donkey::IrBlock ok;
+  ok.address = 0x1010;
+  donkey::IrStatement ret;
+  ret.op = donkey::IrOp::Return;
+  ret.width = 8;
+  ret.a = donkey::IrOperand::register_ref("rax", 8);
+  ok.statements.push_back(ret);
+  function.blocks.push_back(ok);
+  function.call_names[0x2000] = "abort";
+  return function;
+}
+
+}  // namespace
+
+// The unreachable end of a no-return block prints nothing but is still the block's end for the
+// control-flow check, in the layout structurer and in the goto structurer (a regression: without
+// the tag the check saw the block fall through, and refused every candidate).
+TEST(Ir, ANoReturnBlockIsStructured) {
+  const donkey::IrFunction function = no_return_arm_function();
+  const auto verified = donkey::verify_ir(function);
+  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().code << ": "
+                                    << verified.diagnostic().message;
+  const auto text = donkey::format_pseudocode(function);
+  ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
+  EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("abort();"), std::string::npos) << text.value();
+  const donkey::StructureVerdict verdict = donkey::classify_structure(function);
+  EXPECT_EQ(verdict.cls, donkey::StructureClass::Structured) << verdict.reason;
+  EXPECT_EQ(verdict.oracle_rejections, 0U) << verdict.oracle_detail;
+  // The goto structurer, called on its own, is accepted by the check too.
+  const auto gotos = donkey::detail::structure_with_gotos(function, nullptr);
+  ASSERT_TRUE(gotos.has_value());
+  const auto mismatch = donkey::detail::check_structured_control_flow(function, gotos->lines);
+  EXPECT_FALSE(mismatch.has_value()) << mismatch.value_or("");
 }
