@@ -14,13 +14,12 @@
 namespace donkey {
 namespace {
 
-constexpr std::uint64_t kEntrySize = 16;          // Elf64_Verneed and Elf64_Vernaux
-constexpr std::uint64_t kMaxNameLength = 4096;    // longest version or file name read
-constexpr std::uint16_t kFirstNeedIndex = 2;      // 0: local, 1: global (unversioned)
-constexpr std::uint16_t kHiddenBit = 0x8000;      // VERSYM_HIDDEN, ignored for imports
+constexpr std::uint64_t kEntrySize = 16;        // Elf64_Verneed and Elf64_Vernaux
+constexpr std::uint64_t kMaxNameLength = 4096;  // longest version or file name read
+constexpr std::uint16_t kFirstNeedIndex = 2;    // 0: local, 1: global (unversioned)
+constexpr std::uint16_t kHiddenBit = 0x8000;    // VERSYM_HIDDEN, ignored for imports
 
-Result<std::string> name_at(const ByteReader& strings, std::uint32_t offset,
-                            std::uint64_t entry) {
+Result<std::string> name_at(const ByteReader& strings, std::uint32_t offset, std::uint64_t entry) {
   auto text = strings.c_string(offset, kMaxNameLength);
   if (!text) {
     return make_error<std::string>(Status::InvalidInput, "elf.version_needs.name",
@@ -165,8 +164,8 @@ Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
       continue;
     }
     const auto [it, added] = imports.emplace(names[index], need->second);
-    if (!added && (it->second.file != need->second.file ||
-                   it->second.version != need->second.version)) {
+    if (!added &&
+        (it->second.file != need->second.file || it->second.version != need->second.version)) {
       conflicting.insert(names[index]);
     }
   }

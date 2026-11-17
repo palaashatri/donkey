@@ -35,8 +35,7 @@ Analyzed analyze_fixture(const std::string& directory, const std::string& name) 
   return out;
 }
 
-const donkey::Function* function_at(const donkey::AnalysisResult& analysis,
-                                    std::uint64_t address) {
+const donkey::Function* function_at(const donkey::AnalysisResult& analysis, std::uint64_t address) {
   for (const donkey::Function& function : analysis.functions) {
     if (function.address == address) {
       return &function;
@@ -177,11 +176,10 @@ TEST(Analysis, AStubForTheImagesOwnFunctionIsNamedButIsNotAnImport) {
   EXPECT_EQ(stub->stub_target, "own_fn");
   EXPECT_TRUE(stub->import_name.empty());
   EXPECT_EQ(donkey::call_target_name(analyzed.analysis, 0x1810), "own_fn");
-  const auto targets =
-      donkey::plt_stub_targets(analyzed.binary.image, analyzed.binary.data);
+  const auto targets = donkey::plt_stub_targets(analyzed.binary.image, analyzed.binary.data);
   EXPECT_TRUE(targets.contains(0x1810));
-  EXPECT_FALSE(donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data)
-                   .contains(0x1810));
+  EXPECT_FALSE(
+      donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data).contains(0x1810));
 }
 
 // An IRELATIVE slot (an ifunc that binds locally, as libc's strlen and memcpy do): objdump only
@@ -195,6 +193,6 @@ TEST(Analysis, AnIfuncStubIsNamedByItsIfuncSymbol) {
   EXPECT_TRUE(stub->import_name.empty());
   const std::string caller = pseudocode_containing(analyzed, 0x1135);
   EXPECT_NE(caller.find("pick("), std::string::npos) << caller;
-  EXPECT_FALSE(donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data)
-                   .contains(0x1050));
+  EXPECT_FALSE(
+      donkey::plt_stub_imports(analyzed.binary.image, analyzed.binary.data).contains(0x1050));
 }

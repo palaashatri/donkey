@@ -52,6 +52,16 @@ const donkey::Function* function_at(const AnalysisResult& analysis, std::uint64_
   return nullptr;
 }
 
+/// The function at `address`, or an empty one with a test failure when there is none.
+const donkey::Function& function_ref(const AnalysisResult& analysis, std::uint64_t address) {
+  if (const donkey::Function* function = function_at(analysis, address)) {
+    return *function;
+  }
+  ADD_FAILURE() << "no function at " << address;
+  static const donkey::Function none{};
+  return none;
+}
+
 bool has_edge(const AnalysisResult& analysis, std::uint64_t from, std::uint64_t to) {
   for (const donkey::CfgEdge& edge : analysis.cfg.edges) {
     if (edge.from == from && edge.to == to && edge.kind != donkey::CfgEdgeKind::Call) {
@@ -184,10 +194,9 @@ TEST(ElfVersions, RefusesBrokenTables) {
   self[12] = std::byte{0x10};  // next = 16
   EXPECT_EQ(donkey::read_version_needs(self, names).diagnostic().code, "elf.version_needs.loop");
   // The entry limit.
-  EXPECT_EQ(donkey::read_version_needs(version_needs(1, {{2, 11}, {3, 11}}), names, 2)
-                .diagnostic()
-                .code,
-            "elf.version_needs.limit");
+  EXPECT_EQ(
+      donkey::read_version_needs(version_needs(1, {{2, 11}, {3, 11}}), names, 2).diagnostic().code,
+      "elf.version_needs.limit");
 }
 
 // readelf -V on stubs_x86_64: abort's version index names GLIBC_2.2.5 of libc.so.6.
@@ -224,8 +233,7 @@ TEST(Analysis, AVersionedRuntimeImportIsMarkedWithItsEvidence) {
   const donkey::Function* abort_stub = function_at(analyzed.analysis, 0x1060);
   ASSERT_NE(abort_stub, nullptr);
   EXPECT_TRUE(abort_stub->no_return);
-  EXPECT_EQ(abort_stub->no_return_reason,
-            "known-name:abort version:GLIBC_2.2.5 file:libc.so.6");
+  EXPECT_EQ(abort_stub->no_return_reason, "known-name:abort version:GLIBC_2.2.5 file:libc.so.6");
   const donkey::Function* puts_stub = function_at(analyzed.analysis, 0x1070);
   ASSERT_NE(puts_stub, nullptr);
   EXPECT_FALSE(puts_stub->no_return);
@@ -280,16 +288,16 @@ TEST(Cfg, NoReturnCallEndsTheBlock) {
   // Without the mark the bytes after the call are f0's.
   auto plain = donkey::analyze(image, data);
   ASSERT_TRUE(plain.has_value());
-  EXPECT_EQ(function_at(plain.value(), 0x1000)->end_address, 0x100bU);
+  EXPECT_EQ(function_ref(plain.value(), 0x1000).end_address, 0x100bU);
 }
 
 // f0 (0x1000): test edi, edi; je 0x100b; call 0x1010; 0x100b: ret.  The ret after the call is
 // reached by the je, so it stays in f0, but the call has no fall-through edge to it.
 TEST(Cfg, BytesReachedByAnotherPathStayInTheFunction) {
-  auto [data, image] = raw_image({{0x0, {0x85, 0xff, 0x74, 0x07, 0xe8, 0x07, 0x00, 0x00, 0x00,
-                                         0x90, 0x90, 0xc3}},
-                                  {0x10, {0xc3}}},
-                                 0x11, {0x1000, 0x1010});
+  auto [data, image] =
+      raw_image({{0x0, {0x85, 0xff, 0x74, 0x07, 0xe8, 0x07, 0x00, 0x00, 0x00, 0x90, 0x90, 0xc3}},
+                 {0x10, {0xc3}}},
+                0x11, {0x1000, 0x1010});
   AnalysisOptions options;
   options.no_return_targets.insert(0x1010);
   auto result = donkey::analyze(image, data, options);
@@ -307,7 +315,7 @@ TEST(Cfg, BytesReachedByAnotherPathStayInTheFunction) {
 // once f0's mark cuts its fall-through. f2 (0x1020) has a path that returns: not marked.
 TEST(Analysis, PropagationUsesOnlyProvenMarks) {
   auto [data, image] = raw_image(
-      {{0x00, {0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3}},             // f0: call 0x1040; ret
+      {{0x00, {0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3}},              // f0: call 0x1040; ret
        {0x10, {0xe8, 0xeb, 0xff, 0xff, 0xff, 0x31, 0xc0, 0xc3}},  // f1: call 0x1000; xor; ret
        {0x20, {0x85, 0xff, 0x74, 0x05, 0xe8, 0x17, 0x00, 0x00, 0x00, 0xc3}},  // f2
        {0x40, {0xc3}}},
@@ -316,20 +324,20 @@ TEST(Analysis, PropagationUsesOnlyProvenMarks) {
   options.no_return_targets.insert(0x1040);
   auto result = donkey::analyze(image, data, options);
   ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
-  EXPECT_TRUE(function_at(result.value(), 0x1000)->no_return);
-  EXPECT_EQ(function_at(result.value(), 0x1000)->no_return_reason,
+  EXPECT_TRUE(function_ref(result.value(), 0x1000).no_return);
+  EXPECT_EQ(function_ref(result.value(), 0x1000).no_return_reason,
             "propagated:every path ends in a call that does not return");
-  EXPECT_TRUE(function_at(result.value(), 0x1010)->no_return);
-  EXPECT_FALSE(function_at(result.value(), 0x1020)->no_return);
+  EXPECT_TRUE(function_ref(result.value(), 0x1010).no_return);
+  EXPECT_FALSE(function_ref(result.value(), 0x1020).no_return);
   // The mark is not taken from the target's own `ret`: 0x1040 is the caller's assumption, and
   // the analysis does not mark it itself.
-  EXPECT_FALSE(function_at(result.value(), 0x1040)->no_return);
+  EXPECT_FALSE(function_ref(result.value(), 0x1040).no_return);
   // Off: nothing is marked.
   options.no_return_analysis = false;
   options.no_return_targets.clear();
   auto off = donkey::analyze(image, data, options);
   ASSERT_TRUE(off.has_value());
-  EXPECT_FALSE(function_at(off.value(), 0x1000)->no_return);
+  EXPECT_FALSE(function_ref(off.value(), 0x1000).no_return);
 }
 
 // --- IR -----------------------------------------------------------------------------------------
@@ -492,8 +500,8 @@ donkey::IrFunction no_return_arm_function() {
 TEST(Ir, ANoReturnBlockIsStructured) {
   const donkey::IrFunction function = no_return_arm_function();
   const auto verified = donkey::verify_ir(function);
-  ASSERT_TRUE(verified.has_value()) << verified.diagnostic().code << ": "
-                                    << verified.diagnostic().message;
+  ASSERT_TRUE(verified.has_value())
+      << verified.diagnostic().code << ": " << verified.diagnostic().message;
   const auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
   EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();

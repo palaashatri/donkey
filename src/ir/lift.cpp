@@ -2834,8 +2834,8 @@ bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
     return false;
   }
   const bool direct = call.a.kind == IrOperandKind::Constant && call.a.constant != 0;
-  const bool slot = call.a.kind == IrOperandKind::Memory && call.a.reg.empty() &&
-                    call.a.index.empty();
+  const bool slot =
+      call.a.kind == IrOperandKind::Memory && call.a.reg.empty() && call.a.index.empty();
   if ((!direct && !slot) || !analysis.no_return.contains(call.a.constant)) {
     return false;
   }
@@ -3451,7 +3451,8 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
     if (ends_unreachable && !returns) {
       lifted.value().partial = true;
       lifted.value().notes.push_back(
-          "no path returns: every path ends in a call that does not return, so nothing is compared");
+          "no path returns: every path ends in a call that does not return, so nothing is "
+          "compared");
     }
     name_call_targets(analysis, function, lifted.value());
     // An import stub prints under its import's own name (`abort`, not `abort@plt`), so the

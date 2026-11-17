@@ -3,9 +3,9 @@
 #include <cstdint>
 #include <map>
 #include <set>
-#include <string_view>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "donkey/analysis/cfg.h"

@@ -911,8 +911,7 @@ Result<bool> verify_ir(const IrFunction& function) {
       // G24-T3: a no-return call is followed by an unreachable Return, the block's last statement,
       // and an unreachable Return follows only such a call.
       if (statement.op == IrOp::Call && statement.no_return &&
-          (index + 2 != block.statements.size() ||
-           block.statements[index + 1].op != IrOp::Return ||
+          (index + 2 != block.statements.size() || block.statements[index + 1].op != IrOp::Return ||
            !block.statements[index + 1].unreachable)) {
         return fail("ir.no_return_call_not_last",
                     "a call that does not return is not followed by the block's unreachable end");

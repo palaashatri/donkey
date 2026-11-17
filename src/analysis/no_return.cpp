@@ -65,9 +65,14 @@ constexpr std::array<KnownName, 33> kKnownNames{{
 
 /// The CRT names that also never return when a Windows C runtime provides them.
 bool is_windows_crt_name(std::string_view name) {
-  static constexpr std::array<std::string_view, 8> kCrt{
-      "abort", "exit", "_exit", "_Exit", "quick_exit", "longjmp", "_CxxThrowException",
-      "_invalid_parameter_noinfo_noreturn"};
+  static constexpr std::array<std::string_view, 8> kCrt{"abort",
+                                                        "exit",
+                                                        "_exit",
+                                                        "_Exit",
+                                                        "quick_exit",
+                                                        "longjmp",
+                                                        "_CxxThrowException",
+                                                        "_invalid_parameter_noinfo_noreturn"};
   return std::find(kCrt.begin(), kCrt.end(), name) != kCrt.end();
 }
 

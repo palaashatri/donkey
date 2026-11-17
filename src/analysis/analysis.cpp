@@ -1,9 +1,9 @@
 #include "donkey/analysis/analysis.h"
 
+#include "donkey/analysis/no_return.h"
 #include "donkey/binary/eh_frame.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
-#include "donkey/analysis/no_return.h"
 
 #include <algorithm>
 #include <iterator>
@@ -110,7 +110,7 @@ void name_thunks(AnalysisResult& result) {
     if (forwards.contains(target) || end.name == synthetic_function_name(target)) {
       continue;  // a cycle, or a target with no name of its own: the thunk keeps sub_<hex>
     }
-    thunk.name = "j_" + (!end.import_name.empty()  ? end.import_name
+    thunk.name = "j_" + (!end.import_name.empty()   ? end.import_name
                          : !end.stub_target.empty() ? end.stub_target
                                                     : end.name);
   }
@@ -856,8 +856,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   }
 
   if (options.build_control_flow) {
-    auto graph =
-        build_control_flow_graph(image, result.instructions, result.functions, walk, file);
+    auto graph = build_control_flow_graph(image, result.instructions, result.functions, walk, file);
     // Propagation (owner decision 1): a function of the image whose every path ends in a call
     // that does not return is itself no-return. Each round rebuilds the graph with the new marks,
     // so code after a call to a newly marked function leaves its callers; at most 8 rounds.
@@ -872,8 +871,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
           function.has_extent = result.cfg.functions[found->second].has_extent;
         }
       }
-      const std::vector<std::uint64_t> marked =
-          propagate_no_return(result, walk.no_return_targets);
+      const std::vector<std::uint64_t> marked = propagate_no_return(result, walk.no_return_targets);
       if (marked.empty()) {
         graph = Result<ControlFlowGraph>(std::move(result.cfg));
         result.cfg = ControlFlowGraph{};
@@ -1029,13 +1027,14 @@ std::string call_target_name(const AnalysisResult& analysis, std::uint64_t addre
       analysis.functions.begin(), analysis.functions.end(), address,
       [](const Function& function, std::uint64_t value) { return function.address < value; });
   if (found == analysis.functions.end() || found->address != address) {
-    found = std::find_if(analysis.functions.begin(), analysis.functions.end(),
-                         [address](const Function& function) { return function.address == address; });
+    found =
+        std::find_if(analysis.functions.begin(), analysis.functions.end(),
+                     [address](const Function& function) { return function.address == address; });
     if (found == analysis.functions.end()) {
       return {};
     }
   }
-  const std::string& name = !found->import_name.empty() ? found->import_name
+  const std::string& name = !found->import_name.empty()   ? found->import_name
                             : !found->stub_target.empty() ? found->stub_target
                                                           : found->name;
   if (name == synthetic_function_name(address) || !is_c_identifier(name)) {

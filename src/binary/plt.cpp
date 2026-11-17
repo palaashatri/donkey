@@ -17,11 +17,11 @@ namespace {
 using binary::detail::kMaxRelocationEntries;
 using binary::detail::kRelaEntrySize;
 
-constexpr std::uint64_t kJumpSlotX86_64 = 7;      // R_X86_64_JUMP_SLOT
-constexpr std::uint64_t kGlobDatX86_64 = 6;       // R_X86_64_GLOB_DAT
-constexpr std::uint64_t kJumpSlotAArch64 = 1026;  // R_AARCH64_JUMP_SLOT
-constexpr std::uint64_t kIRelativeX86_64 = 37;    // R_X86_64_IRELATIVE
-constexpr std::uint64_t kIRelativeAArch64 = 1032; // R_AARCH64_IRELATIVE
+constexpr std::uint64_t kJumpSlotX86_64 = 7;       // R_X86_64_JUMP_SLOT
+constexpr std::uint64_t kGlobDatX86_64 = 6;        // R_X86_64_GLOB_DAT
+constexpr std::uint64_t kJumpSlotAArch64 = 1026;   // R_AARCH64_JUMP_SLOT
+constexpr std::uint64_t kIRelativeX86_64 = 37;     // R_X86_64_IRELATIVE
+constexpr std::uint64_t kIRelativeAArch64 = 1032;  // R_AARCH64_IRELATIVE
 
 /// The names the image imports: its undefined dynamic symbols. A relocation can also name a symbol
 /// the image defines, and that is not an import.
@@ -131,8 +131,7 @@ std::map<std::uint64_t, std::string> stub_names(const BinaryImage& image,
     }
     const std::uint64_t irelative = aarch64 ? kIRelativeAArch64 : kIRelativeX86_64;
     for (const Section& section : image.sections) {
-      if ((section.name != ".rela.plt" && section.name != ".rela.dyn") ||
-          !section.has_file_data) {
+      if ((section.name != ".rela.plt" && section.name != ".rela.dyn") || !section.has_file_data) {
         continue;
       }
       const std::uint64_t count = section.file_size / kRelaEntrySize;

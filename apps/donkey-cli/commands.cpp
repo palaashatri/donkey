@@ -694,7 +694,6 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
         if (function.no_return) {
           std::printf("%-18s   no return: %s\n", "", function.no_return_reason.c_str());
         }
-
       }
       std::printf("(%zu functions)\n", analysis.functions.size());
     }
