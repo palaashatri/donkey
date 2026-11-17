@@ -69,7 +69,8 @@ std::optional<std::uint64_t> aarch64_plt_slot(const ByteReader& reader, std::uin
 
 }  // namespace
 
-/// Stub address -> imported name, for the PLT entries that jump through a JUMP_SLOT.
+/// Stub address -> imported name, for the PLT entries that jump through a JUMP_SLOT, and the
+/// `.plt.got` entries that jump through a GLOB_DAT slot.
 std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
                                                       std::span<const std::byte> data) {
   std::map<std::uint64_t, std::string> stubs;
@@ -151,6 +152,48 @@ std::map<std::uint64_t, std::string> plt_stub_imports(const BinaryImage& image,
           stubs[section.address + entry] = it->second;
         }
         break;
+      }
+    }
+  }
+  // x86-64 `.plt.got`: lazy binding is off for these imports, so each entry jumps through a
+  // GLOB_DAT slot (`ff 25 disp32`, after an optional ENDBR64 or BND prefix) and has no JUMP_SLOT.
+  // Entries are 8 bytes (`jmp *slot(%rip); xchg %ax,%ax`) or 16 with IBT. Each 8-byte position is
+  // searched; a match needs a slot that a GLOB_DAT for an import names, so other bytes get no name.
+  if (!aarch64) {
+    const std::map<std::uint64_t, std::string> slots = got_import_slots(image, data);
+    for (const Section& section : image.sections) {
+      if (section.name != ".plt.got" || !section.has_file_data) {
+        continue;
+      }
+      // An entry starts at an 8-byte boundary; its jump is in its first 8 bytes. The next entry
+      // starts at the first 8-byte boundary after the jump, which steps over a 16-byte IBT entry.
+      std::uint64_t entry = 0;
+      while (entry + 6 <= section.file_size) {
+        std::optional<std::uint64_t> jump;
+        for (std::uint64_t at = entry; at < entry + 8 && at + 6 <= section.file_size; ++at) {
+          const auto op0 = reader.u8(section.file_offset + at);
+          const auto op1 = reader.u8(section.file_offset + at + 1);
+          if (op0 && op1 && op0.value() == 0xff && op1.value() == 0x25) {
+            jump = at;
+            break;
+          }
+        }
+        if (!jump) {
+          entry += 8;
+          continue;
+        }
+        const auto disp = reader.u32(section.file_offset + *jump + 2, Endian::Little);
+        if (!disp) {
+          break;
+        }
+        const std::uint64_t next = section.address + *jump + 6;
+        const std::uint64_t got =
+            next + static_cast<std::uint64_t>(static_cast<std::int64_t>(
+                       static_cast<std::int32_t>(static_cast<std::uint32_t>(disp.value()))));
+        if (const auto it = slots.find(got); it != slots.end()) {
+          stubs[section.address + entry] = it->second;
+        }
+        entry = (*jump + 6 + 7) & ~std::uint64_t{7};
       }
     }
   }

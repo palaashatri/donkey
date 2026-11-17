@@ -144,6 +144,7 @@ add_executable(donkey_unit_tests
   unit/rtti_msvc_test.cpp
   unit/link_test.cpp
   unit/link_calls_test.cpp
+  unit/import_names_test.cpp
   unit/link_aarch64_test.cpp
   unit/condition_test.cpp
   unit/string_literals_test.cpp
@@ -445,7 +446,7 @@ set_tests_properties(cli.functions_elf_json PROPERTIES
 add_test(NAME cli.xrefs_elf_json
          COMMAND donkey-cli xrefs ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.xrefs_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"from\": \"0x400104\", \"to\": \"0x400109\", \"kind\": \"call\"")
+  PASS_REGULAR_EXPRESSION "\"from\": \"0x400104\", \"to\": \"0x400109\", \"to_name\": \"[^\"]*\", \"kind\": \"call\"")
 
 add_test(NAME cli.analyze_elf_json
          COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
@@ -1146,3 +1147,23 @@ set_tests_properties(cli.link_reports_calls_through_got_slots PROPERTIES
 add_test(NAME cli.link_needs_a_library
          COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/link/libconsumer.so)
 set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
+
+# G24-T4: import stubs are listed by their import (`abort@plt`), and the decompiler prints a call
+# to one by the import's own name. Fixture: tests/fixtures/stubs (PROVENANCE.md there).
+add_test(NAME cli.functions_lists_import_stubs_by_name
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.functions_lists_import_stubs_by_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\", \"address\": \"0x1060\".*\"import\": \"abort\"")
+add_test(NAME cli.decompile_prints_import_calls_by_name
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+set_tests_properties(cli.decompile_prints_import_calls_by_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\n    abort\\(\\);\n"
+  FAIL_REGULAR_EXPRESSION "sub_1060\\(|abort@plt\\(")
+add_test(NAME cli.xrefs_name_import_stubs
+         COMMAND donkey-cli xrefs ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.xrefs_name_import_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"from\": \"0x1179\", \"to\": \"0x1060\", \"to_name\": \"abort@plt\"")
+add_test(NAME cli.callgraph_names_import_stubs
+         COMMAND donkey-cli callgraph ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"callee\": \"0x1060\", \"callee_name\": \"abort@plt\"")

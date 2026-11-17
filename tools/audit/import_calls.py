@@ -15,7 +15,9 @@ per binary and counts, over every sampled function:
     is not determined by the definitions that reach the return";
   - calls through a GOT slot (`-fno-plt`), printed as `((void (*)(void))*(u64 *)(0x...))()`;
   - calls printed by a no-return import's name (`abort(`), the form G24-T4 prints, so a `return` after
-    one is still counted once stubs are named.
+    one is still counted once stubs are named;
+  - calls printed by the name of any import the binary has a stub or a GOT slot for (`puts(`), the
+    form G24-T4 prints in place of `sub_<hex>(`.
 
 A sampled address that the CLI does not return is an error: the measurement is refused, not saved
 with fewer functions.
@@ -36,6 +38,7 @@ NO_RETURN = {"abort", "exit", "_exit", "_Exit", "quick_exit", "__stack_chk_fail"
 SOMETIMES_NO_RETURN = {"error"}
 # A call printed by the import's own name, as G24-T4 prints it.
 NAMED_NO_RETURN_CALL = re.compile(r"(?<![\w.])(" + "|".join(sorted(NO_RETURN)) + r")\(")
+CALL_BY_NAME = re.compile(r"(?<![\w.>])([A-Za-z_]\w*)\(")
 RETURN_NOTE = "the returned register is not determined by the definitions that reach the return"
 STUB_SECTIONS = (".plt", ".plt.sec", ".plt.got")
 GOT_SECTIONS = (".got", ".got.plt")
@@ -135,6 +138,7 @@ def measure(args):
             gots = [ranges[name] for name in GOT_SECTIONS if name in ranges]
             names = stub_names(copy)
             slots = got_slot_names(copy)
+            import_names = set(names.values()) | set(slots.values())
             decompiled = json.loads(run([args.cli, "decompile", copy, "--json",
                                          "--max-functions", "1000000"]))
         returned = {int(function["address"], 16) for function in decompiled["functions"]}
@@ -177,6 +181,10 @@ def measure(args):
                     following = lines[index + 1] if index + 1 < len(lines) else ""
                     if following.startswith("return"):
                         counts["no_return_sites_followed_by_return"] += 1
+                for m in CALL_BY_NAME.finditer(line):
+                    if m.group(1) in import_names:
+                        counts["import_call_sites_printed_by_name"] += 1
+                        called.add(m.group(1))
                 for m in re.finditer(r"\*\(u64 \*\)\((0x[0-9a-f]+)\)\)\(", line):
                     slot = int(m.group(1), 16)
                     if inside(slot, gots):

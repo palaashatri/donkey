@@ -3361,6 +3361,37 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
 
 }  // namespace
 
+namespace {
+
+/// Fills `call_names` (G24-T4): the name of each direct call target that has one, and the import
+/// of each GOT slot an indirect call reads (`call *slot(%rip)`, a `-fno-plt` call).
+void name_call_targets(const AnalysisResult& analysis, const Function& lifted_function,
+                       IrFunction& function) {
+  for (const IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.op != IrOp::Call) {
+        continue;
+      }
+      const IrOperand& target = statement.a;
+      if (target.kind == IrOperandKind::Constant && target.constant != 0) {
+        if (std::string name = call_target_name(analysis, target.constant); !name.empty()) {
+          function.call_names.emplace(target.constant, std::move(name));
+        }
+      } else if (target.kind == IrOperandKind::Memory && target.reg.empty() &&
+                 target.index.empty() && lifted_function.import_name.empty()) {
+        // An import stub's own jump through its slot keeps its slot form: printed by name, it
+        // would read as a call of the stub to itself.
+        if (const auto slot = analysis.import_slots.find(target.constant);
+            slot != analysis.import_slots.end() && is_c_identifier(slot->second)) {
+          function.call_names.emplace(target.constant, slot->second);
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
 Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult& analysis,
                                  const Function& function, const LiftOptions& options) {
   LiftOptions shared = options;
@@ -3371,7 +3402,18 @@ Result<IrFunction> lift_function(const BinaryImage& image, const AnalysisResult&
   // is a cycle, and its direct callees may be as tall as kMaxCallHeight.
   PathFrame frame(CallSummaryAccess::impl(*shared.call_summaries), function.address,
                   kMaxCallHeight + 1);
-  return lift_body(image, analysis, function, shared);
+  auto lifted = lift_body(image, analysis, function, shared);
+  if (lifted) {
+    name_call_targets(analysis, function, lifted.value());
+    // An import stub prints under its import's own name (`abort`, not `abort@plt`), so the
+    // pseudocode stays C; the note says what the function is.
+    if (!function.import_name.empty() && is_c_identifier(function.import_name)) {
+      lifted.value().name = function.import_name;
+      lifted.value().notes.push_back("import stub: jumps to the imported function " +
+                                     function.import_name + " through its GOT slot");
+    }
+  }
+  return lifted;
 }
 
 }  // namespace donkey

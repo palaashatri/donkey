@@ -38,7 +38,8 @@ GraphLayout layout_function_graph(const ControlFlowGraph& cfg, FunctionId functi
   std::vector<const CfgEdge*> edges;
   edges.reserve(cfg.edges.size());
   for (const CfgEdge& edge : cfg.edges) {
-    if (edge.to != 0 && edge.kind != CfgEdgeKind::Call) {
+    if (edge.to != 0 && edge.kind != CfgEdgeKind::Call &&
+        edge.kind != CfgEdgeKind::TailCall) {
       edges.push_back(&edge);
     }
   }

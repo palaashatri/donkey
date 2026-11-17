@@ -27,6 +27,14 @@ struct Function {
   /// The start is an FDE of the image's `.eh_frame` (G23-T1): the compiler's unwind table names it.
   bool from_unwind = false;
   bool estimated = true;
+  /// The function is an import stub (G24-T4): a PLT entry (`.plt`, `.plt.sec`, `.plt.got`) whose
+  /// relocation names the import it jumps to. `name` is then `<import>@plt`, and this field holds
+  /// the import's own name, which the pseudocode prints as the call target.
+  std::string import_name;
+  /// The function is a thunk (G24-T4): its only instruction is an unconditional direct jump to
+  /// another function's start. `name` is then `j_` and the target's name, unless a symbol names it.
+  bool thunk = false;
+  std::uint64_t thunk_target = 0;
 };
 
 struct BasicBlock {
@@ -48,6 +56,9 @@ enum class CfgEdgeKind : std::uint8_t {
   Indirect,
   Call,
   JumpTable,  ///< one recovered target of a jump table
+  /// An unconditional direct jump to another function's start or to an import stub (G24-T4): the
+  /// target is not followed, because its code belongs to that function.
+  TailCall,
 };
 
 const char* cfg_edge_kind_name(CfgEdgeKind kind) noexcept;
