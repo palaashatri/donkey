@@ -109,6 +109,10 @@ struct BinaryImage {
   /// The Mach-O LC_UUID as 32 lowercase hex digits, which a .dSYM file must share. Empty when the
   /// image has none (every other format).
   std::string uuid;
+  /// The Mach-O LC_FUNCTION_STARTS table's place in the file (G23-T3), checked to lie inside it.
+  /// Zero size when the image has none (every other format too).
+  std::uint64_t function_starts_offset = 0;
+  std::uint64_t function_starts_size = 0;
 
   std::vector<Segment> segments;
   std::vector<Section> sections;

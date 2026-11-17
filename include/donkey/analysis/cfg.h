@@ -26,6 +26,8 @@ struct Function {
   bool from_symbol = false;
   /// The start is an FDE of the image's `.eh_frame` (G23-T1): the compiler's unwind table names it.
   bool from_unwind = false;
+  /// The start is in the Mach-O LC_FUNCTION_STARTS table (G23-T3): the linker lists it.
+  bool from_function_starts = false;
   bool estimated = true;
   /// The function is an import stub (G24-T4): a PLT entry (`.plt`, `.plt.sec`, `.plt.got`) whose
   /// relocation names the import it jumps to. `name` is then `<import>@plt`, and this field holds
