@@ -57,13 +57,13 @@ TEST(TypeLibMake, SplitsTopLevelDeclarations) {
 TEST(TypeLibMake, KeepsWhatParsesAndListsTheRest) {
   const char* input =
       "typedef int myint;\n"
-      "extern int counter;\n"                          // a variable: not a type
+      "extern int counter;\n"  // a variable: not a type
       "struct s { myint a; };\n"
-      "static int twice(int a) { return a * 2; }\n"    // a definition
+      "static int twice(int a) { return a * 2; }\n"  // a definition
       "int use(struct s *);\n"
-      "int use(struct s *);\n"                         // declared again
-      "unknown_t broken(void);\n"                      // an unknown type
-      "struct t { struct gone member; };\n";           // a member of an unknown struct
+      "int use(struct s *);\n"                // declared again
+      "unknown_t broken(void);\n"             // an unknown type
+      "struct t { struct gone member; };\n";  // a member of an unknown struct
   auto made = donkey::make_type_library(input, test_options());
   ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
   EXPECT_EQ(made.value().kept, 3U);

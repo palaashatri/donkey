@@ -926,3 +926,123 @@ TEST(Cfg, ManyFunctionsAreNamedAndMergedInLinearTime) {
   EXPECT_LT(std::chrono::duration_cast<std::chrono::seconds>(elapsed).count(), 60)
       << "analysis took longer than a minute";
 }
+
+// G24-T4: an unconditional jump to another function's start is recorded as a tail call; a jump
+// into code no function starts at stays a branch.
+TEST(Cfg, JumpToAnotherFunctionIsATailCall) {
+  // f0 (0x1000): jmp 0x1010.  f1 (0x1010): ret.
+  auto [data, image] = image_with_functions({{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}},
+                                            0x11, {0x1000, 0x1010});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  int tail = 0;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    if (edge.from == 0x1000) {
+      EXPECT_EQ(edge.to, 0x1010U);
+      EXPECT_EQ(edge.kind, donkey::CfgEdgeKind::TailCall);
+      ++tail;
+    }
+  }
+  EXPECT_EQ(tail, 1);
+  EXPECT_STREQ(donkey::cfg_edge_kind_name(donkey::CfgEdgeKind::TailCall), "tail_call");
+}
+
+TEST(Cfg, JumpBackToTheSeedEntryStaysInsideTheFunction) {
+  // 0x1000 (the entry): ret. 0x1018 (a symbol): jmp 0x1008. 0x1008 (no seed): jmp 0x1018. The
+  // function at 0x1018 takes in 0x1008, its lowest address; the jump back to its seed entry is not
+  // a tail call.
+  auto [data, image] = image_with_functions({{0x0, {0xc3}},
+                                             {0x8, {0xe9, 0x0b, 0x00, 0x00, 0x00}},
+                                             {0x18, {0xe9, 0xeb, 0xff, 0xff, 0xff}}},
+                                            0x20, {0x1018});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  int jumps = 0;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    if (edge.from == 0x1008 || edge.from == 0x1018) {
+      EXPECT_EQ(edge.kind, donkey::CfgEdgeKind::Jump) << std::hex << edge.from;
+      ++jumps;
+    }
+  }
+  EXPECT_EQ(jumps, 2);
+}
+
+TEST(Cfg, JumpIntoUnknownCodeIsABranch) {
+  // f0 (0x1000): jmp 0x1010; 0x1010: ret, which no function starts at.
+  auto [data, image] =
+      image_with_functions({{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}}, 0x11, {0x1000});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  int branch = 0;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    if (edge.from == 0x1000) {
+      EXPECT_EQ(edge.kind, donkey::CfgEdgeKind::Jump);
+      ++branch;
+    }
+  }
+  EXPECT_EQ(branch, 1);
+}
+
+namespace {
+
+const donkey::Function* function_named_at(const donkey::AnalysisResult& result,
+                                          std::uint64_t address) {
+  for (const donkey::Function& function : result.functions) {
+    if (function.address == address) {
+      return &function;
+    }
+  }
+  return nullptr;
+}
+
+}  // namespace
+
+// A function that is only a jump to another function is a thunk, named after its target.
+TEST(Analysis, ThunkTakesItsTargetsName) {
+  // 0x1000 (the entry point, no symbol): endbr64; jmp 0x1010.  0x1010 (symbol f0): ret.
+  auto [data, image] = image_with_functions(
+      {{0x0, {0xf3, 0x0f, 0x1e, 0xfa, 0xe9, 0x07, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}}, 0x11,
+      {0x1010});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* thunk = function_named_at(result.value(), 0x1000);
+  ASSERT_NE(thunk, nullptr);
+  EXPECT_TRUE(thunk->thunk);
+  EXPECT_EQ(thunk->thunk_target, 0x1010U);
+  EXPECT_EQ(thunk->name, "j_f0");
+  EXPECT_EQ(donkey::call_target_name(result.value(), 0x1000), "j_f0");
+  const donkey::Function* target = function_named_at(result.value(), 0x1010);
+  ASSERT_NE(target, nullptr);
+  EXPECT_FALSE(target->thunk);
+}
+
+// A thunk with a symbol keeps the symbol's name; a chain of thunks takes the name at its end; a
+// function that does more than jump is not a thunk.
+TEST(Analysis, ThunkChainsAndNamedThunks) {
+  // 0x1000 (entry): jmp 0x1010.  0x1010 (call target, no symbol): jmp 0x1020.
+  // 0x1020 (symbol f0): ret.  0x1030 (symbol f1): jmp 0x1020.
+  // 0x1040 (symbol f2): nop; jmp 0x1020, two instructions, so not a thunk.
+  auto [data, image] = image_with_functions({{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}},
+                                             {0x10, {0xe9, 0x0b, 0x00, 0x00, 0x00}},
+                                             {0x20, {0xc3}},
+                                             {0x30, {0xe9, 0xeb, 0xff, 0xff, 0xff}},
+                                             {0x40, {0x90, 0xe9, 0xda, 0xff, 0xff, 0xff}}},
+                                            0x50, {0x1020, 0x1030, 0x1040});
+  // 0x1010 is a seed only through a call: give it one from a user start.
+  donkey::AnalysisOptions options;
+  options.user_function_starts.push_back(0x1010);
+  auto result = donkey::analyze(image, data, options);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  const donkey::Function* first = function_named_at(result.value(), 0x1000);
+  ASSERT_NE(first, nullptr);
+  EXPECT_TRUE(first->thunk);
+  EXPECT_EQ(first->thunk_target, 0x1010U);
+  EXPECT_EQ(first->name, "j_f0");
+  const donkey::Function* named = function_named_at(result.value(), 0x1030);
+  ASSERT_NE(named, nullptr);
+  EXPECT_TRUE(named->thunk);
+  EXPECT_EQ(named->name, "f1");
+  const donkey::Function* longer = function_named_at(result.value(), 0x1040);
+  ASSERT_NE(longer, nullptr);
+  EXPECT_FALSE(longer->thunk);
+}

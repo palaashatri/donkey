@@ -67,7 +67,7 @@ inline constexpr std::string_view kTypeLibraryGenerator = "donkey-cli typelib ma
 /// refuses, found when the result is read back), `typelib_make.empty` (no declaration was kept),
 /// `typelib_make.too_many_skipped` (the skipped list does not fit the header bounds), and any
 /// refusal of read_type_library on the result.
-[[nodiscard]] Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
-                                                              const TypeLibraryMakeOptions& options);
+[[nodiscard]] Result<TypeLibraryMakeResult> make_type_library(
+    std::string_view preprocessed, const TypeLibraryMakeOptions& options);
 
 }  // namespace donkey

@@ -280,6 +280,11 @@ struct IrFunction {
   std::vector<IrLocalVariable> local_variables;
   /// Structures recovered behind pointer parameters (recover_pointer_structs).
   std::vector<IrPointerStruct> pointer_structs;
+  /// Names the printer shows for call targets (G24-T4), keyed by the called address, or for a call
+  /// through a GOT slot (`call *slot(%rip)`), by the slot's address. Each name is a C identifier:
+  /// an import's own name (`abort`), or a function's symbol or thunk name. A target with no entry
+  /// prints as `sub_<hex>`. Display only: the IR and the evaluator use the address.
+  std::map<std::uint64_t, std::string> call_names;
 };
 
 /// Infer structure layouts behind pointer parameters: a parameter register
