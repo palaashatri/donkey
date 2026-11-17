@@ -16,7 +16,7 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 7;
+constexpr int kProjectSchemaVersion = 8;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
@@ -94,6 +94,8 @@ struct TypeApplication {
   TypeApplicationKind kind = TypeApplicationKind::FunctionPrototype;
   std::uint64_t address = 0;
   TypeId type_id{};
+  /// Who made the application (G22-T3): the user, DWARF, a PDB, inference, or a type library.
+  TypeProvenance source = TypeProvenance::User;
 };
 
 struct ProjectImage {
@@ -194,8 +196,11 @@ class Project {
   [[nodiscard]] Result<std::vector<TypeApplication>> type_applications(std::int64_t image_id) const;
 
   /// Apply a type to an address of an image. A type id of zero removes the application.
+  /// A library application (`source` Library) does not replace an application of another source;
+  /// any other source replaces a library one.
   [[nodiscard]] Result<void> set_type_application(std::int64_t image_id, TypeApplicationKind kind,
-                                                  std::uint64_t address, TypeId type_id);
+                                                  std::uint64_t address, TypeId type_id,
+                                                  TypeProvenance source = TypeProvenance::User);
 
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;

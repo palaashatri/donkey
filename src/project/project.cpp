@@ -322,6 +322,14 @@ CREATE TABLE local_names (
 PRAGMA user_version=7;
 )sql";
 
+/// v8 records where each type application came from (G22-T3): 0 user, 1 DWARF, 2 PDB, 3 inferred,
+/// 4 a type library, as TypeProvenance numbers them. Existing rows were made by the user.
+constexpr const char* kMigrateV7ToV8 = R"sql(
+ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0
+  CHECK (source BETWEEN 0 AND 4);
+PRAGMA user_version=8;
+)sql";
+
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
   return Diagnostic::make(Status::InternalError, std::move(code),
@@ -617,6 +625,20 @@ Result<Project> Project::open(const std::string& path) {
                                    "migrate v6->v7: " + message);
       }
       schema = 7;
+    }
+    if (schema == 7) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v7->v8: " + message);
+      }
+      schema = 8;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -1369,7 +1391,7 @@ Result<std::vector<TypeApplication>> Project::type_applications(std::int64_t ima
   }
   sqlite3* db = impl_->db;
   Statement rows(db,
-                 "SELECT kind, address, type_id FROM type_applications WHERE image_id = ?1 "
+                 "SELECT kind, address, type_id, source FROM type_applications WHERE image_id = ?1 "
                  "ORDER BY address, kind");
   rows.bind(1, image_id);
   if (!rows.ok()) {
@@ -1383,6 +1405,9 @@ Result<std::vector<TypeApplication>> Project::type_applications(std::int64_t ima
     application.kind = static_cast<TypeApplicationKind>(rows.integer(0));
     application.address = static_cast<std::uint64_t>(rows.integer(1));
     application.type_id = TypeId(static_cast<std::uint64_t>(rows.integer(2)));
+    const std::int64_t source = rows.integer(3);
+    application.source =
+        source >= 0 && source <= 4 ? static_cast<TypeProvenance>(source) : TypeProvenance::User;
     out.push_back(application);
   }
   if (!rows.done()) {
@@ -1394,7 +1419,8 @@ Result<std::vector<TypeApplication>> Project::type_applications(std::int64_t ima
 }
 
 Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicationKind kind,
-                                           std::uint64_t address, TypeId type_id) {
+                                           std::uint64_t address, TypeId type_id,
+                                           TypeProvenance source) {
   if (!is_open()) {
     return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
   }
@@ -1451,13 +1477,28 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
     return make_void_error(Status::InvalidInput, "project.image_not_found",
                            "no image with id " + std::to_string(image_id));
   }
+  // A library application never replaces one the user, DWARF or a PDB made (G22-T3); any other
+  // source replaces a library one.
+  if (source == TypeProvenance::Library) {
+    Statement current(db,
+                      "SELECT source FROM type_applications WHERE image_id = ?1 AND address = ?2 "
+                      "AND kind = ?3");
+    current.bind(1, image_id);
+    current.bind(2, static_cast<std::int64_t>(address));
+    current.bind(3, static_cast<std::int64_t>(kind));
+    if (current.ok() && current.step() &&
+        current.integer(0) != static_cast<std::int64_t>(TypeProvenance::Library)) {
+      return Result<void>();
+    }
+  }
   Statement insert(db,
-                   "INSERT OR REPLACE INTO type_applications(image_id, address, kind, type_id) "
-                   "VALUES(?1, ?2, ?3, ?4)");
+                   "INSERT OR REPLACE INTO type_applications(image_id, address, kind, type_id, "
+                   "source) VALUES(?1, ?2, ?3, ?4, ?5)");
   insert.bind(1, image_id);
   insert.bind(2, static_cast<std::int64_t>(address));
   insert.bind(3, static_cast<std::int64_t>(kind));
   insert.bind(4, static_cast<std::int64_t>(type_id.value()));
+  insert.bind(5, static_cast<std::int64_t>(source));
   if (!insert.execute_statement()) {
     return make_void_error(
         Status::InternalError, "project.type_application_failed",

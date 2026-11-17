@@ -1033,7 +1033,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1165,7 +1165,7 @@ TEST(Types, MigratesFromSchemaV4) {
   {
     auto project = Project::create(path.str());
     ASSERT_TRUE(project.has_value());
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
   }
   // A v4 project has no type tables; drop them and set the version back to 4.
   {
@@ -1181,7 +1181,7 @@ TEST(Types, MigratesFromSchemaV4) {
   }
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 7);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto empty = reopened.value().types();
   ASSERT_TRUE(empty.has_value());
   EXPECT_EQ(empty.value().size(), 0U);
@@ -1868,7 +1868,7 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
 
   auto project = Project::open(path.str());
   ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-  EXPECT_EQ(project.value().schema_version(), 7);
+  EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
   auto images = project.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -1897,7 +1897,7 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
                   .has_value());
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 7);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto rows = reopened.value().annotations(image_id);
   ASSERT_TRUE(rows.has_value());
   EXPECT_EQ(rows.value().size(), 5U);
@@ -1916,7 +1916,7 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
     auto images = project.value().images();
     ASSERT_TRUE(images.has_value());
     ASSERT_EQ(images.value().size(), 1U);
@@ -1927,15 +1927,18 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE local_names; PRAGMA user_version=6", nullptr, nullptr,
-                           nullptr),
+    // Version 8's column goes too, so the file is what version 6 wrote.
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "DROP TABLE local_names; ALTER TABLE type_applications DROP COLUMN "
+                           "source; PRAGMA user_version=6",
+                           nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
   }
 
   auto migrated = Project::open(path.str());
   ASSERT_TRUE(migrated.has_value()) << migrated.diagnostic().message;
-  EXPECT_EQ(migrated.value().schema_version(), 7);
+  EXPECT_EQ(migrated.value().schema_version(), donkey::kProjectSchemaVersion);
   auto rows = migrated.value().annotations(image_id);
   ASSERT_TRUE(rows.has_value());
   EXPECT_EQ(rows.value().size(), 3U);
@@ -2062,4 +2065,86 @@ TEST(Project, ReplacesEveryLocalNameAtOnceAndKeepsThePreviousSetWhenRefused) {
   auto cleared = project.value().local_names(image_id);
   ASSERT_TRUE(cleared.has_value());
   EXPECT_TRUE(cleared.value().empty());
+}
+
+// G22-T3: schema v8 records the source of each type application. A v7 project opens, and its
+// applications are the user's; a library application does not replace a user one, and a user
+// application replaces a library one.
+TEST(Types, MigratesFromSchemaV7) {
+  TempPath temp("types-v7");
+  const std::string path = temp.str();
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+  std::int64_t image_id = 0;
+  donkey::TypeId function_id{};
+  {
+    auto project = Project::create(path);
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    image_id = imported.value();
+    donkey::TypeTable table;
+    auto declared = donkey::parse_c_declarations("int f(int);\nint g(int);\n", table);
+    ASSERT_TRUE(declared.has_value());
+    for (const auto& type : declared.value()) {
+      table.put(type);
+      if (type.name == "f") {
+        function_id = type.id;
+      }
+    }
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+    ASSERT_TRUE(project.value()
+                    .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                          0x1000, function_id)
+                    .has_value());
+  }
+  {
+    // Back to v7: the table without its `source` column.
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db,
+                           "ALTER TABLE type_applications DROP COLUMN source; "
+                           "PRAGMA user_version=7;",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  auto project = Project::open(path);
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
+  auto applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 1U);
+  EXPECT_EQ(applications.value()[0].source, donkey::TypeProvenance::User);
+  // A library application at the same address leaves the user's in place.
+  auto types = project.value().types();
+  ASSERT_TRUE(types.has_value());
+  donkey::TypeId other{};
+  for (const auto& type : types.value().list()) {
+    if (type.name == "g") {
+      other = type.id;
+    }
+  }
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x1000, other, donkey::TypeProvenance::Library)
+                  .has_value());
+  applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  EXPECT_EQ(applications.value()[0].type_id, function_id);
+  // At a new address the library's applies; then a user edit replaces it.
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x2000, other, donkey::TypeProvenance::Library)
+                  .has_value());
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x2000, function_id)
+                  .has_value());
+  applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 2U);
+  EXPECT_EQ(applications.value()[1].type_id, function_id);
+  EXPECT_EQ(applications.value()[1].source, donkey::TypeProvenance::User);
 }
