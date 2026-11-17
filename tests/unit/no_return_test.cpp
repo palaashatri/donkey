@@ -269,6 +269,63 @@ TEST(ElfVersions, AnUnversionedImportIsNotListed) {
   EXPECT_FALSE(versions.value().contains("abort"));
 }
 
+// One versioned and one unversioned undefined import of the same name: the name carries no
+// version evidence. stubs_x86_64's `puts` import is renamed `abort` (its st_name points at
+// abort's string) and made unversioned (index 1); the versioned `abort` stays as it was.
+TEST(ElfVersions, ANameAlsoImportedUnversionedHasNoVersion) {
+  auto loaded = donkey::load_binary(fixture("stubs", "stubs_x86_64"));
+  ASSERT_TRUE(loaded.has_value());
+  const donkey::BinaryImage& image = loaded.value().image;
+  const donkey::Section* versym = section_of(image, ".gnu.version");
+  const donkey::Section* dynsym = section_of(image, ".dynsym");
+  const donkey::Section* dynstr = section_of(image, ".dynstr");
+  ASSERT_NE(versym, nullptr);
+  ASSERT_NE(dynsym, nullptr);
+  ASSERT_NE(dynstr, nullptr);
+  std::vector<std::byte> data(loaded.value().data.begin(), loaded.value().data.end());
+  const auto read32 = [&](std::uint64_t at) {
+    std::uint32_t value = 0;
+    for (int byte = 3; byte >= 0; --byte) {
+      value = (value << 8U) | std::to_integer<std::uint32_t>(data[at + byte]);
+    }
+    return value;
+  };
+  const auto name_of = [&](std::uint32_t offset) {
+    std::string name;
+    for (std::uint64_t at = dynstr->file_offset + offset;
+         at < dynstr->file_offset + dynstr->file_size && data[at] != std::byte{0}; ++at) {
+      name.push_back(static_cast<char>(std::to_integer<unsigned>(data[at])));
+    }
+    return name;
+  };
+  std::uint64_t abort_entry = 0;
+  std::uint64_t puts_entry = 0;
+  for (std::uint64_t entry = 1; (entry + 1) * 24 <= dynsym->file_size; ++entry) {
+    const std::string name = name_of(read32(dynsym->file_offset + entry * 24));
+    if (name == "abort") {
+      abort_entry = entry;
+    } else if (name == "puts") {
+      puts_entry = entry;
+    }
+  }
+  ASSERT_NE(abort_entry, 0U);
+  ASSERT_NE(puts_entry, 0U);
+  {
+    const auto before = donkey::read_import_versions(image, data);
+    ASSERT_TRUE(before.has_value()) << before.diagnostic().message;
+    ASSERT_TRUE(before.value().contains("abort"));
+  }
+  for (std::uint64_t byte = 0; byte < 4; ++byte) {
+    data[dynsym->file_offset + puts_entry * 24 + byte] =
+        data[dynsym->file_offset + abort_entry * 24 + byte];
+  }
+  data[versym->file_offset + puts_entry * 2] = std::byte{1};
+  data[versym->file_offset + puts_entry * 2 + 1] = std::byte{0};
+  const auto versions = donkey::read_import_versions(image, data);
+  ASSERT_TRUE(versions.has_value()) << versions.diagnostic().message;
+  EXPECT_FALSE(versions.value().contains("abort"));
+}
+
 // --- The fixed list and its binding -------------------------------------------------------------
 
 TEST(Analysis, NoReturnNamesComeOnlyFromTheFixedList) {

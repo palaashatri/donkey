@@ -148,7 +148,14 @@ void name_import_thunks(AnalysisResult& result, BinaryFormat format) {
     std::size_t index = at->second;
     if (result.instructions[index].mnemonic == "endbr64" ||
         result.instructions[index].mnemonic == "endbr32") {
+      const Instruction& endbr = result.instructions[index];
       ++index;
+      // Decoded instructions from separate pieces sit next to each other in the vector, so the
+      // jump must start where the ENDBR ends.
+      if (index >= result.instructions.size() ||
+          result.instructions[index].address != endbr.address + endbr.length) {
+        continue;
+      }
     }
     if (index >= result.instructions.size()) {
       continue;
