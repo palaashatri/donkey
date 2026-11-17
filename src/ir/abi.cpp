@@ -348,7 +348,8 @@ Scan scan(const IrFunction& function, const AbiModel& model) {
           if (width > result.widest_return_width) {
             result.widest_return_width = width;
           }
-        } else if (statement.a.kind == IrOperandKind::None) {
+        } else if (statement.a.kind == IrOperandKind::None && !statement.unreachable) {
+          // An unreachable return after a no-return call (G24-T3) is not a path that returns.
           result.has_bare_return = true;
         }
         continue;

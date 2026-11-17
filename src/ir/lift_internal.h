@@ -29,4 +29,11 @@ void check_call_clobbers(IrFunction& function);
                                                  FunctionId function_id,
                                                  std::uint8_t pointer_width);
 
+/// G24-T3: when `block` ends in a call to an address the analysis marks as not returning (a
+/// direct target, or the GOT or IAT slot an indirect call reads), marks the call `no_return` and
+/// ends the block with an unreachable Return, and returns true. The lifters call it where a block
+/// would otherwise fall through or get a synthetic return.
+bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
+                                 std::uint8_t pointer_width);
+
 }  // namespace donkey::internal

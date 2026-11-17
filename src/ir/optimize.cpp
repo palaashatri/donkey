@@ -346,8 +346,8 @@ void add_return_obligations(Live& live) {
 Live walk_block(const IrBlock& block, Live live, std::vector<bool>* dead) {
   for (std::size_t i = block.statements.size(); i-- > 0;) {
     const IrStatement& statement = block.statements[i];
-    if (statement.op == IrOp::Return) {
-      add_return_obligations(live);
+    if (statement.op == IrOp::Return && !statement.unreachable) {
+      add_return_obligations(live);  // an unreachable return (G24-T3) reads nothing
     }
     if (statement.op == IrOp::Call || statement.op == IrOp::Unsupported) {
       live.all = true;  // the callee or the unknown statement may read any register
