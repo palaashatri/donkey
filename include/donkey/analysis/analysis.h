@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
+#include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
 #include "donkey/core/ids.h"
@@ -96,6 +97,11 @@ struct AnalysisOptions {
   /// Mark calls that do not return (G24-T3): calls to the no-return imports bound to a runtime
   /// library, then, propagated, to the image's functions whose every path ends in one.
   bool no_return_analysis = true;
+  /// Where the libraries of an ELF image are found, to prove which library an import binds to
+  /// (G24-T3). The default is a model of glibc's search rooted at this host's `/` (its
+  /// /etc/ld.so.cache and default directories, read as files): it does not run the host's loader
+  /// and does not read LD_PRELOAD or LD_LIBRARY_PATH (see ElfLibrarySearch).
+  ElfLibrarySearch library_search;
   /// Addresses a call does not return from (G24-T3): function starts, and GOT or IAT slots that
   /// a `call *slot` reads. analyze() fills it from the analysis; a direct caller of
   /// build_control_flow_graph may set it. The walk does not continue after such a call.

@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "donkey/binary/byte_reader.h"
+#include "donkey/binary/link.h"
 #include "elf_dynamic.h"
 
 namespace donkey {
@@ -18,7 +19,7 @@ namespace {
 constexpr std::uint64_t kEntrySize = 16;        // Elf64_Verneed and Elf64_Vernaux
 constexpr std::uint64_t kMaxNameLength = 4096;  // longest version or file name read
 constexpr std::uint16_t kFirstNeedIndex = 2;    // 0: local, 1: global (unversioned)
-constexpr std::uint16_t kHiddenBit = 0x8000;    // VERSYM_HIDDEN, ignored for imports
+constexpr std::uint16_t kHiddenBit = 0x8000;    // VERSYM_HIDDEN / VER_NDX hidden flag
 
 Result<std::string> name_at(const ByteReader& strings, std::uint32_t offset, std::uint64_t entry) {
   auto text = strings.c_string(offset, kMaxNameLength);
@@ -119,7 +120,9 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
       if (!version) {
         return Result<ElfVersionNeeds>(version.diagnostic());
       }
-      if (!needs.by_index.emplace(index, ElfVersionNeed{file.value(), std::move(version.value())})
+      const bool hidden = (other.value() & kHiddenBit) != 0;
+      if (!needs.by_index
+               .emplace(index, ElfVersionNeed{file.value(), std::move(version.value()), hidden})
                .second) {
         return make_error<ElfVersionNeeds>(Status::InvalidInput, "elf.version_needs.duplicate",
                                            "two version needs use one index", entry);
@@ -147,62 +150,103 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
   return needs;
 }
 
-Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
-    const BinaryImage& image, std::span<const std::byte> data) {
-  std::map<std::string, ElfVersionNeed> imports;
+Result<std::vector<ElfImportReference>> read_import_references(const BinaryImage& image,
+                                                               std::span<const std::byte> data) {
+  std::vector<ElfImportReference> references;
   if (image.format != BinaryFormat::Elf || image.bits != 64) {
-    return imports;
-  }
-  const Section* versym = section_named(image, ".gnu.version");
-  const Section* verneed = section_named(image, ".gnu.version_r");
-  const Section* dynstr = section_named(image, ".dynstr");
-  if (versym == nullptr || verneed == nullptr || dynstr == nullptr) {
-    return imports;
-  }
-  const ByteReader file(data);
-  auto need_bytes = file.slice(verneed->file_offset, verneed->file_size);
-  auto string_bytes = file.slice(dynstr->file_offset, dynstr->file_size);
-  if (!need_bytes || !string_bytes) {
-    return make_error<std::map<std::string, ElfVersionNeed>>(
-        Status::InvalidInput, "elf.version_needs.truncated",
-        "the version need or string table lies outside the file", verneed->file_offset);
-  }
-  auto needs = read_version_needs(need_bytes.value(), string_bytes.value());
-  if (!needs) {
-    return Result<std::map<std::string, ElfVersionNeed>>(needs.diagnostic());
+    return references;
   }
   // Each dynamic symbol's own definedness decides whether it is an import: a name can be both
   // defined and imported by different symbols.
   const std::vector<std::string> names = binary::detail::dynamic_symbol_names(image, data);
   const std::vector<bool> undefined = binary::detail::dynamic_symbol_undefined(image, data);
-  std::set<std::string> conflicting;
+  const Section* versym = section_named(image, ".gnu.version");
+  const Section* verneed = section_named(image, ".gnu.version_r");
+  const Section* dynstr = section_named(image, ".dynstr");
+  const ByteReader file(data);
+  ElfVersionNeeds needs;
+  // The loader reads versions through DT_VERSYM and DT_VERNEED. When it would read them and the
+  // sections are missing, an import's version index cannot be resolved here: it is unresolved,
+  // never taken as unversioned.
+  const ElfLibraryNames dynamic = read_library_names(image, data);
+  const bool symbols_lost = dynamic.version_symbols && versym == nullptr;
+  const bool versioned = versym != nullptr;
+  if (versioned && verneed != nullptr && dynstr != nullptr) {
+    auto need_bytes = file.slice(verneed->file_offset, verneed->file_size);
+    auto string_bytes = file.slice(dynstr->file_offset, dynstr->file_size);
+    if (!need_bytes || !string_bytes) {
+      return make_error<std::vector<ElfImportReference>>(
+          Status::InvalidInput, "elf.version_needs.truncated",
+          "the version need or string table lies outside the file", verneed->file_offset);
+    }
+    auto read = read_version_needs(need_bytes.value(), string_bytes.value());
+    if (!read) {
+      return Result<std::vector<ElfImportReference>>(read.diagnostic());
+    }
+    needs = std::move(read.value());
+  }
   for (std::size_t index = 0; index < names.size(); ++index) {
     if (index >= undefined.size() || !undefined[index] || names[index].empty()) {
       continue;
     }
-    if (index * 2 + 2 > versym->file_size) {
-      return make_error<std::map<std::string, ElfVersionNeed>>(
-          Status::InvalidInput, "elf.version_symbols.truncated",
-          "the symbol version table ends before an imported symbol's entry", versym->file_offset);
+    ElfImportReference reference;
+    reference.name = names[index];
+    if (symbols_lost) {
+      reference.unresolved = true;
+    } else if (versioned) {
+      if (index * 2 + 2 > versym->file_size) {
+        return make_error<std::vector<ElfImportReference>>(
+            Status::InvalidInput, "elf.version_symbols.truncated",
+            "the symbol version table ends before an imported symbol's entry", versym->file_offset);
+      }
+      const auto value = file.u16(versym->file_offset + index * 2, Endian::Little);
+      if (!value) {
+        return make_error<std::vector<ElfImportReference>>(
+            Status::InvalidInput, "elf.version_symbols.truncated",
+            "the symbol version table lies outside the file", versym->file_offset);
+      }
+      const auto version = static_cast<std::uint16_t>(value.value() & ~kHiddenBit);
+      if (version >= kFirstNeedIndex) {
+        const auto need = needs.by_index.find(version);
+        if (need == needs.by_index.end()) {
+          reference.unresolved = true;
+        } else {
+          reference.version = need->second.version;
+          reference.file = need->second.file;
+          reference.hidden = need->second.hidden;
+        }
+      }
     }
-    const auto value = file.u16(versym->file_offset + index * 2, Endian::Little);
-    if (!value) {
-      return make_error<std::map<std::string, ElfVersionNeed>>(
-          Status::InvalidInput, "elf.version_symbols.truncated",
-          "the symbol version table lies outside the file", versym->file_offset);
-    }
-    const auto version = static_cast<std::uint16_t>(value.value() & ~kHiddenBit);
-    const auto need = needs.value().by_index.find(version);
-    if (version < kFirstNeedIndex || need == needs.value().by_index.end()) {
+    references.push_back(std::move(reference));
+  }
+  return references;
+}
+
+Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
+    const BinaryImage& image, std::span<const std::byte> data) {
+  std::map<std::string, ElfVersionNeed> imports;
+  if (image.format != BinaryFormat::Elf || image.bits != 64 ||
+      section_named(image, ".gnu.version") == nullptr ||
+      section_named(image, ".gnu.version_r") == nullptr ||
+      section_named(image, ".dynstr") == nullptr) {
+    return imports;
+  }
+  auto references = read_import_references(image, data);
+  if (!references) {
+    return Result<std::map<std::string, ElfVersionNeed>>(references.diagnostic());
+  }
+  std::set<std::string> conflicting;
+  for (const ElfImportReference& reference : references.value()) {
+    if (reference.version.empty()) {
       // An unversioned (or unresolved) import of a name another import has a version for: which
       // library provides it is not known, so the name carries no version evidence.
-      conflicting.insert(names[index]);
+      conflicting.insert(reference.name);
       continue;
     }
-    const auto [it, added] = imports.emplace(names[index], need->second);
-    if (!added &&
-        (it->second.file != need->second.file || it->second.version != need->second.version)) {
-      conflicting.insert(names[index]);
+    const ElfVersionNeed need{reference.file, reference.version};
+    const auto [it, added] = imports.emplace(reference.name, need);
+    if (!added && (it->second.file != need.file || it->second.version != need.version)) {
+      conflicting.insert(reference.name);
     }
   }
   for (const std::string& name : conflicting) {
