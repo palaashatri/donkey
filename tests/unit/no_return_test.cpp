@@ -1195,7 +1195,8 @@ TEST(ElfLoadScope, TheLibraryLimitCountsTheProgram) {
   EXPECT_NE(exit_binding.reason.find("more libraries than the limit"), std::string::npos)
       << exit_binding.reason;
   search.library_limit = 3;
-  EXPECT_EQ(scope_of(fixture("loadscope", "steal_consumer"), search).lookup("exit", "GLIBC_2.2.5")
+  EXPECT_EQ(scope_of(fixture("loadscope", "steal_consumer"), search)
+                .lookup("exit", "GLIBC_2.2.5")
                 .outcome,
             donkey::ElfBinding::Outcome::Bound);
 }
