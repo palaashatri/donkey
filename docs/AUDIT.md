@@ -637,6 +637,80 @@ the first pair (+40%) is treated as noise, and the median is the figure to read.
 `c101de2` (openssl +22%/+14%, git +1%/+5%) is superseded by these numbers. Structuring runs once per candidate, and the
 CLI also classifies each function (a second run of the structurers), so most of the added cost is the check.
 
+### W1b: goto reduction (G04-T5, owner decision of 2026-11-17)
+
+Branch `agent/ir/G04-T5-W1b-goto-reduction`, measured with `sample_list.py measure` on the fixed list
+(1,986 functions), Release builds. Before: `main` with G24-T4 (#66; the goto structurer is that of W1).
+
+Rule (`kGotoRuleCopy`, `src/ir/structure_goto.cpp`): where the goto structurer would print `goto T`, it
+prints a copy of T instead when T is small (at most 4 printed statements, `kMaxCopiedStatements`), is not
+a loop header, and either returns, or ends in a plain branch whose own edge leaves without a goto (it
+falls out of the region, breaks, continues, or reaches a block printed next), or goes on to a small
+block that returns (one level). A jump-only block (no statements) is the zero-statement case, so a goto
+to a block that only jumps on becomes that jump's own break, continue or fall-through. At most 64 copies
+per function (`kMaxBlockCopies`). The copy carries no label and changes no edge; the control-flow check
+verifies it like any printed block (it already accepts a block printed twice). `structure_function`
+tries the candidate with copies first and, if the check refuses it, the one without.
+
+| | Before | After |
+|---|---|---|
+| Gotos, total | 16,232 | **14,644** (-9.8%) |
+| Functions with gotos | 986 | 919 |
+| Structured, no goto | 1,000 | 1,067 |
+| Largest in one function | 409 | 394 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos before, after): ls 1,648 / 1,475; openssl 3,326 / 3,114; bash 1,997 / 1,833;
+libsqlite3 1,734 / 1,559; libc 1,362 / 1,156; git 3,749 / 3,406; python3.12 2,416 / 2,101.
+
+Timing, whole-binary `decompile --json`, one process at a time, before and after alternating (wall
+seconds): openssl 4.19 / 4.35, 3.74 / 4.35, 4.24 / 4.31 (median +3.8%); git 64.0 / 65.7 (+2.7%). Under the 25% bar.
+
+Tried and not kept: copying small conditional blocks too (the second test of a short-circuit
+condition) and keeping whichever of three candidates (none, simple copies, copies of tests) has the
+fewest gotos: 14,573 gotos (71 fewer), but openssl took 38% longer, over the bar; copying tests alone
+gave 15,236, more than simple copies, because a copied test decides its arms again where it stands.
+Compound conditions (rule `kGotoRuleCompound`, branch `agent/ir/G04-T5-W1b-compound-conditions`): a
+test block that holds only its compare and branch, has one predecessor, and shares one target with that
+predecessor's branch is printed inside the predecessor's `if`: `if (a && b) { inner } else { shared }`,
+or `if (a || b) { shared } ...` when the shared arm is printed first. The tag of the `if` names the
+second test, its polarity and the operator; the control-flow check lowers it to the two branches (the
+second block's code, then its branch) and checks every edge of both blocks as for any other test. The
+candidate is tried first; if the check refused it, the structurer would fall back to copies only, then
+to neither.
+
+| | W1b copies | With compound conditions |
+|---|---|---|
+| Gotos, total | 14,644 | **14,319** (-2.2%) |
+| Functions with gotos | 919 | 916 |
+| Largest in one function | 394 | 387 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos): ls 1,448; openssl 3,020; bash 1,791; libsqlite3 1,509; libc 1,119; git 3,374;
+python3.12 2,058. Time, whole-binary `decompile --json` of openssl, alternating, three runs each: 5.76,
+5.63, 5.34 s before and 5.96, 4.87, 5.20 s after (no difference beyond the noise). `ls` prints 44
+compound conditions, such as `if ((rax & rax) != 0 && *(u8 *)(rax) != 0x0) {`, where the second test
+reads memory only when the first holds, as in the binary.
+
+Re-measured after G24-T3 (#67, no-return calls end their block) merged into both sides:
+
+| | `main` (04c4bd3) | W1b on that `main` |
+|---|---|---|
+| Gotos, total | 15,712 | **13,713** (-12.7%) |
+| Functions with gotos | 984 | 913 |
+| Largest in one function | 407 | 385 |
+| Printed as labelled blocks | 0 | 0 |
+| Candidates refused by the control-flow check | 0 | 0 |
+| Complete | 177 | 177 |
+
+Per binary (gotos, `main` / W1b): ls 1,589 / 1,351; openssl 3,237 / 2,929; bash 1,881 / 1,658; libsqlite3
+1,694 / 1,464; libc 1,359 / 1,117; git 3,543 / 3,141; python3.12 2,409 / 2,053.
+
+
 ### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
 
 A stress driver (`w1audit/stress`, not committed) builds N checks `if (rax == 0) return i;` followed by the
