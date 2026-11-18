@@ -2899,9 +2899,11 @@ order is the waves in `docs/PARITY.md` section 4:
 4. **Wave 4.** G14, G27.
 5. **Wave 5.** G12, G17, G31, G29, G28, G32.
 
-Inside a wave, take an **[oracle]** or **[ground truth]** task before one
-without a machine check. Take T0 of a G20 to G32 gap before any other task of
-that gap.
+Inside a wave, the dependency-ready task that moves the measured numbers most
+comes first, and ledger order decides between equals (section 2, step 1).
+Inside one gap, take its **[oracle]** and **[ground truth]** tasks before its
+tasks without a machine check, and T0 of a G20 to G32 gap before any other task
+of that gap.
 
 Branch hygiene, so that `main` stays the one place where work lives:
 
