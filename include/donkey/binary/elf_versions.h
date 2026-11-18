@@ -10,6 +10,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "donkey/binary/image.h"
 #include "donkey/core/result.h"
@@ -51,6 +52,22 @@ inline constexpr std::size_t kMaxVersionNeedEntries = 65'536;
 /// different needs is left out too. An image without the two sections gives an empty map; a
 /// malformed version need table gives the reader's diagnostic, and a `.gnu.version` that ends
 /// before an import's entry gives `elf.version_symbols.truncated`.
+/// One imported dynamic symbol (undefined by its own `st_shndx`) of a 64-bit little-endian ELF
+/// image, in symbol order, with the version it asks for: `version` and `file` from its version
+/// need, both empty for an unversioned import (index 0 or 1, or an image without `.gnu.version`),
+/// and `unresolved` when its index names no need.
+struct ElfImportReference {
+  std::string name;
+  std::string version;
+  std::string file;
+  bool unresolved = false;
+};
+
+/// The image's imported symbols with their versions (see ElfImportReference). The refusals are
+/// those of read_import_versions.
+[[nodiscard]] Result<std::vector<ElfImportReference>> read_import_references(
+    const BinaryImage& image, std::span<const std::byte> data);
+
 [[nodiscard]] Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
     const BinaryImage& image, std::span<const std::byte> data);
 

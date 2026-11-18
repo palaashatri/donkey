@@ -2483,12 +2483,23 @@ least one returning path and every returning path compared; 4: option (c)). What
   `sub_` calls to stubs.)
 - Not done: interposition (`LD_PRELOAD`) is assumed absent, as decision 4 records; AArch64 GOT calls are not bound
   (no AArch64 GOT reader); Mach-O imports are not bound.
-- Known limitation (owner, 2026-11-17, from review of #67): a versioned import (`exit@GLIBC_2.2.5`) is bound by its
-  version alone, even when another needed library comes earlier in DT_NEEDED order. glibc lets a library without
-  symbol versioning that is found first satisfy a versioned reference, so such a library exporting `exit` would make
-  the mark wrong. Requiring every needed library to be a runtime library (as the unversioned rule does) would remove
-  nearly all marks on real programs, which almost always also need libz, libssl or the like; the owner kept the
-  version as the evidence. A name that also has an unversioned import carries no version evidence.
+- Binding proven, not assumed (2026-11-18, after the owner rejected the limitation #67 had recorded): a version need
+  does not prove the provider. glibc binds a versioned reference to the first library of the load scope whose
+  definition it accepts, and an unversioned global definition in an earlier library is accepted, so `exit@GLIBC_2.2.5`
+  can bind to another library's `exit`. `ElfLoadScope` (`include/donkey/binary/elf_load_scope.h`) now builds the
+  scope the loader would (`/etc/ld.so.preload`, DT_NEEDED breadth first; DT_RPATH, the library path, DT_RUNPATH with
+  `$ORIGIN`, `/etc/ld.so.conf` and the default directories, under an optional sysroot; files of another class or
+  machine skipped) and looks each reference up by glibc's `check_match` rules (a versioned reference: no `.gnu.version`
+  in the library, the same version, or a non-hidden unversioned definition; an unversioned one: an index below 3, or
+  the only non-hidden versioned definition). A name is marked only when every way the image imports it binds to a
+  runtime library of its kind; an earlier library the walk cannot find or read leaves it unmarked, with
+  `analysis.no_return_unverified` saying which. The same walk replaces the unversioned rule "every needed library is
+  a runtime library". The fixture `tests/fixtures/loadscope/steal_consumer` reproduces the case with the real loader
+  (`libsteal exit(1) returned`, then a crash past the call the compiler took as no-return); Donkey does not mark it,
+  and marks the same program when the earlier library has no `exit`. The CLI takes `--sysroot` and `--library-path`.
+  On the seven audit binaries the marks are the same as before (ls 16, openssl 6, bash 74, libsqlite3 1, libc 63,
+  git 169, python3.12 57), now each with its bound library and path. Not modelled: the environment (`LD_PRELOAD`,
+  `LD_LIBRARY_PATH`), which no file shows; 32-bit ELF imports (not marked).
 
 **T4. Thunks and import stubs named.**
 

@@ -1,0 +1,2 @@
+GLIBC_2.17 { global: abort; exit; puts; local: *; };
+GLIBC_2.34 { global: __libc_start_main; } GLIBC_2.17;

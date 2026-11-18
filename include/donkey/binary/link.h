@@ -27,6 +27,11 @@ struct LinkInput {
 struct ElfLibraryNames {
   std::string soname;
   std::vector<std::string> needed;
+  /// DT_RPATH and DT_RUNPATH as written (colon-separated, `$ORIGIN` not expanded); empty when
+  /// absent.
+  std::string rpath;
+  std::string runpath;
+  bool has_runpath = false;
 };
 
 /// Reads DT_SONAME and DT_NEEDED from the `.dynamic` section of an ELF image. Both are empty for

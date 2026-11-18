@@ -1176,11 +1176,28 @@ set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
 # G24-T3: a call to a bound no-return import ends its path; no `return` follows it, and the
 # function list says why the import does not return.
 add_test(NAME cli.decompile_prints_no_return_call_without_return
-         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.decompile_prints_no_return_call_without_return PROPERTIES
   PASS_REGULAR_EXPRESSION "    abort\\(\\).\n  } else {"
   FAIL_REGULAR_EXPRESSION "abort\\(\\).\n *return")
 add_test(NAME cli.functions_list_no_return_evidence
-         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.functions_list_no_return_evidence PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 file:libc.so.6\"")
+  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 bound:libc.so.6 path:[^\"]*/lib/x86_64-linux-gnu/libc.so.6\"")
+# A versioned import that an earlier library's unversioned definition takes (the loader's own
+# binding, tests/fixtures/loadscope/PROVENANCE.md) is not marked; nor is one whose libraries
+# cannot be found, and the analysis says so.
+add_test(NAME cli.functions_no_mark_when_an_earlier_library_defines_the_name
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal)
+set_tests_properties(cli.functions_no_mark_when_an_earlier_library_defines_the_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"exit@plt\"[^}]*\"no_return\": false"
+  FAIL_REGULAR_EXPRESSION "\"no_return\": true")
+add_test(NAME cli.analyze_reports_unverified_no_return
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
+set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
+  PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")

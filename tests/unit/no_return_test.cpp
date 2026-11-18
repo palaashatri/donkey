@@ -13,6 +13,7 @@
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/analysis/no_return.h"
+#include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/elf_versions.h"
 #include "donkey/binary/image.h"
 #include "donkey/ir/eval.h"
@@ -35,11 +36,27 @@ struct Analyzed {
   AnalysisResult analysis;
 };
 
-Analyzed analyze_fixture(const std::string& name) {
-  auto loaded = donkey::load_binary(fixture("stubs", name));
+/// The fixture sysroot whose libraries an image of `architecture` loads (tests/fixtures/loadscope):
+/// a stand-in libc.so.6 with glibc's version names, so no result depends on the host's libraries.
+donkey::ElfLibrarySearch fixture_libraries(donkey::Architecture architecture) {
+  donkey::ElfLibrarySearch search;
+  search.sysroot =
+      fixture("loadscope",
+              architecture == donkey::Architecture::AArch64 ? "sysroot-aarch64" : "sysroot-x86_64");
+  return search;
+}
+
+Analyzed analyze_fixture(const std::string& name, const std::string& directory = "stubs",
+                         const std::vector<std::string>& library_paths = {}) {
+  auto loaded = donkey::load_binary(fixture(directory, name));
   EXPECT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   Analyzed out{std::move(loaded.value()), {}};
-  auto analysis = donkey::analyze(out.binary.image, out.binary.data);
+  AnalysisOptions options;
+  options.library_search = fixture_libraries(out.binary.image.architecture);
+  for (const std::string& path : library_paths) {
+    options.library_search.paths.push_back(fixture("loadscope", path));
+  }
+  auto analysis = donkey::analyze(out.binary.image, out.binary.data, options);
   EXPECT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
   out.analysis = std::move(analysis.value());
   return out;
@@ -349,10 +366,94 @@ TEST(Analysis, AVersionedRuntimeImportIsMarkedWithItsEvidence) {
   const donkey::Function* abort_stub = function_at(analyzed.analysis, 0x1060);
   ASSERT_NE(abort_stub, nullptr);
   EXPECT_TRUE(abort_stub->no_return);
-  EXPECT_EQ(abort_stub->no_return_reason, "known-name:abort version:GLIBC_2.2.5 file:libc.so.6");
+  // The evidence: the version the import asks for, the library the loader binds it to, and the
+  // file that library was found in (the fixture sysroot's stand-in libc).
+  EXPECT_EQ(abort_stub->no_return_reason,
+            "known-name:abort version:GLIBC_2.2.5 bound:libc.so.6 path:" +
+                fixture("loadscope", "sysroot-x86_64") + "/lib/x86_64-linux-gnu/libc.so.6");
   const donkey::Function* puts_stub = function_at(analyzed.analysis, 0x1070);
   ASSERT_NE(puts_stub, nullptr);
   EXPECT_FALSE(puts_stub->no_return);
+}
+
+// The case a version need alone gets wrong (tests/fixtures/loadscope, PROVENANCE.md there):
+// steal_consumer imports exit@GLIBC_2.2.5 from libc.so.6 and needs libsteal.so.1 first. When the
+// libsteal.so.1 it runs with defines an unversioned exit, glibc's loader binds the call there (the
+// fixture's oracle: under LD_LIBRARY_PATH=steal the program prints "libsteal exit(1) returned"),
+// so the call is not marked and its fall-through stays. With the libsteal.so.1 it was linked
+// against (no exit), the call binds to libc.so.6 and is marked.
+TEST(Analysis, AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked) {
+  const Analyzed stolen = analyze_fixture("steal_consumer", "loadscope", {"steal"});
+  const auto exit_stub =
+      std::find_if(stolen.analysis.functions.begin(), stolen.analysis.functions.end(),
+                   [](const donkey::Function& f) { return f.import_name == "exit"; });
+  ASSERT_NE(exit_stub, stolen.analysis.functions.end());
+  EXPECT_FALSE(exit_stub->no_return);
+  EXPECT_TRUE(stolen.analysis.no_return.empty());
+
+  const Analyzed clean = analyze_fixture("steal_consumer", "loadscope", {"clean"});
+  const auto clean_stub =
+      std::find_if(clean.analysis.functions.begin(), clean.analysis.functions.end(),
+                   [](const donkey::Function& f) { return f.import_name == "exit"; });
+  ASSERT_NE(clean_stub, clean.analysis.functions.end());
+  EXPECT_TRUE(clean_stub->no_return);
+  EXPECT_NE(clean_stub->no_return_reason.find("bound:libc.so.6"), std::string::npos)
+      << clean_stub->no_return_reason;
+}
+
+// A library the walk cannot find before any definition leaves the binding unknown: no mark, and
+// the analysis says which import and why.
+TEST(Analysis, AnImportWhoseLibrariesCannotBeFoundIsNotMarked) {
+  const Analyzed analyzed = analyze_fixture("steal_consumer", "loadscope");
+  EXPECT_TRUE(analyzed.analysis.no_return.empty());
+  const auto diagnostic = std::find_if(
+      analyzed.analysis.diagnostics.begin(), analyzed.analysis.diagnostics.end(),
+      [](const donkey::Diagnostic& d) { return d.code == "analysis.no_return_unverified"; });
+  ASSERT_NE(diagnostic, analyzed.analysis.diagnostics.end());
+  EXPECT_NE(diagnostic->message.find("exit: libsteal.so.1 was not found"), std::string::npos)
+      << diagnostic->message;
+}
+
+// AArch64: the same proof with the AArch64 stand-in libc (GLIBC_2.17).
+TEST(Analysis, AnAArch64VersionedRuntimeImportIsMarked) {
+  const Analyzed analyzed = analyze_fixture("stubs_aarch64");
+  const auto abort_stub =
+      std::find_if(analyzed.analysis.functions.begin(), analyzed.analysis.functions.end(),
+                   [](const donkey::Function& f) { return f.import_name == "abort"; });
+  ASSERT_NE(abort_stub, analyzed.analysis.functions.end());
+  EXPECT_TRUE(abort_stub->no_return);
+  EXPECT_NE(abort_stub->no_return_reason.find("version:GLIBC_2.17 bound:libc.so.6"),
+            std::string::npos)
+      << abort_stub->no_return_reason;
+}
+
+// The scope in the loader's order, from the sysroot and the library path: the executable, then
+// DT_NEEDED breadth first (libsteal.so.1 from the library path, libc.so.6 from the sysroot's
+// multiarch directory). A versioned reference binds to the first definition it accepts; an
+// unversioned one to a definition of index 0 to 2 (libc's exit@@GLIBC_2.2.5 is index 2).
+TEST(ElfLoadScope, FindsLibrariesInTheLoadersOrderAndBindsByGlibcRules) {
+  auto loaded = donkey::load_binary(fixture("loadscope", "steal_consumer"));
+  ASSERT_TRUE(loaded.has_value());
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "steal"));
+  const donkey::ElfLoadScope scope =
+      donkey::ElfLoadScope::build(loaded.value().image, loaded.value().data, search);
+  ASSERT_EQ(scope.libraries().size(), 3U);
+  EXPECT_EQ(scope.libraries()[1].name, "libsteal.so.1");
+  EXPECT_EQ(scope.libraries()[1].path, fixture("loadscope", "steal") + "/libsteal.so.1");
+  EXPECT_EQ(scope.libraries()[2].soname, "libc.so.6");
+  const donkey::ElfBinding versioned = scope.lookup("exit", "GLIBC_2.2.5");
+  ASSERT_EQ(versioned.outcome, donkey::ElfBinding::Outcome::Bound);
+  EXPECT_EQ(versioned.library, 1U);  // libsteal's unversioned exit satisfies it
+  const donkey::ElfBinding puts = scope.lookup("puts", "GLIBC_2.2.5");
+  ASSERT_EQ(puts.outcome, donkey::ElfBinding::Outcome::Bound);
+  EXPECT_EQ(puts.library, 2U);
+  const donkey::ElfBinding unversioned = scope.lookup("abort", "");
+  ASSERT_EQ(unversioned.outcome, donkey::ElfBinding::Outcome::Bound);
+  EXPECT_EQ(unversioned.library, 2U);
+  EXPECT_EQ(scope.lookup("no_such_name", "").outcome, donkey::ElfBinding::Outcome::NotDefined);
+  // A version the stand-in libc does not define is not satisfied by its versioned definition.
+  EXPECT_EQ(scope.lookup("abort", "GLIBC_9.9").outcome, donkey::ElfBinding::Outcome::NotDefined);
 }
 
 // exit_consumer imports an unversioned `exit` and needs libmyexit.so.1 (which exports an `exit`
@@ -379,9 +480,13 @@ TEST(Analysis, ANoReturnNameExportedByTwoNeededLibrariesIsNotMarked) {
   // import is unversioned, and DT_NEEDED names a library that is not a runtime library.
   auto loaded = donkey::load_binary(fixture("stubs", "exit_consumer"));
   ASSERT_TRUE(loaded.has_value());
-  const auto marks = donkey::bind_no_return_imports(loaded.value().image, loaded.value().data,
-                                                    {{0x1050, "exit"}}, {});
+  std::vector<std::string> unverified;
+  const auto marks = donkey::bind_no_return_imports(
+      loaded.value().image, loaded.value().data, {{0x1050, "exit"}}, {},
+      fixture_libraries(donkey::Architecture::X86_64), &unverified);
   EXPECT_TRUE(marks.empty());
+  // Proven, not unknown: both libraries are in the sysroot, and libmyexit.so.1 comes first.
+  EXPECT_TRUE(unverified.empty());
 }
 
 // --- CFG ----------------------------------------------------------------------------------------
@@ -705,4 +810,41 @@ TEST(Ir, AFunctionWithNoReturningPathStaysPartial) {
     noted = noted || note.find("no path returns") != std::string::npos;
   }
   EXPECT_TRUE(noted);
+}
+
+// glibc's lookup rules on a library with two versions of a name
+// (tests/fixtures/loadscope/libvers.so.1: the hidden exit@V2 at index 3 and the default exit@@V3 at
+// index 4). An unversioned reference takes the only non-hidden versioned definition; a versioned
+// one takes its own version, hidden or not; a version the library does not define for the name is
+// not satisfied, and lookup goes on to the next library. A library that was not found stops the
+// lookup: where the name binds is unknown.
+TEST(ElfLoadScope, LooksUpVersionsByGlibcRules) {
+  auto vers = donkey::load_binary(fixture("loadscope", "libvers.so.1"));
+  auto libc =
+      donkey::load_binary(fixture("loadscope", "sysroot-x86_64/lib/x86_64-linux-gnu/libc.so.6"));
+  ASSERT_TRUE(vers.has_value());
+  ASSERT_TRUE(libc.has_value());
+  const std::vector<donkey::ElfLoadScope::Input> inputs = {
+      {"executable", nullptr, {}},
+      {"libvers.so.1", &vers.value().image, vers.value().data},
+      {"libc.so.6", &libc.value().image, libc.value().data},
+  };
+  const donkey::ElfLoadScope scope = donkey::ElfLoadScope::from_images(inputs);
+  EXPECT_EQ(scope.lookup("exit", "").library, 1U);
+  EXPECT_EQ(scope.lookup("exit", "V2").library, 1U);
+  EXPECT_EQ(scope.lookup("exit", "V3").library, 1U);
+  // libvers has no exit@GLIBC_2.2.5 and its exits are versioned: the reference goes on to libc.
+  const donkey::ElfBinding glibc = scope.lookup("exit", "GLIBC_2.2.5");
+  ASSERT_EQ(glibc.outcome, donkey::ElfBinding::Outcome::Bound);
+  EXPECT_EQ(glibc.library, 2U);
+
+  const std::vector<donkey::ElfLoadScope::Input> missing = {
+      {"executable", nullptr, {}},
+      {"libgone.so.1", nullptr, {}},
+      {"libc.so.6", &libc.value().image, libc.value().data},
+  };
+  const donkey::ElfLoadScope unknown = donkey::ElfLoadScope::from_images(missing);
+  const donkey::ElfBinding blocked = unknown.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(blocked.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_EQ(blocked.reason, "libgone.so.1 was not found");
 }

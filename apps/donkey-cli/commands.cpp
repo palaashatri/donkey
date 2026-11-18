@@ -139,11 +139,39 @@ struct AnalysisRequest {
   LoadOptions load_options;
 };
 
+/// Where the analysis looks for an ELF image's libraries (--sysroot, --library-path, G24-T3).
+/// One command runs per process, so the flags set it once for every analysis that command does.
+ElfLibrarySearch& library_search() {
+  static ElfLibrarySearch search;
+  return search;
+}
+
+/// Analysis options with the command line's library search.
+AnalysisOptions analysis_options() {
+  AnalysisOptions options;
+  options.library_search = library_search();
+  return options;
+}
+
 bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::size_t& index,
                          LoadOptions& options, const char*& error_message) {
   const std::string_view argument = arguments[index];
   if (argument == "--isolate") {
     options.isolate = true;
+    return true;
+  }
+  if (argument == "--sysroot" || argument == "--library-path") {
+    std::string_view value;
+    if (!take_value(arguments, index, value) || value.empty()) {
+      error_message = argument == "--sysroot" ? "--sysroot needs a directory"
+                                              : "--library-path needs a directory";
+      return true;
+    }
+    if (argument == "--sysroot") {
+      library_search().sysroot = std::string(value);
+    } else {
+      library_search().paths.emplace_back(value);
+    }
     return true;
   }
   if (argument == "--raw") {
@@ -551,7 +579,7 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   options.max_strings = request.max_strings;
   options.min_string_length = request.min_string_length;
@@ -864,6 +892,9 @@ void print_usage(std::FILE* out) {
       "  donkey-cli serve [--project <db>] [--allow-write]\n"
       "                                   JSON-RPC 2.0 on stdin/stdout (see docs/RPC.md)\n"
       "  donkey-cli batch <script.json>   run a JSON array of RPC requests, print the responses\n"
+      "\n"
+      "Analysis commands take --sysroot DIR and --library-path DIR (repeatable): where an ELF\n"
+      "image's libraries are, to show which library each import binds to (default: this host).\n"
       "\n"
       "Every command except `debug launch` only reads files and never executes them.\n"
       "`debug launch` runs the program under the native debugger (it stops at the\n"
@@ -1536,7 +1567,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   auto result = analyze(loaded.image, loaded.data, options);
   if (!result) {
@@ -1723,7 +1754,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   auto analysis = analyze(loaded.image, loaded.data, options);
   if (!analysis) {
@@ -2308,7 +2339,7 @@ int report_link(const std::vector<std::string>& labels,
   analyses.reserve(loaded.size());
   bool partial = false;
   for (const donkey::LoadedBinary& item : loaded) {
-    auto analysis = donkey::analyze(item.image, item.data);
+    auto analysis = donkey::analyze(item.image, item.data, analysis_options());
     if (!analysis) {
       return fail(analysis.diagnostic());
     }
@@ -2475,7 +2506,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
     if (!load(binary, loaded, load_options)) {
       return kExitFailure;
     }
-    auto analysis = analyze(loaded.image, loaded.data);
+    auto analysis = analyze(loaded.image, loaded.data, analysis_options());
     if (!analysis) {
       return fail(analysis.diagnostic());
     }

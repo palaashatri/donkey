@@ -13,6 +13,8 @@ namespace {
 constexpr std::uint64_t kDtNull = 0;
 constexpr std::uint64_t kDtNeeded = 1;
 constexpr std::uint64_t kDtSoname = 14;
+constexpr std::uint64_t kDtRpath = 15;
+constexpr std::uint64_t kDtRunpath = 29;
 constexpr std::size_t kMaxDynamicEntries = 4096;
 constexpr std::uint64_t kMaxNameLength = 4096;
 
@@ -107,7 +109,7 @@ ElfLibraryNames read_library_names(const BinaryImage& image, std::span<const std
     if (tag == kDtNull) {
       break;
     }
-    if (tag != kDtNeeded && tag != kDtSoname) {
+    if (tag != kDtNeeded && tag != kDtSoname && tag != kDtRpath && tag != kDtRunpath) {
       continue;
     }
     const auto text = reader.c_string(strings->file_offset + value, kMaxNameLength);
@@ -116,6 +118,11 @@ ElfLibraryNames read_library_names(const BinaryImage& image, std::span<const std
     }
     if (tag == kDtSoname) {
       names.soname = std::string(text.value());
+    } else if (tag == kDtRpath) {
+      names.rpath = std::string(text.value());
+    } else if (tag == kDtRunpath) {
+      names.runpath = std::string(text.value());
+      names.has_runpath = true;
     } else {
       names.needed.emplace_back(text.value());
     }
