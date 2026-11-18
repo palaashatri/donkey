@@ -1253,3 +1253,16 @@ add_test(NAME cli.analyze_reports_unverified_no_return
                  --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
   PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")
+
+# A floor under every test's timeout (DONKEY_TEST_TIMEOUT_FLOOR, 0 by default). It raises a limit,
+# never lowers one, and leaves every test and assertion in place. The tests gtest discovers at test
+# time take CTest's --timeout instead, which the same job sets to the floor.
+if(DONKEY_TEST_TIMEOUT_FLOOR GREATER 0)
+  get_property(_donkey_tests DIRECTORY PROPERTY TESTS)
+  foreach(_donkey_test IN LISTS _donkey_tests)
+    get_test_property(${_donkey_test} TIMEOUT _donkey_timeout)
+    if(NOT _donkey_timeout OR _donkey_timeout LESS DONKEY_TEST_TIMEOUT_FLOOR)
+      set_tests_properties(${_donkey_test} PROPERTIES TIMEOUT ${DONKEY_TEST_TIMEOUT_FLOOR})
+    endif()
+  endforeach()
+endif()
