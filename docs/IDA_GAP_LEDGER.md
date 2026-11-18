@@ -82,9 +82,12 @@ wrong even if CI is green.
 
 ## 2. How to take a task
 
-1. Pick the first task in section 5 whose status is TODO and whose
-   dependencies are all DONE. Prefer tasks marked **[oracle]**: the
-   differential corpus checks them automatically, so mistakes are caught.
+1. Pick, among the tasks of the current wave in section 5 whose status is TODO and whose
+   dependencies are all DONE, the one that moves the measured numbers most (AGENTS.md,
+   "Highest leverage first"); between tasks of equal effect, take the first in this ledger's
+   order. Inside a gap, its **[ground truth]** and **[oracle]** tasks still come first, as
+   "Measure before you build" says: they are what the effect is measured with, and the
+   differential corpus checks **[oracle]** tasks automatically.
 2. Read every file the task lists before editing. Read the tests next to them.
 3. Write the tests first, from the task's "Tests" list. Run them and see them
    fail.
@@ -2987,13 +2990,15 @@ order is the waves in `docs/PARITY.md` section 4:
 4. **Wave 4.** G14, G27.
 5. **Wave 5.** G12, G17, G31, G29, G28, G32.
 
-Inside a wave, take an **[oracle]** or **[ground truth]** task before one
-without a machine check. Take T0 of a G20 to G32 gap before any other task of
-that gap.
+Inside a wave, the dependency-ready task that moves the measured numbers most
+comes first, and ledger order decides between equals (section 2, step 1).
+Inside one gap, take its **[oracle]** and **[ground truth]** tasks before its
+tasks without a machine check, and T0 of a G20 to G32 gap before any other task
+of that gap.
 
 Branch hygiene, so that `main` stays the one place where work lives:
 
-- At most three task branches are open at once, and each has an open PR.
+- At most six task branches are open at once, and each has an open PR.
 - Do not stack a branch on an unmerged branch unless the task depends on it.
   If you do, say so in both PRs.
 - When a PR merges, delete its branch in the same session. When work is

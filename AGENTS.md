@@ -32,7 +32,7 @@ Rules for parity work, on top of the ledger's rules:
 The first-wave backlog of `docs/DESIGN.md` §16 (T000-T010 and the milestones through M11) is done. Do not restart it.
 
 1. Read `docs/PARITY.md` sections 3 and 4, then the ledger's sections 1-3.
-2. Take the first task that is TODO, whose dependencies are DONE, in the current wave. Today that is **Wave 1**: G20 (measure the decompiler on real programs), then G21 (call arguments and results), G24 (function discovery in stripped binaries), G23-T1 to T3 (unwind tables), and the open tasks of G04, G05 and G01.
+2. Take, in the current wave, a task that is TODO and whose dependencies are DONE: among those, the one that moves the measured numbers most (see "Highest leverage first" below), and between tasks of equal effect the first in ledger order. Today that is **Wave 1**: G20 (measure the decompiler on real programs), then G21 (call arguments and results), G24 (function discovery in stripped binaries), G23-T1 to T3 (unwind tables), and the open tasks of G04, G05 and G01.
 3. For a G20-G32 gap, T0 comes first: write the task-level plan in the ledger, in its own PR, after reading the code the gap touches.
 4. Before starting, check that no open PR or pushed branch already does the task (`git branch -r`, the open PR list). Finish or supersede existing work instead of starting a second copy.
 
@@ -104,7 +104,16 @@ When you add or change presets, update this section in the same PR so it always 
 - PR description: task ID, what was tested (commands + results), platforms not tested.
 - No warning-suppression blankets on project sources; build both Debug and Release before opening a PR.
 - **`main` is the only place finished work lives.** Every pushed branch has an open PR, or is named in the open PR that carries its commits. Never leave pushed work with neither.
-- Keep at most three task branches open at once. Do not stack a branch on an unmerged one unless the task depends on it, and say so in both PRs.
+- Keep at most six task branches open at once. Do not stack a branch on an unmerged one unless the task depends on it, and say so in both PRs.
+
+## Delivering fast without lowering the bar
+
+Speed comes from removing waits, never from skipping a check. Every review finding is fixed or answered with evidence, every test runs, nothing merges red, and the honesty rules above hold.
+
+- **Review before review.** Before a PR is opened, and before each push to it, review the diff adversarially against ground truth (the loader, the ABI, the compiled code, the format specification): for every new rule, ask what input makes it give a wrong answer, and test that input. Most reviewer findings should be found here first.
+- **One push per review round.** Collect every fix for a round of findings, run the full Debug and Release suites once, and push once. Each push cancels the CI run in progress.
+- **Keep the pipeline full.** Finished, tested work goes up as a PR at once (within the open-branch limit), so review and CI of one task overlap the work on the next.
+- **Highest leverage first.** This is the rule for choosing the next task, and it replaces plain ledger order: among the tasks of the current wave that are TODO with their dependencies DONE, take first the one that moves the scorecard's measured numbers most (`docs/PARITY.md` section 3, `docs/AUDIT.md`), and say in the PR which number it moves and by how much.
 - When a PR merges, delete its branch in the same session. Before deleting a branch that was not merged as it stands, prove that nothing is lost: `git cherry origin/main <branch>` must list no `+` commit that is not in the replacement. Close the superseded PR with a link to what replaced it.
 - Before ending a session, list what is unmerged (`git branch -r --no-merged origin/main`) and report each branch as: has an open PR, superseded (with proof), or needs a decision.
 
