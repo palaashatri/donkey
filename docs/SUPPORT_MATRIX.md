@@ -40,9 +40,13 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   on ELF by finding the libraries the dynamic loader would load, in its order (`ElfLoadScope`: ld.so.preload,
   DT_NEEDED breadth first, RPATH/RUNPATH/ld.so.conf/default directories, under `--sysroot`, plus `--library-path`)
   and binding each reference (its symbol version read by a bounded reader, `fuzz_elf_versions`) by glibc's lookup
-  rules, and on PE by the import's DLL. A shared library's references bind first in the global scope of the
-  program that loads it, so its calls are marked only with that program (`--program`; `link` uses its
-  executable); without it they stay unmarked. A library that cannot be found before the binding leaves the call
+  rules, and on PE by the import's DLL. An ELF shared library's references bind first in the global scope of
+  the program that loads it, so its calls are marked only with that program (`--program`); without it they
+  stay unmarked. Its local scope follows glibc's dlopen: a need the program already loaded is that object,
+  the executable's DT_RPATH is searched, and DT_SYMBOLIC puts the library first (each checked against glibc's
+  loader, `ElfLoadScope.ALibrarys*`, `ElfLoadScope.ASymbolicLibraryLooksItselfUpFirst`). `link` analyses
+  each input with its executable as that program; its own import bindings and call reports come from the
+  inputs it is given, and it prints no no-return marks. A library that cannot be found before the binding leaves the call
   unmarked (`analysis.no_return_unverified`, and the analysis is Partial). `functions --json` gives each mark
   its reason (`no_return_reason`); an ELF import mark names the bound library and the file it was found in,
   a PE import mark names its DLL. The ELF search models glibc's (`/etc/ld.so.cache`, inherited DT_RPATH,

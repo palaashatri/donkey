@@ -27,6 +27,13 @@
 // that runs the program with them gives the same directories as `paths` (LD_LIBRARY_PATH's place in
 // the search) and its preloads in the sysroot's /etc/ld.so.preload. Neither is RTLD_DEEPBIND,
 // which a program can pass to dlopen to search the library's local scope first.
+//
+// The library's local scope follows glibc's dlopen: a needed name the global scope already loaded
+// (by its name, soname or file) is that object, not searched for again; a search with no DT_RUNPATH
+// in the requester takes the DT_RPATH of the objects that loaded it, then the executable's. The
+// object that calls dlopen also passes on its DT_RPATH, and it is not known: when a library of the
+// program's scope has a DT_RPATH it could pass on, such a search is Unknown. A library linked with
+// DT_SYMBOLIC (or DF_SYMBOLIC) looks itself up first. The two walks share one kMaxScopeLibraries.
 
 #include <cstddef>
 #include <cstdint>
@@ -54,12 +61,20 @@ struct ElfLibrarySearch {
   /// For a shared library: the program that loads it (a path of this machine), whose global scope
   /// is searched first. Empty: the library's bindings are Unknown. Not used for a program.
   std::string program;
+  /// The program already in memory, used in place of reading `program` (which then only names it),
+  /// so the scope is built from the bytes a caller has already checked. Not owned: it must outlive
+  /// the build.
+  const BinaryImage* program_image = nullptr;
+  std::span<const std::byte> program_data;
   /// Libraries waiting to be looked for at once (kMaxScopeQueue). Past it, no later library is
   /// queued and the rest of the scope is not known.
   std::size_t queue_limit = 4096;
+  /// Libraries read for the whole scope, a shared library's local scope included
+  /// (kMaxScopeLibraries). Past it, the rest of the scope is not known.
+  std::size_t library_limit = 256;
 };
 
-inline constexpr std::size_t kMaxScopeLibraries = 256;
+inline constexpr std::size_t kMaxScopeLibraries = 256;  // ElfLibrarySearch::library_limit's default
 /// Libraries waiting to be looked for at once; past it the rest of the scope is not known.
 inline constexpr std::size_t kMaxScopeQueue = 4096;  // ElfLibrarySearch::queue_limit's default
 inline constexpr std::uint64_t kMaxScopeLibraryBytes = std::uint64_t{1} << 30;
@@ -137,12 +152,13 @@ class ElfLoadScope {
 
  private:
   struct Impl;
+  struct Inherited;
   std::unique_ptr<Impl> impl_;
 
-  /// The scope with `image` at its root: what build() gives a program, and a library's local scope
-  /// (`preload` false: ld.so.preload belongs to the global scope).
+  /// The scope with `image` at its root: what build() gives a program, and, with `inherited` (what
+  /// the program's global scope passes on), a shared library's local scope.
   static ElfLoadScope build_root(const BinaryImage& image, std::span<const std::byte> data,
-                                 const ElfLibrarySearch& search, bool preload);
+                                 const ElfLibrarySearch& search, const Inherited* inherited);
 };
 
 }  // namespace donkey

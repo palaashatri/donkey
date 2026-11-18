@@ -50,6 +50,34 @@ from this directory (`tests/fixtures/loadscope`), so the outputs land where the 
 loaded it first (`_dl_lookup_symbol_x`: the program's search list, then the library's local scope),
 so where its `abort` binds is known only with that program.
 
+`plugin/` holds a program and three libraries it could dlopen, built from `src/plugin/` (each built twice,
+the bytes are the same):
+
+    F="-O1 -fPIC -nostdlib -s -Wl,--build-id=none -Wl,--no-as-needed"
+    gcc $F -shared -Wl,-soname,libdep.so.1 -o plugin/a/libdep.so.1 src/plugin/dep_a.c
+    gcc $F -shared -Wl,-soname,libhelper.so.1 -o plugin/a/libhelper.so.1 src/plugin/helper.c
+    gcc $F -shared -Wl,-soname,libdep.so.1 -o plugin/b/libdep.so.1 src/plugin/dep_b.c
+    gcc $F -shared -Wl,-soname,libdep.so.1 -Wl,--disable-new-dtags,-rpath,/opt/vendor \
+        -o plugin/rpath/libdep.so.1 src/plugin/dep_a.c
+    gcc $F -pie -Wl,-e,_start -Wl,--disable-new-dtags,-rpath,'$ORIGIN/a' -o plugin/program \
+        src/plugin/program.c plugin/a/libdep.so.1
+    gcc $F -shared -Wl,-soname,libplugin_runpath.so.1 -Wl,--enable-new-dtags,-rpath,'$ORIGIN/b' \
+        -o plugin/libplugin_runpath.so.1 src/plugin/plugin_runpath.c plugin/b/libdep.so.1
+    gcc $F -shared -Wl,-soname,libplugin_rpath.so.1 -o plugin/libplugin_rpath.so.1 \
+        src/plugin/plugin_rpath.c plugin/a/libhelper.so.1
+    gcc $F -shared -Wl,-soname,libplugin_symbolic.so.1 -Wl,-Bsymbolic -o plugin/libplugin_symbolic.so.1 \
+        src/plugin/plugin_symbolic.c plugin/a/libdep.so.1
+
+Oracle, glibc 2.39's loader on the build host, through a host program with the same DT_RPATH
+`$ORIGIN/a` and need `libdep.so.1` that dlopens each library (`RTLD_NOW | RTLD_LOCAL`):
+
+- `libplugin_runpath.so.1`: `LD_DEBUG=files` shows one link map for `libdep.so.1`, the program's
+  (`a/`); `b/libdep.so.1` is never opened, and `marker` is undefined.
+- `libplugin_rpath.so.1`: `LD_DEBUG=libs` finds `libhelper.so.1` in `a/`, "RPATH from file" the
+  executable.
+- `libplugin_symbolic.so.1`: its `dep_a` call returns 5 (its own definition); the program's `dep_a`
+  returns 1, and `libplugin_runpath.so.1`'s call returns 1 (the program's).
+
 `steal_consumer` is linked against `clean/libsteal.so.1`, which has no `exit`, so its `exit` import
 asks for `exit@GLIBC_2.2.5` from `libc.so.6`; DT_NEEDED lists `libsteal.so.1` first.
 `steal/libsteal.so.1` is a later build of that library with an unversioned `exit` that returns.

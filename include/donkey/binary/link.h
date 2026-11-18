@@ -38,6 +38,8 @@ struct ElfLibraryNames {
   bool nodeflib = false;
   /// DF_1_PIE in DT_FLAGS_1: a position-independent executable, not a shared library.
   bool pie = false;
+  /// DT_SYMBOLIC, or DF_SYMBOLIC in DT_FLAGS: the object's own references look in it first.
+  bool symbolic = false;
   /// DT_VERSYM, DT_VERDEF and DT_VERNEED are present: the loader reads symbol versions.
   bool version_symbols = false;
   bool version_definitions = false;
