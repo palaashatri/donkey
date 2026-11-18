@@ -129,6 +129,10 @@ TEST(FunctionStarts, LoaderRefusesATableOutsideTheFile) {
 namespace {
 
 std::uint32_t le32(const std::vector<std::byte>& data, std::size_t at) {
+  if (data.size() < 4 || at > data.size() - 4) {
+    ADD_FAILURE() << "read past the end at " << at;
+    return 0;
+  }
   std::uint32_t value = 0;
   for (int byte = 3; byte >= 0; --byte) {
     value =
@@ -138,6 +142,10 @@ std::uint32_t le32(const std::vector<std::byte>& data, std::size_t at) {
 }
 
 void put_be32(std::vector<std::byte>& data, std::size_t at, std::uint32_t value) {
+  if (data.size() < 4 || at > data.size() - 4) {
+    ADD_FAILURE() << "write past the end at " << at;
+    return;
+  }
   for (int byte = 0; byte < 4; ++byte) {
     data[at + static_cast<std::size_t>(byte)] =
         static_cast<std::byte>((value >> (24U - 8U * static_cast<unsigned>(byte))) & 0xffU);
