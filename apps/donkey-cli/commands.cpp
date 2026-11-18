@@ -873,7 +873,7 @@ void print_usage(std::FILE* out) {
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       " [--json]\n"
       "  donkey-cli link <executable> <library>... [--sysroot <dir>] [--library-path <dir>]... "
-      "[--json]\n"
+      "[--program <path>] [--json]\n"
       "  donkey-cli project link <database> [--json]\n"
       "  donkey-cli project string <database> <image-id> <address> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
@@ -902,8 +902,10 @@ void print_usage(std::FILE* out) {
       "\n"
       "Analysis commands take --sysroot DIR and --library-path DIR (repeatable): where an ELF\n"
       "image's libraries are, to show which library each import binds to (default: this host).\n"
-      "A shared library's imports bind first in the program that loads it: --program PATH names\n"
-      "that program (without it, a library's bindings are unknown).\n"
+      "An ELF shared library's imports bind first in the program that loads it: --program PATH\n"
+      "names that program (without it, a library's bindings are unknown). `link` analyses each\n"
+      "input with its executable as that program unless --program names another; its import\n"
+      "bindings and call providers come from the inputs it is given, not from the program.\n"
       "\n"
       "Every command except `debug launch` only reads files and never executes them.\n"
       "`debug launch` runs the program under the native debugger (it stops at the\n"
@@ -2349,10 +2351,13 @@ int report_link(const std::vector<std::string>& labels,
   bool partial = false;
   for (const donkey::LoadedBinary& item : loaded) {
     // The libraries of a link are loaded by its executable (the first input), unless --program
-    // names another program.
+    // names another program. The executable is the image already loaded (and, for `project link`,
+    // already checked against the project), not the file read again.
     AnalysisOptions options = analysis_options();
     if (options.library_search.program.empty() && !loaded.empty()) {
       options.library_search.program = loaded.front().image.path;
+      options.library_search.program_image = &loaded.front().image;
+      options.library_search.program_data = loaded.front().data;
     }
     auto analysis = donkey::analyze(item.image, item.data, options);
     if (!analysis) {

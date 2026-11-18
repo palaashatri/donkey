@@ -674,6 +674,23 @@ struct ElfLoadScope::Impl {
   std::vector<LoadedLibrary> loaded;  // parallel to libraries; [0] is the executable
   bool executable_dynamic = true;     // false: the executable defines nothing for others
   std::size_t image_index = 0;        // where the image the scope was built for is
+  bool image_first = false;           // DT_SYMBOLIC: the image is looked up before the scope
+  // What a walk leaves for a later one (a shared library's local scope): every name, soname and
+  // file it loaded, the executable's DT_RPATH (empty when it has DT_RUNPATH) with its $ORIGIN, and
+  // whether another object has a DT_RPATH it could pass on to a library it loads.
+  std::set<std::string> seen;
+  std::string executable_rpath;
+  LoaderPath executable_origin;
+  bool other_rpath = false;
+};
+
+/// What the program's global scope passes on to a shared library's local scope.
+struct ElfLoadScope::Inherited {
+  std::size_t max_libraries = 0;  // what is left of the shared budget
+  std::set<std::string> loaded;   // names, sonames and files already loaded
+  std::string executable_rpath;
+  LoaderPath executable_origin;
+  bool unknown_rpath = false;  // the object that calls dlopen may pass on a DT_RPATH
 };
 
 ElfLoadScope::ElfLoadScope() : impl_(std::make_unique<Impl>()) {}
@@ -743,9 +760,10 @@ bool is_shared_library(const BinaryImage& image, std::span<const std::byte> data
 
 ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::byte> data,
                                  const ElfLibrarySearch& search) {
+  const ElfLibraryNames own = read_library_names(image, data);
   if (image.format != BinaryFormat::Elf || image.bits != 64 ||
-      !is_shared_library(image, data, read_library_names(image, data))) {
-    return build_root(image, data, search, true);
+      !is_shared_library(image, data, own)) {
+    return build_root(image, data, search, nullptr);
   }
   // A shared library: the program's global scope, then the library's local scope.
   ElfLoadScope scope;
@@ -770,25 +788,48 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
         "a shared library's references bind first in the scope of the program that loads it, "
         "and no program was given");
   }
-  FileBytes file = read_file(fs::path(search.program), kMaxScopeLibraryBytes);
-  if (file.state != FileBytes::State::Read) {
-    return unknown_program(search.program + " could not be read");
+  // The program: the image the caller already holds, or the file `program` names.
+  FileBytes file;
+  std::optional<BinaryImage> parsed_program;
+  const BinaryImage* program = search.program_image;
+  std::span<const std::byte> program_data = search.program_data;
+  if (program == nullptr) {
+    file = read_file(fs::path(search.program), kMaxScopeLibraryBytes);
+    if (file.state != FileBytes::State::Read) {
+      return unknown_program(search.program + " could not be read");
+    }
+    auto parsed = parse_binary(file.bytes, search.program);
+    if (!parsed) {
+      return unknown_program(search.program + " is not an ELF program of the library's machine");
+    }
+    parsed_program = std::move(parsed.value());
+    program = &*parsed_program;
+    program_data = file.bytes;
   }
-  auto parsed = parse_binary(file.bytes, search.program);
-  if (!parsed || parsed.value().format != BinaryFormat::Elf ||
-      parsed.value().architecture != image.architecture || parsed.value().bits != image.bits) {
+  if (program->format != BinaryFormat::Elf || program->architecture != image.architecture ||
+      program->bits != image.bits) {
     return unknown_program(search.program + " is not an ELF program of the library's machine");
   }
-  if (is_shared_library(parsed.value(), file.bytes,
-                        read_library_names(parsed.value(), file.bytes))) {
+  if (is_shared_library(*program, program_data, read_library_names(*program, program_data))) {
     return unknown_program(search.program + " is a shared library, not a program");
   }
   ElfLibrarySearch global_search = search;
   global_search.program.clear();
-  ElfLoadScope global = build_root(parsed.value(), file.bytes, global_search, true);
-  ElfLoadScope local = build_root(image, data, global_search, false);
+  global_search.program_image = nullptr;
+  global_search.program_data = {};
+  ElfLoadScope global = build_root(*program, program_data, global_search, nullptr);
+  Inherited inherited;
+  const std::size_t limit = std::min(search.library_limit, kMaxScopeLibraries);
+  inherited.max_libraries =
+      global.impl_->libraries.size() >= limit ? 0 : limit - global.impl_->libraries.size();
+  inherited.loaded = global.impl_->seen;
+  inherited.executable_rpath = global.impl_->executable_rpath;
+  inherited.executable_origin = global.impl_->executable_origin;
+  inherited.unknown_rpath = global.impl_->other_rpath;
+  ElfLoadScope local = build_root(image, data, global_search, &inherited);
   impl = std::move(*global.impl_);
   impl.image_index = impl.libraries.size();
+  impl.image_first = own.symbolic;
   for (std::size_t i = 0; i < local.impl_->libraries.size(); ++i) {
     impl.libraries.push_back(std::move(local.impl_->libraries[i]));
     impl.loaded.push_back(std::move(local.impl_->loaded[i]));
@@ -797,7 +838,12 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
 }
 
 ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const std::byte> data,
-                                      const ElfLibrarySearch& search, bool preload) {
+                                      const ElfLibrarySearch& search, const Inherited* inherited) {
+  // ld.so.preload belongs to the global scope: a library's local scope does not read it.
+  const bool preload = inherited == nullptr;
+  const std::size_t max_libraries = inherited != nullptr
+                                        ? inherited->max_libraries
+                                        : std::min(search.library_limit, kMaxScopeLibraries);
   ElfLoadScope scope;
   Impl& impl = *scope.impl_;
   const std::string& sysroot = search.sysroot;
@@ -838,6 +884,10 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     names_of.push_back(own);
     origin_of.push_back(origin);
     loader_of.push_back(kNoLoader);
+    if (inherited == nullptr && !own.has_runpath) {
+      impl.executable_rpath = own.rpath;
+      impl.executable_origin = origin;
+    }
   }
   if (!own.complete) {
     impl.loaded[0].readable = false;
@@ -973,6 +1023,32 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       for (std::size_t object = requester; object != kNoLoader; object = loader_of[object]) {
         if (!names_of[object].has_runpath) {
           add_entries(names_of[object].rpath, object);
+        }
+      }
+      if (inherited != nullptr) {
+        // A library's local scope: the object that called dlopen loaded it, and its DT_RPATH
+        // (and its loaders') comes next. That object is not known; when one of the program's
+        // libraries has a DT_RPATH to pass on, the search is not known either. Then glibc tries
+        // the executable's own DT_RPATH.
+        if (inherited->unknown_rpath) {
+          SearchStep step;
+          step.kind = SearchStep::Kind::Unknowable;
+          step.reason =
+              "the object that loads the library with dlopen is not known, and a "
+              "library of the program's scope has a DT_RPATH it would pass on";
+          steps.push_back(std::move(step));
+        }
+        for (const std::string& entry : split_search_path(inherited->executable_rpath)) {
+          SearchStep step;
+          std::string why;
+          const auto directory = expand_tokens(entry, inherited->executable_origin, why);
+          if (directory) {
+            step.directory = *directory;
+          } else {
+            step.kind = SearchStep::Kind::Unknowable;
+            step.reason = why;
+          }
+          steps.push_back(std::move(step));
         }
       }
     }
@@ -1153,8 +1229,13 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
   for (const std::string& name : own.needed) {
     enqueue({name, 0, false});
   }
-  std::set<std::string> seen;  // names, sonames and files already in the scope
-  while (!queue.empty() && impl.libraries.size() <= kMaxScopeLibraries) {
+  // Names, sonames and files already in the scope. A library's local scope starts with what the
+  // program's global scope loaded: glibc gives a needed name that matches one of them that object.
+  std::set<std::string> seen;
+  if (inherited != nullptr) {
+    seen = inherited->loaded;
+  }
+  while (!queue.empty() && impl.libraries.size() <= max_libraries) {
     Pending next = std::move(queue.front());
     queue.pop_front();
     if (seen.contains(next.name)) {
@@ -1217,13 +1298,29 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     impl.libraries.push_back(rest);
     impl.loaded.push_back(std::move(loaded));
   }
+  impl.seen = std::move(seen);
+  for (std::size_t object = 1; object < names_of.size(); ++object) {
+    if (!names_of[object].has_runpath && !names_of[object].rpath.empty()) {
+      impl.other_rpath = true;
+    }
+  }
   return scope;
 }
 
 ElfBinding ElfLoadScope::lookup(const std::string& name, const std::string& version,
                                 bool hidden_need) const {
   ElfBinding out;
+  // DT_SYMBOLIC: the image itself first, then the scope in order (where it is not looked up again).
+  std::vector<std::size_t> order;
+  if (impl_->image_first && impl_->image_index < impl_->libraries.size()) {
+    order.push_back(impl_->image_index);
+  }
   for (std::size_t index = 0; index < impl_->libraries.size(); ++index) {
+    if (order.empty() || index != order.front()) {
+      order.push_back(index);
+    }
+  }
+  for (const std::size_t index : order) {
     const LoadedLibrary& loaded = impl_->loaded[index];
     if (!loaded.readable) {
       if (index == 0 && !impl_->executable_dynamic) {
