@@ -355,7 +355,16 @@ jobs:
           run: |
             set -e
             git config --global --add safe.directory '*'
-            cmake --preset package-freebsd
+            # The emulated aarch64 VM sometimes stops as a whole for about 35 minutes while its
+            # clock keeps running (twice in November 2026: no line was printed for 35 minutes, and
+            # the test running then was charged the whole stop, past CTest's 1500 s, while the test
+            # that had just ended reported 1.73 s). On that VM every test may run for an hour; a
+            # test that really hangs still fails.
+            floor=''
+            if [ "${{ matrix.vm_arch }}" = aarch64 ]; then
+              floor=3600
+            fi
+            cmake --preset package-freebsd ${floor:+-DDONKEY_TEST_TIMEOUT_FLOOR=$floor}
             cmake --build --preset package-freebsd --parallel
             # What analysis reports about the test debuggee (status, diagnostics).
             build/package-freebsd/apps/donkey-cli/donkey-cli analyze \
@@ -382,7 +391,8 @@ jobs:
               exclude='ui[.]script_(virtualization|responsiveness)'
               export DONKEY_UI_NO_TIMING=1
             fi
-            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 --output-on-failure ${exclude:+-E "$exclude"}
+            DISPLAY=:99 ctest --preset package-freebsd --parallel 2 --output-on-failure \
+              ${floor:+--timeout $floor} ${exclude:+-E "$exclude"}
             mkdir -p screenshots
             cp build/package-freebsd/tests/screenshots/*.bmp screenshots/ || true
             (cd build/package-freebsd && cpack)
