@@ -437,9 +437,9 @@ class Parser {
     return SizeAlign{size.value(), alignment.value()};
   }
 
-  void note(const std::string& name, CNameSpace space, TypeKind kind) {
+  void note(const std::string& name, CNameSpace space, TypeKind kind, bool completes = false) {
     if (names_ != nullptr) {
-      names_->push_back(CDeclaredName{name, space, kind});
+      names_->push_back(CDeclaredName{name, space, kind, completes});
     }
   }
 
@@ -711,6 +711,9 @@ class Parser {
                                    "'" + tag + "' is already defined");
           }
           id = known->second;  // completes an earlier forward declaration
+          if (forward_tags_.erase(id) != 0) {
+            note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct, true);
+          }
         }
       }
       if (!id.valid()) {
@@ -749,6 +752,7 @@ class Parser {
     tags.emplace(tag, id);
     note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
     incomplete_.insert(id);
+    forward_tags_.insert(id);
     return TagRef{id, false};
   }
 
@@ -1181,6 +1185,8 @@ class Parser {
   std::map<std::string, TypeId> typedef_names_;
   std::map<std::string, TypeId> scalars_;
   std::set<TypeId> incomplete_;
+  /// Tags this text named by a forward reference and has not defined yet.
+  std::set<TypeId> forward_tags_;
   int nesting_ = 0;  ///< struct and union bodies being parsed
 };
 

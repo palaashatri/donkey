@@ -2790,13 +2790,19 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   std::ifstream file(input, std::ios::binary);
   std::string text(static_cast<std::size_t>(size), '\0');
   file.read(text.data(), static_cast<std::streamsize>(text.size()));
-  text.resize(static_cast<std::size_t>(file.gcount()));
+  // A short read (the file shrank, or a read error) would make a library of a prefix: refused.
+  if (!file || static_cast<std::uintmax_t>(file.gcount()) != size) {
+    return fail(Diagnostic{Status::InvalidInput, "typelib_make.read",
+                           "cannot read the whole preprocessed C file", std::nullopt});
+  }
   auto made = donkey::make_type_library(text, options);
   if (!made) {
     return fail(made.diagnostic());
   }
   std::ofstream written(out, std::ios::binary | std::ios::trunc);
   written << made.value().text;
+  // Closing flushes the buffer: a failed write shows here, before success is reported.
+  written.close();
   if (!written) {
     return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
                            "cannot write the library file", std::nullopt});

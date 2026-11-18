@@ -37,8 +37,12 @@ for header in $(cd "$include" && ls ./*.h | sed 's|^\./||' | LC_ALL=C sort); do
   set -- "$@" --source-file "$header $(sha256sum "$include/$header" | cut -d' ' -f1)"
 done
 
-cpp="gcc -E -P -nostdinc -isystem $include -D_GNU_SOURCE"
-$cpp "$work/all.c" -o "$work/all.i"
+# The same flags run and are recorded. Include-path variables of the environment (CPATH and the
+# like) are cleared: GCC searches them even with -nostdinc, so they could put other headers in the
+# place of the hashed musl ones.
+flags="-E -P -nostdinc -isystem $include -D_GNU_SOURCE"
+env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH \
+  -u OBJCPLUS_INCLUDE_PATH gcc $flags "$work/all.c" -o "$work/all.i"
 
 "$cli" typelib make "$work/all.i" --out "$out" \
   --library musl-libc --library-version 1.2.4 \
@@ -49,9 +53,9 @@ $cpp "$work/all.c" -o "$work/all.i"
   --licence-file usr/share/doc/musl-dev/copyright \
   --licence-sha256 "$(sha256sum "$licence" | cut -d' ' -f1)" \
   --command "sh tools/typelib/make-musl.sh" \
-  --preprocessor "gcc $(gcc -dumpfullversion) -E -P -nostdinc -D_GNU_SOURCE" \
+  --preprocessor "gcc $(gcc -dumpfullversion) $flags (CPATH, C_INCLUDE_PATH and the like unset)" \
   --created "$created" \
   --macro _GNU_SOURCE= \
-  --note "source_sha256 is the SHA-256 of the preprocessed text; each source_file is a musl header" \
+  --note "source_sha256 is the SHA-256 of the whole preprocessed text; each source_file hash covers one top-level musl header, not the headers it includes" \
   --note "musl include/* is public domain with a permission grant; the package licence is MIT" \
   "$@"
