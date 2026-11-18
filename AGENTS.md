@@ -104,7 +104,16 @@ When you add or change presets, update this section in the same PR so it always 
 - PR description: task ID, what was tested (commands + results), platforms not tested.
 - No warning-suppression blankets on project sources; build both Debug and Release before opening a PR.
 - **`main` is the only place finished work lives.** Every pushed branch has an open PR, or is named in the open PR that carries its commits. Never leave pushed work with neither.
-- Keep at most three task branches open at once. Do not stack a branch on an unmerged one unless the task depends on it, and say so in both PRs.
+- Keep at most six task branches open at once. Do not stack a branch on an unmerged one unless the task depends on it, and say so in both PRs.
+
+## Delivering fast without lowering the bar
+
+Speed comes from removing waits, never from skipping a check. Every review finding is fixed or answered with evidence, every test runs, nothing merges red, and the honesty rules above hold.
+
+- **Review before review.** Before a PR is opened, and before each push to it, review the diff adversarially against ground truth (the loader, the ABI, the compiled code, the format specification): for every new rule, ask what input makes it give a wrong answer, and test that input. Most reviewer findings should be found here first.
+- **One push per review round.** Collect every fix for a round of findings, run the full Debug and Release suites once, and push once. Each push cancels the CI run in progress.
+- **Keep the pipeline full.** Finished, tested work goes up as a PR at once (within the open-branch limit), so review and CI of one task overlap the work on the next.
+- **Highest leverage first.** Inside a wave, take first the task that moves the scorecard's measured numbers most (`docs/PARITY.md` section 3, `docs/AUDIT.md`), and say in the PR which number it moves and by how much.
 - When a PR merges, delete its branch in the same session. Before deleting a branch that was not merged as it stands, prove that nothing is lost: `git cherry origin/main <branch>` must list no `+` commit that is not in the replacement. Close the superseded PR with a link to what replaced it.
 - Before ending a session, list what is unmerged (`git branch -r --no-merged origin/main`) and report each branch as: has an open PR, superseded (with proof), or needs a decision.
 
