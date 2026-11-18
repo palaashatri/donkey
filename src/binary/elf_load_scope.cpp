@@ -796,6 +796,10 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
         "a shared library's references bind first in the scope of the program that loads it, "
         "and no program was given");
   }
+  if (std::min(search.library_limit, kMaxScopeLibraries) == 0) {
+    // No room even for the program: it is not opened.
+    return unknown_program("the scope has more libraries than the limit");
+  }
   // The program: the image the caller already holds, or the file `program` names.
   FileBytes file;
   std::optional<BinaryImage> parsed_program;

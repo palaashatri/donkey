@@ -1232,6 +1232,15 @@ TEST(ElfLoadScope, ALimitOfZeroReadsNothing) {
                 .lookup("plugin_rpath", "")
                 .outcome,
             donkey::ElfBinding::Outcome::Unknown);
+  // The program is not even opened: one that does not exist gives the limit's reason, not a read
+  // failure.
+  plugin.program = fixture("loadscope", "plugin/no-such-program");
+  const donkey::ElfBinding unopened =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), plugin).lookup("helper", "");
+  EXPECT_EQ(unopened.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(unopened.reason.find("more libraries than the limit"), std::string::npos)
+      << unopened.reason;
+  EXPECT_EQ(unopened.reason.find("could not be read"), std::string::npos) << unopened.reason;
 }
 
 // The limit counts every object of the scope, the program included: steal_consumer needs
