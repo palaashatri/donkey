@@ -43,11 +43,14 @@ struct ElfLibrarySearch {
   std::vector<std::string> paths;
   /// Read /etc/ld.so.preload, /etc/ld.so.cache and the default directories.
   bool system_directories = true;
+  /// Libraries waiting to be looked for at once (kMaxScopeQueue). Past it, no later library is
+  /// queued and the rest of the scope is not known.
+  std::size_t queue_limit = 4096;
 };
 
 inline constexpr std::size_t kMaxScopeLibraries = 256;
 /// Libraries waiting to be looked for at once; past it the rest of the scope is not known.
-inline constexpr std::size_t kMaxScopeQueue = 4096;
+inline constexpr std::size_t kMaxScopeQueue = 4096;  // ElfLibrarySearch::queue_limit's default
 inline constexpr std::uint64_t kMaxScopeLibraryBytes = std::uint64_t{1} << 30;
 inline constexpr std::uint64_t kMaxLoaderCacheBytes = std::uint64_t{64} << 20;
 

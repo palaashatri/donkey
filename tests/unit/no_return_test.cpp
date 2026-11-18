@@ -1341,3 +1341,19 @@ TEST(Analysis, ALibraryThatIsTheCLibraryOnlyByItsSonameIsNotTrusted) {
   ASSERT_TRUE(analysis.has_value());
   EXPECT_TRUE(analysis.value().no_return.empty());
 }
+
+// A library left out when the queue is full stays out, and so does every library queued after it,
+// even once the queue has room again. chain_consumer needs liba.so.1 then libc.so.6; with room for
+// one, libc.so.6 is left out. Were liba's own needs (libb, then libsteal with an unversioned exit)
+// queued later, exit would bind to libsteal, ahead of the libc the loader takes first.
+TEST(ElfLoadScope, ALibraryLeftOutOfAFullQueueKeepsEveryLaterOneOut) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "chain"));
+  search.queue_limit = 1;
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "chain/chain_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 3U);  // the executable, liba.so.1, then the unknown rest
+  EXPECT_EQ(scope.libraries()[1].name, "liba.so.1");
+  const donkey::ElfBinding binding = scope.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_TRUE(contains(binding.reason, "limit")) << binding.reason;
+}

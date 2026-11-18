@@ -983,7 +983,9 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
   std::deque<Pending> queue;
   bool overflow = false;
   const auto enqueue = [&](Pending pending) {
-    if (queue.size() >= kMaxScopeQueue) {
+    // Once one library is left out, every later one is too: a library queued after the omission
+    // would otherwise take a place in the scope before the one left out.
+    if (overflow || queue.size() >= search.queue_limit) {
       overflow = true;
       return;
     }
