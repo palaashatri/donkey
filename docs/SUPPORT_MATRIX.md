@@ -378,5 +378,5 @@ the listing draws no data rows, and the decompiler does not print string literal
 | What | Status | Evidence | Not done |
 |---|---|---|---|
 | Format and reader (T1) | Done | `TypeLib.*`, `fuzz_typelib` | |
-| Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte | FreeBSD and MinGW-w64 libraries; `.winmd`; `sizeof` and `?:` in array bounds (445 musl declarations listed as skipped) |
+| Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte with `CREATED=2026-11-18`, `musl-dev` 1.2.4-2 and GCC 13.3.0 (checked by generating twice on Ubuntu 24.04 x86-64) | FreeBSD and MinGW-w64 libraries; `.winmd`; `sizeof` and `?:` in array bounds, bit-fields (398 musl declarations listed as skipped, `struct stat` among them) |
 | Applying a library to code (T3) | Not done | | the decompiler and the CLI do not use a library's types yet |

@@ -1308,8 +1308,8 @@ void expect_located_error(std::string_view text, const char* code, std::string_v
 }  // namespace
 
 TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
-  // A tag the first time it is named (here by a forward reference in a prototype, then its
-  // definition, which is not listed again), a typedef that names an untagged struct, a plain
+  // A tag the first time it is named (here by a forward reference in a prototype), then again at
+  // its definition, marked as completing it; a typedef that names an untagged struct, a plain
   // typedef and a prototype.
   std::vector<donkey::CDeclaredName> names;
   const auto parsed = donkey::parse_c_declarations(
@@ -1320,21 +1320,34 @@ TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
       "enum mode { MODE_A = 1 };\n",
       donkey::TypeTable{}, {}, &names);
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
-  ASSERT_EQ(names.size(), 5U);
+  ASSERT_EQ(names.size(), 6U);
   EXPECT_EQ(names[0].name, "box");
   EXPECT_EQ(names[0].space, donkey::CNameSpace::Tag);
   EXPECT_EQ(names[0].kind, donkey::TypeKind::Struct);
+  EXPECT_FALSE(names[0].completes);
   EXPECT_EQ(names[1].name, "area");
   EXPECT_EQ(names[1].space, donkey::CNameSpace::Ordinary);
   EXPECT_EQ(names[1].kind, donkey::TypeKind::Function);
-  EXPECT_EQ(names[2].name, "item");
-  EXPECT_EQ(names[2].space, donkey::CNameSpace::Ordinary);
-  EXPECT_EQ(names[2].kind, donkey::TypeKind::Typedef);
-  EXPECT_EQ(names[3].name, "count_t");
+  EXPECT_EQ(names[2].name, "box");
+  EXPECT_EQ(names[2].space, donkey::CNameSpace::Tag);
+  EXPECT_TRUE(names[2].completes);
+  EXPECT_EQ(names[3].name, "item");
+  EXPECT_EQ(names[3].space, donkey::CNameSpace::Ordinary);
   EXPECT_EQ(names[3].kind, donkey::TypeKind::Typedef);
-  EXPECT_EQ(names[4].name, "mode");
-  EXPECT_EQ(names[4].space, donkey::CNameSpace::Tag);
-  EXPECT_EQ(names[4].kind, donkey::TypeKind::Enum);
+  EXPECT_FALSE(names[3].completes);
+  EXPECT_EQ(names[4].name, "count_t");
+  EXPECT_EQ(names[4].kind, donkey::TypeKind::Typedef);
+  EXPECT_EQ(names[5].name, "mode");
+  EXPECT_EQ(names[5].space, donkey::CNameSpace::Tag);
+  EXPECT_EQ(names[5].kind, donkey::TypeKind::Enum);
+
+  // A tag defined without a forward reference is listed once, not as completing anything.
+  std::vector<donkey::CDeclaredName> once;
+  ASSERT_TRUE(
+      donkey::parse_c_declarations("struct p { int32_t x; };\n", donkey::TypeTable{}, {}, &once)
+          .has_value());
+  ASSERT_EQ(once.size(), 1U);
+  EXPECT_FALSE(once[0].completes);
 }
 
 TEST(Types, ParsesCDeclarations) {

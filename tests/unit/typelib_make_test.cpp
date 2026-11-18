@@ -87,6 +87,82 @@ TEST(TypeLibMake, KeepsWhatParsesAndListsTheRest) {
   EXPECT_EQ(type_named(library.value(), "t", donkey::TypeKind::Struct), nullptr);
 }
 
+// Delimiters inside a character or string literal are not C structure: the definition of f still
+// ends at its closing brace, and g is a declaration of its own.
+TEST(TypeLibMake, LiteralsAreNotDelimiters) {
+  const auto declarations = donkey::split_c_declarations(
+      "typedef int ok; static int f(void) { return '('; } int g(void);\n"
+      "static const char *h(void) { return \"};( \\\" )\"; }\n"
+      "int k(void);\n");
+  ASSERT_EQ(declarations.size(), 5U);
+  EXPECT_EQ(declarations[0], "typedef int ok;");
+  EXPECT_EQ(declarations[1], "static int f(void) { return '('; }");
+  EXPECT_EQ(declarations[2], "int g(void);");
+  // The literal is copied as it is, spaces and escapes included.
+  EXPECT_EQ(declarations[3], "static const char *h(void) { return \"};( \\\" )\"; }");
+  EXPECT_EQ(declarations[4], "int k(void);");
+}
+
+// An attribute that may change a type is never dropped: the declaration is listed as skipped with
+// the attribute. One that changes neither the type nor the layout (noreturn, nonnull) is removed.
+TEST(TypeLibMake, TypeChangingAttributesAreNotDropped) {
+  const char* input =
+      "typedef __attribute__((vector_size(16))) int v4;\n"
+      "struct packed_s { char c; int i; } __attribute__((__packed__));\n"
+      "typedef int aligned_t __attribute__((aligned(16)));\n"
+      "void quit(int) __attribute__((__noreturn__, __nonnull__));\n";
+  auto made = donkey::make_type_library(input, test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 1U);  // quit
+  ASSERT_EQ(made.value().skipped.size(), 3U);
+  for (const donkey::TypeLibrarySkipped& skipped : made.value().skipped) {
+    EXPECT_NE(skipped.reason.find("attribute that may change the type"), std::string::npos)
+        << skipped.name << ": " << skipped.reason;
+  }
+  EXPECT_NE(made.value().skipped[0].reason.find("vector_size"), std::string::npos);
+  auto library = donkey::read_type_library(made.value().text);
+  ASSERT_TRUE(library.has_value()) << library.diagnostic().message;
+  EXPECT_EQ(type_named(library.value(), "v4", donkey::TypeKind::Typedef), nullptr);
+  EXPECT_NE(type_named(library.value(), "quit", donkey::TypeKind::Function), nullptr);
+}
+
+// A tag the kept text names only by a forward reference (a pointer member) is completed by its
+// definition later in the input, as one C text completes it; a second definition is refused.
+TEST(TypeLibMake, AForwardReferencedTagIsCompletedByItsDefinition) {
+  const char* input =
+      "typedef struct entry { struct entry *next; struct info *info; } entry_t;\n"
+      "struct info { int id; long size; };\n"
+      "int info_of(const char *, struct info *);\n"
+      "struct info { int other; };\n";
+  auto made = donkey::make_type_library(input, test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 3U);
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_EQ(made.value().skipped[0].name, "info");
+  EXPECT_NE(made.value().skipped[0].reason.find("cdecl.redefinition"), std::string::npos)
+      << made.value().skipped[0].reason;
+  auto library = donkey::read_type_library(made.value().text);
+  ASSERT_TRUE(library.has_value()) << library.diagnostic().message;
+  const auto* info = type_named(library.value(), "info", donkey::TypeKind::Struct);
+  ASSERT_NE(info, nullptr);
+  ASSERT_EQ(info->fields.size(), 2U);
+  EXPECT_EQ(info->fields[1].name, "size");
+  EXPECT_EQ(info->fields[1].offset, 8U);
+  EXPECT_EQ(info->size, 16U);
+}
+
+// A skipped record names the declarator the parser refused, not the last name in the group.
+TEST(TypeLibMake, ASkippedRecordNamesTheRefusedDeclarator) {
+  auto made = donkey::make_type_library("int f(void);\nextern int optind, opterr, optopt;\n",
+                                        test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_EQ(made.value().skipped[0].name, "optind");
+  // The position is the declaration's own ("line 1"), not the kept text's.
+  EXPECT_NE(made.value().skipped[0].reason.find("line 1,"), std::string::npos)
+      << made.value().skipped[0].reason;
+}
+
 TEST(TypeLibMake, RefusesAnInputWithNothingKept) {
   auto made = donkey::make_type_library("extern int only_a_variable;\n", test_options());
   ASSERT_FALSE(made.has_value());
@@ -118,7 +194,22 @@ TEST(TypeLibMake, ShippedMuslLibraryLoads) {
   const auto* printf_type = type_named(library.value(), "printf", donkey::TypeKind::Function);
   ASSERT_NE(printf_type, nullptr);
   EXPECT_TRUE(printf_type->variadic);
-  EXPECT_NE(type_named(library.value(), "stat", donkey::TypeKind::Struct), nullptr);
+  // struct sigaltstack is named first by a forward reference (stack_t), then defined: kept whole.
+  const auto* sigaltstack = type_named(library.value(), "sigaltstack", donkey::TypeKind::Struct);
+  ASSERT_NE(sigaltstack, nullptr);
+  ASSERT_EQ(sigaltstack->fields.size(), 3U);
+  EXPECT_EQ(sigaltstack->fields[2].name, "ss_size");
+  EXPECT_EQ(sigaltstack->size, 24U);
+  // struct stat is not: its timespec members pad with bit-fields whose widths are constant
+  // expressions (`int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`), outside the C subset. It
+  // is listed as skipped with that reason, and the library has only the incomplete tag that
+  // `struct stat *` makes, never a struct with no fields presented as complete.
+  bool stat_listed = false;
+  for (const donkey::TypeLibrarySkipped& skipped : library.value().skipped) {
+    stat_listed = stat_listed ||
+                  (skipped.name == "stat" && skipped.reason.find("st_atim") != std::string::npos);
+  }
+  EXPECT_TRUE(stat_listed);
   // pthread_attr_t's layout uses `sizeof` in an array bound, which the parser does not evaluate:
   // it and the functions that name it are listed as skipped, not dropped.
   bool listed = false;
