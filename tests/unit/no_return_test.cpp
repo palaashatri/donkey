@@ -405,6 +405,40 @@ TEST(Analysis, AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked)
       << clean_stub->no_return_reason;
 }
 
+// A shared library's references bind first in the global scope of the program that loads it
+// (glibc's _dl_lookup_symbol_x: the program's search list, then the library's local scope). So the
+// library alone proves nothing: without the program its abort call is not marked, and the analysis
+// says why. With the program it is loaded by, the call binds to the C library and is marked.
+TEST(Analysis, ALibrarysImportIsBoundOnlyInTheScopeOfItsProgram) {
+  const Analyzed alone = analyze_fixture("libaborts.so.1", "loadscope");
+  EXPECT_TRUE(alone.analysis.no_return.empty());
+  const auto diagnostic = std::find_if(
+      alone.analysis.diagnostics.begin(), alone.analysis.diagnostics.end(),
+      [](const donkey::Diagnostic& d) { return d.code == "analysis.no_return_unverified"; });
+  ASSERT_NE(diagnostic, alone.analysis.diagnostics.end());
+  EXPECT_NE(diagnostic->message.find("abort: a shared library's references bind first in the "
+                                     "scope of the program that loads it"),
+            std::string::npos)
+      << diagnostic->message;
+
+  auto loaded = donkey::load_binary(fixture("loadscope", "libaborts.so.1"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  AnalysisOptions options;
+  options.library_search = fixture_libraries(donkey::Architecture::X86_64);
+  options.library_search.paths.push_back(fixture("loadscope", "clean"));
+  options.library_search.program = fixture("loadscope", "steal_consumer");
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, options);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  const auto abort_stub =
+      std::find_if(analysis.value().functions.begin(), analysis.value().functions.end(),
+                   [](const donkey::Function& f) { return f.import_name == "abort"; });
+  ASSERT_NE(abort_stub, analysis.value().functions.end());
+  EXPECT_TRUE(abort_stub->no_return);
+  EXPECT_NE(abort_stub->no_return_reason.find("version:GLIBC_2.2.5 bound:libc.so.6"),
+            std::string::npos)
+      << abort_stub->no_return_reason;
+}
+
 // A library the walk cannot find before any definition leaves the binding unknown: no mark, and
 // the analysis says which import and why.
 TEST(Analysis, AnImportWhoseLibrariesCannotBeFoundIsNotMarked) {
@@ -1019,6 +1053,45 @@ TEST(ElfLoadScope, InheritsTheRpathOfTheObjectsThatLoadedTheRequester) {
   EXPECT_EQ(scope.libraries()[4].path, fixture("loadscope", "chain/inner/libsteal.so.1"));
   // Every library was found and read, so a name none defines is known not to be defined.
   EXPECT_EQ(scope.lookup("no_such_name", "").outcome, donkey::ElfBinding::Outcome::NotDefined);
+}
+
+// A shared library is looked up in the program's global scope first, then in its own local scope.
+// steal/libsteal.so.1 defines an unversioned exit. Rooted at the library, exit binds to its own
+// definition; loaded by steal_consumer (whose global scope is the program, the libsteal.so.1 it
+// was linked with, then libc.so.6), exit binds to libc.so.6, before the library's own copy.
+TEST(ElfLoadScope, ALibraryIsLookedUpInItsProgramsScopeFirst) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  const std::string library = fixture("loadscope", "steal/libsteal.so.1");
+
+  // Without the program nothing is known: the program comes first and is not given.
+  const donkey::ElfLoadScope alone = scope_of(library, search);
+  EXPECT_EQ(alone.image_index(), 1U);
+  const donkey::ElfBinding unknown = alone.lookup("exit", "");
+  EXPECT_EQ(unknown.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(unknown.reason.find("no program was given"), std::string::npos) << unknown.reason;
+
+  search.program = fixture("loadscope", "steal_consumer");
+  const donkey::ElfLoadScope scope = scope_of(library, search);
+  ASSERT_EQ(scope.libraries().size(), 5U);
+  EXPECT_EQ(scope.libraries()[1].path, fixture("loadscope", "clean/libsteal.so.1"));
+  EXPECT_EQ(scope.libraries()[2].name, "libc.so.6");
+  EXPECT_EQ(scope.image_index(), 3U);
+  EXPECT_EQ(scope.libraries()[3].path, library);
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "");
+  ASSERT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Bound) << exit_binding.reason;
+  EXPECT_EQ(exit_binding.library, 2U);  // libc.so.6 of the global scope, not the library's exit
+  // A name only the library defines binds in its local scope.
+  const donkey::ElfBinding marker = scope.lookup("steal_marker", "");
+  ASSERT_EQ(marker.outcome, donkey::ElfBinding::Outcome::Bound) << marker.reason;
+  EXPECT_EQ(marker.library, 1U);  // the program's libsteal.so.1 comes first
+
+  // A program that is itself a shared library is refused.
+  search.program = fixture("loadscope", "chain/liba.so.1");
+  const donkey::ElfBinding refused = scope_of(library, search).lookup("exit", "");
+  EXPECT_EQ(refused.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(refused.reason.find("is a shared library, not a program"), std::string::npos)
+      << refused.reason;
 }
 
 // $ORIGIN of an executable inside the sysroot is a path of the target: its RUNPATH

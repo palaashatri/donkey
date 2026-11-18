@@ -673,6 +673,7 @@ struct ElfLoadScope::Impl {
   std::vector<ElfScopeLibrary> libraries;
   std::vector<LoadedLibrary> loaded;  // parallel to libraries; [0] is the executable
   bool executable_dynamic = true;     // false: the executable defines nothing for others
+  std::size_t image_index = 0;        // where the image the scope was built for is
 };
 
 ElfLoadScope::ElfLoadScope() : impl_(std::make_unique<Impl>()) {}
@@ -682,6 +683,10 @@ ElfLoadScope& ElfLoadScope::operator=(ElfLoadScope&&) noexcept = default;
 
 const std::vector<ElfScopeLibrary>& ElfLoadScope::libraries() const {
   return impl_->libraries;
+}
+
+std::size_t ElfLoadScope::image_index() const {
+  return impl_->image_index;
 }
 
 ElfLoadScope ElfLoadScope::from_images(std::span<const Input> inputs) {
@@ -712,8 +717,88 @@ ElfLoadScope ElfLoadScope::from_images(std::span<const Input> inputs) {
   return scope;
 }
 
+namespace {
+
+constexpr std::uint16_t kEtExec = 2;
+constexpr std::uint16_t kEtDyn = 3;
+
+/// The ELF header's e_type, or 0 when the header cannot be read.
+std::uint16_t elf_type(const BinaryImage& image, std::span<const std::byte> data) {
+  if (data.size() < 18) {
+    return 0;
+  }
+  const auto lo = std::to_integer<std::uint16_t>(data[16]);
+  const auto hi = std::to_integer<std::uint16_t>(data[17]);
+  return image.endian == Endian::Big ? static_cast<std::uint16_t>((lo << 8) | hi)
+                                     : static_cast<std::uint16_t>((hi << 8) | lo);
+}
+
+/// A shared library: ET_DYN without DF_1_PIE. Its references bind in the scope of the program that
+/// loads it.
+bool is_shared_library(const BinaryImage& image, std::span<const std::byte> data,
+                       const ElfLibraryNames& names) {
+  return elf_type(image, data) == kEtDyn && !names.pie;
+}
+
+}  // namespace
+
 ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::byte> data,
                                  const ElfLibrarySearch& search) {
+  if (image.format != BinaryFormat::Elf || image.bits != 64 ||
+      !is_shared_library(image, data, read_library_names(image, data))) {
+    return build_root(image, data, search, true);
+  }
+  // A shared library: the program's global scope, then the library's local scope.
+  ElfLoadScope scope;
+  Impl& impl = *scope.impl_;
+  const auto unknown_program = [&](std::string problem) {
+    ElfScopeLibrary program;
+    program.name = "(the program that loads this library)";
+    program.path = search.program;
+    LoadedLibrary loaded;
+    loaded.problem = std::move(problem);
+    impl.libraries.push_back(std::move(program));
+    impl.loaded.push_back(std::move(loaded));
+    ElfScopeLibrary self;
+    self.path = fs::path(image.path).generic_string();
+    impl.libraries.push_back(std::move(self));
+    impl.loaded.emplace_back();
+    impl.image_index = 1;
+    return std::move(scope);
+  };
+  if (search.program.empty()) {
+    return unknown_program(
+        "a shared library's references bind first in the scope of the program that loads it, "
+        "and no program was given");
+  }
+  FileBytes file = read_file(fs::path(search.program), kMaxScopeLibraryBytes);
+  if (file.state != FileBytes::State::Read) {
+    return unknown_program(search.program + " could not be read");
+  }
+  auto parsed = parse_binary(file.bytes, search.program);
+  if (!parsed || parsed.value().format != BinaryFormat::Elf ||
+      parsed.value().architecture != image.architecture || parsed.value().bits != image.bits) {
+    return unknown_program(search.program + " is not an ELF program of the library's machine");
+  }
+  if (is_shared_library(parsed.value(), file.bytes,
+                        read_library_names(parsed.value(), file.bytes))) {
+    return unknown_program(search.program + " is a shared library, not a program");
+  }
+  ElfLibrarySearch global_search = search;
+  global_search.program.clear();
+  ElfLoadScope global = build_root(parsed.value(), file.bytes, global_search, true);
+  ElfLoadScope local = build_root(image, data, global_search, false);
+  impl = std::move(*global.impl_);
+  impl.image_index = impl.libraries.size();
+  for (std::size_t i = 0; i < local.impl_->libraries.size(); ++i) {
+    impl.libraries.push_back(std::move(local.impl_->libraries[i]));
+    impl.loaded.push_back(std::move(local.impl_->loaded[i]));
+  }
+  return scope;
+}
+
+ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const std::byte> data,
+                                      const ElfLibrarySearch& search, bool preload) {
   ElfLoadScope scope;
   Impl& impl = *scope.impl_;
   const std::string& sysroot = search.sysroot;
@@ -1020,7 +1105,7 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
     }
     queue.push_back(std::move(pending));
   };
-  if (search.system_directories) {
+  if (search.system_directories && preload) {
     // ld.so.preload: names separated by white space or `:`, `#` to the end of a line a comment.
     const Resolved where = resolve(LoaderPath{false, "/etc/ld.so.preload"}, sysroot);
     std::optional<std::string> problem;
@@ -1146,7 +1231,9 @@ ElfBinding ElfLoadScope::lookup(const std::string& name, const std::string& vers
         continue;  // an executable that is not dynamically linked defines nothing for others
       }
       out.outcome = ElfBinding::Outcome::Unknown;
-      out.reason = index == 0 ? "the executable: " + loaded.problem : loaded.problem;
+      // Index 0 is the executable, unless a library's program is not known (that entry is named).
+      const bool executable = index == 0 && impl_->libraries[0].name.empty();
+      out.reason = executable ? "the executable: " + loaded.problem : loaded.problem;
       return out;
     }
     const auto found = loaded.definitions.find(name);

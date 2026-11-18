@@ -16,9 +16,17 @@
 // two different default directories, a file this reader refuses that the loader may accept, and a
 // dynamic table that cannot be read in full.
 //
+// A shared library (ET_DYN without DF_1_PIE) is not a program: the loader looks its references up
+// in the global scope of the program that loaded it first (that program, its preloads and its
+// libraries), then in the library's own local scope (the library and the libraries it needs). So a
+// library's bindings are known only with the program that loads it (`ElfLibrarySearch::program`);
+// without one, every lookup is Unknown. A position-independent executable linked before DF_1_PIE
+// existed reads as a library, which only loses answers.
+//
 // Not modelled: the run-time environment. LD_PRELOAD and LD_LIBRARY_PATH are not read; a caller
 // that runs the program with them gives the same directories as `paths` (LD_LIBRARY_PATH's place in
-// the search) and its preloads in the sysroot's /etc/ld.so.preload. dlopen is not modelled.
+// the search) and its preloads in the sysroot's /etc/ld.so.preload. Neither is RTLD_DEEPBIND,
+// which a program can pass to dlopen to search the library's local scope first.
 
 #include <cstddef>
 #include <cstdint>
@@ -43,6 +51,9 @@ struct ElfLibrarySearch {
   std::vector<std::string> paths;
   /// Read /etc/ld.so.preload, /etc/ld.so.cache and the default directories.
   bool system_directories = true;
+  /// For a shared library: the program that loads it (a path of this machine), whose global scope
+  /// is searched first. Empty: the library's bindings are Unknown. Not used for a program.
+  std::string program;
   /// Libraries waiting to be looked for at once (kMaxScopeQueue). Past it, no later library is
   /// queued and the rest of the scope is not known.
   std::size_t queue_limit = 4096;
@@ -94,7 +105,8 @@ class ElfLoadScope {
  public:
   /// The scope of the 64-bit ELF `image` (read from `image.path`, for `$ORIGIN`): ld.so.preload,
   /// then DT_NEEDED breadth first, each library once (by name, soname or file), each looked for as
-  /// the file header describes. At most kMaxScopeLibraries libraries are read.
+  /// the file header describes. At most kMaxScopeLibraries libraries are read. For a shared
+  /// library: the global scope of `search.program`, then the library's local scope.
   static ElfLoadScope build(const BinaryImage& image, std::span<const std::byte> data,
                             const ElfLibrarySearch& search);
 
@@ -113,6 +125,8 @@ class ElfLoadScope {
   ElfLoadScope& operator=(ElfLoadScope&&) noexcept;
 
   [[nodiscard]] const std::vector<ElfScopeLibrary>& libraries() const;
+  /// The index in libraries() of the image the scope was built for (0 for a program).
+  [[nodiscard]] std::size_t image_index() const;
 
   /// Where a reference to `name` binds, by glibc's `check_match`. With a version (`version`
   /// non-empty): a library without symbol versions, a definition of the same version, or (unless
@@ -124,6 +138,11 @@ class ElfLoadScope {
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;
+
+  /// The scope with `image` at its root: what build() gives a program, and a library's local scope
+  /// (`preload` false: ld.so.preload belongs to the global scope).
+  static ElfLoadScope build_root(const BinaryImage& image, std::span<const std::byte> data,
+                                 const ElfLibrarySearch& search, bool preload);
 };
 
 }  // namespace donkey

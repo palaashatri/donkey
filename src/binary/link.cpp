@@ -71,6 +71,7 @@ constexpr std::uint64_t kDtVersym = 0x6ffffff0;
 constexpr std::uint64_t kDtVerdef = 0x6ffffffc;
 constexpr std::uint64_t kDtVerneed = 0x6ffffffe;
 constexpr std::uint64_t kDf1Nodeflib = 0x800;
+constexpr std::uint64_t kDf1Pie = 0x08000000;
 constexpr std::uint32_t kPtDynamic = 2;
 constexpr std::size_t kMaxProgramHeaders = 65'535;
 
@@ -269,6 +270,7 @@ ElfLibraryNames read_library_names(const BinaryImage& image, std::span<const std
     switch (entry.tag) {
       case kDtFlags1:
         names.nodeflib = (entry.value & kDf1Nodeflib) != 0;
+        names.pie = (entry.value & kDf1Pie) != 0;
         continue;
       case kDtVersym:
         names.version_symbols = true;

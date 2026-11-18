@@ -160,18 +160,21 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
     options.isolate = true;
     return true;
   }
-  if (argument == "--sysroot" || argument == "--library-path") {
+  if (argument == "--sysroot" || argument == "--library-path" || argument == "--program") {
     std::string_view value;
     // A directory that starts with `-` is spelled `./-name`, so a following option is never
     // taken for the directory.
     if (index + 1 >= arguments.size() || arguments[index + 1].empty() ||
         arguments[index + 1].front() == '-' || !take_value(arguments, index, value)) {
-      error_message = argument == "--sysroot" ? "--sysroot needs a directory"
-                                              : "--library-path needs a directory";
+      error_message = argument == "--sysroot"   ? "--sysroot needs a directory"
+                      : argument == "--program" ? "--program needs the program's path"
+                                                : "--library-path needs a directory";
       return true;
     }
     if (argument == "--sysroot") {
       library_search().sysroot = std::string(value);
+    } else if (argument == "--program") {
+      library_search().program = std::string(value);
     } else {
       library_search().paths.emplace_back(value);
     }
@@ -899,6 +902,8 @@ void print_usage(std::FILE* out) {
       "\n"
       "Analysis commands take --sysroot DIR and --library-path DIR (repeatable): where an ELF\n"
       "image's libraries are, to show which library each import binds to (default: this host).\n"
+      "A shared library's imports bind first in the program that loads it: --program PATH names\n"
+      "that program (without it, a library's bindings are unknown).\n"
       "\n"
       "Every command except `debug launch` only reads files and never executes them.\n"
       "`debug launch` runs the program under the native debugger (it stops at the\n"
@@ -2343,7 +2348,13 @@ int report_link(const std::vector<std::string>& labels,
   analyses.reserve(loaded.size());
   bool partial = false;
   for (const donkey::LoadedBinary& item : loaded) {
-    auto analysis = donkey::analyze(item.image, item.data, analysis_options());
+    // The libraries of a link are loaded by its executable (the first input), unless --program
+    // names another program.
+    AnalysisOptions options = analysis_options();
+    if (options.library_search.program.empty() && !loaded.empty()) {
+      options.library_search.program = loaded.front().image.path;
+    }
+    auto analysis = donkey::analyze(item.image, item.data, options);
     if (!analysis) {
       return fail(analysis.diagnostic());
     }
@@ -2442,7 +2453,7 @@ int command_link(const std::vector<std::string_view>& arguments) {
     const std::string_view argument = arguments[i];
     if (argument == "--json") {
       json = true;
-    } else if (argument == "--sysroot" || argument == "--library-path") {
+    } else if (argument == "--sysroot" || argument == "--library-path" || argument == "--program") {
       // Where each image's libraries are found when its no-return imports are bound.
       LoadOptions unused;
       const char* flag_error = nullptr;

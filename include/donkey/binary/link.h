@@ -36,6 +36,8 @@ struct ElfLibraryNames {
   /// DF_1_NODEFLIB in DT_FLAGS_1: the loader skips ld.so.cache and the default directories for the
   /// libraries this object needs.
   bool nodeflib = false;
+  /// DF_1_PIE in DT_FLAGS_1: a position-independent executable, not a shared library.
+  bool pie = false;
   /// DT_VERSYM, DT_VERDEF and DT_VERNEED are present: the loader reads symbol versions.
   bool version_symbols = false;
   bool version_definitions = false;
