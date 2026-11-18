@@ -41,8 +41,11 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   DT_NEEDED breadth first, RPATH/RUNPATH/ld.so.conf/default directories, under `--sysroot`, plus `--library-path`)
   and binding each reference (its symbol version read by a bounded reader, `fuzz_elf_versions`) by glibc's lookup
   rules, and on PE by the import's DLL. A library that cannot be found before the binding leaves the call
-  unmarked (`analysis.no_return_unverified`). Each mark records its evidence (`functions --json`:
-  `no_return_reason`, with the bound library and its path). Tested against the real loader's binding
+  unmarked (`analysis.no_return_unverified`, and the analysis is Partial). `functions --json` gives each mark
+  its reason (`no_return_reason`); an ELF import mark names the bound library and the file it was found in,
+  a PE import mark names its DLL. The ELF search models glibc's (`/etc/ld.so.cache`, inherited DT_RPATH,
+  hardware-capability subdirectories) and does not read `LD_PRELOAD` or `LD_LIBRARY_PATH`; where it cannot know
+  which file the loader takes, the call is not marked. Tested against the real loader's binding
   (`Analysis.AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked`,
   `ElfLoadScope.FindsLibrariesInTheLoadersOrderAndBindsByGlibcRules`). Same-image functions whose
   every path ends in such a call, `ud2` or `hlt` are marked by propagation (8 rounds at most). The CFG gives

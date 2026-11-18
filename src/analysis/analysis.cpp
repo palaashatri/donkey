@@ -856,6 +856,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.no_return = bind_no_return_imports(image, file, import_stubs, result.import_slots,
                                               options.library_search, &unverified);
     if (!unverified.empty()) {
+      result.partial = true;  // calls that may never return keep a fall-through: not Complete
       std::string list;
       for (const std::string& item : unverified) {
         list += (list.empty() ? "" : "; ") + item;

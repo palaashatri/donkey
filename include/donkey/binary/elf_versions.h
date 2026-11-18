@@ -21,6 +21,11 @@ namespace donkey {
 struct ElfVersionNeed {
   std::string file;     ///< the needed file's name, as DT_NEEDED spells it
   std::string version;  ///< the version name
+  /// VER_NDX hidden bit (0x8000) of `vna_other`: the reference does not accept an unversioned
+  /// definition in a library that has symbol versions, only this version.
+  bool hidden = false;
+
+  friend bool operator==(const ElfVersionNeed&, const ElfVersionNeed&) = default;
 };
 
 /// The version needs of `.gnu.version_r`, keyed by the version index that `.gnu.version` uses.
@@ -44,22 +49,17 @@ inline constexpr std::size_t kMaxVersionNeedEntries = 65'536;
     std::span<const std::byte> section, std::span<const std::byte> strings,
     std::size_t max_entries = kMaxVersionNeedEntries);
 
-/// The version need of each versioned import of a 64-bit little-endian ELF image, keyed by the
-/// import's name. An import is a dynamic symbol that is undefined in the image (by its own
-/// `st_shndx`, not by its name). An import whose `.gnu.version` index is 0 or 1 (unversioned), or
-/// whose index no need names, is not listed, and neither is any other import of the same name: one
-/// unversioned reference leaves the name's provider unknown. A name imported twice with two
-/// different needs is left out too. An image without the two sections gives an empty map; a
-/// malformed version need table gives the reader's diagnostic, and a `.gnu.version` that ends
-/// before an import's entry gives `elf.version_symbols.truncated`.
 /// One imported dynamic symbol (undefined by its own `st_shndx`) of a 64-bit little-endian ELF
-/// image, in symbol order, with the version it asks for: `version` and `file` from its version
-/// need, both empty for an unversioned import (index 0 or 1, or an image without `.gnu.version`),
-/// and `unresolved` when its index names no need.
+/// image, in symbol order (a name can appear more than once), with the version it asks for:
+/// `version`, `file` and `hidden` from its version need, empty for an unversioned import (index 0
+/// or 1, or an image whose dynamic table has no DT_VERSYM). `unresolved` is set when the loader
+/// reads a version index for it that this reader cannot resolve: an index that no need names, or
+/// a DT_VERSYM or DT_VERNEED the loader finds whose section is missing.
 struct ElfImportReference {
   std::string name;
   std::string version;
   std::string file;
+  bool hidden = false;
   bool unresolved = false;
 };
 
@@ -68,6 +68,14 @@ struct ElfImportReference {
 [[nodiscard]] Result<std::vector<ElfImportReference>> read_import_references(
     const BinaryImage& image, std::span<const std::byte> data);
 
+/// The version need of each versioned import of a 64-bit little-endian ELF image, keyed by the
+/// import's name. An import is a dynamic symbol that is undefined in the image (by its own
+/// `st_shndx`, not by its name). An import whose `.gnu.version` index is 0 or 1 (unversioned), or
+/// whose index no need names, is not listed, and neither is any other import of the same name: one
+/// unversioned reference leaves the name's provider unknown. A name imported twice with two
+/// different needs is left out too. An image without the two sections gives an empty map; a
+/// malformed version need table gives the reader's diagnostic, and a `.gnu.version` that ends
+/// before an import's entry gives `elf.version_symbols.truncated`.
 [[nodiscard]] Result<std::map<std::string, ElfVersionNeed>> read_import_versions(
     const BinaryImage& image, std::span<const std::byte> data);
 

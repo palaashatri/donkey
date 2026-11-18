@@ -8,6 +8,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "donkey/binary/elf_load_scope.h"
@@ -185,7 +186,8 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
       }
       return marks;  // an unreadable version table: no mark
     }
-    std::map<std::string, std::set<std::string>> versions_of;
+    // Each (version, hidden) form a name is imported with: every one must bind.
+    std::map<std::string, std::set<std::pair<std::string, bool>>> versions_of;
     std::set<std::string> unresolved;
     for (const ElfImportReference& reference : references.value()) {
       if (!bound.contains(reference.name)) {
@@ -194,19 +196,25 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
       if (reference.unresolved) {
         unresolved.insert(reference.name);
       }
-      versions_of[reference.name].insert(reference.version);
+      versions_of[reference.name].emplace(reference.version, reference.hidden);
     }
     const ElfLoadScope scope = ElfLoadScope::build(image, data, search);
     for (auto& [name, provenance] : bound) {
       const KnownName* entry = known(name);
       const auto versions = versions_of.find(name);
-      if (entry == nullptr || versions == versions_of.end() || unresolved.contains(name)) {
+      if (entry == nullptr || versions == versions_of.end()) {
+        continue;
+      }
+      if (unresolved.contains(name)) {
+        if (unverified != nullptr) {
+          unverified->push_back(name + ": its symbol version could not be read");
+        }
         continue;
       }
       std::string evidence;
       bool proven = true;
-      for (const std::string& version : versions->second) {
-        const ElfBinding binding = scope.lookup(name, version);
+      for (const auto& [version, hidden] : versions->second) {
+        const ElfBinding binding = scope.lookup(name, version, hidden);
         if (binding.outcome == ElfBinding::Outcome::Unknown) {
           if (unverified != nullptr) {
             unverified->push_back(name + ": " + binding.reason);
@@ -218,12 +226,17 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
           proven = false;
           break;
         }
+        // The library's own SONAME is only what it says about itself: the name the executable's
+        // DT_NEEDED (or ld.so.preload) loaded it by must be a runtime library's name as well, so a
+        // library that calls itself libc.so.6 under another name is not taken for the C library.
         const ElfScopeLibrary& library = scope.libraries()[binding.library];
-        const std::string& library_name = library.soname.empty() ? library.name : library.soname;
-        if (!elf_library_provides(library_name, entry->provider)) {
+        const std::string loaded_as = library.name.substr(library.name.find_last_of('/') + 1);
+        if (!elf_library_provides(loaded_as, entry->provider) ||
+            (!library.soname.empty() && !elf_library_provides(library.soname, entry->provider))) {
           proven = false;
           break;
         }
+        const std::string& library_name = library.soname.empty() ? loaded_as : library.soname;
         evidence += (version.empty() ? std::string(" unversioned") : " version:" + version) +
                     " bound:" + library_name + " path:" + library.path;
       }

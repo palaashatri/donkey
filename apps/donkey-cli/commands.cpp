@@ -162,7 +162,10 @@ bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::si
   }
   if (argument == "--sysroot" || argument == "--library-path") {
     std::string_view value;
-    if (!take_value(arguments, index, value) || value.empty()) {
+    // A directory that starts with `-` is spelled `./-name`, so a following option is never
+    // taken for the directory.
+    if (index + 1 >= arguments.size() || arguments[index + 1].empty() ||
+        arguments[index + 1].front() == '-' || !take_value(arguments, index, value)) {
       error_message = argument == "--sysroot" ? "--sysroot needs a directory"
                                               : "--library-path needs a directory";
       return true;
@@ -866,7 +869,8 @@ void print_usage(std::FILE* out) {
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       " [--json]\n"
-      "  donkey-cli link <executable> <library>... [--json]\n"
+      "  donkey-cli link <executable> <library>... [--sysroot <dir>] [--library-path <dir>]... "
+      "[--json]\n"
       "  donkey-cli project link <database> [--json]\n"
       "  donkey-cli project string <database> <image-id> <address> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
@@ -2434,9 +2438,18 @@ int report_link(const std::vector<std::string>& labels,
 int command_link(const std::vector<std::string_view>& arguments) {
   bool json = false;
   std::vector<std::string_view> positional;
-  for (const std::string_view argument : arguments) {
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
     if (argument == "--json") {
       json = true;
+    } else if (argument == "--sysroot" || argument == "--library-path") {
+      // Where each image's libraries are found when its no-return imports are bound.
+      LoadOptions unused;
+      const char* flag_error = nullptr;
+      try_parse_load_flag(arguments, i, unused, flag_error);
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for link");
     } else {

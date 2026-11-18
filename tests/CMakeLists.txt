@@ -1196,6 +1196,34 @@ add_test(NAME cli.functions_no_mark_when_an_earlier_library_defines_the_name
 set_tests_properties(cli.functions_no_mark_when_an_earlier_library_defines_the_name PROPERTIES
   PASS_REGULAR_EXPRESSION "\"name\": \"exit@plt\"[^}]*\"no_return\": false"
   FAIL_REGULAR_EXPRESSION "\"no_return\": true")
+# The same search, analysed: libsteal.so.1 was found in the library path and the binding was
+# proven (to libsteal's exit), so nothing is reported as unverified. Without --library-path the
+# library is missing and the next test reports it.
+add_test(NAME cli.analyze_proves_the_binding_to_the_earlier_library
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal)
+set_tests_properties(cli.analyze_proves_the_binding_to_the_earlier_library PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\""
+  FAIL_REGULAR_EXPRESSION "analysis.no_return_unverified")
+# An option where a directory belongs is refused, not taken as the directory.
+add_test(NAME cli.analyze_refuses_an_option_as_the_sysroot
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --sysroot --json)
+set_tests_properties(cli.analyze_refuses_an_option_as_the_sysroot PROPERTIES
+  WILL_FAIL TRUE)
+add_test(NAME cli.analyze_refuses_an_option_as_the_sysroot_message
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --library-path --json)
+set_tests_properties(cli.analyze_refuses_an_option_as_the_sysroot_message PROPERTIES
+  PASS_REGULAR_EXPRESSION "--library-path needs a directory")
+# `link` analyses each image, so it takes the same library search.
+add_test(NAME cli.link_takes_the_library_search
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/clean/libsteal.so.1
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64 --json)
+set_tests_properties(cli.link_takes_the_library_search PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\"")
 add_test(NAME cli.analyze_reports_unverified_no_return
          COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
                  --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)

@@ -31,11 +31,27 @@ struct ElfLibraryNames {
   /// absent.
   std::string rpath;
   std::string runpath;
+  bool has_rpath = false;
   bool has_runpath = false;
+  /// DF_1_NODEFLIB in DT_FLAGS_1: the loader skips ld.so.cache and the default directories for the
+  /// libraries this object needs.
+  bool nodeflib = false;
+  /// DT_VERSYM, DT_VERDEF and DT_VERNEED are present: the loader reads symbol versions.
+  bool version_symbols = false;
+  bool version_definitions = false;
+  bool version_needs = false;
+  /// The image has a dynamic table (PT_DYNAMIC, or a `.dynamic` section when it has no program
+  /// headers).
+  bool dynamic = false;
+  /// False when part of the dynamic table could not be read (the table is cut short, a name lies
+  /// outside the string table, or the program headers are unreadable): a library or search
+  /// directory may be missing from the lists above.
+  bool complete = true;
 };
 
-/// Reads DT_SONAME and DT_NEEDED from the `.dynamic` section of an ELF image. Both are empty for
-/// other formats and for an image without a dynamic section.
+/// Reads the dynamic table of an ELF image the way the loader does: PT_DYNAMIC, with names from
+/// DT_STRTAB (the `.dynamic` and `.dynstr` sections only when the image has no program headers).
+/// Every list is empty for other formats and for an image that is not dynamically linked.
 [[nodiscard]] ElfLibraryNames read_library_names(const BinaryImage& image,
                                                  std::span<const std::byte> data);
 

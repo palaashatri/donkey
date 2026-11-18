@@ -2487,19 +2487,36 @@ least one returning path and every returning path compared; 4: option (c)). What
   does not prove the provider. glibc binds a versioned reference to the first library of the load scope whose
   definition it accepts, and an unversioned global definition in an earlier library is accepted, so `exit@GLIBC_2.2.5`
   can bind to another library's `exit`. `ElfLoadScope` (`include/donkey/binary/elf_load_scope.h`) now builds the
-  scope the loader would (`/etc/ld.so.preload`, DT_NEEDED breadth first; DT_RPATH, the library path, DT_RUNPATH with
-  `$ORIGIN`, `/etc/ld.so.conf` and the default directories, under an optional sysroot; files of another class or
-  machine skipped) and looks each reference up by glibc's `check_match` rules (a versioned reference: no `.gnu.version`
-  in the library, the same version, or a non-hidden unversioned definition; an unversioned one: an index below 3, or
-  the only non-hidden versioned definition). A name is marked only when every way the image imports it binds to a
+  scope the loader would and looks each reference up by glibc's `check_match` rules (a versioned reference: no
+  `.gnu.version` in the library, the same version, or, unless its version need is hidden, a non-hidden unversioned
+  definition; an unversioned one: an index below 3, or the only non-hidden versioned definition). The search is
+  glibc's `_dl_map_object`, under an optional sysroot whose symbolic links are followed inside it: `/etc/ld.so.preload`
+  (white space or `:` between names, `#` comments), DT_NEEDED breadth first (each library once, by name, SONAME or
+  file); for each, DT_RPATH of the requester and of every object that loaded it up to the executable (when the
+  requester has no DT_RUNPATH), the library path (LD_LIBRARY_PATH's place), DT_RUNPATH, `/etc/ld.so.cache` (not
+  `/etc/ld.so.conf`, which the loader never reads) unless DF_1_NODEFLIB, then the default directories; dynamic-string
+  tokens expanded once from the original text; DT_NEEDED and the dynamic table read through PT_DYNAMIC, as the loader
+  reads them. Wherever the model cannot know the loader's choice the binding is Unknown, never guessed: an empty or
+  relative search entry (the loader's working directory), `$LIB` and `$PLATFORM`, `$ORIGIN` inside a path, a copy in a
+  `glibc-hwcaps` or legacy capability subdirectory or a cache entry for particular hardware (chosen by the target's
+  processor), a name in two default directories as two different files (their order is fixed when glibc is built), a
+  file whose header the loader accepts and this reader cannot parse or that exceeds the read limit, a dynamic table or
+  version section the loader reads and this reader cannot, and more libraries than the limits (256 read, 4,096
+  queued). Each case has a test against a scratch sysroot (`ElfLoadScope.*`, oracle `LD_DEBUG=libs`, fixtures in
+  `tests/fixtures/loadscope/PROVENANCE.md`). A library's SONAME is not evidence of what it is: the name it was
+  loaded by must be a runtime library's as well (`Analysis.ALibraryThatIsTheCLibraryOnlyByItsSonameIsNotTrusted`).
+  An analysis with an unverified binding is Partial. A name is marked only when every way the image imports it binds to a
   runtime library of its kind; an earlier library the walk cannot find or read leaves it unmarked, with
   `analysis.no_return_unverified` saying which. The same walk replaces the unversioned rule "every needed library is
   a runtime library". The fixture `tests/fixtures/loadscope/steal_consumer` reproduces the case with the real loader
   (`libsteal exit(1) returned`, then a crash past the call the compiler took as no-return); Donkey does not mark it,
   and marks the same program when the earlier library has no `exit`. The CLI takes `--sysroot` and `--library-path`.
   On the seven audit binaries the marks are the same as before (ls 16, openssl 6, bash 74, libsqlite3 1, libc 63,
-  git 169, python3.12 57), now each with its bound library and path. Not modelled: the environment (`LD_PRELOAD`,
-  `LD_LIBRARY_PATH`), which no file shows; 32-bit ELF imports (not marked).
+  git 169, python3.12 57), now each with its bound library and path, the one this host's `ld.so.cache` names. Not
+  modelled: the environment, which no file shows: `LD_PRELOAD` and `LD_LIBRARY_PATH` are not read, and a user who
+  runs the program with them passes the same directories with `--library-path` and the preloads in the sysroot's
+  `/etc/ld.so.preload`; dlopen; 32-bit ELF imports (not marked). `fuzz_load_scope` covers the cache reader and the
+  library reader (384,365 runs, no failure).
 
 **T4. Thunks and import stubs named.**
 

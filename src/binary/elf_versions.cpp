@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "donkey/binary/byte_reader.h"
+#include "donkey/binary/link.h"
 #include "elf_dynamic.h"
 
 namespace donkey {
@@ -18,7 +19,7 @@ namespace {
 constexpr std::uint64_t kEntrySize = 16;        // Elf64_Verneed and Elf64_Vernaux
 constexpr std::uint64_t kMaxNameLength = 4096;  // longest version or file name read
 constexpr std::uint16_t kFirstNeedIndex = 2;    // 0: local, 1: global (unversioned)
-constexpr std::uint16_t kHiddenBit = 0x8000;    // VERSYM_HIDDEN, ignored for imports
+constexpr std::uint16_t kHiddenBit = 0x8000;    // VERSYM_HIDDEN / VER_NDX hidden flag
 
 Result<std::string> name_at(const ByteReader& strings, std::uint32_t offset, std::uint64_t entry) {
   auto text = strings.c_string(offset, kMaxNameLength);
@@ -119,7 +120,9 @@ Result<ElfVersionNeeds> read_version_needs(std::span<const std::byte> section,
       if (!version) {
         return Result<ElfVersionNeeds>(version.diagnostic());
       }
-      if (!needs.by_index.emplace(index, ElfVersionNeed{file.value(), std::move(version.value())})
+      const bool hidden = (other.value() & kHiddenBit) != 0;
+      if (!needs.by_index
+               .emplace(index, ElfVersionNeed{file.value(), std::move(version.value()), hidden})
                .second) {
         return make_error<ElfVersionNeeds>(Status::InvalidInput, "elf.version_needs.duplicate",
                                            "two version needs use one index", entry);
@@ -162,8 +165,13 @@ Result<std::vector<ElfImportReference>> read_import_references(const BinaryImage
   const Section* dynstr = section_named(image, ".dynstr");
   const ByteReader file(data);
   ElfVersionNeeds needs;
-  const bool versioned = versym != nullptr && verneed != nullptr && dynstr != nullptr;
-  if (versioned) {
+  // The loader reads versions through DT_VERSYM and DT_VERNEED. When it would read them and the
+  // sections are missing, an import's version index cannot be resolved here: it is unresolved,
+  // never taken as unversioned.
+  const ElfLibraryNames dynamic = read_library_names(image, data);
+  const bool symbols_lost = dynamic.version_symbols && versym == nullptr;
+  const bool versioned = versym != nullptr;
+  if (versioned && verneed != nullptr && dynstr != nullptr) {
     auto need_bytes = file.slice(verneed->file_offset, verneed->file_size);
     auto string_bytes = file.slice(dynstr->file_offset, dynstr->file_size);
     if (!need_bytes || !string_bytes) {
@@ -183,7 +191,9 @@ Result<std::vector<ElfImportReference>> read_import_references(const BinaryImage
     }
     ElfImportReference reference;
     reference.name = names[index];
-    if (versioned) {
+    if (symbols_lost) {
+      reference.unresolved = true;
+    } else if (versioned) {
       if (index * 2 + 2 > versym->file_size) {
         return make_error<std::vector<ElfImportReference>>(
             Status::InvalidInput, "elf.version_symbols.truncated",
@@ -203,6 +213,7 @@ Result<std::vector<ElfImportReference>> read_import_references(const BinaryImage
         } else {
           reference.version = need->second.version;
           reference.file = need->second.file;
+          reference.hidden = need->second.hidden;
         }
       }
     }
