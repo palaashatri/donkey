@@ -1188,6 +1188,19 @@ TEST(ElfLoadScope, AProgramAndItsLibraryShareTheLibraryLimit) {
   EXPECT_EQ(helper.outcome, donkey::ElfBinding::Outcome::Unknown);
   EXPECT_NE(helper.reason.find("more libraries than the limit"), std::string::npos)
       << helper.reason;
+  // The program and its libdep.so.1 take the whole limit, so the library itself is past it: it is
+  // in the scope by name but not read, and its own definition is not known either.
+  EXPECT_EQ(scope.libraries()[scope.image_index()].path,
+            fixture("loadscope", "plugin/libplugin_rpath.so.1"));
+  const donkey::ElfBinding own = scope.lookup("plugin_rpath", "");
+  EXPECT_EQ(own.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(own.reason.find("more libraries than the limit"), std::string::npos) << own.reason;
+  // With one more, the library is read and its own definition binds.
+  search.library_limit = 3;
+  const donkey::ElfBinding read =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), search)
+          .lookup("plugin_rpath", "");
+  EXPECT_EQ(read.outcome, donkey::ElfBinding::Outcome::Bound) << read.reason;
 }
 
 // The limit counts every object of the scope, the program included: steal_consumer needs

@@ -834,6 +834,19 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
   inherited.executable_rpath = global.impl_->executable_rpath;
   inherited.executable_origin = global.impl_->executable_origin;
   inherited.unknown_rpath = global.impl_->other_rpath;
+  if (inherited.max_libraries == 0) {
+    // The program's scope took the whole limit: the library itself is past it. It stays in the
+    // scope by name, unread, so a lookup that reaches it is not known rather than bound to it.
+    impl = std::move(*global.impl_);
+    ElfScopeLibrary self;
+    self.path = fs::path(image.path).generic_string();
+    LoadedLibrary loaded;
+    loaded.problem = "the scope has more libraries than the limit";
+    impl.image_index = impl.libraries.size();
+    impl.libraries.push_back(std::move(self));
+    impl.loaded.push_back(std::move(loaded));
+    return scope;
+  }
   ElfLoadScope local = build_root(image, data, global_search, &inherited);
   impl = std::move(*global.impl_);
   impl.image_index = impl.libraries.size();
