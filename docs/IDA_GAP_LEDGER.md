@@ -82,9 +82,12 @@ wrong even if CI is green.
 
 ## 2. How to take a task
 
-1. Pick the first task in section 5 whose status is TODO and whose
-   dependencies are all DONE. Prefer tasks marked **[oracle]**: the
-   differential corpus checks them automatically, so mistakes are caught.
+1. Pick, among the tasks of the current wave in section 5 whose status is TODO and whose
+   dependencies are all DONE, the one that moves the measured numbers most (AGENTS.md,
+   "Highest leverage first"); between tasks of equal effect, take the first in this ledger's
+   order. Inside a gap, its **[ground truth]** and **[oracle]** tasks still come first, as
+   "Measure before you build" says: they are what the effect is measured with, and the
+   differential corpus checks **[oracle]** tasks automatically.
 2. Read every file the task lists before editing. Read the tests next to them.
 3. Write the tests first, from the task's "Tests" list. Run them and see them
    fail.
