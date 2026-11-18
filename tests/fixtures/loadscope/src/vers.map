@@ -1,0 +1,3 @@
+V1 { local: *; };
+V2 { global: exit; } V1;
+V3 { global: exit; } V2;
