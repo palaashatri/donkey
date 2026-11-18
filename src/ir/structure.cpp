@@ -2354,23 +2354,39 @@ StructureResult structure_function(const IrFunction& function,
   // Last, the goto structurer: a valid graph is printed as structured code with gotos for the edges
   // no structure expresses, unless it nests deeper than kMaxStructureNesting. It is checked like
   // the candidates above; a refusal or a mismatch leaves the labelled form.
+  // W1b: first with small blocks copied in place of gotos and compound conditions (`a && b`); if
+  // the check refuses that candidate, with copies only, then with neither. (Copying small
+  // conditional blocks too, and keeping whichever of three candidates had the fewest gotos, removed
+  // 71 more of 16,232 but cost 38% more time on openssl: not done.)
   std::string refusal;
-  if (auto goto_structure =
-          structure_with_gotos(function, string_literals, kGotoRuleAll, &refusal)) {
+  bool have_best = false;
+  std::vector<StructuredLine> best_lines;
+  std::size_t best_gotos = 0;
+  for (const std::uint32_t rules : {kGotoRuleDefault, kGotoRuleAll | kGotoRuleCopy, kGotoRuleAll}) {
+    refusal.clear();
+    auto goto_structure = structure_with_gotos(function, string_literals, rules, &refusal);
+    if (!goto_structure) {
+      result.refusal = refusal;
+      continue;
+    }
     if (auto mismatch = check_structured_control_flow(function, goto_structure->lines)) {
       ++result.oracle_rejections;
       if (result.oracle_detail.empty()) {
         result.oracle_detail = *mismatch;
       }
-    } else {
-      result.lines = std::move(goto_structure->lines);
-      result.gotos = goto_structure->gotos;
-      result.outcome =
-          result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
-      return result;
+      continue;
     }
-  } else {
-    result.refusal = refusal;
+    have_best = true;
+    best_gotos = goto_structure->gotos;
+    best_lines = std::move(goto_structure->lines);
+    break;  // the first candidate the check accepts
+  }
+  if (have_best) {
+    result.refusal.clear();
+    result.lines = std::move(best_lines);
+    result.gotos = best_gotos;
+    result.outcome = result.gotos == 0 ? StructureOutcome::Structured : StructureOutcome::WithGotos;
+    return result;
   }
   result.lines.clear();
   result.outcome = StructureOutcome::Labelled;

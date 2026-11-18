@@ -1183,11 +1183,56 @@ set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
 # G24-T3: a call to a bound no-return import ends its path; no `return` follows it, and the
 # function list says why the import does not return.
 add_test(NAME cli.decompile_prints_no_return_call_without_return
-         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.decompile_prints_no_return_call_without_return PROPERTIES
   PASS_REGULAR_EXPRESSION "    abort\\(\\).\n  } else {"
   FAIL_REGULAR_EXPRESSION "abort\\(\\).\n *return")
 add_test(NAME cli.functions_list_no_return_evidence
-         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.functions_list_no_return_evidence PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 file:libc.so.6\"")
+  PASS_REGULAR_EXPRESSION "\"name\": \"abort@plt\".*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 bound:libc.so.6 path:[^\"]*/lib/x86_64-linux-gnu/libc.so.6\"")
+# A versioned import that an earlier library's unversioned definition takes (the loader's own
+# binding, tests/fixtures/loadscope/PROVENANCE.md) is not marked; nor is one whose libraries
+# cannot be found, and the analysis says so.
+add_test(NAME cli.functions_no_mark_when_an_earlier_library_defines_the_name
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal)
+set_tests_properties(cli.functions_no_mark_when_an_earlier_library_defines_the_name PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"exit@plt\"[^}]*\"no_return\": false"
+  FAIL_REGULAR_EXPRESSION "\"no_return\": true")
+# The same search, analysed: libsteal.so.1 was found in the library path and the binding was
+# proven (to libsteal's exit), so nothing is reported as unverified. Without --library-path the
+# library is missing and the next test reports it.
+add_test(NAME cli.analyze_proves_the_binding_to_the_earlier_library
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal)
+set_tests_properties(cli.analyze_proves_the_binding_to_the_earlier_library PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\""
+  FAIL_REGULAR_EXPRESSION "analysis.no_return_unverified")
+# An option where a directory belongs is refused, not taken as the directory.
+add_test(NAME cli.analyze_refuses_an_option_as_the_sysroot
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --sysroot --json)
+set_tests_properties(cli.analyze_refuses_an_option_as_the_sysroot PROPERTIES
+  WILL_FAIL TRUE)
+add_test(NAME cli.analyze_refuses_an_option_as_the_sysroot_message
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --library-path --json)
+set_tests_properties(cli.analyze_refuses_an_option_as_the_sysroot_message PROPERTIES
+  PASS_REGULAR_EXPRESSION "--library-path needs a directory")
+# `link` analyses each image, so it takes the same library search.
+add_test(NAME cli.link_takes_the_library_search
+         COMMAND donkey-cli link ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/clean/libsteal.so.1
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64 --json)
+set_tests_properties(cli.link_takes_the_library_search PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\"")
+add_test(NAME cli.analyze_reports_unverified_no_return
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
+set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
+  PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")

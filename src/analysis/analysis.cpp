@@ -852,7 +852,22 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
         import_stubs.emplace(function.address, function.import_name);
       }
     }
-    result.no_return = bind_no_return_imports(image, file, import_stubs, result.import_slots);
+    std::vector<std::string> unverified;
+    result.no_return = bind_no_return_imports(image, file, import_stubs, result.import_slots,
+                                              options.library_search, &unverified);
+    if (!unverified.empty()) {
+      result.partial = true;  // calls that may never return keep a fall-through: not Complete
+      std::string list;
+      for (const std::string& item : unverified) {
+        list += (list.empty() ? "" : "; ") + item;
+      }
+      result.diagnostics.push_back(Diagnostic::make(
+          Status::Partial, "analysis.no_return_unverified",
+          "calls to these no-return imports keep their fall-through, because where the import "
+          "binds could not be shown (give the image's sysroot or library path): " +
+              list,
+          std::nullopt));
+    }
     for (Function& function : result.functions) {
       if (const auto mark = result.no_return.find(function.address);
           mark != result.no_return.end()) {
