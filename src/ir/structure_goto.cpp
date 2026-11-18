@@ -500,7 +500,8 @@ class Emitter {
   }
 
   /// W1b: a goto to `target` may print a copy of it instead. The target is small (at most
-  /// kMaxCopiedStatements printed statements), is not a loop header, and either returns or ends in
+  /// kMaxCopiedStatements printed statements before its terminator; the `return` or branch exit it
+  /// ends with is not counted), is not a loop header, and either returns or ends in
   /// a plain branch whose own edge leaves without a goto (falls out, breaks, continues) or goes to
   /// a block that may be copied in turn (one level). A copy changes no edge: the control-flow check
   /// verifies it like any printed block.
@@ -531,8 +532,10 @@ class Emitter {
         function_.blocks[next].statements.empty()) {
       return false;
     }
-    // One more level: the next block returns and is small.
-    return function_.blocks[next].statements.back().op == IrOp::Return &&
+    // One more level: the next block returns and is small. Both copies need a slot, or the branch
+    // block would be copied and still end in a goto to the return block.
+    return copies_ + 2 <= kMaxBlockCopies &&
+           function_.blocks[next].statements.back().op == IrOp::Return &&
            printed_statements(next, kMaxCopiedStatements) <= kMaxCopiedStatements;
   }
 
@@ -831,6 +834,10 @@ class Emitter {
     std::vector<std::uint64_t> folded;
     if (compound.test != kNoBlock) {
       emitted_[compound.test] = true;
+      const std::uint64_t entry = function_.blocks[compound.test].address;
+      if (entry != 0 && entry != address) {
+        folded.push_back(entry);
+      }
       for (const IrStatement& statement : function_.blocks[compound.test].statements) {
         if (statement.source_address != 0 && statement.source_address != address &&
             std::find(folded.begin(), folded.end(), statement.source_address) == folded.end()) {

@@ -5572,9 +5572,9 @@ TEST(Ir, RuleCompoundPrintsTwoTestsAsOneCondition) {
   ASSERT_TRUE(pseudocode.has_value()) << pseudocode.diagnostic().message;
   EXPECT_EQ(pseudocode.value().find("goto"), std::string::npos) << pseudocode.value();
   // The second test's instructions map to the combined condition's line: its block prints no
-  // line of its own.
+  // line of its own; the line also keeps the block's entry address.
   IrFunction addressed = function;
-  std::vector<std::uint64_t> second_test;
+  std::vector<std::uint64_t> second_test{addressed.blocks[1].address};
   for (std::size_t i = 0; i < addressed.blocks[1].statements.size(); ++i) {
     addressed.blocks[1].statements[i].source_address = 0x2010 + i * 4;
     second_test.push_back(0x2010 + i * 4);
@@ -5609,7 +5609,9 @@ TEST(Ir, RuleCompoundFoldsTheSecondTestWhenTheArmsJoin) {
   join.push_back(fb_return());
   IrFunction function =
       fb_function({{fb_compare(), fb_branch(3)}, {compare_rbx, branch_rbx}, arm, join});
-  std::vector<std::uint64_t> second_test;
+  // The folded test keeps its block's entry address as well as its instructions' addresses.
+  std::vector<std::uint64_t> second_test{function.blocks[1].address};
+  ASSERT_NE(function.blocks[1].address, 0U);
   for (std::size_t i = 0; i < function.blocks[1].statements.size(); ++i) {
     function.blocks[1].statements[i].source_address = 0x2010 + i * 4;
     second_test.push_back(0x2010 + i * 4);
