@@ -5591,6 +5591,43 @@ TEST(Ir, RuleCompoundPrintsTwoTestsAsOneCondition) {
   EXPECT_TRUE(found) << printed(mapped.lines);
 }
 
+// A compound condition whose arms meet at a join prints through the other insertion paths: block
+// 0 or block 1 branches to block 3, block 2 continues to it. The second test still folds into the
+// combined condition's line.
+TEST(Ir, RuleCompoundFoldsTheSecondTestWhenTheArmsJoin) {
+  IrStatement compare_rbx = fb_compare();
+  compare_rbx.a = IrOperand::register_ref("rbx", 8);
+  IrStatement branch_rbx = fb_branch(3);
+  branch_rbx.a = IrOperand::register_ref("rbx", 8);
+  std::vector<IrStatement> arm;
+  std::vector<IrStatement> join;
+  for (std::uint64_t i = 0; i < 6; ++i) {
+    arm.push_back(fb_set("rdx", 5 + i));
+    join.push_back(fb_set("rcx", i));
+  }
+  arm.push_back(fb_jump(3));
+  join.push_back(fb_return());
+  IrFunction function =
+      fb_function({{fb_compare(), fb_branch(3)}, {compare_rbx, branch_rbx}, arm, join});
+  std::vector<std::uint64_t> second_test;
+  for (std::size_t i = 0; i < function.blocks[1].statements.size(); ++i) {
+    function.blocks[1].statements[i].source_address = 0x2010 + i * 4;
+    second_test.push_back(0x2010 + i * 4);
+  }
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+  EXPECT_FALSE(check_structured_control_flow(function, on.lines).has_value()) << printed(on.lines);
+  bool found = false;
+  for (const StructuredLine& line : on.lines) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen &&
+        line.tag.second != donkey::detail::kNoBlock) {
+      found = true;
+      EXPECT_EQ(line.folded_addresses, second_test) << line.text;
+    }
+  }
+  EXPECT_TRUE(found) << printed(on.lines);
+}
+
 // The check reads a compound condition from its tag: a tag that complements the second test, or
 // joins the tests with the other operator, describes other control flow and is refused.
 TEST(Ir, CheckRefusesACompoundConditionWithTheWrongForm) {

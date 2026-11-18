@@ -878,14 +878,14 @@ class Emitter {
       insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else if (first_empty) {
-      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else if (second_empty) {
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else {
       // Both arms fall out: `if (cond) { first } else { second }`, with the first printed first.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       insert_line(first_end + 1, "} else {", 0, make_tag(LineKind::Else), depth);
       push("}", 0, make_tag(LineKind::Close));
     }
