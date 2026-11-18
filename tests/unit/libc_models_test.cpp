@@ -147,8 +147,7 @@ TEST(LibcModels, AgreeWithTheHostCLibrary) {
         EXPECT_FALSE(name == "memcpy" && overlapping) << "an overlapping memcpy was run";
         EXPECT_FALSE(outside_ascii) << name << " searched for a character outside ASCII";
       } else {
-        EXPECT_TRUE(((name == "memcpy" && overlapping) || outside_ascii) &&
-                    why == "ir.eval_model")
+        EXPECT_TRUE(((name == "memcpy" && overlapping) || outside_ascii) && why == "ir.eval_model")
             << name << ": " << why;
       }
     }
@@ -172,8 +171,8 @@ TEST(LibcModels, ASearchOutsideAsciiIsRefused) {
   for (const char* name : {"strchr", "strrchr"}) {
     EXPECT_TRUE(agree(name, run, why)) << name << ": " << why;
   }
-  for (const std::uint64_t value : {std::uint64_t{0x100} | 'Q', std::uint64_t{0x80},
-                                    std::uint64_t{0xffffffffU}}) {
+  for (const std::uint64_t value :
+       {std::uint64_t{0x100} | 'Q', std::uint64_t{0x80}, std::uint64_t{0xffffffffU}}) {
     run.value = value;
     for (const char* name : {"strchr", "strrchr"}) {
       EXPECT_FALSE(agree(name, run, why)) << name << " of 0x" << std::hex << value;
