@@ -37,11 +37,23 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - No-return calls (G24-T3): a call to a name on the fixed list (`abort`, `exit`, `__stack_chk_fail`,
   `__assert_fail`, `longjmp`, `__cxa_throw`, `_Unwind_Resume`, `ExitProcess`, and the rest in
   `src/analysis/no_return.cpp`; not `error`) ends its path when the import is bound to a runtime library:
-  by its ELF symbol version (`.gnu.version`/`.gnu.version_r`, read by a bounded reader, `fuzz_elf_versions`),
-  otherwise by DT_NEEDED when every needed library is a runtime library, and on PE by the import's DLL.
-  Each mark records its evidence (`functions --json`: `no_return_reason`). A versioned import is trusted by its
-  version alone: a library without symbol versioning that exports the same name and comes earlier in DT_NEEDED
-  order would make the mark wrong (a known limitation, kept by owner decision; `docs/IDA_GAP_LEDGER.md` G24-T3). Same-image functions whose
+  on ELF by finding the libraries the dynamic loader would load, in its order (`ElfLoadScope`: ld.so.preload,
+  DT_NEEDED breadth first, RPATH/RUNPATH/ld.so.conf/default directories, under `--sysroot`, plus `--library-path`)
+  and binding each reference (its symbol version read by a bounded reader, `fuzz_elf_versions`) by glibc's lookup
+  rules, and on PE by the import's DLL. An ELF shared library's references bind first in the global scope of
+  the program that loads it, so its calls are marked only with that program (`--program`); without it they
+  stay unmarked. Its local scope follows glibc's dlopen: a need the program already loaded is that object,
+  the executable's DT_RPATH is searched, and DT_SYMBOLIC puts the library first (each checked against glibc's
+  loader, `ElfLoadScope.ALibrarys*`, `ElfLoadScope.ASymbolicLibraryLooksItselfUpFirst`). `link` analyses
+  each input with its executable as that program; its own import bindings and call reports come from the
+  inputs it is given, and it prints no no-return marks. A library that cannot be found before the binding leaves the call
+  unmarked (`analysis.no_return_unverified`, and the analysis is Partial). `functions --json` gives each mark
+  its reason (`no_return_reason`); an ELF import mark names the bound library and the file it was found in,
+  a PE import mark names its DLL. The ELF search models glibc's (`/etc/ld.so.cache`, inherited DT_RPATH,
+  hardware-capability subdirectories) and does not read `LD_PRELOAD` or `LD_LIBRARY_PATH`; where it cannot know
+  which file the loader takes, the call is not marked. Tested against the real loader's binding
+  (`Analysis.AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked`,
+  `ElfLoadScope.FindsLibrariesInTheLoadersOrderAndBindsByGlibcRules`). Same-image functions whose
   every path ends in such a call, `ud2` or `hlt` are marked by propagation (8 rounds at most). The CFG gives
   the call no fall-through edge; the IR ends the block with an unreachable return that prints nothing; the
   evaluator stops at the call with `ir.eval_no_return`; a function with no returning path stays Partial.
@@ -68,12 +80,14 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported, 177 Complete (8.9%; 184 before the fs/gs fix, 7 of them wrong); before G04-T5, 985 labelled (49.6%, under the 52% bar).
 - Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
-  blocks (985 before G04-T5). 1,000 print without a goto and 986 with gotos (16,232 in all; the
-  largest function has 409). Every printed structure is checked edge by edge against the IR before it
-  is shown (no candidate was refused on the sample). The gotos are the open part: most go to a block
-  that is already printed (shared joins), and removing them needs owner decisions (`docs/AUDIT.md`, W1).
+  blocks (985 before G04-T5). 1,073 print without a goto and 913 with gotos (13,758 in all, 15,712
+  on `main` before W1b copied small blocks in place of gotos and printed two tests as one `&&` or `||`
+  condition; the largest function has 385). Every printed
+  structure is checked edge by edge against the IR before it is shown (no candidate was refused on the
+  sample). The gotos are the open part: most go to a block that is already printed (shared joins and
+  short-circuit conditions; `docs/AUDIT.md`, W1 and W1b).
 - Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
-  unwind; structured output without gotos for the 986 functions that G04-T5 prints with gotos.
+  unwind; structured output without gotos for the 913 functions that G04-T5 prints with gotos.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
 |---|---|---|---|---|

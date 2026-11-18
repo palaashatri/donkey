@@ -8,8 +8,10 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
+#include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/elf_versions.h"
 #include "donkey/binary/link.h"
 
@@ -152,7 +154,8 @@ bool is_runtime_library(std::string_view name) noexcept {
 std::map<std::uint64_t, std::string> bind_no_return_imports(
     const BinaryImage& image, std::span<const std::byte> data,
     const std::map<std::uint64_t, std::string>& stubs,
-    const std::map<std::uint64_t, std::string>& slots) {
+    const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search,
+    std::vector<std::string>* unverified) {
   std::map<std::uint64_t, std::string> marks;
   // The provenance of each import name that is bound to a runtime library, or nothing.
   std::map<std::string, std::string> bound;
@@ -172,41 +175,74 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
     return marks;
   }
   if (image.format == BinaryFormat::Elf) {
-    const KnownName* entry = nullptr;
-    auto versions = read_import_versions(image, data);
-    const ElfLibraryNames libraries = read_library_names(image, data);
-    // An unversioned import is bound by DT_NEEDED only when every needed library is a runtime
-    // library of the name's kind: another needed library could export the same name.
+    // An ELF import is bound where the dynamic loader binds it: the first library of the load
+    // scope that defines the name in a form the reference accepts. Every reference of the name
+    // (each version it is imported with) must bind to a runtime library of the name's kind; a
+    // library the walk cannot find or read before the binding leaves the name unmarked.
+    auto references = read_import_references(image, data);
+    if (!references) {
+      if (unverified != nullptr) {
+        unverified->push_back("the symbol version table: " + references.diagnostic().message);
+      }
+      return marks;  // an unreadable version table: no mark
+    }
+    // Each (version, hidden) form a name is imported with: every one must bind.
+    std::map<std::string, std::set<std::pair<std::string, bool>>> versions_of;
+    std::set<std::string> unresolved;
+    for (const ElfImportReference& reference : references.value()) {
+      if (!bound.contains(reference.name)) {
+        continue;
+      }
+      if (reference.unresolved) {
+        unresolved.insert(reference.name);
+      }
+      versions_of[reference.name].emplace(reference.version, reference.hidden);
+    }
+    const ElfLoadScope scope = ElfLoadScope::build(image, data, search);
     for (auto& [name, provenance] : bound) {
-      entry = known(name);
-      if (entry == nullptr) {
+      const KnownName* entry = known(name);
+      const auto versions = versions_of.find(name);
+      if (entry == nullptr || versions == versions_of.end()) {
         continue;
       }
-      if (!versions) {
-        continue;  // an unreadable version table: no mark from it, and no fallback either
-      }
-      if (const auto version = versions.value().find(name); version != versions.value().end()) {
-        if (elf_library_provides(version->second.file, entry->provider)) {
-          provenance = "known-name:" + name + " version:" + version->second.version +
-                       " file:" + version->second.file;
+      if (unresolved.contains(name)) {
+        if (unverified != nullptr) {
+          unverified->push_back(name + ": its symbol version could not be read");
         }
         continue;
       }
-      if (libraries.needed.empty()) {
-        continue;
-      }
-      const bool all_runtime =
-          std::all_of(libraries.needed.begin(), libraries.needed.end(),
-                      [](const std::string& file) { return is_runtime_library(file); });
-      const bool one_provides = std::any_of(
-          libraries.needed.begin(), libraries.needed.end(),
-          [entry](const std::string& file) { return elf_library_provides(file, entry->provider); });
-      if (all_runtime && one_provides) {
-        std::string needed;
-        for (const std::string& file : libraries.needed) {
-          needed += (needed.empty() ? "" : ",") + file;
+      std::string evidence;
+      bool proven = true;
+      for (const auto& [version, hidden] : versions->second) {
+        const ElfBinding binding = scope.lookup(name, version, hidden);
+        if (binding.outcome == ElfBinding::Outcome::Unknown) {
+          if (unverified != nullptr) {
+            unverified->push_back(name + ": " + binding.reason);
+          }
+          proven = false;
+          break;
         }
-        provenance = "known-name:" + name + " needed:" + needed;
+        if (binding.outcome != ElfBinding::Outcome::Bound ||
+            binding.library == scope.image_index()) {
+          proven = false;
+          break;
+        }
+        // The library's own SONAME is only what it says about itself: the name the executable's
+        // DT_NEEDED (or ld.so.preload) loaded it by must be a runtime library's name as well, so a
+        // library that calls itself libc.so.6 under another name is not taken for the C library.
+        const ElfScopeLibrary& library = scope.libraries()[binding.library];
+        const std::string loaded_as = library.name.substr(library.name.find_last_of('/') + 1);
+        if (!elf_library_provides(loaded_as, entry->provider) ||
+            (!library.soname.empty() && !elf_library_provides(library.soname, entry->provider))) {
+          proven = false;
+          break;
+        }
+        const std::string& library_name = library.soname.empty() ? loaded_as : library.soname;
+        evidence += (version.empty() ? std::string(" unversioned") : " version:" + version) +
+                    " bound:" + library_name + " path:" + library.path;
+      }
+      if (proven && !evidence.empty()) {
+        provenance = "known-name:" + name + evidence;
       }
     }
   } else if (image.format == BinaryFormat::Pe) {

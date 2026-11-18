@@ -142,11 +142,45 @@ struct AnalysisRequest {
   LoadOptions load_options;
 };
 
+/// Where the analysis looks for an ELF image's libraries (--sysroot, --library-path, G24-T3).
+/// One command runs per process, so the flags set it once for every analysis that command does.
+ElfLibrarySearch& library_search() {
+  static ElfLibrarySearch search;
+  return search;
+}
+
+/// Analysis options with the command line's library search.
+AnalysisOptions analysis_options() {
+  AnalysisOptions options;
+  options.library_search = library_search();
+  return options;
+}
+
 bool try_parse_load_flag(const std::vector<std::string_view>& arguments, std::size_t& index,
                          LoadOptions& options, const char*& error_message) {
   const std::string_view argument = arguments[index];
   if (argument == "--isolate") {
     options.isolate = true;
+    return true;
+  }
+  if (argument == "--sysroot" || argument == "--library-path" || argument == "--program") {
+    std::string_view value;
+    // A directory that starts with `-` is spelled `./-name`, so a following option is never
+    // taken for the directory.
+    if (index + 1 >= arguments.size() || arguments[index + 1].empty() ||
+        arguments[index + 1].front() == '-' || !take_value(arguments, index, value)) {
+      error_message = argument == "--sysroot"   ? "--sysroot needs a directory"
+                      : argument == "--program" ? "--program needs the program's path"
+                                                : "--library-path needs a directory";
+      return true;
+    }
+    if (argument == "--sysroot") {
+      library_search().sysroot = std::string(value);
+    } else if (argument == "--program") {
+      library_search().program = std::string(value);
+    } else {
+      library_search().paths.emplace_back(value);
+    }
     return true;
   }
   if (argument == "--raw") {
@@ -554,7 +588,7 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   options.max_strings = request.max_strings;
   options.min_string_length = request.min_string_length;
@@ -843,7 +877,8 @@ void print_usage(std::FILE* out) {
       " [--json]\n"
       "  donkey-cli typelib make <preprocessed.i> --out FILE --library NAME ... (tools/typelib)\n"
       "  donkey-cli typelib show <library.dtl>\n"
-      "  donkey-cli link <executable> <library>... [--json]\n"
+      "  donkey-cli link <executable> <library>... [--sysroot <dir>] [--library-path <dir>]... "
+      "[--program <path>] [--json]\n"
       "  donkey-cli project link <database> [--json]\n"
       "  donkey-cli project string <database> <image-id> <address> [--json]\n"
       "  donkey-cli analyze <binary> [--json] [--max-instructions N]\n"
@@ -873,6 +908,13 @@ void print_usage(std::FILE* out) {
       "  donkey-cli serve [--project <db>] [--allow-write]\n"
       "                                   JSON-RPC 2.0 on stdin/stdout (see docs/RPC.md)\n"
       "  donkey-cli batch <script.json>   run a JSON array of RPC requests, print the responses\n"
+      "\n"
+      "Analysis commands take --sysroot DIR and --library-path DIR (repeatable): where an ELF\n"
+      "image's libraries are, to show which library each import binds to (default: this host).\n"
+      "An ELF shared library's imports bind first in the program that loads it: --program PATH\n"
+      "names that program (without it, a library's bindings are unknown). `link` analyses each\n"
+      "input with its executable as that program unless --program names another; its import\n"
+      "bindings and call providers come from the inputs it is given, not from the program.\n"
       "\n"
       "Every command except `debug launch` only reads files and never executes them.\n"
       "`debug launch` runs the program under the native debugger (it stops at the\n"
@@ -1545,7 +1587,7 @@ int command_cfg(const std::vector<std::string_view>& arguments) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   auto result = analyze(loaded.image, loaded.data, options);
   if (!result) {
@@ -1786,7 +1828,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   if (!load(request.path, loaded, request.load_options)) {
     return kExitFailure;
   }
-  AnalysisOptions options;
+  AnalysisOptions options = analysis_options();
   options.max_instructions = request.max_instructions;
   auto analysis = analyze(loaded.image, loaded.data, options);
   if (!analysis) {
@@ -2862,7 +2904,16 @@ int report_link(const std::vector<std::string>& labels,
   analyses.reserve(loaded.size());
   bool partial = false;
   for (const donkey::LoadedBinary& item : loaded) {
-    auto analysis = donkey::analyze(item.image, item.data);
+    // The libraries of a link are loaded by its executable (the first input), unless --program
+    // names another program. The executable is the image already loaded (and, for `project link`,
+    // already checked against the project), not the file read again.
+    AnalysisOptions options = analysis_options();
+    if (options.library_search.program.empty() && !loaded.empty()) {
+      options.library_search.program = loaded.front().image.path;
+      options.library_search.program_image = &loaded.front().image;
+      options.library_search.program_data = loaded.front().data;
+    }
+    auto analysis = donkey::analyze(item.image, item.data, options);
     if (!analysis) {
       return fail(analysis.diagnostic());
     }
@@ -2957,9 +3008,18 @@ int report_link(const std::vector<std::string>& labels,
 int command_link(const std::vector<std::string_view>& arguments) {
   bool json = false;
   std::vector<std::string_view> positional;
-  for (const std::string_view argument : arguments) {
+  for (std::size_t i = 0; i < arguments.size(); ++i) {
+    const std::string_view argument = arguments[i];
     if (argument == "--json") {
       json = true;
+    } else if (argument == "--sysroot" || argument == "--library-path" || argument == "--program") {
+      // Where each image's libraries are found when its no-return imports are bound.
+      LoadOptions unused;
+      const char* flag_error = nullptr;
+      try_parse_load_flag(arguments, i, unused, flag_error);
+      if (flag_error != nullptr) {
+        return usage_error(flag_error);
+      }
     } else if (!argument.empty() && argument.front() == '-') {
       return usage_error("unknown option for link");
     } else {
@@ -3029,7 +3089,7 @@ int command_project(const std::vector<std::string_view>& arguments) {
     if (!load(binary, loaded, load_options)) {
       return kExitFailure;
     }
-    auto analysis = analyze(loaded.image, loaded.data);
+    auto analysis = analyze(loaded.image, loaded.data, analysis_options());
     if (!analysis) {
       return fail(analysis.diagnostic());
     }

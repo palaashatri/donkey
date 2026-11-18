@@ -17,6 +17,10 @@ option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
 option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
+# Seconds every registered test may run at least (0: each test's own limit). For a host whose
+# clock keeps running while the whole machine is stopped, such as the emulated FreeBSD aarch64
+# VM in CI: a stop of half an hour is otherwise charged to whichever test is running.
+set(DONKEY_TEST_TIMEOUT_FLOOR 0 CACHE STRING "Lower bound on every test's timeout, in seconds")
 option(DONKEY_STATIC_RUNTIME
        "Link the C/C++ runtime statically (self-contained release executables)" OFF)
 
@@ -92,6 +96,7 @@ add_library(donkey_binary STATIC
   src/binary/rtti_msvc.cpp
   src/binary/link.cpp
   src/binary/elf_versions.cpp
+  src/binary/elf_load_scope.cpp
   src/binary/plt.cpp
   src/binary/elf_dynamic.cpp
   src/binary/core.cpp
@@ -364,6 +369,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_eh_frame PRIVATE cxx_std_20)
   target_compile_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_eh_frame PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_load_scope fuzz/fuzz_load_scope.cpp)
+  target_link_libraries(fuzz_load_scope PRIVATE donkey::binary)
+  target_compile_features(fuzz_load_scope PRIVATE cxx_std_20)
+  target_compile_options(fuzz_load_scope PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_load_scope PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_elf_versions fuzz/fuzz_elf_versions.cpp)
   target_link_libraries(fuzz_elf_versions PRIVATE donkey::binary)
   target_compile_features(fuzz_elf_versions PRIVATE cxx_std_20)
