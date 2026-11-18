@@ -89,7 +89,7 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported, 177 Complete (8.9%; 184 before the fs/gs fix, 7 of them wrong); before G04-T5, 985 labelled (49.6%, under the 52% bar).
 - Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
-  blocks (985 before G04-T5). 1,073 print without a goto and 913 with gotos (13,713 in all, 15,712
+  blocks (985 before G04-T5). 1,073 print without a goto and 913 with gotos (13,758 in all, 15,712
   on `main` before W1b copied small blocks in place of gotos and printed two tests as one `&&` or `||`
   condition; the largest function has 385). Every printed
   structure is checked edge by edge against the IR before it is shown (no candidate was refused on the
