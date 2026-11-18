@@ -2,18 +2,22 @@
 
 // No-return calls (G24-T3). A call to `abort`, `exit` or another function on a fixed list does not
 // come back, so the code after it is not this path's code and the function does not return there.
-// The list is matched exactly on an import's name, and only when the import is bound to a runtime
-// library (owner decision 4, 2026-11-17): by the ELF symbol version when the import has one,
-// otherwise by DT_NEEDED when every needed library is a runtime library; on PE by the DLL that the
-// import names. Every mark records the evidence (its provenance). The mark is a static assumption:
-// a library preloaded at run time (`LD_PRELOAD`) could define the same name and return.
+// The list is matched exactly on an import's name, and only when the import is shown to bind to a
+// runtime library: on ELF by walking the libraries the dynamic loader would load, in its order,
+// and taking the first definition each reference (with its symbol version, or without one)
+// accepts (ElfLoadScope); on PE by the DLL that the import names. A library the walk cannot find
+// or read before the binding leaves the import unmarked. Every mark records the evidence (its
+// provenance). What the file and the system cannot show is not modelled: a library preloaded by
+// the environment (`LD_PRELOAD`) could define the same name and return.
 
 #include <cstdint>
 #include <map>
 #include <span>
 #include <string>
 #include <string_view>
+#include <vector>
 
+#include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/image.h"
 
 namespace donkey {
@@ -30,12 +34,15 @@ namespace donkey {
 /// The no-return imports of an image, keyed by the address a call reaches them through: each
 /// stub address of `stubs` (address -> import, as plt_stub_imports and the PE import thunks give)
 /// and each slot address of `slots` (GOT or IAT slot -> import). The value is the provenance,
-/// `known-name:abort version:GLIBC_2.2.5 file:libc.so.6`, `known-name:abort needed:libc.so.6`, or
+/// `known-name:abort version:GLIBC_2.2.5 bound:libc.so.6 path:/lib/x86_64-linux-gnu/libc.so.6`
+/// (one `version`/`unversioned` part per way the image imports the name), or
 /// `known-name:ExitProcess dll:KERNEL32.dll`. An import is left out when its provider is not shown
-/// to be a runtime library, or when the version table cannot be read.
+/// to be a runtime library, or when the version table cannot be read; each name left out because
+/// a library could not be found or read is added to `unverified` with the reason.
 [[nodiscard]] std::map<std::uint64_t, std::string> bind_no_return_imports(
     const BinaryImage& image, std::span<const std::byte> data,
     const std::map<std::uint64_t, std::string>& stubs,
-    const std::map<std::uint64_t, std::string>& slots);
+    const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search = {},
+    std::vector<std::string>* unverified = nullptr);
 
 }  // namespace donkey

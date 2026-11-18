@@ -37,11 +37,17 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - No-return calls (G24-T3): a call to a name on the fixed list (`abort`, `exit`, `__stack_chk_fail`,
   `__assert_fail`, `longjmp`, `__cxa_throw`, `_Unwind_Resume`, `ExitProcess`, and the rest in
   `src/analysis/no_return.cpp`; not `error`) ends its path when the import is bound to a runtime library:
-  by its ELF symbol version (`.gnu.version`/`.gnu.version_r`, read by a bounded reader, `fuzz_elf_versions`),
-  otherwise by DT_NEEDED when every needed library is a runtime library, and on PE by the import's DLL.
-  Each mark records its evidence (`functions --json`: `no_return_reason`). A versioned import is trusted by its
-  version alone: a library without symbol versioning that exports the same name and comes earlier in DT_NEEDED
-  order would make the mark wrong (a known limitation, kept by owner decision; `docs/IDA_GAP_LEDGER.md` G24-T3). Same-image functions whose
+  on ELF by finding the libraries the dynamic loader would load, in its order (`ElfLoadScope`: ld.so.preload,
+  DT_NEEDED breadth first, RPATH/RUNPATH/ld.so.conf/default directories, under `--sysroot`, plus `--library-path`)
+  and binding each reference (its symbol version read by a bounded reader, `fuzz_elf_versions`) by glibc's lookup
+  rules, and on PE by the import's DLL. A library that cannot be found before the binding leaves the call
+  unmarked (`analysis.no_return_unverified`, and the analysis is Partial). `functions --json` gives each mark
+  its reason (`no_return_reason`); an ELF import mark names the bound library and the file it was found in,
+  a PE import mark names its DLL. The ELF search models glibc's (`/etc/ld.so.cache`, inherited DT_RPATH,
+  hardware-capability subdirectories) and does not read `LD_PRELOAD` or `LD_LIBRARY_PATH`; where it cannot know
+  which file the loader takes, the call is not marked. Tested against the real loader's binding
+  (`Analysis.AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked`,
+  `ElfLoadScope.FindsLibrariesInTheLoadersOrderAndBindsByGlibcRules`). Same-image functions whose
   every path ends in such a call, `ud2` or `hlt` are marked by propagation (8 rounds at most). The CFG gives
   the call no fall-through edge; the IR ends the block with an unreachable return that prints nothing; the
   evaluator stops at the call with `ir.eval_no_return`; a function with no returning path stays Partial.
