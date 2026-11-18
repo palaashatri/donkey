@@ -126,6 +126,89 @@ TEST(FunctionStarts, LoaderRefusesATableOutsideTheFile) {
   EXPECT_EQ(refused.diagnostic().code, "macho.bad_function_starts");
 }
 
+namespace {
+
+std::uint32_t le32(const std::vector<std::byte>& data, std::size_t at) {
+  std::uint32_t value = 0;
+  for (int byte = 3; byte >= 0; --byte) {
+    value =
+        (value << 8U) | std::to_integer<std::uint32_t>(data[at + static_cast<std::size_t>(byte)]);
+  }
+  return value;
+}
+
+void put_be32(std::vector<std::byte>& data, std::size_t at, std::uint32_t value) {
+  for (int byte = 0; byte < 4; ++byte) {
+    data[at + static_cast<std::size_t>(byte)] =
+        static_cast<std::byte>((value >> (24U - 8U * static_cast<unsigned>(byte))) & 0xffU);
+  }
+}
+
+}  // namespace
+
+// A second LC_FUNCTION_STARTS is refused: the fixture with another linkedit_data command (16
+// bytes: LC_CODE_SIGNATURE, LC_DATA_IN_CODE, LC_DYLD_EXPORTS_TRIE or LC_DYLD_CHAINED_FIXUPS)
+// relabelled as one.
+TEST(FunctionStarts, LoaderRefusesASecondTable) {
+  for (const std::string name : {"starts_x86_64", "starts_arm64"}) {
+    auto loaded = donkey::load_binary(fixture(name));
+    ASSERT_TRUE(loaded.has_value());
+    std::vector<std::byte> data(loaded.value().data.begin(), loaded.value().data.end());
+    std::size_t at = 32;
+    const std::uint32_t commands = le32(data, 16);
+    bool patched = false;
+    for (std::uint32_t i = 0; i < commands; ++i) {
+      const std::uint32_t command = le32(data, at);
+      if (le32(data, at + 4) == 16 && (command == 0x1d || command == 0x29 ||
+                                       command == 0x80000033U || command == 0x80000034U)) {
+        data[at] = std::byte{0x26};
+        data[at + 1] = std::byte{0};
+        data[at + 2] = std::byte{0};
+        data[at + 3] = std::byte{0};
+        patched = true;
+        break;
+      }
+      at += le32(data, at + 4);
+    }
+    ASSERT_TRUE(patched) << name;
+    auto refused = donkey::parse_binary(data, name);
+    ASSERT_FALSE(refused.has_value()) << name;
+    EXPECT_EQ(refused.diagnostic().code, "macho.bad_function_starts") << name;
+    EXPECT_NE(refused.diagnostic().message.find("second"), std::string::npos)
+        << refused.diagnostic().message;
+  }
+}
+
+// In a fat file the table's offset is relative to its slice: the x86-64 fixture wrapped in a fat
+// header, its slice at 0x1000, gives the same starts as the thin file.
+TEST(FunctionStarts, AFatSliceGivesTheSameStartsAsTheThinFile) {
+  auto thin = donkey::load_binary(fixture("starts_x86_64"));
+  ASSERT_TRUE(thin.has_value());
+  const auto& thin_data = thin.value().data;
+  auto thin_starts = donkey::read_function_starts_of_image(thin.value().image, thin_data);
+  ASSERT_TRUE(thin_starts.has_value());
+  ASSERT_EQ(thin_starts.value().size(), 4U);
+
+  constexpr std::size_t kSlice = 0x1000;
+  std::vector<std::byte> fat(kSlice, std::byte{0});
+  put_be32(fat, 0, 0xCAFEBABEU);
+  put_be32(fat, 4, 1);            // one architecture
+  put_be32(fat, 8, 0x01000007U);  // CPU_TYPE_X86_64
+  put_be32(fat, 12, 3);           // CPU_SUBTYPE_X86_64_ALL
+  put_be32(fat, 16, static_cast<std::uint32_t>(kSlice));
+  put_be32(fat, 20, static_cast<std::uint32_t>(thin_data.size()));
+  put_be32(fat, 24, 12);  // 2^12 alignment
+  fat.insert(fat.end(), thin_data.begin(), thin_data.end());
+
+  auto image = donkey::parse_binary(fat, "starts_x86_64.fat");
+  ASSERT_TRUE(image.has_value()) << image.diagnostic().message;
+  EXPECT_EQ(image.value().function_starts_offset,
+            thin.value().image.function_starts_offset + kSlice);
+  auto fat_starts = donkey::read_function_starts_of_image(image.value(), fat);
+  ASSERT_TRUE(fat_starts.has_value()) << fat_starts.diagnostic().message;
+  EXPECT_EQ(fat_starts.value(), thin_starts.value());
+}
+
 // Stripped, the image names only its entry point; the table gives the other three functions, each
 // marked with its provenance.
 TEST(Analysis, MachOFunctionStartsSeedAStrippedBinary) {
