@@ -843,6 +843,7 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
     LoadedLibrary loaded;
     loaded.problem = "the scope has more libraries than the limit";
     impl.image_index = impl.libraries.size();
+    impl.image_first = own.symbolic;  // DT_SYMBOLIC: the unread library still comes first
     impl.libraries.push_back(std::move(self));
     impl.loaded.push_back(std::move(loaded));
     return scope;
@@ -878,6 +879,14 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
   // The executable is the first object of the global scope.
   ElfScopeLibrary self;
   self.path = fs::path(image.path).generic_string();
+  if (max_libraries == 0) {
+    // A limit of 0 leaves no room even for the root: it is in the scope by name, unread.
+    LoadedLibrary loaded;
+    loaded.problem = "the scope has more libraries than the limit";
+    impl.libraries.push_back(std::move(self));
+    impl.loaded.push_back(std::move(loaded));
+    return scope;
+  }
   const ElfLibraryNames own = read_library_names(image, data);
   impl.executable_dynamic = own.dynamic || !own.complete;
   impl.libraries.push_back(self);

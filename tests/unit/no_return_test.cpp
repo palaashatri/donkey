@@ -1203,6 +1203,37 @@ TEST(ElfLoadScope, AProgramAndItsLibraryShareTheLibraryLimit) {
   EXPECT_EQ(read.outcome, donkey::ElfBinding::Outcome::Bound) << read.reason;
 }
 
+// A DT_SYMBOLIC library past the shared limit still comes first in its own lookups: dep_a, which it
+// defines and the program's libdep.so.1 defines too, is not known rather than bound to libdep.
+TEST(ElfLoadScope, ASymbolicLibraryPastTheLimitIsStillLookedUpFirst) {
+  donkey::ElfLibrarySearch search = plugin_search();
+  search.library_limit = 2;
+  const donkey::ElfBinding dep_a =
+      scope_of(fixture("loadscope", "plugin/libplugin_symbolic.so.1"), search).lookup("dep_a", "");
+  EXPECT_EQ(dep_a.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(dep_a.reason.find("more libraries than the limit"), std::string::npos) << dep_a.reason;
+}
+
+// A limit of 0 reads nothing, not even the program: every lookup is not known.
+TEST(ElfLoadScope, ALimitOfZeroReadsNothing) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  search.library_limit = 0;
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "steal_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 1U);
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(exit_binding.reason.find("more libraries than the limit"), std::string::npos)
+      << exit_binding.reason;
+  // A library and its program, with a limit of 0: neither is read.
+  donkey::ElfLibrarySearch plugin = plugin_search();
+  plugin.library_limit = 0;
+  EXPECT_EQ(scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), plugin)
+                .lookup("plugin_rpath", "")
+                .outcome,
+            donkey::ElfBinding::Outcome::Unknown);
+}
+
 // The limit counts every object of the scope, the program included: steal_consumer needs
 // libsteal.so.1 and libc.so.6, and with a limit of 2 only libsteal.so.1 is read. `exit`, which
 // only libc.so.6 defines, is then not known.
