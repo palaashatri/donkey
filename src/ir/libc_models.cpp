@@ -158,7 +158,22 @@ Result<std::uint64_t> run_libc_model(const LibcModel& model,
     }
     return length;
   }
+  // The character memchr, strchr and strrchr search for. ISO C converts the int to (unsigned)
+  // char, but C libraries differ outside ASCII: Microsoft's strrchr does not find a character whose
+  // int has bits above the low byte, where glibc's does (both measured by
+  // LibcModels.AgreeWithTheHostCLibrary). Such a call is refused, not guessed.
+  const auto ascii = [&](std::uint64_t value) {
+    if (value > 0x7f) {
+      bytes.fail("ir.eval_model",
+                 std::string(name) + " of a character outside ASCII: C libraries differ there");
+      return false;
+    }
+    return true;
+  };
   if (name == "memchr") {
+    if (!ascii(b)) {
+      return bytes.error();
+    }
     const auto wanted = static_cast<std::uint8_t>(b);
     for (std::uint64_t i = 0; i < n; ++i) {
       if (!bytes.read(a + i, c)) {
@@ -171,6 +186,9 @@ Result<std::uint64_t> run_libc_model(const LibcModel& model,
     return std::uint64_t{0};
   }
   if (name == "strchr" || name == "strrchr") {
+    if (!ascii(b)) {
+      return bytes.error();
+    }
     const auto wanted = static_cast<std::uint8_t>(b);
     const bool last = name == "strrchr";
     std::uint64_t found = 0;

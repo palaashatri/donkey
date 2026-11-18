@@ -1890,7 +1890,9 @@ then stays Partial.
 **Models.** `donkey/ir/libc_models.h`: strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn,
 memcpy, memmove, memset. Each reads and writes exactly the bytes ISO C says, counts a step per byte,
 and fails on undefined input (an overlapping memcpy: `ir.eval_model`; an unmapped byte:
-`ir.eval_memory`). memcmp, strcmp and strncmp have no model: ISO C defines only the sign of their
+`ir.eval_memory`), and on input where C libraries differ: memchr, strchr and strrchr search only
+for an ASCII character (Microsoft's strrchr, on the Windows CI host, does not find a character
+whose `int` has bits above the low byte, where glibc's does). memcmp, strcmp and strncmp have no model: ISO C defines only the sign of their
 result, and the oracle compares exact values.
 
 **IR.** `IrStatement::call_model` names the function. The arguments come from its prototype (System V

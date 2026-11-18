@@ -121,10 +121,12 @@ TEST(LibcModels, AgreeWithTheHostCLibrary) {
       for (std::size_t i = 0; i < pointers; ++i) {
         run.offsets.push_back(rng() % 128);
       }
-      // Sizes stay inside the buffer; the int arguments carry bits above the low byte, which the
-      // functions ignore (they convert to unsigned char).
-      run.value =
-          round % 5 == 0 ? (rng() & 0xffff'ffffU) : run.bytes[rng() % 64] | (rng() % 4) << 8;
+      // Sizes stay inside the buffer. A searched-for character is ASCII on even rounds (often one
+      // of the text's own); on odd rounds it may carry bits above the low byte or be past ASCII,
+      // which C libraries treat differently, so the model must refuse it.
+      run.value = round % 2 == 0   ? (run.bytes[rng() % 64] & 0x7fU)
+                  : round % 5 == 1 ? (rng() & 0xffff'ffffU)
+                                   : run.bytes[rng() % 64] | (rng() % 4) << 8;
       if (model.arguments.back() == donkey::LibcArgument::Size) {
         run.value = round % 7 == 0 ? 0 : rng() % 128;
       }
@@ -133,6 +135,9 @@ TEST(LibcModels, AgreeWithTheHostCLibrary) {
         run.value = rng() % 128;
       }
       std::string why;
+      const bool searches = name == "strchr" || name == "strrchr" ||
+                            (name == "memchr" && (run.value & 0xffff'ffffU) > 0x7f);
+      const bool outside_ascii = searches && (run.value & 0xffff'ffffU) > 0x7f;
       const bool overlapping =
           pointers == 2 && run.value > 0 &&
           (run.offsets[0] > run.offsets[1] ? run.offsets[0] - run.offsets[1]
@@ -140,29 +145,41 @@ TEST(LibcModels, AgreeWithTheHostCLibrary) {
       if (agree(name, run, why)) {
         ++compared;
         EXPECT_FALSE(name == "memcpy" && overlapping) << "an overlapping memcpy was run";
+        EXPECT_FALSE(outside_ascii) << name << " searched for a character outside ASCII";
       } else {
-        EXPECT_TRUE(name == "memcpy" && overlapping && why == "ir.eval_model")
+        EXPECT_TRUE(((name == "memcpy" && overlapping) || outside_ascii) &&
+                    why == "ir.eval_model")
             << name << ": " << why;
       }
     }
   }
-  EXPECT_GT(compared, 3500U);
+  EXPECT_GT(compared, 3000U);
 }
 
 // memchr, strchr, strrchr and memset take an int and use its low byte: a value with other bits
 // set finds or writes the same byte the host does.
-TEST(LibcModels, AnIntArgumentIsConvertedToUnsignedChar) {
+// memset stores the low byte of its int, as every C library does. memchr, strchr and strrchr search
+// only for an ASCII character: past it, C libraries differ (Microsoft's strrchr does not find a
+// character whose int has bits above the low byte; glibc's does), so the model refuses the call.
+TEST(LibcModels, ASearchOutsideAsciiIsRefused) {
   ModelInput run;
   run.bytes.assign(kSize, 'a');
   run.bytes[10] = 'Q';
   run.bytes[200] = 0;
   run.offsets = {0};
-  run.value = 0x7fffff00U | 'Q';
   std::string why;
+  run.value = 'Q';
   for (const char* name : {"strchr", "strrchr"}) {
     EXPECT_TRUE(agree(name, run, why)) << name << ": " << why;
   }
-  run.value = 0x1000 | 'Q';
+  for (const std::uint64_t value : {std::uint64_t{0x100} | 'Q', std::uint64_t{0x80},
+                                    std::uint64_t{0xffffffffU}}) {
+    run.value = value;
+    for (const char* name : {"strchr", "strrchr"}) {
+      EXPECT_FALSE(agree(name, run, why)) << name << " of 0x" << std::hex << value;
+      EXPECT_EQ(why, "ir.eval_model") << name;
+    }
+  }
   EXPECT_TRUE(agree("memset", ModelInput{run.bytes, {0}, 0x40}, why)) << why;
 }
 
