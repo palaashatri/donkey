@@ -82,9 +82,12 @@ wrong even if CI is green.
 
 ## 2. How to take a task
 
-1. Pick the first task in section 5 whose status is TODO and whose
-   dependencies are all DONE. Prefer tasks marked **[oracle]**: the
-   differential corpus checks them automatically, so mistakes are caught.
+1. Pick, among the tasks of the current wave in section 5 whose status is TODO and whose
+   dependencies are all DONE, the one that moves the measured numbers most (AGENTS.md,
+   "Highest leverage first"); between tasks of equal effect, take the first in this ledger's
+   order. Inside a gap, its **[ground truth]** and **[oracle]** tasks still come first, as
+   "Measure before you build" says: they are what the effect is measured with, and the
+   differential corpus checks **[oracle]** tasks automatically.
 2. Read every file the task lists before editing. Read the tests next to them.
 3. Write the tests first, from the task's "Tests" list. Run them and see them
    fail.
@@ -159,7 +162,7 @@ P0 is the most important, P3 the least.
 | G01 | Floating point (x86 SSE scalar, AArch64 FP) | Decompiles float/double code | The IR has exact floating-point operations (G01-T1). x86-64 scalar SSE (G01-T2) and the AArch64 scalar `s`/`d` forms, including `fmadd`/`fmsub` (G01-T3), lift to them. Packed and vector forms stay Partial (G08) | P0 | IN PROGRESS (T1 and T2 DONE; T3 verified under qemu-aarch64 with GCC, and not yet verified with Apple Clang or on CI runners) |
 | G02 | x86 integer gaps | Full integer semantics | Complete for the x86 integer gaps: adc/sbb, double-width mul/div, bit operations, bsf/bsr, flags across blocks (G02-T1 to T4) | P0 | DONE (G02-T1 to T4) |
 | G03 | AArch64 integer gaps | Full | Complete for the AArch64 integer gaps (G03-T1 to T4). The Partial corpus functions left are FP and SIMD, owned by G01 and G08 | P0 | DONE (G03-T1 to T4) |
-| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL; T5 DONE (goto reduction W1b decided 2026-11-17, not started): no function of the 1,986 list is printed as labelled blocks, 986 are printed with gotos, see G04-T5. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample before T5: 49.6% (985; bar 52%, met); with T5, 0. 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
+| G04 | Decompiler readability | Clean C with merged variables, `for` loops, simplified conditions | Register aliases merged (T1); copy propagation and dead-register removal (T2); one-block loops as do-while, break, continue and integer negation (T3, partial); a while loop whose counter is set just before it and stepped by a constant at the end of its latch prints as `for` (T3, unit-tested; O0 counted loops with counters in memory print as `for` (`c_sum_array`); O2 and O3 rotate loops into guarded do-while forms, which do not); parameters and frame slots take their DWARF names at -O0 (T4) | P0 | IN PROGRESS (T0, T1, T2, T4 DONE; T3 PARTIAL; T5 DONE (goto reduction W1b decided 2026-11-17 and done: small-block copies and compound conditions): no function of the 1,986 list is printed as labelled blocks, 913 are printed with gotos (13,713 gotos, 15,712 on `main` before W1b; CI run 44264049339 at `e49d58f`), see G04-T5. Structuring (goal 8, merged): loops are natural loops, a reverse-postorder copy is structured when the layout fails, and `if (c) break;` prints. Dominator-tree fallback structurer, bounded copies of return blocks, and node splitting of irreducible functions are in. Measured labelled share on the fixed 1,986-function sample before T5: 49.6% (985; bar 52%, met); with T5, 0. 106 irreducible functions remain; no split function is structured. Not done: a loop header with two entries after splitting, switch terminators in the splitter, and the remaining region shapes; see docs/AUDIT.md) |
 | G05 | Type system and user types | Type libraries, struct/enum editing, propagation | The type store with validation and ABI sizes (T1, partial); a bounded C declaration parser (T2); applying a prototype to recovered code (T3, partial: `apply_prototype` and its tests; no CLI or decompiler path calls it); project type add, list and apply in the CLI (T4, CLI part; apply records the application only). No editing UI, no undo, and the decompiler does not read the applied types | P0 | IN PROGRESS (T1 PARTIAL; T2 DONE; T3 PARTIAL, step 3 TODO; T4 PARTIAL: CLI only, UI and undo TODO) |
 | G06 | PDB (Windows debug info) | Full | PDB 7.00 read: the MSF container, PDB info, modules, procedures, globals, the struct, class, union and enum types with their instance fields, pointers, arrays, modifiers and procedures; mapped into the type store with provenance Pdb (`types_from_pdb`). Enumerators are read with their values (LF_ENUMERATE). Not read: C++ class layouts; structs with base classes, virtual tables or methods are reported and left out | P1 | IN PROGRESS (T1 to T3 DONE for C structs, enums and the fixtures; C++ class layouts TODO) |
 | G07 | Separate debug files (.dSYM, debuglink, build-id, compressed DWARF) | Full | Separate debug files by build-id and debuglink (CRC-32 checked); a `.dSYM` bundle found by LC_UUID; `debuginfo --debug-file` checks a named file; zlib and zstd compressed DWARF | P1 | DONE (T1 and T2; the .dSYM lookup is checked with Apple's dsymutil output on macOS CI, `cli.debuginfo_json`) |
@@ -178,7 +181,7 @@ P0 is the most important, P3 the least.
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 to T4 TODO; header sources decided 2026-11-17, see T2) |
-| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
@@ -928,7 +931,7 @@ for Partial functions.
 - **Done when:** the measurement in `docs/AUDIT.md` (W1 section) shows the numbers above, the
   three build trees and the desktop UI suite pass, and the PARITY, SUPPORT_MATRIX and DESIGN
   §17.2 rows agree with the evidence.
-- **Status:** DONE, measured in `docs/AUDIT.md` (W1); goto reduction (W1b) decided 2026-11-17, not started. No function of the
+- **Status:** DONE, measured in `docs/AUDIT.md` (W1); goto reduction (W1b) decided 2026-11-17 and done (small-block copies, compound conditions). No function of the
   fixed 1,986-function list is printed as labelled blocks (985 before), and every printed structure
   passes the control-flow check, on the corpus and on the list (0 candidates refused). Structured
   without goto: 1,001 before, 1,000 after. Two functions left that set (`openssl` `0xa9b70`, `libc`
@@ -939,11 +942,23 @@ for Partial functions.
   The open decision, whether to copy small shared blocks and recover compound conditions to remove
   most of them, was decided on 2026-11-17: yes (W1b below), with the copy bounded by block size and
   by total growth, and every result still passing the control-flow check.
-- **W1b (goto reduction, not started):** `Ir.LeavingTheLoopFromInsideASwitchPrintsGotos` prints two
-  gotos for one exit: `case 0x1: goto loc_4010;`, where `loc_4010` only jumps on to the loop's exit.
-  The goto to the block that only jumps should go straight to the jump's target, or the block should
-  be copied where it is small. Same family as the shared-join gotos above. Decided 2026-11-17: do all
-  three (thread through jump-only blocks, copy small shared blocks, recover `&&`/`||`).
+- **W1b (goto reduction):** DONE in part (2026-11-17, `docs/AUDIT.md` W1b): small blocks that return or
+  only jump on are copied in place of a goto (`kGotoRuleCopy`, at most 4 statements, at most 64
+  copies per function); this also threads a goto through a block that only jumps. Gotos
+  16,232 -> 14,644, functions with gotos 986 -> 919, 0 candidates refused, openssl +3.8% time.
+  `Ir.LeavingTheLoopFromInsideASwitchCopiesTheExit` (was `...PrintsGotos`),
+  `Ir.RuleCopyPrintsASmallExitInPlaceOfItsGoto`, `Ir.RuleCopyLeavesALargeBlockAsAGoto`.
+  Compound conditions: DONE (2026-11-17, `docs/AUDIT.md` W1b). A test whose block holds only its
+  test, is reached only from another test, and shares one target with it prints with that test as
+  one `if (a && b)` or `if (a || b)` (`kGotoRuleCompound`); the tag names the second test, and the
+  control-flow check lowers it to the two branches and checks both, edge by edge. Gotos 14,644 ->
+  14,319, functions with gotos 919 -> 916, 0 candidates refused, no measurable time cost.
+  Re-measured after G24-T3 (#67) ended blocks at no-return calls: `main` 15,712 gotos in 984
+  functions, W1b 13,713 in 913 (-12.7%), Complete 177 both.
+  CI: [run 44264049339](https://github.com/palaashatri/donkey/actions/runs/44264049339) at `e49d58f`
+  (headless on Linux x86-64 and arm64, macOS and Windows, and the desktop shell under Xvfb), which runs
+  every `Ir.Rule*` and `Ir.Check*` test above.
+  `Ir.RuleCompoundPrintsTwoTestsAsOneCondition`, `Ir.CheckRefusesACompoundConditionWithTheWrongForm`.
 
 ### G05 Type system and user types
 
@@ -2210,6 +2225,69 @@ them.
 **Done when.** G24-T1 shows the gain in function-start recall on stripped R1
 binaries, and a C++ fixture with `try`/`catch` shows its regions.
 
+#### G23-T0 task-level plan (written 2026-11-17, before any T3 code)
+
+Checked against: `src/binary/macho.cpp` (the load commands it reads: `LC_SEGMENT`/`LC_SEGMENT_64`,
+`LC_UUID`, `LC_MAIN`, `LC_UNIXTHREAD`, `LC_SYMTAB`; every other command is skipped by its size),
+`src/binary/eh_frame.cpp` and `src/binary/pdata.cpp` (T1, T2: bounded readers with a record limit and a
+malformed count), and `src/analysis/analysis.cpp` (unwind starts become seeds with the `from_unwind`
+provenance; a table not read in full makes the analysis Partial with a diagnostic).
+
+**T3 — Mach-O function starts and compact unwind.** Two readers, in this order.
+
+1. *`LC_FUNCTION_STARTS`* (load command 0x26, a `linkedit_data_command`: `dataoff`, `datasize`). The
+   loader records the table's file range on the image after checking that it lies inside the file
+   (`macho.bad_function_starts` otherwise; a second such command is refused too). A new reader,
+   `read_function_starts` in `src/binary/function_starts.cpp`, decodes the ULEB128 deltas: the first is
+   the offset from the start of the `__TEXT` segment (the segment with file offset 0), each later one
+   from the previous start; a zero delta or the end of the data ends the list (the linker pads with
+   zeros). A ULEB128 longer than 10 bytes or past 64 bits, a start outside `__TEXT`, and more than 2^20
+   entries are refused with stable codes (`function_starts.*`). On 32-bit ARM the low bit (Thumb) is
+   cleared from each start. A fuzz target (`fuzz_function_starts`) runs the reader on raw bytes.
+   *Analysis:* each start inside an executable section is a seed with a new provenance,
+   `from_function_starts` (the linker's table, not an unwind record), shown by `functions --json`. A
+   table that cannot be read makes the analysis Partial with the reader's diagnostic.
+   *Fixture:* `tests/fixtures/function_starts/`: a C file whose two static functions are reached only
+   through a pointer table in data, built for x86-64 and arm64 with clang 18 and `ld64.lld` 18, then
+   stripped with `llvm-strip`, so only the table names them. *Oracle:* `llvm-objdump --macho
+   --function-starts`.
+   *Tests:* `FunctionStarts.MatchTheOracle` (both fixtures, every address), `FunctionStarts.RefusesBrokenTables`
+   (an overlong ULEB128, a start past `__TEXT`, the entry limit, a range outside the file),
+   `Analysis.MachOFunctionStartsSeedAStrippedBinary` (all four functions found and marked; one without
+   the table), `cli.functions_marks_function_starts`.
+   *Measurement:* functions found on the stripped fixtures before and after, and recall against the
+   table on `tests/fixtures/dsym/dbg`.
+2. *`__TEXT,__unwind_info`* (compact unwind, version 1): the header (common encodings, personalities,
+   index array), the first-level index (function offset, second-level page offset, LSDA index offset),
+   regular second-level pages (kind 2: function offset and encoding per entry) and compressed pages
+   (kind 3: a 24-bit offset from the index entry's function offset and an 8-bit encoding index).
+   Every page and entry is checked against the section; the counts are bounded by the page size. Each
+   entry's function offset is a start; the encodings (frameless, frame-based, DWARF) are kept for later
+   use and not interpreted here. Starts become seeds with the `from_unwind` provenance, as `.eh_frame`'s
+   do. Oracle: `llvm-objdump --macho --unwind-info`. Fuzz target `fuzz_unwind_info`. The measurement
+   is the agreement with `LC_FUNCTION_STARTS` on the same fixtures (both should name the same starts;
+   any difference is listed).
+
+**T4 — Itanium LSDA** (outline, refined before it starts). The CIE augmentation `L` gives each FDE's
+LSDA pointer (the T1 reader skips it today). A reader for `.gcc_except_table` decodes the header
+(LPStart and TType encodings, the call-site encoding) and the call-site table (start, length, landing
+pad, action), bounded and fuzzed. Landing pads become CFG edges of a new kind from each call inside a
+call-site range, so the handler code is reached and lifted. A function with a landing pad stays
+Partial ("exception handling is not modelled"), and the printer marks the protected range. Oracle: a
+C++ fixture with `try`/`catch` checked by hand against `llvm-dwarfdump --eh-frame` and the object's
+`.gcc_except_table` bytes. Owner decision: whether a function with landing pads can ever be Complete
+(the plan's default is no).
+
+**T5 — Windows x64 exception data** (outline, refined before it starts). `.xdata` `UNWIND_INFO` (the
+unwind codes, chained entries and the handler flags), then the language-specific data of
+`__C_specific_handler` (SEH scope tables) and `__CxxFrameHandler3`/`4` (C++ `FuncInfo`, try blocks and
+catch handlers, which name RTTI types that G10 reads). Handlers become CFG edges as in T4; the
+function stays Partial. Oracle: `llvm-readobj --unwind` and a MinGW or clang-cl fixture.
+
+**Order and status.** T3 part 1 first (smallest, and the only start table a stripped Mach-O
+executable keeps besides compact unwind), then part 2, then T4, then T5. T1 is DONE and T2 PARTIAL
+(chained entries skipped, `.xdata` not read); T2's `.xdata` part belongs with T5.
+
 ### G24 Analysis of stripped binaries (P0)
 
 **Why.** Finding the functions of a stripped binary is the core of both
@@ -2924,13 +3002,15 @@ order is the waves in `docs/PARITY.md` section 4:
 4. **Wave 4.** G14, G27.
 5. **Wave 5.** G12, G17, G31, G29, G28, G32.
 
-Inside a wave, take an **[oracle]** or **[ground truth]** task before one
-without a machine check. Take T0 of a G20 to G32 gap before any other task of
-that gap.
+Inside a wave, the dependency-ready task that moves the measured numbers most
+comes first, and ledger order decides between equals (section 2, step 1).
+Inside one gap, take its **[oracle]** and **[ground truth]** tasks before its
+tasks without a machine check, and T0 of a G20 to G32 gap before any other task
+of that gap.
 
 Branch hygiene, so that `main` stays the one place where work lives:
 
-- At most three task branches are open at once, and each has an open PR.
+- At most six task branches are open at once, and each has an open PR.
 - Do not stack a branch on an unmerged branch unless the task depends on it.
   If you do, say so in both PRs.
 - When a PR merges, delete its branch in the same session. When work is

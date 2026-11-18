@@ -210,6 +210,8 @@ class Emitter {
   std::vector<StructuredLine> lines_;
   int depth_ = 1;
   std::size_t gotos_ = 0;
+  std::size_t copies_ = 0;  ///< blocks printed as a copy in place of a goto (W1b)
+  int copy_depth_ = 0;      ///< copies being printed inside a copy
 
   // ---- analysis -----------------------------------------------------------------------------
 
@@ -325,12 +327,10 @@ class Emitter {
 
   /// Inserts a line before `position`, indented for `depth`.
   void insert_line(std::size_t position, const std::string& text, std::uint64_t address,
-                   LineTag tag, int depth) {
+                   LineTag tag, int depth, std::vector<std::uint64_t> folded = {}) {
     StructuredLine line{
         text.empty() ? std::string() : std::string(static_cast<std::size_t>(depth) * 2, ' ') + text,
-        address,
-        tag,
-        {}};
+        address, tag, std::move(folded)};
     lines_.insert(lines_.begin() + static_cast<std::ptrdiff_t>(position), std::move(line));
   }
 
@@ -462,8 +462,99 @@ class Emitter {
     if (walkable(target, ctx)) {
       return walk(target);
     }
+    if (copyable(target, ctx)) {
+      return emit_copy(target, ctx);
+    }
     emit_goto(target);
     return done(Outcome::Jumps);
+  }
+
+  /// The statements a block prints, its terminator left out, counted up to `limit` + 1: past the
+  /// limit the exact count does not matter, so a large block is not rendered in full each time a
+  /// copy of it is considered.
+  [[nodiscard]] std::size_t printed_statements(BlockId block, std::size_t limit) const {
+    const IrBlock& ir = function_.blocks[block];
+    std::size_t printed = 0;
+    for (std::size_t index = 0; index + 1 < ir.statements.size() && printed <= limit; ++index) {
+      const IrStatement* previous = flags_producer(ir, index);
+      if (!render_statement(function_, ir.statements[index], previous, literals_).empty()) {
+        ++printed;
+      }
+    }
+    return printed;
+  }
+
+  /// Whether an edge to `target` leaves without a goto: it falls out, continues or breaks.
+  [[nodiscard]] bool exits_without_goto(BlockId target, const Ctx& ctx) const {
+    if (ctx.stop != kNoBlock && target == ctx.stop && ctx.stop_falls) {
+      return true;
+    }
+    if ((rules_ & kGotoRuleContinue) != 0) {
+      const Frame* loop = innermost_loop();
+      if (loop != nullptr && target == loop->header) {
+        return true;
+      }
+    }
+    return (rules_ & kGotoRuleBreak) != 0 && !frames_.empty() && frames_.back().breaks &&
+           frames_.back().follow != kNoBlock && target == frames_.back().follow;
+  }
+
+  /// W1b: a goto to `target` may print a copy of it instead. The target is small (at most
+  /// kMaxCopiedStatements printed statements before its terminator; the `return` or branch exit it
+  /// ends with is not counted), is not a loop header, and either returns or ends in
+  /// a plain branch whose own edge leaves without a goto (falls out, breaks, continues) or goes to
+  /// a block that may be copied in turn (one level). A copy changes no edge: the control-flow check
+  /// verifies it like any printed block.
+  [[nodiscard]] bool copyable(BlockId target, const Ctx& ctx) const {
+    if ((rules_ & kGotoRuleCopy) == 0 || target >= function_.blocks.size() ||
+        copies_ >= kMaxBlockCopies || copy_depth_ > 1 || loop_of_[target] >= 0 ||
+        function_.blocks[target].statements.empty()) {
+      return false;
+    }
+    const IrStatement& terminator = function_.blocks[target].statements.back();
+    if (terminator.op != IrOp::Return && terminator.op != IrOp::Branch) {
+      return false;
+    }
+    if (printed_statements(target, kMaxCopiedStatements) > kMaxCopiedStatements) {
+      return false;
+    }
+    if (terminator.op == IrOp::Return) {
+      return true;
+    }
+    const BlockId next = terminator.a.block;
+    if (next == target) {
+      return false;
+    }
+    if (exits_without_goto(next, ctx) || walkable(next, ctx)) {
+      return true;
+    }
+    if (copy_depth_ > 0 || next >= function_.blocks.size() || loop_of_[next] >= 0 ||
+        function_.blocks[next].statements.empty()) {
+      return false;
+    }
+    // One more level: the next block returns and is small. Both copies need a slot, or the branch
+    // block would be copied and still end in a goto to the return block.
+    return copies_ + 2 <= kMaxBlockCopies &&
+           function_.blocks[next].statements.back().op == IrOp::Return &&
+           printed_statements(next, kMaxCopiedStatements) <= kMaxCopiedStatements;
+  }
+
+  /// Prints a copy of `target` where a goto to it would be: its statements, then its exit.
+  Next emit_copy(BlockId target, const Ctx& ctx) {
+    ++copies_;
+    ++copy_depth_;
+    // A copy carries no label: the label, if any, stays on the block's first printing.
+    push(std::string(), function_.blocks[target].address, make_tag(LineKind::Marker, target));
+    const IrStatement& terminator = function_.blocks[target].statements.back();
+    Next result = done(Outcome::Jumps);
+    if (terminator.op == IrOp::Return) {
+      emit_statements(target, true, false);
+    } else {
+      emit_statements(target, false, false);
+      result = decide(terminator.a.block, ctx);
+    }
+    --copy_depth_;
+    return result;
   }
 
   /// Prints the region from `start` until it stops, and returns how it ended.
@@ -591,6 +682,90 @@ class Emitter {
     return !walkable(start, ctx);
   }
 
+  /// A compound condition found by compound_of: `test` is kNoBlock when there is none.
+  struct Compound {
+    BlockId test = kNoBlock;    ///< the second test, a target of the first branch
+    BlockId inner = kNoBlock;   ///< the target of `test` that the first branch does not have
+    BlockId shared = kNoBlock;  ///< the target both tests have
+  };
+
+  /// How the condition that enters one arm of a compound condition is written.
+  struct CompoundArm {
+    bool first_negated = false;   ///< the first test's condition is complemented
+    bool second_negated = false;  ///< the second test's condition is complemented
+    bool joined_by_or = false;    ///< `||`; otherwise `&&`
+  };
+
+  /// The compound condition that starts at the branch of `block`, if any (kGotoRuleCompound).
+  [[nodiscard]] Compound compound_of(BlockId block) const {
+    Compound none;
+    if ((rules_ & kGotoRuleCompound) == 0) {
+      return none;
+    }
+    const std::size_t count = function_.blocks.size();
+    const IrStatement& branch = function_.blocks[block].statements.back();
+    const BlockId targets[2] = {branch.b.block, block + 1};
+    for (int i = 0; i < 2; ++i) {
+      const BlockId test = targets[i];
+      const BlockId other = targets[1 - i];
+      if (test == block || test >= count || other >= count || test == other || emitted_[test] ||
+          labelled_[test] || loop_of_[test] >= 0 || graph_.predecessors[test].size() != 1) {
+        continue;
+      }
+      const IrBlock& ir = function_.blocks[test];
+      const std::size_t size = ir.statements.size();
+      if (size == 0 || ir.statements.back().op != IrOp::CondBranch ||
+          !(size == 1 || (size == 2 && is_flag_setter(ir.statements[0])))) {
+        continue;
+      }
+      const BlockId test_taken = ir.statements.back().b.block;
+      const BlockId test_fall = test + 1;
+      if (test_taken == test_fall || test_fall >= count || test_taken >= count) {
+        continue;
+      }
+      BlockId inner = kNoBlock;
+      if (test_taken == other) {
+        inner = test_fall;
+      } else if (test_fall == other) {
+        inner = test_taken;
+      }
+      if (inner == kNoBlock || inner == block || inner == test) {
+        continue;
+      }
+      return Compound{test, inner, other};
+    }
+    return none;
+  }
+
+  /// The condition that enters `arm_block` (the compound's inner or shared end). Control enters
+  /// `inner` when the first test goes to the second and the second goes to `inner`: `a && b`.
+  /// It enters `shared` when either goes there: `a || b`.
+  [[nodiscard]] CompoundArm compound_arm(BlockId block, const Compound& compound,
+                                         BlockId arm_block) const {
+    const BlockId first_fall = block + 1;
+    const BlockId second_fall = compound.test + 1;
+    CompoundArm form;
+    if (arm_block == compound.inner) {
+      form.first_negated = compound.test == first_fall;
+      form.second_negated = compound.inner == second_fall;
+      form.joined_by_or = false;
+    } else {
+      form.first_negated = compound.shared == first_fall;
+      form.second_negated = compound.shared == second_fall;
+      form.joined_by_or = true;
+    }
+    return form;
+  }
+
+  /// One side of `&&` or `||`, in parentheses when it holds an operator that binds no tighter.
+  [[nodiscard]] static std::string compound_part(const std::string& condition) {
+    if (condition.find("&&") != std::string::npos || condition.find("||") != std::string::npos ||
+        condition.find('?') != std::string::npos) {
+      return "(" + condition + ")";
+    }
+    return condition;
+  }
+
   /// An if on the condition of `block`. Its two arms are printed one level deeper. When an arm
   /// jumps (it never falls out), the `if` closes after that arm and the other arm continues at the
   /// level of the `if`, as the rest of the region: `if (c) { jump }` and then the rest. So a chain
@@ -613,25 +788,63 @@ class Emitter {
     const bool has_join = join != kNoBlock && join < function_.blocks.size();
     const bool falls = falls_to_join(join, ctx);
     const BlockId arm_stop = has_join ? join : kNoBlock;
-    const Ctx taken_ctx{taken, arm_stop, falls};
-    const Ctx fall_ctx{fall, arm_stop, falls};
     const std::uint64_t address = function_.blocks[block].address;
     const int depth = depth_;
 
+    // A compound condition: one target of the branch is a block that holds only its test, is
+    // reached only from here, and shares its other target with this branch. Its two arms are then
+    // `inner` (the test block's own target) and `shared`.
+    const Compound compound = compound_of(block);
+    // The two arms: the branch's targets, or for a compound condition its two ends.
+    const BlockId arm_a = compound.test != kNoBlock ? compound.inner : taken;
+    const BlockId arm_b = compound.test != kNoBlock ? compound.shared : fall;
+    const Ctx a_ctx{arm_a, arm_stop, falls};
+    const Ctx b_ctx{arm_b, arm_stop, falls};
+
     // The arm printed first: a short one, when the other one is not short.
-    const bool fall_first = short_arm(fall, fall_ctx) && !short_arm(taken, taken_ctx);
-    const BlockId first = fall_first ? fall : taken;
-    const BlockId second = fall_first ? taken : fall;
-    const Ctx& first_ctx = fall_first ? fall_ctx : taken_ctx;
-    const Ctx& second_ctx = fall_first ? taken_ctx : fall_ctx;
-    // Whether an arm is the fall-through (its printed condition is the complement of the branch's).
-    const auto is_fall = [&](BlockId arm_block) { return arm_block == fall; };
+    const bool b_first = short_arm(arm_b, b_ctx) && !short_arm(arm_a, a_ctx);
+    const BlockId first = b_first ? arm_b : arm_a;
+    const BlockId second = b_first ? arm_a : arm_b;
+    const Ctx& first_ctx = b_first ? b_ctx : a_ctx;
+    const Ctx& second_ctx = b_first ? a_ctx : b_ctx;
+    // The condition under which control enters `arm_block`.
     const auto arm_open = [&](BlockId arm_block) {
-      return "if (" + condition_of(block, is_fall(arm_block)) + ") {";
+      if (compound.test == kNoBlock) {
+        // Whether the arm is the fall-through (its condition is the complement of the branch's).
+        return "if (" + condition_of(block, arm_block == fall) + ") {";
+      }
+      const CompoundArm form = compound_arm(block, compound, arm_block);
+      return "if (" + compound_part(condition_of(block, form.first_negated)) +
+             (form.joined_by_or ? " || " : " && ") +
+             compound_part(condition_of(compound.test, form.second_negated)) + ") {";
     };
     const auto arm_tag = [&](BlockId arm_block) {
-      return make_tag(LineKind::IfOpen, block, kNoBlock, is_fall(arm_block));
+      if (compound.test == kNoBlock) {
+        return make_tag(LineKind::IfOpen, block, kNoBlock, arm_block == fall);
+      }
+      const CompoundArm form = compound_arm(block, compound, arm_block);
+      LineTag tag = make_tag(LineKind::IfOpen, block, kNoBlock, form.first_negated);
+      tag.second = compound.test;
+      tag.second_negated = form.second_negated;
+      tag.second_or = form.joined_by_or;
+      return tag;
     };
+    // A test block printed inside the condition, never on its own: its instructions map to the
+    // `if` line that says it.
+    std::vector<std::uint64_t> folded;
+    if (compound.test != kNoBlock) {
+      emitted_[compound.test] = true;
+      const std::uint64_t entry = function_.blocks[compound.test].address;
+      if (entry != 0 && entry != address) {
+        folded.push_back(entry);
+      }
+      for (const IrStatement& statement : function_.blocks[compound.test].statements) {
+        if (statement.source_address != 0 && statement.source_address != address &&
+            std::find(folded.begin(), folded.end(), statement.source_address) == folded.end()) {
+          folded.push_back(statement.source_address);
+        }
+      }
+    }
 
     const std::size_t first_begin = lines_.size();
     depth_ = depth + 1;
@@ -641,7 +854,7 @@ class Emitter {
 
     if (first_outcome == Outcome::Jumps) {
       // The first arm never falls out: `if (cond) { first }`, then the second arm is the rest here.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
       return decide(second, ctx);
     }
@@ -663,23 +876,23 @@ class Emitter {
                     lines_.begin() + static_cast<std::ptrdiff_t>(first_end),
                     lines_.begin() + static_cast<std::ptrdiff_t>(second_end));
       }
-      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth, folded);
       insert_line(first_begin + 1 + second_length, "}", 0, make_tag(LineKind::Close), depth);
       dedent_from(first_begin + 2 + second_length);
     } else if (first_empty && second_empty) {
       // Both arms are empty: the branch's two targets are the same block, the join. The test is
       // still printed, as an empty `if`, so that the printed code has the block's branch.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else if (first_empty) {
-      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth);
+      insert_line(first_begin, arm_open(second), address, arm_tag(second), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else if (second_empty) {
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       push("}", 0, make_tag(LineKind::Close));
     } else {
       // Both arms fall out: `if (cond) { first } else { second }`, with the first printed first.
-      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth);
+      insert_line(first_begin, arm_open(first), address, arm_tag(first), depth, folded);
       insert_line(first_end + 1, "} else {", 0, make_tag(LineKind::Else), depth);
       push("}", 0, make_tag(LineKind::Close));
     }

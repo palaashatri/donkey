@@ -929,6 +929,26 @@ TEST(Cfg, ManyFunctionsAreNamedAndMergedInLinearTime) {
 
 // G24-T4: an unconditional jump to another function's start is recorded as a tail call; a jump
 // into code no function starts at stays a branch.
+// A block that ends without a branch falls through into the next block, and the edge's source is
+// its last instruction, like every other edge, not the next block's first address. 0x1000: test
+// edi,edi; 0x1002: je 0x1005; 0x1004: nop (a block of its own, ending at 0x1005); 0x1005: ret.
+TEST(Cfg, AFallThroughEdgeStartsAtTheBlocksLastInstruction) {
+  auto [data, image] =
+      image_with_functions({{0x0, {0x85, 0xff, 0x74, 0x01, 0x90, 0xc3}}}, 0x6, {0x1000});
+  auto result = donkey::analyze(image, data);
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  int fall_through = 0;
+  for (const donkey::CfgEdge& edge : result.value().cfg.edges) {
+    EXPECT_NE(edge.from, 0x1005U) << "an edge from the ret, which has none";
+    if (edge.from == 0x1004) {
+      EXPECT_EQ(edge.to, 0x1005U);
+      EXPECT_EQ(edge.kind, donkey::CfgEdgeKind::ConditionalFalse);
+      ++fall_through;
+    }
+  }
+  EXPECT_EQ(fall_through, 1);
+}
+
 TEST(Cfg, JumpToAnotherFunctionIsATailCall) {
   // f0 (0x1000): jmp 0x1010.  f1 (0x1010): ret.
   auto [data, image] = image_with_functions({{0x0, {0xe9, 0x0b, 0x00, 0x00, 0x00}}, {0x10, {0xc3}}},

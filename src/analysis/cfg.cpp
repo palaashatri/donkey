@@ -1427,7 +1427,9 @@ Result<ControlFlowGraph> build_control_flow_graph(const BinaryImage& image,
           // already guarantees.
           if (index + 1 < graph.blocks.size() &&
               block.end_address == graph.blocks[index + 1].address) {
-            graph.edges.push_back(CfgEdge{block.end_address, graph.blocks[index + 1].address,
+            // The edge's source is the block's last instruction, as for every other edge; the
+            // block's end is the next block's first address.
+            graph.edges.push_back(CfgEdge{last_instruction.address, graph.blocks[index + 1].address,
                                           CfgEdgeKind::ConditionalFalse});
           } else if (fallthrough != function.address && function_starts.contains(fallthrough)) {
             // The block falls through into another function's start, where the walk stopped

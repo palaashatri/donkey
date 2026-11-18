@@ -1257,8 +1257,12 @@ struct Lifter {
       }
     }
     if (last.classification == InstructionClass::Other) {
-      ++predecessors;  // a fall-through has no CFG edge
-      from_previous = true;
+      // A plain fall-through is the edge from `last` counted above. Without one (the CFG records
+      // it only between contiguous blocks), the fall-through still reaches `block`.
+      if (!from_previous) {
+        ++predecessors;
+        from_previous = true;
+      }
     } else if (last.classification != InstructionClass::ConditionalJump) {
       return false;
     }
