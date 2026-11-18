@@ -634,6 +634,9 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   std::map<std::string, TypeKind> tags;
   std::map<std::string, TypeKind> ordinary;
   for (const CDeclaredName& name : declared) {
+    if (name.completes) {
+      continue;  // the definition of a tag named earlier by a forward reference
+    }
     std::map<std::string, TypeKind>& space = name.space == CNameSpace::Tag ? tags : ordinary;
     const auto [entry, inserted] = space.emplace(name.name, name.kind);
     if (inserted) {

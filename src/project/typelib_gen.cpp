@@ -33,13 +33,85 @@ bool dropped_word(std::string_view word) {
   return kDropped.contains(word);
 }
 
-/// Words followed by a parenthesised argument that is removed with them.
-bool dropped_call(std::string_view word) {
-  return word == "__attribute__" || word == "__attribute" || word == "__asm__" || word == "__asm" ||
-         word == "asm" || word == "__declspec";
+/// The index just past the character or string literal that opens at `at` (a ' or "), escapes
+/// included; the end of the text when it is not closed.
+std::size_t skip_literal(std::string_view text, std::size_t at) {
+  const char quote = text[at];
+  for (++at; at < text.size(); ++at) {
+    if (text[at] == '\\') {
+      ++at;  // the escaped character, whatever it is
+    } else if (text[at] == quote) {
+      return at + 1;
+    }
+  }
+  return text.size();
+}
+
+bool opens_literal(char c) {
+  return c == '\'' || c == '"';
+}
+
+/// An assembler label (`__asm__("name")`) renames the symbol and never the type: removed.
+bool dropped_asm(std::string_view word) {
+  return word == "__asm__" || word == "__asm" || word == "asm";
+}
+
+/// Attribute words: their parenthesised argument is examined, not dropped blindly.
+bool attribute_word(std::string_view word) {
+  return word == "__attribute__" || word == "__attribute" || word == "__declspec";
+}
+
+/// GCC and MSVC attributes that change neither a type nor its layout: diagnostics, optimisation
+/// hints, linkage and visibility. Any other attribute (`aligned`, `packed`, `vector_size`, `mode`,
+/// `transparent_union`, one this list does not know) may change the type, so a declaration that
+/// carries it is kept with its attribute and skipped, never kept without it.
+bool type_neutral_attribute(std::string_view name) {
+  while (name.size() > 4 && name.starts_with("__") && name.ends_with("__")) {
+    name = name.substr(2, name.size() - 4);
+  }
+  static const std::set<std::string_view> kNeutral{"noreturn",
+                                                   "nothrow",
+                                                   "leaf",
+                                                   "const",
+                                                   "pure",
+                                                   "malloc",
+                                                   "nonnull",
+                                                   "returns_nonnull",
+                                                   "warn_unused_result",
+                                                   "format",
+                                                   "format_arg",
+                                                   "deprecated",
+                                                   "unavailable",
+                                                   "visibility",
+                                                   "unused",
+                                                   "used",
+                                                   "cold",
+                                                   "hot",
+                                                   "returns_twice",
+                                                   "sentinel",
+                                                   "alloc_size",
+                                                   "alloc_align",
+                                                   "access",
+                                                   "noinline",
+                                                   "always_inline",
+                                                   "gnu_inline",
+                                                   "artificial",
+                                                   "weak",
+                                                   "error",
+                                                   "warning",
+                                                   "nonstring",
+                                                   "noclone",
+                                                   "flatten",
+                                                   "no_instrument_function",
+                                                   "dllimport",
+                                                   "dllexport",
+                                                   "noalias",
+                                                   "restrict"};
+  return kNeutral.contains(name);
 }
 
 /// The index just past the parenthesised group that starts at the first '(' at or after `at`.
+/// Delimiters inside a character or string literal are not counted.
 std::size_t skip_group(std::string_view text, std::size_t at) {
   while (at < text.size() && std::isspace(static_cast<unsigned char>(text[at])) != 0) {
     ++at;
@@ -48,14 +120,52 @@ std::size_t skip_group(std::string_view text, std::size_t at) {
     return at;
   }
   int depth = 0;
-  for (; at < text.size(); ++at) {
+  while (at < text.size()) {
+    if (opens_literal(text[at])) {
+      at = skip_literal(text, at);
+      continue;
+    }
     if (text[at] == '(') {
       ++depth;
     } else if (text[at] == ')' && --depth == 0) {
       return at + 1;
     }
+    ++at;
   }
   return at;
+}
+
+/// Whether every attribute named in the group `text[from, to)` (`((a, b(1), c))`) is type-neutral.
+/// The names are the identifiers at the group's second level of parentheses.
+bool neutral_attribute_group(std::string_view text, std::size_t from, std::size_t to,
+                             bool declspec) {
+  int depth = 0;
+  std::size_t at = from;
+  while (at < to) {
+    const char c = text[at];
+    if (opens_literal(c)) {
+      at = skip_literal(text, at);
+      continue;
+    }
+    if (c == '(') {
+      ++depth;
+    } else if (c == ')') {
+      --depth;
+    } else if (is_ident_start(c)) {
+      std::size_t end = at + 1;
+      while (end < to && is_ident_char(text[end])) {
+        ++end;
+      }
+      // __attribute__((name ...)) puts a name at depth 2; __declspec(name) at depth 1.
+      if (depth == (declspec ? 1 : 2) && !type_neutral_attribute(text.substr(at, end - at))) {
+        return false;
+      }
+      at = end;
+      continue;
+    }
+    ++at;
+  }
+  return true;
 }
 
 /// One declaration on one line: dropped words removed, every run of white space one space.
@@ -72,7 +182,11 @@ std::string normalised(std::string_view text) {
     }
     std::string_view piece;
     std::size_t next = i + 1;
-    if (is_ident_start(c)) {
+    if (opens_literal(c)) {
+      // A literal is copied as it is: its spaces and delimiters are not C text.
+      next = skip_literal(text, i);
+      piece = text.substr(i, next - i);
+    } else if (is_ident_start(c)) {
       while (next < text.size() && is_ident_char(text[next])) {
         ++next;
       }
@@ -82,9 +196,31 @@ std::string normalised(std::string_view text) {
         space = true;
         continue;
       }
-      if (dropped_call(word)) {
+      if (dropped_asm(word)) {
         i = skip_group(text, next);
         space = true;
+        continue;
+      }
+      if (attribute_word(word)) {
+        const std::size_t end = skip_group(text, next);
+        if (neutral_attribute_group(text, next, end, word == "__declspec")) {
+          i = end;
+          space = true;
+          continue;
+        }
+        // Kept, written as `__attribute__((...))` (or `__declspec(...)`) without inner spaces:
+        // make_type_library skips the declaration and names the attribute.
+        if (space && !out.empty()) {
+          out.push_back(' ');
+        }
+        space = false;
+        out.append(word == "__attribute" ? std::string_view("__attribute__") : word);
+        for (std::size_t k = next; k < end; ++k) {
+          if (std::isspace(static_cast<unsigned char>(text[k])) == 0) {
+            out.push_back(text[k]);
+          }
+        }
+        i = end;
         continue;
       }
       piece = word;
@@ -212,6 +348,13 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       continue;
     }
     line_start = c == '\n';
+    if (opens_literal(c)) {
+      // A literal's contents are not delimiters.
+      const std::size_t end = skip_literal(preprocessed, i);
+      current.append(preprocessed.substr(i, end - i));
+      i = end - 1;
+      continue;
+    }
     current.push_back(c);
     if (c == '(') {
       ++parens;
@@ -256,22 +399,82 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   parse_options.char_is_signed = options.char_is_signed;
 
   TypeLibraryMakeResult made;
-  TypeTable kept_types;
   std::set<std::string> tags;
   std::set<std::string> ordinary;
   std::string body;
+  std::size_t kept_lines = 0;  // lines of the kept text (one per declaration)
+  std::size_t kept_names = 0;  // names the kept text lists
   for (const std::string& declaration : split_c_declarations(preprocessed)) {
-    const std::string name = record_text(name_of(declaration), 96, false);
+    std::string name = record_text(name_of(declaration), 96, false);
     if (declaration.find('{') != std::string::npos && declaration.back() == '}') {
       made.skipped.push_back({name, "a function definition (only declarations are kept)"});
       continue;
     }
-    std::vector<CDeclaredName> names;
-    auto parsed = parse_c_declarations(declaration, kept_types, parse_options, &names);
-    if (!parsed) {
-      made.skipped.push_back({name, parsed.diagnostic().code + " " + parsed.diagnostic().message});
+    if (const std::size_t attribute =
+            std::min(declaration.find("__attribute__"), declaration.find("__declspec"));
+        attribute != std::string::npos) {
+      // normalised() kept it: an attribute that may change the type, which the subset does not
+      // model. The declaration is not kept without it.
+      const std::size_t group_end =
+          skip_group(declaration, declaration.find('(', attribute) == std::string::npos
+                                      ? declaration.size()
+                                      : declaration.find('(', attribute));
+      made.skipped.push_back(
+          {name,
+           "an attribute that may change the type is not modelled: " +
+               declaration.substr(attribute, std::min<std::size_t>(group_end - attribute, 80))});
       continue;
     }
+    // The kept text and this declaration parse together, from an empty table, as the reader parses
+    // the library: a tag the kept text named only by a forward reference (`struct stat *` in a
+    // member) is completed here, and a second complete definition is refused.
+    const std::string trial_body = body + declaration + "\n";
+    std::vector<CDeclaredName> all_names;
+    auto whole = parse_c_declarations(trial_body, TypeTable{}, parse_options, &all_names);
+    if (!whole) {
+      // The parse's position is in the whole text: a line past the kept text's lines is in this
+      // declaration, and is given relative to it ("line 1" is its first line); one inside the kept
+      // text means the declaration conflicts with what was kept.
+      const Diagnostic& failure = whole.diagnostic();
+      std::string message = failure.message;
+      bool in_declaration = false;
+      if (message.starts_with("line ")) {
+        std::size_t digits_end = 5;
+        while (digits_end < message.size() &&
+               std::isdigit(static_cast<unsigned char>(message[digits_end])) != 0) {
+          ++digits_end;
+        }
+        if (digits_end > 5 && digits_end - 5 <= 9) {
+          const std::size_t line = std::stoul(message.substr(5, digits_end - 5));
+          if (line > kept_lines) {
+            in_declaration = true;
+            message = "line " + std::to_string(line - kept_lines) + message.substr(digits_end);
+          }
+        }
+      }
+      // The parser names the declarator it refused ("'optind' declares a variable"): that name,
+      // not a guess from the text, identifies the record.
+      if (const std::size_t open = message.find('\''); open != std::string::npos &&
+                                                       open + 1 < message.size() &&
+                                                       is_ident_start(message[open + 1])) {
+        const std::size_t close = message.find('\'', open + 1);
+        const std::string_view after = close == std::string::npos
+                                           ? std::string_view()
+                                           : std::string_view(message).substr(close + 1);
+        // Only the messages that quote the declarator itself: "'x' declares a variable", "'x' is
+        // already defined". Others quote a type or a token.
+        if (after.starts_with(" declares") || after.starts_with(" is already defined")) {
+          name = record_text(message.substr(open + 1, close - open - 1), 96, false);
+        }
+      }
+      made.skipped.push_back(
+          {name,
+           failure.code + (in_declaration ? " " : " (with the kept declarations) ") + message});
+      continue;
+    }
+    const std::vector<CDeclaredName> names(
+        all_names.begin() + static_cast<std::ptrdiff_t>(std::min(kept_names, all_names.size())),
+        all_names.end());
     if (names.empty()) {
       made.skipped.push_back({name, "declares no type, typedef or function"});
       continue;
@@ -279,32 +482,19 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
     bool repeated = false;
     for (const CDeclaredName& declared : names) {
       const auto& space = declared.space == CNameSpace::Tag ? tags : ordinary;
-      repeated = repeated || space.contains(declared.name);
+      repeated = repeated || (!declared.completes && space.contains(declared.name));
     }
     if (repeated) {
       made.skipped.push_back({name, "declared again (the first declaration is kept)"});
       continue;
     }
-    // The kept text must parse on its own, as the reader parses it: a struct with a member of a
-    // type that was skipped (an incomplete type) parses against the kept table, which knows the
-    // type from a pointer, but not as part of the whole text.
-    const std::string trial_body = body + declaration + "\n";
-    auto whole = parse_c_declarations(trial_body, TypeTable{}, parse_options);
-    if (!whole) {
-      made.skipped.push_back({name, whole.diagnostic().code + " (with the kept declarations) " +
-                                        whole.diagnostic().message});
-      continue;
-    }
-    TypeTable trial = kept_types;
-    for (const TypeDefinition& definition : parsed.value()) {
-      trial.put(definition);
-    }
     for (const CDeclaredName& declared : names) {
       (declared.space == CNameSpace::Tag ? tags : ordinary).insert(declared.name);
     }
-    kept_types = std::move(trial);
-    body += declaration;
-    body += '\n';
+    kept_lines +=
+        static_cast<std::size_t>(std::count(declaration.begin(), declaration.end(), '\n')) + 1;
+    kept_names = all_names.size();
+    body = trial_body;
     ++made.kept;
   }
   if (made.kept == 0) {
