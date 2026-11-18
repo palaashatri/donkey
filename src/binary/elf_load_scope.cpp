@@ -719,7 +719,6 @@ ElfLoadScope ElfLoadScope::from_images(std::span<const Input> inputs) {
 
 namespace {
 
-constexpr std::uint16_t kEtExec = 2;
 constexpr std::uint16_t kEtDyn = 3;
 
 /// The ELF header's e_type, or 0 when the header cannot be read.
