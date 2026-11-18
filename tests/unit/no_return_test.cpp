@@ -1088,12 +1088,22 @@ TEST(ElfLoadScope, ALibraryIsLookedUpInItsProgramsScopeFirst) {
   ASSERT_EQ(marker.outcome, donkey::ElfBinding::Outcome::Bound) << marker.reason;
   EXPECT_EQ(marker.library, 1U);
 
-  // A program that is itself a shared library is refused.
+  // The program is what the caller names, whatever its flags: an ET_DYN without DF_1_PIE (a PIE
+  // linked before the flag existed reads the same) is taken as the program, not refused.
   search.program = fixture("loadscope", "chain/liba.so.1");
-  const donkey::ElfBinding refused = scope_of(library, search).lookup("exit", "");
-  EXPECT_EQ(refused.outcome, donkey::ElfBinding::Outcome::Unknown);
-  EXPECT_NE(refused.reason.find("is a shared library, not a program"), std::string::npos)
-      << refused.reason;
+  const donkey::ElfLoadScope named = scope_of(library, search);
+  ASSERT_GE(named.libraries().size(), 2U);
+  EXPECT_EQ(named.libraries()[0].path, search.program);
+  EXPECT_NE(named.libraries()[0].name, "(the program that loads this library)");
+  EXPECT_EQ(named.libraries()[named.image_index()].path, library);
+
+  // A library named as its own program is analysed as the program: its own exit is found first.
+  search.program = library;
+  const donkey::ElfLoadScope itself = scope_of(library, search);
+  EXPECT_EQ(itself.image_index(), 0U);
+  const donkey::ElfBinding own_exit = itself.lookup("exit", "");
+  ASSERT_EQ(own_exit.outcome, donkey::ElfBinding::Outcome::Bound) << own_exit.reason;
+  EXPECT_EQ(own_exit.library, 0U);
 }
 
 // A library's local scope follows glibc's dlopen (tests/fixtures/loadscope/PROVENANCE.md, "plugin",

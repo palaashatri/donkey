@@ -761,7 +761,15 @@ bool is_shared_library(const BinaryImage& image, std::span<const std::byte> data
 ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::byte> data,
                                  const ElfLibrarySearch& search) {
   const ElfLibraryNames own = read_library_names(image, data);
-  if (image.format != BinaryFormat::Elf || image.bits != 64 ||
+  // The program is named, not inferred: an image that is its own `program` is analysed as the
+  // program, whatever its flags (a position-independent executable linked before DF_1_PIE has
+  // none). Only an unnamed ET_DYN without DF_1_PIE is taken for a shared library.
+  bool own_program = search.program_image == &image;
+  if (!own_program && !search.program.empty() && !image.path.empty()) {
+    std::error_code error;
+    own_program = fs::equivalent(fs::path(search.program), fs::path(image.path), error) && !error;
+  }
+  if (image.format != BinaryFormat::Elf || image.bits != 64 || own_program ||
       !is_shared_library(image, data, own)) {
     return build_root(image, data, search, nullptr);
   }
@@ -810,9 +818,9 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
       program->bits != image.bits) {
     return unknown_program(search.program + " is not an ELF program of the library's machine");
   }
-  if (is_shared_library(*program, program_data, read_library_names(*program, program_data))) {
-    return unknown_program(search.program + " is a shared library, not a program");
-  }
+  // The program is what the caller names: glibc runs an ET_DYN without DF_1_PIE as a program too
+  // (an executable linked before the flag existed, or `ld.so lib.so`), so its flags are not
+  // checked.
   ElfLibrarySearch global_search = search;
   global_search.program.clear();
   global_search.program_image = nullptr;

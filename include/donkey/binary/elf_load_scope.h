@@ -20,8 +20,10 @@
 // in the global scope of the program that loaded it first (that program, its preloads and its
 // libraries), then in the library's own local scope (the library and the libraries it needs). So a
 // library's bindings are known only with the program that loads it (`ElfLibrarySearch::program`);
-// without one, every lookup is Unknown. A position-independent executable linked before DF_1_PIE
-// existed reads as a library, which only loses answers.
+// without one, every lookup is Unknown. The program is named, not inferred from flags: a
+// position-independent executable linked before DF_1_PIE existed reads as a library unless it is
+// named as the program (`program` naming the image itself), which loses answers but never gives a
+// wrong one.
 //
 // Not modelled: the run-time environment. LD_PRELOAD and LD_LIBRARY_PATH are not read; a caller
 // that runs the program with them gives the same directories as `paths` (LD_LIBRARY_PATH's place in
@@ -59,7 +61,9 @@ struct ElfLibrarySearch {
   /// Read /etc/ld.so.preload, /etc/ld.so.cache and the default directories.
   bool system_directories = true;
   /// For a shared library: the program that loads it (a path of this machine), whose global scope
-  /// is searched first. Empty: the library's bindings are Unknown. Not used for a program.
+  /// is searched first. Empty: the library's bindings are Unknown. Whatever it names is taken as a
+  /// program, whatever its flags; naming the image itself (or `program_image` pointing at it)
+  /// analyses the image as the program.
   std::string program;
   /// The program already in memory, used in place of reading `program` (which then only names it),
   /// so the scope is built from the bytes a caller has already checked. Not owned: it must outlive
