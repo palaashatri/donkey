@@ -1,6 +1,7 @@
 #include "donkey/ir/lift.h"
 
 #include "donkey/ir/abi.h"
+#include "donkey/ir/libc_models.h"
 
 #include <algorithm>
 #include <array>
@@ -19,6 +20,22 @@
 #include "registers.h"
 
 namespace donkey {
+namespace {
+
+/// The x86-64 register families a call may change (System V's caller-saved set, which holds every
+/// Win64 caller-saved register too).
+const std::set<std::string>& caller_saved_families() {
+  static const std::set<std::string> families = [] {
+    std::set<std::string> out = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
+    for (int n = 0; n < 16; ++n) {
+      out.insert("xmm" + std::to_string(n));
+    }
+    return out;
+  }();
+  return families;
+}
+
+}  // namespace
 
 struct CallSummaryCache::Impl {
   /// What a call to a resolved callee needs and what it changes (G21-T2).
@@ -628,6 +645,12 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
     for (const IrStatement& statement : block.statements) {
       if (statement.dest.kind == IrOperandKind::Register && !statement.dest.reg.empty()) {
         summary.writes.push_back(internal::register_family(statement.dest.reg));
+      }
+      if (statement.op == IrOp::Call && !statement.call_model.empty()) {
+        // A modelled C library call (G21-T7) may change every caller-saved register.
+        summary.writes.insert(summary.writes.end(), caller_saved_families().begin(),
+                              caller_saved_families().end());
+        continue;
       }
       if (statement.op != IrOp::Call || !statement.signature_inferred) {
         continue;
@@ -2219,6 +2242,42 @@ struct Lifter {
     statement.call_writes = callee.writes;
   }
 
+  /// The model of the C function a call target runs (G21-T7): the target is an import stub or a
+  /// GOT or IAT slot (`call *slot`) of an import the analysis shows binds to the C library, and the
+  /// function has a model. x86-64 only: the System V or Win64 argument registers.
+  [[nodiscard]] const LibcModel* modelled_call(const IrOperand& target) const {
+    if (image.architecture != Architecture::X86_64) {
+      return nullptr;
+    }
+    const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
+    const bool slot = target.kind == IrOperandKind::Memory && target.reg.empty() &&
+                      target.index.empty() && target.width == pointer_width;
+    if (!direct && !slot) {
+      return nullptr;
+    }
+    const auto bound = analysis.c_library_imports.find(target.constant);
+    return bound == analysis.c_library_imports.end() ? nullptr
+                                                     : find_libc_model(bound->second.name);
+  }
+
+  /// Gives a call statement the C prototype of `model`: each argument in its register of the
+  /// image's calling convention (an int in the register's low 32 bits), the result in all of rax.
+  void resolve_model_call(IrStatement& statement, const LibcModel& model) const {
+    static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
+    static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
+    static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
+    static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
+    const bool win64 = image.format == BinaryFormat::Pe;
+    for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
+      const bool narrow = model.arguments[i] == LibcArgument::Int;
+      const char* name =
+          win64 ? (narrow ? kWin32[i] : kWin64[i]) : (narrow ? kSysV32[i] : kSysV64[i]);
+      statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
+    }
+    statement.dest = IrOperand::register_ref("rax", 8);
+    statement.call_model = std::string(model.name);
+  }
+
   void lift_call(IrBlock& block, const Instruction& instruction) {
     IrStatement statement;
     statement.op = IrOp::Call;
@@ -2231,6 +2290,11 @@ struct Lifter {
           to_ir_operand(instruction.structured_operands.front(), instruction, pointer_width);
     } else {
       statement.a = IrOperand::constant_value(0, pointer_width);
+    }
+    if (const LibcModel* model = modelled_call(statement.a)) {
+      resolve_model_call(statement, *model);
+      push(block, std::move(statement));
+      return;
     }
     if (const auto callee = known_callee(instruction)) {
       resolve_call_statement(statement, *callee);
@@ -2335,7 +2399,8 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
     const IrStatement& statement = block.statements[s];
     // A resolved call (G21) that returns a value defines the integer return register: its result.
     // Any other call, and an unsupported statement, may define either register: unknown.
-    if (statement.op == IrOp::Call && statement.signature_inferred &&
+    if (statement.op == IrOp::Call &&
+        (statement.signature_inferred || !statement.call_model.empty()) &&
         statement.dest.kind == IrOperandKind::Register &&
         internal::register_family(statement.dest.reg) == regs.integer_family) {
       ReturnDefinition out;
@@ -2762,14 +2827,7 @@ void check_call_clobbers_impl(IrFunction& function) {
         // A call clobbers the caller-saved families. A resolved call (its callee's IR is known and
         // complete) clobbers only the caller-saved families that callee writes; an unknown call
         // clobbers all of them. Then the call defines its result.
-        static const std::set<std::string> kCallerSaved = [] {
-          std::set<std::string> families = {"rax", "rcx", "rdx", "rsi", "rdi",
-                                            "r8",  "r9",  "r10", "r11"};
-          for (int n = 0; n < 16; ++n) {
-            families.insert("xmm" + std::to_string(n));
-          }
-          return families;
-        }();
+        const std::set<std::string>& kCallerSaved = caller_saved_families();
         if (statement.signature_inferred) {
           for (const std::string& family : statement.call_writes) {
             if (kCallerSaved.count(family) != 0) {
@@ -3121,7 +3179,17 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
           } else {
             call.a = IrOperand::constant_value(0, lifter.pointer_width);
           }
-          if (const auto callee = lifter.known_callee(instruction)) {
+          // A tail call to a modelled C library import (G21-T7). Not in an import stub: its own
+          // jump through its slot is the import itself, not a call of it.
+          const LibcModel* model =
+              lifter.function.import_name.empty() ? lifter.modelled_call(call.a) : nullptr;
+          if (model != nullptr) {
+            lifter.resolve_model_call(call, *model);
+            lifter.push(out_block, std::move(call));
+            lifter.out.notes.push_back(
+                "a jump to a C library function is lifted as a call of its model, followed by a "
+                "return");
+          } else if (const auto callee = lifter.known_callee(instruction)) {
             // A tail call to a function of the image with a known signature: the callee runs with
             // the caller's argument registers, and its result is what this function returns.
             Lifter::resolve_call_statement(call, *callee);
@@ -3337,7 +3405,16 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
       call.source_address = instruction.address;
       call.width = lifter.pointer_width;
       call.a = IrOperand::constant_value(target, lifter.pointer_width);
-      if (const auto callee = lifter.known_callee(instruction)) {
+      if (const LibcModel* model = lifter.modelled_call(call.a); model != nullptr) {
+        lifter.resolve_model_call(call, *model);
+        const std::string note =
+            "a conditional jump to a C library function is lifted as a branch to a call of its "
+            "model, followed by a return";
+        if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
+            lifter.out.notes.end()) {
+          lifter.note(note);
+        }
+      } else if (const auto callee = lifter.known_callee(instruction)) {
         Lifter::resolve_call_statement(call, *callee);
         const std::string note =
             "a conditional jump to a known function is lifted as a branch to a call with its "

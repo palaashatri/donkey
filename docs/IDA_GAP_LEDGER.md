@@ -176,7 +176,7 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; 43 of 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | None bundled. A library file format and its bounded reader exist (G22-T1, `docs/TYPELIBS.md`); nothing applies a library yet. The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 to T4 TODO; header sources decided 2026-11-17, see T2) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
@@ -1794,6 +1794,10 @@ they stay Partial and so do their callers. Baseline: 1,009 of the
 - **T5.** A call to a no-return function ends the block (needs G24-T3).
 - **T6.** Indirect calls: function pointers, vtable slots (the G10-T3
   call-site work), import stubs.
+- **T7 [oracle].** Calls of C library imports: an executable model of each C
+  function whose result ISO C fully defines, checked against the host's C
+  library, so a caller of the function can be executed and compared with its
+  compiled code. Plan and result below.
 
 **Done when.** No R1 function is Partial only because it calls, and the
 corpus has call-heavy functions verified by execution.
@@ -1867,6 +1871,48 @@ certain (`signature_inferred`). A wrong signature must fail the oracle, not prin
 the oracle must run each call-heavy function with several inputs. The clobber model must not let
 a value that a call changed be printed as the old one. Do not widen the subset by guessing at
 callee-saved registers. Mutual recursion stops at depth 1 in the lifter, so the cost is bounded.
+
+#### G21-T7 C library calls with executable models (written and done 2026-11-18)
+
+**Why first among the call tasks.** On the fixed sample most functions that are Partial because of
+a call call an import, not a function of their own image, and the most common imports are C library
+functions. A call of an import can only be Complete when the interpreter can run something that
+does what the library does, for every input, so each function needs an exact model.
+
+**Binding (needs G24-T3).** An import's call is modelled only when every reference to the name binds
+to the C library: on ELF by the load scope (`ElfLoadScope`, the same walk as the no-return marks:
+`bind_runtime_imports` gives both, as `AnalysisResult::c_library_imports`), on PE when its DLL is a
+Microsoft C runtime. A shared library's imports bind first in the scope of the program that loads it,
+so a shared library gets bindings only with `--program` (the corpus test passes its own
+executable). A sanitizer build of the program, which defines `strlen` itself, binds there: the call
+then stays Partial.
+
+**Models.** `donkey/ir/libc_models.h`: strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn,
+memcpy, memmove, memset. Each reads and writes exactly the bytes ISO C says, counts a step per byte,
+and fails on undefined input (an overlapping memcpy: `ir.eval_model`; an unmapped byte:
+`ir.eval_memory`). memcmp, strcmp and strncmp have no model: ISO C defines only the sign of their
+result, and the oracle compares exact values.
+
+**IR.** `IrStatement::call_model` names the function. The arguments come from its prototype (System V
+`rdi, rsi, rdx` or Win64 `rcx, rdx, r8`, an `int` in the low 32 bits), the result is all of `rax`,
+and the call may change every caller-saved register (the clobber check and a callee's call summary
+count them all). `signature_inferred` stays false: the prototype is not an inference. The verifier
+refuses a call that names a function without a model or passes another number of arguments. Tail
+calls and conditional tail calls are modelled too; an import stub's own jump is not.
+
+**Tests.** `LibcModels.AgreeWithTheHostCLibrary` (4,000 random inputs; a model that took the first
+match for strrchr, or copied memmove forward, fails it), `LibcModels.*` for the int argument, the
+terminator, unmapped bytes, the step budget, the evaluator and the verifier;
+`DecompilerCorpus.CLibraryCallsNeedTheProgramThatLoadsTheLibrary`; eleven `c_lib_*` corpus
+functions in `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`.
+
+**Result.** GCC 13.3, Linux x86-64: 43 of the 44 `c_lib_*` results (-O0, -O2, -O3, -O3 x86-64-v2)
+are Complete and verified on 48 vectors each. `c_lib_memcpy_sum` above -O0 stays Partial: it zeroes
+`ecx` with `xor ecx, ecx` after the call, which the clobber check reads as a read of a clobbered
+register (the zeroing idiom is the next fix). On the fixed sample of 1,986 functions
+(`tools/audit/sample_list.py`): Complete 177 → 180, and functions noted "no modelled ABI"
+1,493 → 1,486. The sample's callers mostly call other imports too (allocation, I/O, formatted
+output), and two of its seven binaries are shared libraries measured without their program.
 
 ### G22 Type libraries (P1)
 

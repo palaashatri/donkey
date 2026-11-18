@@ -853,8 +853,10 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       }
     }
     std::vector<std::string> unverified;
-    result.no_return = bind_no_return_imports(image, file, import_stubs, result.import_slots,
-                                              options.library_search, &unverified);
+    RuntimeImportBindings bindings = bind_runtime_imports(
+        image, file, import_stubs, result.import_slots, options.library_search, &unverified);
+    result.no_return = std::move(bindings.no_return);
+    result.c_library_imports = std::move(bindings.c_library);
     if (!unverified.empty()) {
       result.partial = true;  // calls that may never return keep a fall-through: not Complete
       std::string list;

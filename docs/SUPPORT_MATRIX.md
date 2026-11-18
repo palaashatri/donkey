@@ -69,6 +69,15 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
   (`c_call_*`) are Complete and verified at -O0, -O2, -O3 and -O3-x86-64-v2 (48 vectors each). The
   CLI test `cli.decompile_prints_call_arguments` shows a call with its arguments.
+- C library calls (G21-T7): on x86-64, a call of an import shown to bind to the C library (the
+  G24-T3 load scope on ELF, with `--program` for a shared library; a C runtime DLL on PE) to
+  `strlen`, `strnlen`, `memchr`, `strchr`, `strrchr`, `strspn`, `strcspn`, `memcpy`, `memmove` or
+  `memset` carries the function's prototype, and the interpreter runs an executable model of it.
+  Every model is compared with the host C library on random inputs
+  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, 43 of the 44 `c_lib_*`
+  corpus results are Complete and verified (48 vectors each); `c_lib_memcpy_sum` above -O0 is
+  Partial (a zeroing `xor` after the call). Not tested on Windows, macOS (Mach-O imports are not
+  bound) or FreeBSD hosts.
 - Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
   `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node

@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "donkey/analysis/cfg.h"
+#include "donkey/analysis/no_return.h"
 #include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/image.h"
 #include "donkey/core/cancellation.h"
@@ -124,6 +125,11 @@ struct AnalysisResult {
   /// Every address a call does not return from (G24-T3), with its evidence: the stub and slot
   /// addresses of bound no-return imports, and the starts of functions propagated from them.
   std::map<std::uint64_t, std::string> no_return;
+  /// Imports shown to bind to the C library (G21-T7), keyed like `no_return` (stub and slot
+  /// addresses), with the evidence. Filled with the no-return marks (`no_return_analysis`), from
+  /// the same walk of the load scope. A call to one of them may run an executable model of the C
+  /// function (donkey/ir/libc_models.h).
+  std::map<std::uint64_t, BoundImport> c_library_imports;
   bool partial = false;
   std::vector<Diagnostic> diagnostics;
 };

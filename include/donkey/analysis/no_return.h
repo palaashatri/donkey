@@ -45,4 +45,25 @@ namespace donkey {
     const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search = {},
     std::vector<std::string>* unverified = nullptr);
 
+/// An import shown to bind to the C library (G21-T7): its name and the evidence, in the form of
+/// bind_no_return_imports' provenance with `c-library:` in place of `known-name:`.
+struct BoundImport {
+  std::string name;
+  std::string provenance;
+};
+
+/// Both bindings an analysis needs from one walk of the load scope, keyed like
+/// bind_no_return_imports: the no-return marks, and every import whose every reference binds to the
+/// C library (on ELF, a library of the C library's names; on PE, a Microsoft C runtime DLL).
+struct RuntimeImportBindings {
+  std::map<std::uint64_t, std::string> no_return;
+  std::map<std::uint64_t, BoundImport> c_library;
+};
+
+[[nodiscard]] RuntimeImportBindings bind_runtime_imports(
+    const BinaryImage& image, std::span<const std::byte> data,
+    const std::map<std::uint64_t, std::string>& stubs,
+    const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search = {},
+    std::vector<std::string>* unverified = nullptr);
+
 }  // namespace donkey
