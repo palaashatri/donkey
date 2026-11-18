@@ -1235,7 +1235,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
   if (inherited != nullptr) {
     seen = inherited->loaded;
   }
-  while (!queue.empty() && impl.libraries.size() <= max_libraries) {
+  while (!queue.empty() && impl.libraries.size() < max_libraries) {
     Pending next = std::move(queue.front());
     queue.pop_front();
     if (seen.contains(next.name)) {

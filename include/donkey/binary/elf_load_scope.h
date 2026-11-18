@@ -69,8 +69,9 @@ struct ElfLibrarySearch {
   /// Libraries waiting to be looked for at once (kMaxScopeQueue). Past it, no later library is
   /// queued and the rest of the scope is not known.
   std::size_t queue_limit = 4096;
-  /// Libraries read for the whole scope, a shared library's local scope included
-  /// (kMaxScopeLibraries). Past it, the rest of the scope is not known.
+  /// Objects in the whole scope, the executable (and a shared library itself, with its local
+  /// scope) included (kMaxScopeLibraries). Past it, no more are read and the rest of the scope is
+  /// not known.
   std::size_t library_limit = 256;
 };
 

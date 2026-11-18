@@ -1180,6 +1180,26 @@ TEST(ElfLoadScope, AProgramAndItsLibraryShareTheLibraryLimit) {
       << helper.reason;
 }
 
+// The limit counts every object of the scope, the program included: steal_consumer needs
+// libsteal.so.1 and libc.so.6, and with a limit of 2 only libsteal.so.1 is read. `exit`, which
+// only libc.so.6 defines, is then not known.
+TEST(ElfLoadScope, TheLibraryLimitCountsTheProgram) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  search.library_limit = 2;
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "steal_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 3U);  // the program, libsteal.so.1 and the limit's marker
+  EXPECT_EQ(scope.libraries()[1].path, fixture("loadscope", "clean/libsteal.so.1"));
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(exit_binding.reason.find("more libraries than the limit"), std::string::npos)
+      << exit_binding.reason;
+  search.library_limit = 3;
+  EXPECT_EQ(scope_of(fixture("loadscope", "steal_consumer"), search).lookup("exit", "GLIBC_2.2.5")
+                .outcome,
+            donkey::ElfBinding::Outcome::Bound);
+}
+
 // A program the caller already holds is used as it is, not read again by its path: here the path
 // names a file that does not exist.
 TEST(ElfLoadScope, AProgramInMemoryIsNotReadAgain) {
