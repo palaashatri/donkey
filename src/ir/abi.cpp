@@ -238,8 +238,10 @@ void walk_block(const IrBlock& block, const AbiModel& model, std::vector<bool>& 
     }
 
     reads.clear();
-    collect_reads(statement.a, reads);
-    collect_reads(statement.b, reads);
+    if (!is_zeroing_idiom(statement)) {  // `xor ecx, ecx` reads no incoming value of rcx
+      collect_reads(statement.a, reads);
+      collect_reads(statement.b, reads);
+    }
     collect_reads(statement.c, reads);  // the divisor of Div and Rem
     if (statement.dest.kind == IrOperandKind::Memory) {
       collect_reads(statement.dest, reads);
