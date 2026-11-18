@@ -111,7 +111,9 @@ detail. "Gaps" names the ledger entries that move the row.
 ## 4. Roadmap
 
 The order is by leverage: what makes the most functions of a real program readable first. Inside a
-wave, take tasks in ledger order. A wave is not a release.
+wave, among the tasks that are TODO with their dependencies DONE, take first the one that moves the
+measured numbers most, and between tasks of equal effect the first in ledger order (AGENTS.md, "Highest
+leverage first"). A wave is not a release.
 
 **Wave 1. Every function decompiles to something useful.**
 G20 (measure real programs first, so the rest is ordered by evidence), then G21 (call arguments

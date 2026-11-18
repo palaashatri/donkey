@@ -2902,7 +2902,7 @@ that gap.
 
 Branch hygiene, so that `main` stays the one place where work lives:
 
-- At most three task branches are open at once, and each has an open PR.
+- At most six task branches are open at once, and each has an open PR.
 - Do not stack a branch on an unmerged branch unless the task depends on it.
   If you do, say so in both PRs.
 - When a PR merges, delete its branch in the same session. When work is
