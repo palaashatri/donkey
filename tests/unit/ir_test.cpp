@@ -1137,10 +1137,9 @@ TEST(Ir, NegatedIntegerComparisonIsWrittenAsItsComplement) {
   EXPECT_EQ(text.value().find("!("), std::string::npos) << text.value();
 }
 
-TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
-  // while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
-  // return rax. A `break` inside the switch would leave the switch, not the loop, so the leave is a
-  // goto, and the loop's own structure is kept (G04-T5: no whole-function labelled form).
+// while (rax != 0) { switch (eax) { case 1: leave the loop; default: rax -= 1; } }
+// return rax. Block 2 (case 1) only jumps on to the return (block 4).
+IrFunction switch_exit_function() {
   IrFunction function;
   function.address = 0x4000;
   function.name = "switch_exit";
@@ -1174,13 +1173,19 @@ TEST(Ir, LeavingTheLoopFromInsideASwitchPrintsGotos) {
 
   function.blocks[4].statements.push_back(return_statement());
 
+  return function;
+}
+
+TEST(Ir, LeavingTheLoopFromInsideASwitchCopiesTheExit) {
+  // A `break` inside the switch would leave the switch, not the loop. Without W1b the leave is two
+  // gotos (`case 0x1: goto loc_4010;`, and loc_4010 only jumps on): see
+  // Ir.RuleCopyPrintsASmallExitInPlaceOfItsGoto. With it, the small exit is copied where the loop
+  // is left, and no goto is printed (G04-T5 W1b).
+  const IrFunction function = switch_exit_function();
   const auto text = donkey::format_pseudocode(function);
   ASSERT_TRUE(text.has_value()) << text.diagnostic().message;
-  EXPECT_NE(text.value().find("// note: 2 goto(s) where control flow has no structured form"),
-            std::string::npos)
-      << text.value();
-  EXPECT_NE(text.value().find("case 0x1:\n          goto loc_4010;"), std::string::npos)
-      << text.value();
+  EXPECT_EQ(text.value().find("goto"), std::string::npos) << text.value();
+  EXPECT_NE(text.value().find("case 0x1:\n          break;"), std::string::npos) << text.value();
   EXPECT_EQ(text.value().find("labeled blocks"), std::string::npos) << text.value();
 }
 
@@ -5318,9 +5323,11 @@ TEST(Ir, FallbackDoesNotCopyAReturnBlockOverEightStatements) {
     big.push_back(fb_set("rcx", static_cast<std::uint64_t>(i)));
   }
   big.push_back(fb_return());
+  // Block 1 sets rsi before its test, so it is not a test-only block and the two tests are not
+  // printed as one compound condition (which would need no copy and no goto).
   const IrFunction f = fb_function({
       {fb_compare(), fb_branch(3)},
-      {fb_compare(), fb_branch(3)},
+      {fb_set("rsi", 1), fb_compare(), fb_branch(3)},
       {fb_set("rdx", 5), fb_return()},
       big,
   });
@@ -5474,6 +5481,8 @@ namespace {
 using donkey::detail::check_structured_control_flow;
 using donkey::detail::GotoStructure;
 using donkey::detail::kGotoRuleAll;
+using donkey::detail::kGotoRuleCopy;
+using donkey::detail::kGotoRuleDefault;
 using donkey::detail::structure_with_gotos;
 using donkey::detail::StructuredLine;
 
@@ -5508,6 +5517,169 @@ IrStatement switch_on_rax(std::uint32_t default_block, std::vector<IrSwitchCase>
   statement.switch_cases = std::move(cases);
   return statement;
 }
+
+}  // namespace
+
+// W1b: the copy rule. Off, the leave from inside the switch is two gotos; on, the small blocks are
+// copied in their place and no goto is left. Both are accepted by the control-flow check.
+TEST(Ir, RuleCopyPrintsASmallExitInPlaceOfItsGoto) {
+  const IrFunction function = switch_exit_function();
+  const GotoStructure off = structured_with(function, kGotoRuleAll);
+  EXPECT_EQ(off.gotos, 2U) << printed(off.lines);
+  EXPECT_NE(printed(off.lines).find("goto loc_4010;"), std::string::npos) << printed(off.lines);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+}
+
+namespace {
+
+/// Two tests that share their taken target, block 3, which is too large to copy:
+///   0: if (rax == 0) goto 3;   1: if (rbx == 0) goto 3;   2: rdx = 5..9; return;   3: rcx = ...;
+/// The second test holds only its compare and branch, and only block 0 reaches it.
+IrFunction two_tests_function() {
+  IrStatement compare_rbx = fb_compare();
+  compare_rbx.a = IrOperand::register_ref("rbx", 8);
+  IrStatement branch_rbx = fb_branch(3);
+  branch_rbx.a = IrOperand::register_ref("rbx", 8);
+  std::vector<IrStatement> fall_arm;
+  std::vector<IrStatement> shared_arm;
+  for (std::uint64_t i = 0; i < 6; ++i) {
+    fall_arm.push_back(fb_set("rdx", 5 + i));
+    shared_arm.push_back(fb_set("rcx", i));
+  }
+  fall_arm.push_back(fb_return());
+  shared_arm.push_back(fb_return());
+  return fb_function(
+      {{fb_compare(), fb_branch(3)}, {compare_rbx, branch_rbx}, fall_arm, shared_arm});
+}
+
+}  // namespace
+
+// W1b: the compound rule. Without it, the second arrival at the shared block is a goto; with it,
+// the two tests are one condition and no goto is left. The control-flow check accepts both.
+TEST(Ir, RuleCompoundPrintsTwoTestsAsOneCondition) {
+  const IrFunction function = two_tests_function();
+  const GotoStructure off = structured_with(function, kGotoRuleAll | kGotoRuleCopy);
+  EXPECT_EQ(off.gotos, 1U) << printed(off.lines);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+  const std::string text = printed(on.lines);
+  const bool joined =
+      text.find(" || ") != std::string::npos || text.find(" && ") != std::string::npos;
+  EXPECT_TRUE(joined) << text;
+  // The whole printer takes the same form.
+  const auto pseudocode = donkey::format_pseudocode(function);
+  ASSERT_TRUE(pseudocode.has_value()) << pseudocode.diagnostic().message;
+  EXPECT_EQ(pseudocode.value().find("goto"), std::string::npos) << pseudocode.value();
+  // The second test's instructions map to the combined condition's line: its block prints no
+  // line of its own; the line also keeps the block's entry address.
+  IrFunction addressed = function;
+  std::vector<std::uint64_t> second_test{addressed.blocks[1].address};
+  for (std::size_t i = 0; i < addressed.blocks[1].statements.size(); ++i) {
+    addressed.blocks[1].statements[i].source_address = 0x2010 + i * 4;
+    second_test.push_back(0x2010 + i * 4);
+  }
+  const GotoStructure mapped = structured_with(addressed, kGotoRuleDefault);
+  bool found = false;
+  for (const StructuredLine& line : mapped.lines) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen &&
+        line.tag.second != donkey::detail::kNoBlock) {
+      found = true;
+      EXPECT_EQ(line.folded_addresses, second_test) << line.text;
+    }
+  }
+  EXPECT_TRUE(found) << printed(mapped.lines);
+}
+
+// A compound condition whose arms meet at a join prints through the other insertion paths: block
+// 0 or block 1 branches to block 3, block 2 continues to it. The second test still folds into the
+// combined condition's line.
+TEST(Ir, RuleCompoundFoldsTheSecondTestWhenTheArmsJoin) {
+  IrStatement compare_rbx = fb_compare();
+  compare_rbx.a = IrOperand::register_ref("rbx", 8);
+  IrStatement branch_rbx = fb_branch(3);
+  branch_rbx.a = IrOperand::register_ref("rbx", 8);
+  std::vector<IrStatement> arm;
+  std::vector<IrStatement> join;
+  for (std::uint64_t i = 0; i < 6; ++i) {
+    arm.push_back(fb_set("rdx", 5 + i));
+    join.push_back(fb_set("rcx", i));
+  }
+  arm.push_back(fb_jump(3));
+  join.push_back(fb_return());
+  IrFunction function =
+      fb_function({{fb_compare(), fb_branch(3)}, {compare_rbx, branch_rbx}, arm, join});
+  // The folded test keeps its block's entry address as well as its instructions' addresses.
+  std::vector<std::uint64_t> second_test{function.blocks[1].address};
+  ASSERT_NE(function.blocks[1].address, 0U);
+  for (std::size_t i = 0; i < function.blocks[1].statements.size(); ++i) {
+    function.blocks[1].statements[i].source_address = 0x2010 + i * 4;
+    second_test.push_back(0x2010 + i * 4);
+  }
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_EQ(on.gotos, 0U) << printed(on.lines);
+  EXPECT_FALSE(check_structured_control_flow(function, on.lines).has_value()) << printed(on.lines);
+  bool found = false;
+  for (const StructuredLine& line : on.lines) {
+    if (line.tag.kind == donkey::detail::LineKind::IfOpen &&
+        line.tag.second != donkey::detail::kNoBlock) {
+      found = true;
+      EXPECT_EQ(line.folded_addresses, second_test) << line.text;
+    }
+  }
+  EXPECT_TRUE(found) << printed(on.lines);
+}
+
+// The check reads a compound condition from its tag: a tag that complements the second test, or
+// joins the tests with the other operator, describes other control flow and is refused.
+TEST(Ir, CheckRefusesACompoundConditionWithTheWrongForm) {
+  const IrFunction function = two_tests_function();
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  std::size_t compound_line = on.lines.size();
+  for (std::size_t i = 0; i < on.lines.size(); ++i) {
+    if (on.lines[i].tag.kind == donkey::detail::LineKind::IfOpen &&
+        on.lines[i].tag.second != donkey::detail::kNoBlock) {
+      compound_line = i;
+    }
+  }
+  ASSERT_LT(compound_line, on.lines.size()) << printed(on.lines);
+  std::vector<StructuredLine> flipped = on.lines;
+  flipped[compound_line].tag.second_negated = !flipped[compound_line].tag.second_negated;
+  EXPECT_TRUE(check_structured_control_flow(function, flipped).has_value());
+  std::vector<StructuredLine> other_operator = on.lines;
+  other_operator[compound_line].tag.second_or = !other_operator[compound_line].tag.second_or;
+  EXPECT_TRUE(check_structured_control_flow(function, other_operator).has_value());
+  // A block with statements of its own is never folded into a condition.
+  IrFunction busy = function;
+  busy.blocks[1].statements.insert(busy.blocks[1].statements.begin(), fb_set("rsi", 1));
+  const GotoStructure busy_on = structured_with(busy, kGotoRuleDefault);
+  for (const StructuredLine& line : busy_on.lines) {
+    EXPECT_EQ(line.tag.second, donkey::detail::kNoBlock) << line.text;
+  }
+}
+
+// A block too large to copy keeps its goto: more than kMaxCopiedStatements printed statements.
+TEST(Ir, RuleCopyLeavesALargeBlockAsAGoto) {
+  IrFunction function = switch_exit_function();
+  // Five statements in the return block: too many to copy.
+  IrBlock& exit = function.blocks[4];
+  const IrStatement ret = exit.statements.back();
+  exit.statements.pop_back();
+  for (int i = 0; i < 5; ++i) {
+    IrStatement add;
+    add.op = IrOp::Add;
+    add.dest = IrOperand::register_ref("rax", 8);
+    add.a = IrOperand::register_ref("rax", 8);
+    add.b = IrOperand::constant_value(static_cast<std::uint64_t>(i + 1), 8);
+    add.width = 8;
+    exit.statements.push_back(add);
+  }
+  exit.statements.push_back(ret);
+  const GotoStructure on = structured_with(function, kGotoRuleDefault);
+  EXPECT_GT(on.gotos, 0U) << printed(on.lines);
+}
+
+namespace {
 
 constexpr std::uint32_t kWithout(std::uint32_t rule) {
   return kGotoRuleAll & ~rule;
