@@ -508,51 +508,81 @@ Probe probe(const fs::path& host, const BinaryImage& image) {
 constexpr const char* kLegacyHwcaps[] = {"tls",  "x86_64", "haswell", "xeon_phi", "avx512_1",
                                          "sse2", "i686",   "i586",    "aarch64"};
 
-bool legacy_override(const fs::path& directory, const std::string& name, std::size_t depth) {
+LoaderPath joined(const LoaderPath& directory, const std::string& part) {
+  return LoaderPath{directory.host,
+                    directory.path + (directory.path.ends_with('/') ? "" : "/") + part};
+}
+
+/// Whether the loader could open `path`, resolved as every target path is (links followed inside
+/// the sysroot): empty when it is absent, else why it may be taken.
+std::string may_exist(const LoaderPath& path, const std::string& sysroot) {
+  const Resolved where = resolve(path, sysroot);
+  switch (where.state) {
+    case Resolved::State::Missing:
+      return std::string();
+    case Resolved::State::Unknown:
+      return where.reason;
+    case Resolved::State::Found:
+      break;
+  }
+  return spelled(path, sysroot) + " may be chosen instead, depending on the target's processor";
+}
+
+/// The directory `path` names, resolved inside the sysroot, if it is one.
+std::optional<fs::path> directory_at(const LoaderPath& path, const std::string& sysroot) {
+  const Resolved where = resolve(path, sysroot);
+  std::error_code error;
+  if (where.state != Resolved::State::Found || !fs::is_directory(where.host, error)) {
+    return std::nullopt;
+  }
+  return where.host;
+}
+
+std::string legacy_override(const LoaderPath& directory, const std::string& name,
+                            const std::string& sysroot, std::size_t depth) {
   if (depth == kMaxLegacyDepth) {
-    return false;
+    return std::string();
   }
   for (const char* sub : kLegacyHwcaps) {
-    std::error_code error;
-    const fs::path inner = directory / sub;
-    if (!fs::is_directory(inner, error)) {
+    const LoaderPath inner = joined(directory, sub);
+    if (!directory_at(inner, sysroot)) {
       continue;
     }
-    if (fs::exists(inner / name, error) || legacy_override(inner, name, depth + 1)) {
-      return true;
+    if (std::string why = may_exist(joined(inner, name), sysroot); !why.empty()) {
+      return why;
+    }
+    if (std::string why = legacy_override(inner, name, sysroot, depth + 1); !why.empty()) {
+      return why;
     }
   }
-  return false;
+  return std::string();
 }
 
 /// Why a copy of `name` that the loader tries before `directory` itself might be taken instead, or
 /// empty: a `glibc-hwcaps/<level>` subdirectory or a legacy capability subdirectory holding it.
-/// Which of them the loader takes depends on the target's processor, which is not known.
-std::string hardware_override(const fs::path& directory, const std::string& name) {
-  std::error_code error;
-  const fs::path hwcaps = directory / "glibc-hwcaps";
-  if (fs::is_directory(hwcaps, error)) {
-    fs::directory_iterator it(hwcaps, error);
+/// Which of them the loader takes depends on the target's processor, which is not known. Every
+/// path is resolved as the library's own is, so a link under a sysroot is followed inside it.
+std::string hardware_override(const LoaderPath& directory, const std::string& name,
+                              const std::string& sysroot) {
+  const LoaderPath hwcaps = joined(directory, "glibc-hwcaps");
+  if (const auto listed = directory_at(hwcaps, sysroot)) {
+    std::error_code error;
+    fs::directory_iterator it(*listed, error);
     std::size_t count = 0;
     for (; !error && it != fs::directory_iterator(); it.increment(error)) {
       if (++count > kMaxHwcapsDirectories) {
-        return hwcaps.generic_string() + " has too many entries to examine";
+        return spelled(hwcaps, sysroot) + " has too many entries to examine";
       }
-      std::error_code inner;
-      if (fs::exists(it->path() / name, inner)) {
-        return (it->path() / name).generic_string() +
-               " may be chosen instead, depending on the target's processor";
+      const LoaderPath level = joined(hwcaps, it->path().filename().string());
+      if (std::string why = may_exist(joined(level, name), sysroot); !why.empty()) {
+        return why;
       }
     }
     if (error) {
-      return hwcaps.generic_string() + " could not be listed";
+      return spelled(hwcaps, sysroot) + " could not be listed";
     }
   }
-  if (legacy_override(directory, name, 0)) {
-    return directory.generic_string() + " has a copy of " + name +
-           " in a hardware-capability subdirectory, chosen by the target's processor";
-  }
-  return std::string();
+  return legacy_override(directory, name, sysroot, 0);
 }
 
 /// glibc's ld.so.cache of the target, as the search uses it.
@@ -784,13 +814,12 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
       out.reason = where.reason;
       return out;
     }
-    if (std::string why = hardware_override(where.host, name); !why.empty()) {
+    if (std::string why = hardware_override(directory, name, sysroot); !why.empty()) {
       out.state = Probe::State::Unknown;
       out.reason = std::move(why);
       return out;
     }
-    const LoaderPath file{directory.host,
-                          directory.path + (directory.path.ends_with('/') ? "" : "/") + name};
+    const LoaderPath file = joined(directory, name);
     const Resolved file_where = resolve(file, sysroot);
     if (file_where.state == Resolved::State::Missing) {
       return out;

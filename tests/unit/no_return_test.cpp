@@ -19,6 +19,7 @@
 #include "donkey/binary/elf_load_scope.h"
 #include "donkey/binary/elf_versions.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/link.h"
 #include "donkey/ir/eval.h"
 #include "donkey/ir/ir.h"
 #include "donkey/ir/lift.h"
@@ -1356,4 +1357,96 @@ TEST(ElfLoadScope, ALibraryLeftOutOfAFullQueueKeepsEveryLaterOneOut) {
   const donkey::ElfBinding binding = scope.lookup("exit", "GLIBC_2.2.5");
   EXPECT_EQ(binding.outcome, donkey::ElfBinding::Outcome::Unknown);
   EXPECT_TRUE(contains(binding.reason, "limit")) << binding.reason;
+}
+
+// The hardware-capability check resolves its paths as the library's own are: an absolute link
+// under a sysroot's glibc-hwcaps is followed inside the sysroot, where the override exists.
+TEST(ElfLoadScope, AHardwareCopyBehindALinkInTheSysrootLeavesTheBindingUnknown) {
+  const Scratch root;
+  place_libc(root);
+  root.place("clean/libsteal.so.1", "lib/x86_64-linux-gnu/libsteal.so.1");
+  root.place("steal/libsteal.so.1", "opt/v3/libsteal.so.1");
+  if (!make_link(root.path() / "lib/x86_64-linux-gnu/glibc-hwcaps/x86-64-v3", "/opt/v3")) {
+    GTEST_SKIP() << "symbolic links cannot be made here";
+  }
+  const donkey::ElfBinding binding =
+      scope_of(fixture("loadscope", "steal_consumer"), under(root)).lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_TRUE(contains(binding.reason, "glibc-hwcaps/x86-64-v3")) << binding.reason;
+}
+
+namespace {
+
+/// Renames every section called `from` to `to` (same length) in `bytes`; returns how many.
+std::size_t rename_section(std::vector<std::byte>& bytes, const std::string& from,
+                           const std::string& to) {
+  std::size_t renamed = 0;
+  for (std::size_t at = 0; at + from.size() < bytes.size(); ++at) {
+    bool match =
+        bytes[at + from.size()] == std::byte{0} && (at == 0 || bytes[at - 1] == std::byte{0});
+    for (std::size_t i = 0; match && i < from.size(); ++i) {
+      match = static_cast<char>(bytes[at + i]) == from[i];
+    }
+    if (match) {
+      for (std::size_t i = 0; i < to.size(); ++i) {
+        bytes[at + i] = static_cast<std::byte>(to[i]);
+      }
+      ++renamed;
+    }
+  }
+  return renamed;
+}
+
+std::uint64_t read_le(const std::vector<std::byte>& bytes, std::size_t at, std::size_t size) {
+  std::uint64_t value = 0;
+  for (std::size_t i = 0; i < size; ++i) {
+    value |= static_cast<std::uint64_t>(bytes[at + i]) << (8 * i);
+  }
+  return value;
+}
+
+}  // namespace
+
+// The loader reads a library's needs through PT_DYNAMIC: with its `.dynamic` section renamed,
+// liba.so.1 still needs libb.so.1, and the scope still finds it.
+TEST(ElfLoadScope, ALibraryWhoseDynamicSectionIsRenamedStillGivesItsNeeds) {
+  const Scratch root;
+  std::vector<std::byte> liba = file_bytes(fixture("loadscope", "chain/liba.so.1"));
+  ASSERT_EQ(rename_section(liba, ".dynamic", ".dynamiX"), 1U);
+  root.write("libs/liba.so.1", liba);
+  fs::create_directories(root.path() / "libs/inner");
+  fs::copy_file(fixture("loadscope", "chain/inner/libb.so.1"),
+                root.path() / "libs/inner/libb.so.1");
+  fs::copy_file(fixture("loadscope", "chain/inner/libsteal.so.1"),
+                root.path() / "libs/inner/libsteal.so.1");
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back((root.path() / "libs").string());
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "chain/chain_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 5U);
+  EXPECT_EQ(scope.libraries()[3].name, "libb.so.1");
+  EXPECT_EQ(scope.libraries()[4].name, "libsteal.so.1");
+}
+
+// An image with program headers and no PT_DYNAMIC is not dynamically linked for the loader,
+// whatever its sections say: it needs nothing.
+TEST(ElfLoadScope, ProgramHeadersWithoutPtDynamicNeedNothing) {
+  std::vector<std::byte> bytes = file_bytes(fixture("loadscope", "steal_consumer"));
+  const std::uint64_t phoff = read_le(bytes, 32, 8);
+  const std::uint64_t phentsize = read_le(bytes, 54, 2);
+  const std::uint64_t phnum = read_le(bytes, 56, 2);
+  std::size_t changed = 0;
+  for (std::uint64_t i = 0; i < phnum; ++i) {
+    const std::size_t at = static_cast<std::size_t>(phoff + i * phentsize);
+    if (read_le(bytes, at, 4) == 2) {  // PT_DYNAMIC becomes PT_NULL
+      bytes[at] = std::byte{0};
+      ++changed;
+    }
+  }
+  ASSERT_EQ(changed, 1U);
+  auto image = donkey::parse_binary(bytes, "no_pt_dynamic");
+  ASSERT_TRUE(image.has_value());
+  const donkey::ElfLibraryNames names = donkey::read_library_names(image.value(), bytes);
+  EXPECT_FALSE(names.dynamic);
+  EXPECT_TRUE(names.needed.empty());
+  EXPECT_TRUE(names.complete);
 }

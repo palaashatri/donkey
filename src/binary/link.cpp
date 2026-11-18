@@ -78,6 +78,7 @@ constexpr std::size_t kMaxProgramHeaders = 65'535;
 /// when the image has none; `readable` is false when the program headers cannot be read.
 struct DynamicRange {
   bool found = false;
+  bool program_headers = false;  ///< the image has program headers (the loader reads only them)
   bool readable = true;
   std::uint64_t offset = 0;
   std::uint64_t size = 0;
@@ -113,6 +114,7 @@ DynamicRange program_dynamic(const BinaryImage& image, const ByteReader& reader)
   if (phnum.value() == 0) {
     return out;
   }
+  out.program_headers = true;
   if (entry_size < (wide ? 56U : 32U) || phnum.value() > kMaxProgramHeaders) {
     out.readable = false;
     return out;
@@ -176,6 +178,8 @@ ElfLibraryNames read_library_names(const BinaryImage& image, std::span<const std
     table_offset = program.offset;
     table_size = program.size;
     from_program = true;
+  } else if (program.program_headers) {
+    return names;  // program headers without PT_DYNAMIC: the loader reads no dynamic table
   } else {
     const Section* dynamic = nullptr;
     for (const Section& section : image.sections) {
