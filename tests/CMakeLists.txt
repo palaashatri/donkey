@@ -1224,6 +1224,29 @@ add_test(NAME cli.link_takes_the_library_search
                  --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64 --json)
 set_tests_properties(cli.link_takes_the_library_search PROPERTIES
   PASS_REGULAR_EXPRESSION "\"schema_version\"")
+# A shared library's imports bind first in the scope of the program that loads it: without
+# --program the binding is unknown and reported, with it the abort import is proven.
+add_test(NAME cli.analyze_needs_the_program_of_a_library
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/libaborts.so.1 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
+set_tests_properties(cli.analyze_needs_the_program_of_a_library PROPERTIES
+  PASS_REGULAR_EXPRESSION "no program was given")
+add_test(NAME cli.analyze_binds_a_library_through_its_program
+         COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/libaborts.so.1 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/clean
+                 --program ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer)
+set_tests_properties(cli.analyze_binds_a_library_through_its_program PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"schema_version\""
+  FAIL_REGULAR_EXPRESSION "analysis.no_return_unverified")
+# The mark itself: `functions` shows the abort stub marked, bound to the sysroot's libc.so.6.
+add_test(NAME cli.functions_mark_a_library_import_through_its_program
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/libaborts.so.1 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64
+                 --library-path ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/clean
+                 --program ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer)
+set_tests_properties(cli.functions_mark_a_library_import_through_its_program PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"import\": \"abort\"[^}]*\"no_return\": true, \"no_return_reason\": \"known-name:abort version:GLIBC_2.2.5 bound:libc.so.6")
 add_test(NAME cli.analyze_reports_unverified_no_return
          COMMAND donkey-cli analyze ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/steal_consumer
                  --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)

@@ -222,7 +222,8 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
           proven = false;
           break;
         }
-        if (binding.outcome != ElfBinding::Outcome::Bound || binding.library == 0) {
+        if (binding.outcome != ElfBinding::Outcome::Bound ||
+            binding.library == scope.image_index()) {
           proven = false;
           break;
         }

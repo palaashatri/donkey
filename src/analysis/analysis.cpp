@@ -864,7 +864,8 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
       result.diagnostics.push_back(Diagnostic::make(
           Status::Partial, "analysis.no_return_unverified",
           "calls to these no-return imports keep their fall-through, because where the import "
-          "binds could not be shown (give the image's sysroot or library path): " +
+          "binds could not be shown (give the image's sysroot or library path, and for a shared "
+          "library the program that loads it): " +
               list,
           std::nullopt));
     }

@@ -710,6 +710,11 @@ Re-measured after G24-T3 (#67, no-return calls end their block) merged into both
 Per binary (gotos, `main` / W1b): ls 1,589 / 1,351; openssl 3,237 / 2,929; bash 1,881 / 1,658; libsqlite3
 1,694 / 1,464; libc 1,359 / 1,117; git 3,543 / 3,141; python3.12 2,409 / 2,053.
 
+After G24-T3's library scope (#76), the same list gives 13,758 gotos in the same 913 functions (largest
+385, Complete 177): libsqlite3 1,464 → 1,509. libsqlite3 is a shared library, measured without the
+program that loads it, so its imports are no longer proven no-return, and the code after those calls
+stays reachable. The other six binaries are unchanged.
+
 
 ### W1: stack and nesting (blocker fixes, branch head `14b94a4`)
 
