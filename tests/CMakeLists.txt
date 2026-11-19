@@ -1380,5 +1380,7 @@ add_test(NAME cli.decompile_prints_library_call_arguments
                  --project ${DONKEY_CLI_TYPELIB_DB} --function 0x117e)
 set_tests_properties(cli.decompile_prints_library_call_arguments PROPERTIES
   FIXTURES_REQUIRED typelib_db_applied
+  # It opens the shared project database, so it runs alone with the cli.project_ tests.
+  RESOURCE_LOCK donkey_cli_project_db
   PASS_REGULAR_EXPRESSION "rax = puts\\(rdi\\); /\\* prototype from musl-libc 1.2.4 \\*/"
   FAIL_REGULAR_EXPRESSION "\\[complete\\]")
