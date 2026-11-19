@@ -248,3 +248,30 @@ TEST(Ir, VerifierAcceptsLibraryArgumentsAndRefusesUnsourcedOnes) {
   ASSERT_FALSE(refused.has_value());
   EXPECT_EQ(refused.diagnostic().code, "ir.call_signature");
 }
+
+// A call that has both a C library model (G21-T7: the import binds to the C library, and strlen has
+// an executable model) and a library prototype (G22-T4) runs the model: its arguments are the
+// model's, it is labelled with the model, not the type library, and nothing marks it Partial for
+// being an unexecuted import.
+TEST(Ir, ACLibraryModelTakesPrecedenceOverALibraryPrototype) {
+  donkey::BinaryImage image = raw_image(kDeadRdx.size());
+  auto analyzed = donkey::analyze(image, kDeadRdx);
+  ASSERT_TRUE(analyzed.has_value());
+  analyzed.value().c_library_imports[0x1010] = donkey::BoundImport{"strlen", "test binding"};
+  const auto& functions = analyzed.value().functions;
+  const auto found = std::find_if(functions.begin(), functions.end(),
+                                  [](const donkey::Function& f) { return f.address == 0x1000; });
+  ASSERT_NE(found, functions.end());
+  donkey::LiftOptions options;
+  options.resolve_calls = false;
+  options.call_prototypes = {{0x1010, prototype({8, 8}, 8)}};
+  auto lifted = donkey::lift_function(image, analyzed.value(), *found, options);
+  ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  const IrStatement* call = the_call(lifted.value());
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->call_model, "strlen");
+  EXPECT_TRUE(call->signature_source.empty());
+  ASSERT_EQ(call->call_arguments.size(), 1U);  // strlen(const char *), not the prototype's two
+  EXPECT_EQ(call->call_arguments[0].reg, "rdi");
+  EXPECT_FALSE(has_note(lifted.value(), "a call to an imported function is not executed"));
+}

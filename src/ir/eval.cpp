@@ -3,6 +3,8 @@
 
 #include "donkey/ir/eval.h"
 
+#include "donkey/ir/libc_models.h"
+
 #include "registers.h"
 
 #include <algorithm>
@@ -968,6 +970,34 @@ class Machine {
             if (s.no_return) {
               fail("ir.eval_no_return", "the path reaches a call that does not return");
               return std::nullopt;
+            }
+            // A call of a C library function with a model (G21-T7): the model runs on this
+            // evaluation's memory and step budget, and its result is the destination.
+            if (!s.call_model.empty()) {
+              const LibcModel* model = find_libc_model(s.call_model);
+              if (model == nullptr) {
+                fail("ir.eval_call", "the call names a C function without a model");
+                return std::nullopt;
+              }
+              std::vector<std::uint64_t> args;
+              for (const IrOperand& argument : s.call_arguments) {
+                const auto v = value_of(argument);
+                if (!v) {
+                  fail("ir.eval_call", "a call argument has no value");
+                  return std::nullopt;
+                }
+                args.push_back(*v);
+              }
+              std::size_t used = steps;
+              auto result = run_libc_model(*model, args, memory_, used, options_.max_steps);
+              steps = used;
+              steps_ = steps;
+              if (!result) {
+                fail(result.diagnostic().code, result.diagnostic().message);
+                return std::nullopt;
+              }
+              ok = s.dest.kind != IrOperandKind::Register || assign(s.dest, w, result.value());
+              break;
             }
             // A direct call (G21-T1): the callee's own IR runs with the argument values, on this
             // call's stack, and its result is the destination. Without a callee the call fails.

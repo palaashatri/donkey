@@ -218,6 +218,11 @@ struct IrStatement {
   /// declared it (`musl-libc 1.2.4`). The callee is an import with no body here, so the call is
   /// not executed and its caller is not Complete; `signature_inferred` stays false.
   std::string signature_source;
+  /// Only for Call (G21-T7): the C library function the call runs, when its target is an import
+  /// shown to bind to the C library and the function has an executable model
+  /// (donkey/ir/libc_models.h). The arguments then come from the function's C prototype (not an
+  /// inference), the result is `dest`, and the call may change every caller-saved register.
+  std::string call_model;
 };
 
 struct IrBlock {
