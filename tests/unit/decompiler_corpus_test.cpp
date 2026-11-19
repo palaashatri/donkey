@@ -767,13 +767,12 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
   // Calls of C library functions with executable models (G21-T7): the import binds to the C
   // library in this program's scope, the call carries the function's prototype, and the
   // interpreter runs the model. Measured Complete and verified under GCC 13.3 on Linux x86-64 at
-  // every level, except c_lib_memcpy_sum above -O0, which zeroes a caller-saved register with
-  // `xor ecx, ecx` after the call (read as a read of a clobbered register, so Partial).
+  // every level: all 44 (11 functions, 4 levels). c_lib_memcpy_sum above -O0 zeroes a caller-saved
+  // register with `xor ecx, ecx` after the call, which reads no value of ecx.
   if (gcc13_linux) {
     std::size_t checked = 0;
     for (const Outcome& o : outcomes) {
-      if (std::string_view(o.function).rfind("c_lib_", 0) != 0 ||
-          (o.function == "c_lib_memcpy_sum" && o.level != "O0")) {
+      if (std::string_view(o.function).rfind("c_lib_", 0) != 0) {
         continue;
       }
       ++checked;
@@ -781,7 +780,7 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
       EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
     }
-    EXPECT_GE(checked, 41U);
+    EXPECT_EQ(checked, 44U);
   }
 #endif
 }
