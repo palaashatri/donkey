@@ -69,7 +69,7 @@ after the first measured baseline. A threshold is never lowered to make a row pa
 
 ## 3. Scorecard
 
-State on 2026-11-17: the work integrated on 2026-11-13 (ledger rows G09, G10, G12, G14, G15,
+State on 2026-11-19: the work integrated on 2026-11-13 (ledger rows G09, G10, G12, G14, G15,
 G16 and G17), and the changes below. The measured baseline of the audit that began the Wave 1 work is in
 [`AUDIT.md`](AUDIT.md) (measured on `main` at `1a92abf`). On 2026-11-14 the goal 1 to 10 work on
 branch `claude/funny-meitner-cpc7oc`, merged into `main` with this change, changed the evidence in
@@ -77,7 +77,7 @@ rows 4, 6, 7 and 22 as described there. On 2026-11-15 G04-T5 (goto structuring) 
 and the G22-T0 plan corrected row 8: the CLI records prototype applications, and nothing applies
 them to code yet. G21-T2 (call summaries) changed row 6: calls resolve through callees whose own
 calls resolve, and Complete is 184 of the 1,986 sampled functions. A later fix found 7 of those
-Complete with a wrong meaning (they read thread-local storage as a fixed address), so Complete is 177. On 2026-11-17 G24-T4 (import stubs, GOT and IAT calls, thunks named) changed row 4. The IDA Pro and Ghidra columns are short
+Complete with a wrong meaning (they read thread-local storage as a fixed address), so Complete is 177. On 2026-11-17 G24-T4 (import stubs, GOT and IAT calls, thunks named) changed row 4. On 2026-11-19 the zeroing idiom (a `xor r, r` or `sub r, r` reads no value of `r`), with G21-T7's C library models, changed row 6: Complete is 183. The IDA Pro and Ghidra columns are short
 summaries from their public documentation; check the current documentation before relying on a
 detail. "Gaps" names the ledger entries that move the row.
 
