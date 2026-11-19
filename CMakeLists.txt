@@ -17,6 +17,10 @@ option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
 option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
+# Seconds every registered test may run at least (0: each test's own limit). For a host whose
+# clock keeps running while the whole machine is stopped, such as the emulated FreeBSD aarch64
+# VM in CI: a stop of half an hour is otherwise charged to whichever test is running.
+set(DONKEY_TEST_TIMEOUT_FLOOR 0 CACHE STRING "Lower bound on every test's timeout, in seconds")
 option(DONKEY_STATIC_RUNTIME
        "Link the C/C++ runtime statically (self-contained release executables)" OFF)
 
@@ -147,6 +151,7 @@ donkey_apply_warnings(donkey_analysis)
 add_library(donkey_ir STATIC
   src/ir/abi.cpp
   src/ir/eval.cpp
+  src/ir/libc_models.cpp
   src/ir/ir.cpp
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp

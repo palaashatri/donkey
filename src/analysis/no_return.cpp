@@ -151,40 +151,52 @@ bool is_runtime_library(std::string_view name) noexcept {
   return dll_provides(name, "ExitProcess") || dll_provides(name, "abort");
 }
 
-std::map<std::uint64_t, std::string> bind_no_return_imports(
-    const BinaryImage& image, std::span<const std::byte> data,
-    const std::map<std::uint64_t, std::string>& stubs,
-    const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search,
-    std::vector<std::string>* unverified) {
-  std::map<std::uint64_t, std::string> marks;
-  // The provenance of each import name that is bound to a runtime library, or nothing.
-  std::map<std::string, std::string> bound;
-  auto consider = [&](const std::string& name) {
-    if (bound.contains(name) || !is_known_no_return_name(name)) {
-      return;
-    }
-    bound.emplace(name, std::string());
+namespace {
+
+/// Whether a PE DLL is a Microsoft C runtime: every C library function it exports behaves as ISO C
+/// says.
+bool is_c_runtime_dll(std::string_view dll) {
+  const std::string l = lower(dll);
+  return l == "msvcrt.dll" || l == "ucrtbase.dll" || l == "ucrtbased.dll" ||
+         starts_with(l, "api-ms-win-crt-") || (starts_with(l, "msvcr") && ends_with(l, ".dll"));
+}
+
+}  // namespace
+
+RuntimeImportBindings bind_runtime_imports(const BinaryImage& image,
+                                           std::span<const std::byte> data,
+                                           const std::map<std::uint64_t, std::string>& stubs,
+                                           const std::map<std::uint64_t, std::string>& slots,
+                                           const ElfLibrarySearch& search,
+                                           std::vector<std::string>* unverified) {
+  RuntimeImportBindings out;
+  // For each import name: the provenance of its no-return mark and of its C library binding, or
+  // nothing.
+  struct Bound {
+    std::string no_return;
+    std::string c_library;
   };
+  std::map<std::string, Bound> bound;
   for (const auto& [address, name] : stubs) {
-    consider(name);
+    bound.emplace(name, Bound{});
   }
   for (const auto& [address, name] : slots) {
-    consider(name);
+    bound.emplace(name, Bound{});
   }
   if (bound.empty()) {
-    return marks;
+    return out;
   }
   if (image.format == BinaryFormat::Elf) {
     // An ELF import is bound where the dynamic loader binds it: the first library of the load
     // scope that defines the name in a form the reference accepts. Every reference of the name
-    // (each version it is imported with) must bind to a runtime library of the name's kind; a
-    // library the walk cannot find or read before the binding leaves the name unmarked.
+    // (each version it is imported with) must bind to a library of the right kind; a library the
+    // walk cannot find or read before the binding leaves the name unbound.
     auto references = read_import_references(image, data);
     if (!references) {
       if (unverified != nullptr) {
         unverified->push_back("the symbol version table: " + references.diagnostic().message);
       }
-      return marks;  // an unreadable version table: no mark
+      return out;  // an unreadable version table: nothing is bound
     }
     // Each (version, hidden) form a name is imported with: every one must bind.
     std::map<std::string, std::set<std::pair<std::string, bool>>> versions_of;
@@ -202,28 +214,30 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
     for (auto& [name, provenance] : bound) {
       const KnownName* entry = known(name);
       const auto versions = versions_of.find(name);
-      if (entry == nullptr || versions == versions_of.end()) {
+      if (versions == versions_of.end()) {
         continue;
       }
       if (unresolved.contains(name)) {
-        if (unverified != nullptr) {
+        if (unverified != nullptr && entry != nullptr) {
           unverified->push_back(name + ": its symbol version could not be read");
         }
         continue;
       }
       std::string evidence;
-      bool proven = true;
+      bool no_return = entry != nullptr;  // still proven for the fixed list's kind of library
+      bool c_library = true;              // still proven to be the C library's
       for (const auto& [version, hidden] : versions->second) {
         const ElfBinding binding = scope.lookup(name, version, hidden);
         if (binding.outcome == ElfBinding::Outcome::Unknown) {
-          if (unverified != nullptr) {
+          if (unverified != nullptr && entry != nullptr) {
             unverified->push_back(name + ": " + binding.reason);
           }
-          proven = false;
+          no_return = c_library = false;
           break;
         }
-        if (binding.outcome != ElfBinding::Outcome::Bound || binding.library == 0) {
-          proven = false;
+        if (binding.outcome != ElfBinding::Outcome::Bound ||
+            binding.library == scope.image_index()) {
+          no_return = c_library = false;
           break;
         }
         // The library's own SONAME is only what it says about itself: the name the executable's
@@ -231,17 +245,27 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
         // library that calls itself libc.so.6 under another name is not taken for the C library.
         const ElfScopeLibrary& library = scope.libraries()[binding.library];
         const std::string loaded_as = library.name.substr(library.name.find_last_of('/') + 1);
-        if (!elf_library_provides(loaded_as, entry->provider) ||
-            (!library.soname.empty() && !elf_library_provides(library.soname, entry->provider))) {
-          proven = false;
+        const auto provides = [&](Provider provider) {
+          return elf_library_provides(loaded_as, provider) &&
+                 (library.soname.empty() || elf_library_provides(library.soname, provider));
+        };
+        no_return = no_return && provides(entry->provider);
+        c_library = c_library && provides(Provider::C);
+        if (!no_return && !c_library) {
           break;
         }
         const std::string& library_name = library.soname.empty() ? loaded_as : library.soname;
         evidence += (version.empty() ? std::string(" unversioned") : " version:" + version) +
                     " bound:" + library_name + " path:" + library.path;
       }
-      if (proven && !evidence.empty()) {
-        provenance = "known-name:" + name + evidence;
+      if (evidence.empty()) {
+        continue;
+      }
+      if (no_return) {
+        provenance.no_return = "known-name:" + name + evidence;
+      }
+      if (c_library) {
+        provenance.c_library = "c-library:" + name + evidence;
       }
     }
   } else if (image.format == BinaryFormat::Pe) {
@@ -258,22 +282,41 @@ std::map<std::uint64_t, std::string> bind_no_return_imports(
         continue;
       }
       const std::string& dll = *found->second.begin();
-      if (dll_provides(dll, name)) {
-        provenance = "known-name:" + name + " dll:" + dll;
+      if (is_known_no_return_name(name) && dll_provides(dll, name)) {
+        provenance.no_return = "known-name:" + name + " dll:" + dll;
+      }
+      if (is_c_runtime_dll(dll)) {
+        provenance.c_library = "c-library:" + name + " dll:" + dll;
       }
     }
   }
-  for (const auto& [address, name] : stubs) {
-    if (const auto it = bound.find(name); it != bound.end() && !it->second.empty()) {
-      marks.emplace(address, it->second);
+  const auto mark = [&](std::uint64_t address, const std::string& name) {
+    const auto it = bound.find(name);
+    if (it == bound.end()) {
+      return;
     }
+    if (!it->second.no_return.empty()) {
+      out.no_return.emplace(address, it->second.no_return);
+    }
+    if (!it->second.c_library.empty()) {
+      out.c_library.emplace(address, BoundImport{name, it->second.c_library});
+    }
+  };
+  for (const auto& [address, name] : stubs) {
+    mark(address, name);
   }
   for (const auto& [address, name] : slots) {
-    if (const auto it = bound.find(name); it != bound.end() && !it->second.empty()) {
-      marks.emplace(address, it->second);
-    }
+    mark(address, name);
   }
-  return marks;
+  return out;
+}
+
+std::map<std::uint64_t, std::string> bind_no_return_imports(
+    const BinaryImage& image, std::span<const std::byte> data,
+    const std::map<std::uint64_t, std::string>& stubs,
+    const std::map<std::uint64_t, std::string>& slots, const ElfLibrarySearch& search,
+    std::vector<std::string>* unverified) {
+  return bind_runtime_imports(image, data, stubs, slots, search, unverified).no_return;
 }
 
 }  // namespace donkey

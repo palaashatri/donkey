@@ -40,7 +40,13 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   on ELF by finding the libraries the dynamic loader would load, in its order (`ElfLoadScope`: ld.so.preload,
   DT_NEEDED breadth first, RPATH/RUNPATH/ld.so.conf/default directories, under `--sysroot`, plus `--library-path`)
   and binding each reference (its symbol version read by a bounded reader, `fuzz_elf_versions`) by glibc's lookup
-  rules, and on PE by the import's DLL. A library that cannot be found before the binding leaves the call
+  rules, and on PE by the import's DLL. An ELF shared library's references bind first in the global scope of
+  the program that loads it, so its calls are marked only with that program (`--program`); without it they
+  stay unmarked. Its local scope follows glibc's dlopen: a need the program already loaded is that object,
+  the executable's DT_RPATH is searched, and DT_SYMBOLIC puts the library first (each checked against glibc's
+  loader, `ElfLoadScope.ALibrarys*`, `ElfLoadScope.ASymbolicLibraryLooksItselfUpFirst`). `link` analyses
+  each input with its executable as that program; its own import bindings and call reports come from the
+  inputs it is given, and it prints no no-return marks. A library that cannot be found before the binding leaves the call
   unmarked (`analysis.no_return_unverified`, and the analysis is Partial). `functions --json` gives each mark
   its reason (`no_return_reason`); an ELF import mark names the bound library and the file it was found in,
   a PE import mark names its DLL. The ELF search models glibc's (`/etc/ld.so.cache`, inherited DT_RPATH,
@@ -67,6 +73,15 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   tested (`Ir.CallCarries*`, `Ir.CallerSaved*`, `Ir.DirectCallTo*`). Six call-heavy corpus functions
   (`c_call_*`) are Complete and verified at -O0, -O2, -O3 and -O3-x86-64-v2 (48 vectors each). The
   CLI test `cli.decompile_prints_call_arguments` shows a call with its arguments.
+- C library calls (G21-T7): on x86-64, a call of an import shown to bind to the C library (the
+  G24-T3 load scope on ELF, with `--program` for a shared library; a C runtime DLL on PE) to
+  `strlen`, `strnlen`, `memchr`, `strchr`, `strrchr`, `strspn`, `strcspn`, `memcpy`, `memmove` or
+  `memset` carries the function's prototype, and the interpreter runs an executable model of it.
+  Every model is compared with the host C library on random inputs
+  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, 43 of the 44 `c_lib_*`
+  corpus results are Complete and verified (48 vectors each); `c_lib_memcpy_sum` above -O0 is
+  Partial (a zeroing `xor` after the call). Not tested on Windows, macOS (Mach-O imports are not
+  bound) or FreeBSD hosts.
 - Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
   `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
@@ -74,7 +89,7 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
 - Measured on a fixed list of 1,986 system-binary functions (`tools/audit/`, `docs/AUDIT.md`): 0
   InvalidIR and 0 Unsupported, 177 Complete (8.9%; 184 before the fs/gs fix, 7 of them wrong); before G04-T5, 985 labelled (49.6%, under the 52% bar).
 - Structuring (G04-T5): on the same 1,986 functions no function is printed as labelled
-  blocks (985 before G04-T5). 1,073 print without a goto and 913 with gotos (13,713 in all, 15,712
+  blocks (985 before G04-T5). 1,073 print without a goto and 913 with gotos (13,758 in all, 15,712
   on `main` before W1b copied small blocks in place of gotos and printed two tests as one `&&` or `||`
   condition; the largest function has 385). Every printed
   structure is checked edge by edge against the IR before it is shown (no candidate was refused on the

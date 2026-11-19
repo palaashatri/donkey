@@ -405,6 +405,40 @@ TEST(Analysis, AVersionedImportBoundToAnEarlierUnversionedDefinitionIsNotMarked)
       << clean_stub->no_return_reason;
 }
 
+// A shared library's references bind first in the global scope of the program that loads it
+// (glibc's _dl_lookup_symbol_x: the program's search list, then the library's local scope). So the
+// library alone proves nothing: without the program its abort call is not marked, and the analysis
+// says why. With the program it is loaded by, the call binds to the C library and is marked.
+TEST(Analysis, ALibrarysImportIsBoundOnlyInTheScopeOfItsProgram) {
+  const Analyzed alone = analyze_fixture("libaborts.so.1", "loadscope");
+  EXPECT_TRUE(alone.analysis.no_return.empty());
+  const auto diagnostic = std::find_if(
+      alone.analysis.diagnostics.begin(), alone.analysis.diagnostics.end(),
+      [](const donkey::Diagnostic& d) { return d.code == "analysis.no_return_unverified"; });
+  ASSERT_NE(diagnostic, alone.analysis.diagnostics.end());
+  EXPECT_NE(diagnostic->message.find("abort: a shared library's references bind first in the "
+                                     "scope of the program that loads it"),
+            std::string::npos)
+      << diagnostic->message;
+
+  auto loaded = donkey::load_binary(fixture("loadscope", "libaborts.so.1"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  AnalysisOptions options;
+  options.library_search = fixture_libraries(donkey::Architecture::X86_64);
+  options.library_search.paths.push_back(fixture("loadscope", "clean"));
+  options.library_search.program = fixture("loadscope", "steal_consumer");
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, options);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  const auto abort_stub =
+      std::find_if(analysis.value().functions.begin(), analysis.value().functions.end(),
+                   [](const donkey::Function& f) { return f.import_name == "abort"; });
+  ASSERT_NE(abort_stub, analysis.value().functions.end());
+  EXPECT_TRUE(abort_stub->no_return);
+  EXPECT_NE(abort_stub->no_return_reason.find("version:GLIBC_2.2.5 bound:libc.so.6"),
+            std::string::npos)
+      << abort_stub->no_return_reason;
+}
+
 // A library the walk cannot find before any definition leaves the binding unknown: no mark, and
 // the analysis says which import and why.
 TEST(Analysis, AnImportWhoseLibrariesCannotBeFoundIsNotMarked) {
@@ -1019,6 +1053,229 @@ TEST(ElfLoadScope, InheritsTheRpathOfTheObjectsThatLoadedTheRequester) {
   EXPECT_EQ(scope.libraries()[4].path, fixture("loadscope", "chain/inner/libsteal.so.1"));
   // Every library was found and read, so a name none defines is known not to be defined.
   EXPECT_EQ(scope.lookup("no_such_name", "").outcome, donkey::ElfBinding::Outcome::NotDefined);
+}
+
+// A shared library is looked up in the program's global scope first, then in its own local scope.
+// steal/libsteal.so.1 defines an unversioned exit. Rooted at the library, exit binds to its own
+// definition; loaded by steal_consumer (whose global scope is the program, the libsteal.so.1 it
+// was linked with, then libc.so.6), exit binds to libc.so.6, before the library's own copy.
+TEST(ElfLoadScope, ALibraryIsLookedUpInItsProgramsScopeFirst) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  const std::string library = fixture("loadscope", "steal/libsteal.so.1");
+
+  // Without the program nothing is known: the program comes first and is not given.
+  const donkey::ElfLoadScope alone = scope_of(library, search);
+  EXPECT_EQ(alone.image_index(), 1U);
+  const donkey::ElfBinding unknown = alone.lookup("exit", "");
+  EXPECT_EQ(unknown.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(unknown.reason.find("no program was given"), std::string::npos) << unknown.reason;
+
+  search.program = fixture("loadscope", "steal_consumer");
+  const donkey::ElfLoadScope scope = scope_of(library, search);
+  // The program, its libsteal.so.1 and libc.so.6, then the library. The library's own need,
+  // libc.so.6, is the one the program already loaded: it is not read again.
+  ASSERT_EQ(scope.libraries().size(), 4U);
+  EXPECT_EQ(scope.libraries()[1].path, fixture("loadscope", "clean/libsteal.so.1"));
+  EXPECT_EQ(scope.libraries()[2].name, "libc.so.6");
+  EXPECT_EQ(scope.image_index(), 3U);
+  EXPECT_EQ(scope.libraries()[3].path, library);
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "");
+  ASSERT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Bound) << exit_binding.reason;
+  EXPECT_EQ(exit_binding.library, 2U);  // libc.so.6 of the global scope, not the library's exit
+  // The library defines steal_marker too, but the program's libsteal.so.1 comes first.
+  const donkey::ElfBinding marker = scope.lookup("steal_marker", "");
+  ASSERT_EQ(marker.outcome, donkey::ElfBinding::Outcome::Bound) << marker.reason;
+  EXPECT_EQ(marker.library, 1U);
+
+  // The program is what the caller names, whatever its flags: an ET_DYN without DF_1_PIE (a PIE
+  // linked before the flag existed reads the same) is taken as the program, not refused.
+  search.program = fixture("loadscope", "chain/liba.so.1");
+  const donkey::ElfLoadScope named = scope_of(library, search);
+  ASSERT_GE(named.libraries().size(), 2U);
+  EXPECT_EQ(named.libraries()[0].path, search.program);
+  EXPECT_NE(named.libraries()[0].name, "(the program that loads this library)");
+  EXPECT_EQ(named.libraries()[named.image_index()].path, library);
+
+  // A library named as its own program is analysed as the program: its own exit is found first.
+  search.program = library;
+  const donkey::ElfLoadScope itself = scope_of(library, search);
+  EXPECT_EQ(itself.image_index(), 0U);
+  const donkey::ElfBinding own_exit = itself.lookup("exit", "");
+  ASSERT_EQ(own_exit.outcome, donkey::ElfBinding::Outcome::Bound) << own_exit.reason;
+  EXPECT_EQ(own_exit.library, 0U);
+}
+
+// A library's local scope follows glibc's dlopen (tests/fixtures/loadscope/PROVENANCE.md, "plugin",
+// where glibc's loader is the oracle). plugin/program has DT_RPATH $ORIGIN/a and needs
+// libdep.so.1, which it finds in a/ (dep_a only).
+namespace {
+
+donkey::ElfLibrarySearch plugin_search() {
+  donkey::ElfLibrarySearch search;
+  search.system_directories = false;  // everything is found through the fixtures' own paths
+  search.program = fixture("loadscope", "plugin/program");
+  return search;
+}
+
+}  // namespace
+
+// libplugin_runpath.so.1 (DT_RUNPATH $ORIGIN/b) needs libdep.so.1. glibc gives it the libdep.so.1
+// the program already loaded, and never opens b/libdep.so.1, the only one that defines `marker`.
+TEST(ElfLoadScope, ALibrarysNeedTheProgramAlreadyLoadedIsNotSearchedAgain) {
+  const donkey::ElfLoadScope scope =
+      scope_of(fixture("loadscope", "plugin/libplugin_runpath.so.1"), plugin_search());
+  for (const donkey::ElfScopeLibrary& library : scope.libraries()) {
+    EXPECT_EQ(library.path.find("/b/"), std::string::npos) << library.path;
+  }
+  EXPECT_EQ(scope.lookup("marker", "").outcome, donkey::ElfBinding::Outcome::NotDefined);
+  const donkey::ElfBinding dep = scope.lookup("dep_a", "");
+  ASSERT_EQ(dep.outcome, donkey::ElfBinding::Outcome::Bound) << dep.reason;
+  EXPECT_EQ(scope.libraries()[dep.library].path, fixture("loadscope", "plugin/a/libdep.so.1"));
+  // A name only the library defines is found in its local scope, after the global scope.
+  const donkey::ElfBinding own = scope.lookup("plugin_runpath", "");
+  ASSERT_EQ(own.outcome, donkey::ElfBinding::Outcome::Bound) << own.reason;
+  EXPECT_EQ(own.library, scope.image_index());
+}
+
+// libplugin_rpath.so.1 has no search path and needs libhelper.so.1, which only the program's
+// DT_RPATH directory holds: glibc finds it there ("RPATH from file" the executable). When a library
+// of the program's scope has a DT_RPATH of its own, the object that called dlopen could pass that
+// on too, and which object that is is not known: the search is Unknown.
+TEST(ElfLoadScope, ALibrarysSearchTakesTheExecutablesRpath) {
+  const donkey::ElfLoadScope scope =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), plugin_search());
+  const donkey::ElfBinding helper = scope.lookup("helper", "");
+  ASSERT_EQ(helper.outcome, donkey::ElfBinding::Outcome::Bound) << helper.reason;
+  EXPECT_EQ(scope.libraries()[helper.library].path,
+            fixture("loadscope", "plugin/a/libhelper.so.1"));
+
+  const Scratch root;
+  const fs::path program = root.place("plugin/program", "program");
+  root.place("plugin/rpath/libdep.so.1", "a/libdep.so.1");  // DT_RPATH /opt/vendor
+  root.place("plugin/a/libhelper.so.1", "a/libhelper.so.1");
+  const fs::path plugin = root.place("plugin/libplugin_rpath.so.1", "libplugin_rpath.so.1");
+  donkey::ElfLibrarySearch search = plugin_search();
+  search.program = program.string();
+  const donkey::ElfBinding unknown = scope_of(plugin, search).lookup("helper", "");
+  EXPECT_EQ(unknown.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(unknown.reason.find("loads the library with dlopen is not known"), std::string::npos)
+      << unknown.reason;
+}
+
+// libplugin_symbolic.so.1 is linked with -Bsymbolic and defines dep_a itself: its own definition
+// comes first (glibc's oracle: plugin_symbolic() returns 5, its own dep_a, where the program's
+// gives 1). The DT_RUNPATH plugin, without DT_SYMBOLIC, binds dep_a to the program's libdep.so.1.
+TEST(ElfLoadScope, ASymbolicLibraryLooksItselfUpFirst) {
+  const donkey::ElfLoadScope symbolic =
+      scope_of(fixture("loadscope", "plugin/libplugin_symbolic.so.1"), plugin_search());
+  const donkey::ElfBinding own = symbolic.lookup("dep_a", "");
+  ASSERT_EQ(own.outcome, donkey::ElfBinding::Outcome::Bound) << own.reason;
+  EXPECT_EQ(own.library, symbolic.image_index());
+  const donkey::ElfLoadScope plain =
+      scope_of(fixture("loadscope", "plugin/libplugin_runpath.so.1"), plugin_search());
+  EXPECT_NE(plain.lookup("dep_a", "").library, plain.image_index());
+}
+
+// The program's scope and the library's local scope share one limit: with room for the program and
+// its libdep.so.1 only, the library's own need is not read, and a name it would define is Unknown.
+TEST(ElfLoadScope, AProgramAndItsLibraryShareTheLibraryLimit) {
+  donkey::ElfLibrarySearch search = plugin_search();
+  search.library_limit = 2;
+  const donkey::ElfLoadScope scope =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), search);
+  const donkey::ElfBinding helper = scope.lookup("helper", "");
+  EXPECT_EQ(helper.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(helper.reason.find("more libraries than the limit"), std::string::npos)
+      << helper.reason;
+  // The program and its libdep.so.1 take the whole limit, so the library itself is past it: it is
+  // in the scope by name but not read, and its own definition is not known either.
+  EXPECT_EQ(scope.libraries()[scope.image_index()].path,
+            fixture("loadscope", "plugin/libplugin_rpath.so.1"));
+  const donkey::ElfBinding own = scope.lookup("plugin_rpath", "");
+  EXPECT_EQ(own.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(own.reason.find("more libraries than the limit"), std::string::npos) << own.reason;
+  // With one more, the library is read and its own definition binds.
+  search.library_limit = 3;
+  const donkey::ElfBinding read =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), search)
+          .lookup("plugin_rpath", "");
+  EXPECT_EQ(read.outcome, donkey::ElfBinding::Outcome::Bound) << read.reason;
+}
+
+// A DT_SYMBOLIC library past the shared limit still comes first in its own lookups: dep_a, which it
+// defines and the program's libdep.so.1 defines too, is not known rather than bound to libdep.
+TEST(ElfLoadScope, ASymbolicLibraryPastTheLimitIsStillLookedUpFirst) {
+  donkey::ElfLibrarySearch search = plugin_search();
+  search.library_limit = 2;
+  const donkey::ElfBinding dep_a =
+      scope_of(fixture("loadscope", "plugin/libplugin_symbolic.so.1"), search).lookup("dep_a", "");
+  EXPECT_EQ(dep_a.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(dep_a.reason.find("more libraries than the limit"), std::string::npos) << dep_a.reason;
+}
+
+// A limit of 0 reads nothing, not even the program: every lookup is not known.
+TEST(ElfLoadScope, ALimitOfZeroReadsNothing) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  search.library_limit = 0;
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "steal_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 1U);
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(exit_binding.reason.find("more libraries than the limit"), std::string::npos)
+      << exit_binding.reason;
+  // A library and its program, with a limit of 0: neither is read.
+  donkey::ElfLibrarySearch plugin = plugin_search();
+  plugin.library_limit = 0;
+  EXPECT_EQ(scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), plugin)
+                .lookup("plugin_rpath", "")
+                .outcome,
+            donkey::ElfBinding::Outcome::Unknown);
+  // The program is not even opened: one that does not exist gives the limit's reason, not a read
+  // failure.
+  plugin.program = fixture("loadscope", "plugin/no-such-program");
+  const donkey::ElfBinding unopened =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), plugin).lookup("helper", "");
+  EXPECT_EQ(unopened.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(unopened.reason.find("more libraries than the limit"), std::string::npos)
+      << unopened.reason;
+  EXPECT_EQ(unopened.reason.find("could not be read"), std::string::npos) << unopened.reason;
+}
+
+// The limit counts every object of the scope, the program included: steal_consumer needs
+// libsteal.so.1 and libc.so.6, and with a limit of 2 only libsteal.so.1 is read. `exit`, which
+// only libc.so.6 defines, is then not known.
+TEST(ElfLoadScope, TheLibraryLimitCountsTheProgram) {
+  donkey::ElfLibrarySearch search = fixture_libraries(donkey::Architecture::X86_64);
+  search.paths.push_back(fixture("loadscope", "clean"));
+  search.library_limit = 2;
+  const donkey::ElfLoadScope scope = scope_of(fixture("loadscope", "steal_consumer"), search);
+  ASSERT_EQ(scope.libraries().size(), 3U);  // the program, libsteal.so.1 and the limit's marker
+  EXPECT_EQ(scope.libraries()[1].path, fixture("loadscope", "clean/libsteal.so.1"));
+  const donkey::ElfBinding exit_binding = scope.lookup("exit", "GLIBC_2.2.5");
+  EXPECT_EQ(exit_binding.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(exit_binding.reason.find("more libraries than the limit"), std::string::npos)
+      << exit_binding.reason;
+  search.library_limit = 3;
+  EXPECT_EQ(scope_of(fixture("loadscope", "steal_consumer"), search)
+                .lookup("exit", "GLIBC_2.2.5")
+                .outcome,
+            donkey::ElfBinding::Outcome::Bound);
+}
+
+// A program the caller already holds is used as it is, not read again by its path: here the path
+// names a file that does not exist.
+TEST(ElfLoadScope, AProgramInMemoryIsNotReadAgain) {
+  auto program = donkey::load_binary(fixture("loadscope", "plugin/program"));
+  ASSERT_TRUE(program.has_value()) << program.diagnostic().message;
+  donkey::ElfLibrarySearch search = plugin_search();
+  search.program = fixture("loadscope", "plugin/no-such-program");
+  search.program_image = &program.value().image;
+  search.program_data = program.value().data;
+  const donkey::ElfLoadScope scope =
+      scope_of(fixture("loadscope", "plugin/libplugin_rpath.so.1"), search);
+  EXPECT_EQ(scope.lookup("helper", "").outcome, donkey::ElfBinding::Outcome::Bound);
 }
 
 // $ORIGIN of an executable inside the sysroot is a path of the target: its RUNPATH
