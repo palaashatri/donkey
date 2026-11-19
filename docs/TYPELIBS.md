@@ -22,14 +22,18 @@ read, not applied: no code gets a type from a library yet (G22-T3 does that).
 - Repeated records: `--source-file 'PATH SHA256'`, `--macro NAME=VALUE`, `--note TEXT`.
 
 The generator writes the other header values itself: `pointer_size` (8), `generator`,
-`body_sha256`, `declarations` and one `skipped` record per declaration it did not keep. For example:
+`body_sha256`, `declarations` and one `skipped` record per declaration it did not keep. For example,
+for a header `mylib.h` preprocessed into `all.i`, with its licence in `LICENSE`:
 
-```
+```sh
+source_hash=$(sha256sum all.i | cut -d' ' -f1)
+licence_hash=$(sha256sum LICENSE | cut -d' ' -f1)
+header_hash=$(sha256sum mylib.h | cut -d' ' -f1)
 donkey-cli typelib make all.i --out mine.dtl \
   --library mylib --library-version 1.0 --platform linux --architecture x86_64 --abi sysv \
-  --data-model LP64 --char-signed true --source "mylib 1.0 headers" --source-sha256 <64 hex> \
-  --licence MIT --licence-file LICENSE --licence-sha256 <64 hex> --command "make-mylib.sh" \
-  --preprocessor "gcc 13.3.0 -E -P" --created 2026-11-18 --source-file "mylib.h <64 hex>"
+  --data-model LP64 --char-signed true --source "mylib 1.0 headers" --source-sha256 "$source_hash" \
+  --licence MIT --licence-file LICENSE --licence-sha256 "$licence_hash" --command "make-mylib.sh" \
+  --preprocessor "gcc 13.3.0 -E -P" --created 2026-11-18 --source-file "mylib.h $header_hash"
 ```
 
 The input is the preprocessor's output: a script runs the
