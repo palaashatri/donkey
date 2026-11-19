@@ -11,6 +11,7 @@
 #include <limits>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -312,6 +313,35 @@ TEST(Project, RejectsAnnotationsForMissingImageAndOverlongText) {
                                                  0x400100, too_long);
   ASSERT_FALSE(overlong.has_value());
   EXPECT_EQ(overlong.diagnostic().code, "project.annotation_too_long");
+}
+
+// Another connection holding the file's lock for a moment (the desktop app, a second CLI run, a
+// closing connection's checkpoint) makes opening wait, not fail with "database is locked".
+TEST(Project, OpeningWaitsForAnotherConnectionsLock) {
+  TempPath path("busy");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  }
+  sqlite3* other = nullptr;
+  ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &other, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+  // In rollback-journal mode an exclusive transaction keeps every other connection out, readers
+  // included.
+  ASSERT_EQ(sqlite3_exec(other, "PRAGMA journal_mode=DELETE", nullptr, nullptr, nullptr),
+            SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(other, "BEGIN EXCLUSIVE", nullptr, nullptr, nullptr), SQLITE_OK);
+  std::thread release([other] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    sqlite3_exec(other, "COMMIT", nullptr, nullptr, nullptr);
+  });
+  const auto started = std::chrono::steady_clock::now();
+  auto reopened = Project::open(path.str());
+  const auto waited = std::chrono::steady_clock::now() - started;
+  release.join();
+  sqlite3_close(other);
+  ASSERT_TRUE(reopened.has_value())
+      << reopened.diagnostic().code << ": " << reopened.diagnostic().message;
+  EXPECT_GE(waited, std::chrono::milliseconds(200));  // it waited for the lock, not around it
 }
 
 TEST(Project, MigratesVersionOneDatabaseForward) {
