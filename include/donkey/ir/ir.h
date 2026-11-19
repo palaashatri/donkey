@@ -214,6 +214,11 @@ struct IrStatement {
   /// Complete and makes no calls, so these are every register it can change; a caller-saved
   /// register outside this set keeps its value across the call (the clobber check uses this).
   std::vector<std::string> call_writes;
+  /// Only for Call (G21-T7): the C library function the call runs, when its target is an import
+  /// shown to bind to the C library and the function has an executable model
+  /// (donkey/ir/libc_models.h). The arguments then come from the function's C prototype (not an
+  /// inference), the result is `dest`, and the call may change every caller-saved register.
+  std::string call_model;
 };
 
 struct IrBlock {

@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <limits>
@@ -52,7 +53,10 @@ using donkey::IrCallingConvention;
 /// Argument kinds: i int32, u uint32, l int64, U uint64, c int8, s int16,
 /// b uint8, w uint16, n element count (0..64), P/Q pointers to 64 input
 /// ints, B pointer to 256 input bytes, O pointer to 64 output ints, S pointer
-/// to a struct corpus_point (read and written). Return: i u l U or v (void).
+/// to a struct corpus_point (read and written), Z pointer to 256 bytes of text
+/// with a NUL inside (read and written), Y pointer to a short NUL-terminated
+/// set of text characters, a a text character or 0 (G21-T7). Return: i u l U
+/// or v (void).
 struct CorpusFunction {
   const char* name;
   char returns;
@@ -104,6 +108,17 @@ constexpr CorpusFunction kCorpus[] = {
     {"c_call_wide", 'l', "ll"},
     {"c_call_chain", 'i', "ii"},
     {"c_call_nested", 'i', "ii"},
+    {"c_lib_strlen", 'U', "Z"},
+    {"c_lib_strlen_scaled", 'l', "Zl"},
+    {"c_lib_strchr_index", 'l', "Za"},
+    {"c_lib_strrchr_index", 'l', "Za"},
+    {"c_lib_memchr_index", 'l', "Zan"},
+    {"c_lib_strspn", 'U', "ZY"},
+    {"c_lib_strcspn", 'U', "ZY"},
+    {"c_lib_count_words", 'U', "Z"},
+    {"c_lib_memcpy_sum", 'l', "OPn"},
+    {"c_lib_memset_first", 'i', "Oin"},
+    {"c_lib_memmove_shift", 'i', "Zn"},
     {"c_many_args", 'l', "lllllllll"},
     {"c_narrow_args", 'i', "csbw"},
     {"c_add128_hi", 'U', "UUUU"},
@@ -147,6 +162,8 @@ constexpr std::uint64_t kQ = 0x10010000ULL;
 constexpr std::uint64_t kB = 0x10020000ULL;
 constexpr std::uint64_t kO = 0x10030000ULL;
 constexpr std::uint64_t kS = 0x10040000ULL;
+constexpr std::uint64_t kZ = 0x10050000ULL;
+constexpr std::uint64_t kY = 0x10060000ULL;
 
 struct CorpusPoint {  // must match struct corpus_point
   std::int32_t x;
@@ -211,6 +228,8 @@ std::uint64_t scalar(char kind, Rng& rng, int vector) {
       return static_cast<std::uint16_t>(edge ? e : rng.next());
     case 'n':
       return rng.next() % 65;
+    case 'a':
+      return static_cast<std::uint8_t>(" abcd\0"[rng.next() % 6]);
     default:
       return 0;
   }
@@ -248,6 +267,23 @@ struct Outcome {
   int vectors = 0;
 };
 
+/// Analysis options for a corpus library. Each library is a shared library this test process
+/// loads, so its imports bind first in this program's scope (G24-T3): the program is this test
+/// executable. Where its path is not known the C library bindings are unknown, and the calls stay
+/// Partial.
+donkey::AnalysisOptions corpus_analysis_options() {
+  donkey::AnalysisOptions options;
+  std::error_code error;
+  const std::filesystem::path self = std::filesystem::canonical("/proc/self/exe", error);
+  if (!error) {
+    options.library_search.program = self.string();
+  } else if (!testing::internal::GetArgvs().empty()) {
+    options.library_search.program =
+        std::filesystem::absolute(testing::internal::GetArgvs().front(), error).string();
+  }
+  return options;
+}
+
 IrCallingConvention host_convention() {
   // Windows on Arm uses AAPCS64 for integer arguments, like every other
   // AArch64 platform; only Windows x64 has its own convention.
@@ -272,6 +308,8 @@ struct VectorInputs {
   std::vector<std::uint8_t> bytes = std::vector<std::uint8_t>(256);
   std::vector<std::int32_t> out = std::vector<std::int32_t>(64, -7);
   CorpusPoint point{};
+  std::vector<std::uint8_t> text = std::vector<std::uint8_t>(256);
+  std::vector<std::uint8_t> set = std::vector<std::uint8_t>(256);
   std::size_t count = 0;
   std::uint64_t native_args[9] = {};
   std::uint64_t ir_args[9] = {};
@@ -319,6 +357,27 @@ void fill_vector_inputs(VectorInputs& in, const CorpusFunction& entry, Rng& rng,
         in.native_args[i] = reinterpret_cast<std::uintptr_t>(&in.point);
         in.ir_args[i] = kS;
         break;
+      case 'Z': {
+        // Text of up to 120 characters, then a NUL, then more text: every string a function reads
+        // ends inside the buffer, and a function bounded by a count may read past the NUL.
+        for (auto& v : in.text) {
+          v = static_cast<std::uint8_t>(" abcd"[rng.next() % 5]);
+        }
+        in.text[rng.next() % 121] = 0;
+        in.text.back() = 0;
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.text.data());
+        in.ir_args[i] = kZ;
+        break;
+      }
+      case 'Y': {
+        const std::size_t length = rng.next() % 4;
+        for (std::size_t j = 0; j < length; ++j) {
+          in.set[j] = static_cast<std::uint8_t>(" abcd"[rng.next() % 5]);
+        }
+        in.native_args[i] = reinterpret_cast<std::uintptr_t>(in.set.data());
+        in.ir_args[i] = kY;
+        break;
+      }
       default:
         in.native_args[i] = in.ir_args[i] = scalar(kind, rng, vector);
     }
@@ -340,6 +399,8 @@ donkey::IrEvalMemory vector_memory(const donkey::BinaryImage& image,
   memory.add_region(kB, bytes_of(in.bytes.data(), in.bytes.size()));
   memory.add_region(kO, bytes_of(in.out.data(), in.out.size() * 4));
   memory.add_region(kS, bytes_of(&in.point, sizeof(in.point)));
+  memory.add_region(kZ, in.text);
+  memory.add_region(kY, in.set);
   return memory;
 }
 
@@ -372,7 +433,7 @@ struct Observation {
   bool evaluated = false;
   std::string error;  ///< error code when not evaluated
   std::uint64_t return_value = 0;
-  std::vector<std::vector<std::uint8_t>> regions;  ///< kP, kQ, kB, kO, kS
+  std::vector<std::vector<std::uint8_t>> regions;  ///< kP, kQ, kB, kO, kS, kZ, kY
   bool operator==(const Observation&) const = default;
 };
 
@@ -390,7 +451,7 @@ Observation observe(const donkey::IrFunction& function, bool verified, const Vec
   } else {
     observation.error = result.diagnostic().code;
   }
-  for (const std::uint64_t base : {kP, kQ, kB, kO, kS}) {
+  for (const std::uint64_t base : {kP, kQ, kB, kO, kS, kZ, kY}) {
     const auto* bytes = memory.region(base);
     observation.regions.push_back(bytes != nullptr ? *bytes : std::vector<std::uint8_t>{});
   }
@@ -507,7 +568,7 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
-    donkey::AnalysisOptions analysis_options;
+    donkey::AnalysisOptions analysis_options = corpus_analysis_options();
     auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, analysis_options);
     ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
     void* handle = open_library(library.path);
@@ -598,6 +659,10 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
             *memory.region(kS) != bytes_of(&in.point, sizeof(in.point))) {
           mismatch = true;
           outcome.detail = "vector " + std::to_string(vector) + ": struct contents differ";
+        }
+        if (std::strchr(entry.arguments, 'Z') != nullptr && *memory.region(kZ) != in.text) {
+          mismatch = true;
+          outcome.detail = "vector " + std::to_string(vector) + ": text buffer differs";
         }
       }
       if (!eval_error.empty()) {
@@ -699,7 +764,58 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     }
     EXPECT_TRUE(seen) << "c_call_nested is missing from the corpus";
   }
+  // Calls of C library functions with executable models (G21-T7): the import binds to the C
+  // library in this program's scope, the call carries the function's prototype, and the
+  // interpreter runs the model. Measured Complete and verified under GCC 13.3 on Linux x86-64 at
+  // every level, except c_lib_memcpy_sum above -O0, which zeroes a caller-saved register with
+  // `xor ecx, ecx` after the call (read as a read of a clobbered register, so Partial).
+  if (gcc13_linux) {
+    std::size_t checked = 0;
+    for (const Outcome& o : outcomes) {
+      if (std::string_view(o.function).rfind("c_lib_", 0) != 0 ||
+          (o.function == "c_lib_memcpy_sum" && o.level != "O0")) {
+        continue;
+      }
+      ++checked;
+      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+    }
+    EXPECT_GE(checked, 41U);
+  }
 #endif
+}
+
+// A corpus library is a shared library: without the program that loads it, where its imports bind
+// is not known (G24-T3), so no call of it runs a model and the callers stay Partial.
+TEST(DecompilerCorpus, CLibraryCallsNeedTheProgramThatLoadsTheLibrary) {
+#if !defined(__linux__) || !(defined(__x86_64__) || defined(_M_X64))
+  GTEST_SKIP() << "measured on Linux x86-64";
+#endif
+  auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  const auto lifted_strlen = [&](const donkey::AnalysisOptions& options) {
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, options);
+    EXPECT_TRUE(analysis.has_value());
+    const donkey::Function* function = find_corpus_function(analysis.value(), "c_lib_strlen");
+    EXPECT_NE(function, nullptr);
+    auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *function);
+    EXPECT_TRUE(lifted.has_value());
+    return std::make_pair(analysis.value().c_library_imports.size(), std::move(lifted.value()));
+  };
+  const auto [alone_bound, alone] = lifted_strlen(donkey::AnalysisOptions{});
+  EXPECT_EQ(alone_bound, 0U);
+  EXPECT_TRUE(alone.partial);
+  const auto [bound, with_program] = lifted_strlen(corpus_analysis_options());
+  EXPECT_GT(bound, 0U);
+  EXPECT_FALSE(with_program.partial);
+  bool modelled = false;
+  for (const donkey::IrBlock& block : with_program.blocks) {
+    for (const donkey::IrStatement& statement : block.statements) {
+      modelled = modelled || statement.call_model == "strlen";
+    }
+  }
+  EXPECT_TRUE(modelled);
 }
 
 // A17: the dense switch compiled without optimisation dispatches through a
@@ -723,7 +839,8 @@ TEST(DecompilerCorpus, JumpTableIsRecoveredWithEvidence) {
   const char* name = aarch64 ? "jt_dispatch16" : "c_switch_dense";
   auto loaded = donkey::load_binary(aarch64 ? DONKEY_JUMP_TABLE_O2_PATH : DONKEY_CORPUS_O0_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& f : analysis.value().functions) {
@@ -786,7 +903,8 @@ TEST(DecompilerCorpus, JumpTableFixtureAgreesWithTheCompiledCode) {
 #endif
   auto loaded = donkey::load_binary(DONKEY_JUMP_TABLE_O2_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
   void* handle = open_library(DONKEY_JUMP_TABLE_O2_PATH);
   ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_JUMP_TABLE_O2_PATH;
@@ -837,7 +955,8 @@ TEST(DecompilerCorpus, JumpTableFixtureAgreesWithTheCompiledCode) {
 TEST(DecompilerCorpus, StructLayoutRecoveredBehindAPointerArgument) {
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& f : analysis.value().functions) {
@@ -877,7 +996,8 @@ TEST(DecompilerCorpus, StatementPassesShortenThePseudocode) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
-    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    auto analysis =
+        donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
     ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
 
     std::vector<std::size_t> before_lines;
@@ -966,7 +1086,8 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
-    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    auto analysis =
+        donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
     ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
 
     donkey::IrEvalOptions eval_options;
@@ -1047,7 +1168,8 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path;
-    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+    auto analysis =
+        donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
     ASSERT_TRUE(analysis.has_value());
     donkey::IrEvalOptions eval_options;
     eval_options.architecture = loaded.value().image.architecture;
@@ -1104,7 +1226,8 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaning) {
   ASSERT_STREQ(add3.name, "c_add3");
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = find_corpus_function(analysis.value(), add3.name);
   ASSERT_NE(function, nullptr);
@@ -1145,7 +1268,8 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedPartialFlag) {
   ASSERT_STREQ(add3.name, "c_add3");
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = find_corpus_function(analysis.value(), add3.name);
   ASSERT_NE(function, nullptr);
@@ -1261,7 +1385,8 @@ TEST(DecompilerCorpus, FloatResultsAgreeWithTheCompiledCode) {
 #else
   auto loaded = donkey::load_binary(DONKEY_CORPUS_FP_O0_PATH);
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
   void* handle = open_library(DONKEY_CORPUS_FP_O0_PATH);
   ASSERT_NE(handle, nullptr) << "cannot load " << DONKEY_CORPUS_FP_O0_PATH;
@@ -1362,7 +1487,8 @@ TEST(DecompilerCorpus, ParameterNamesComeFromTheDebugInformation) {
   ASSERT_TRUE(debug_file.has_value()) << debug_file.diagnostic().message;
   auto info = donkey::read_debug_info(debug_file.value().image, debug_file.value().data);
   ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& candidate : analysis.value().functions) {
@@ -1428,7 +1554,8 @@ TEST(DecompilerCorpus, FrameSlotsTakeTheNamesOfTheDebugInformation) {
   ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
   auto info = donkey::read_debug_info(loaded.value().image, loaded.value().data);
   ASSERT_TRUE(info.has_value()) << info.diagnostic().message;
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = nullptr;
   for (const auto& candidate : analysis.value().functions) {
@@ -1546,7 +1673,8 @@ TEST(DecompilerCorpus, AppliedPrototypeNamesStructFields) {
 #endif
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
   ASSERT_NE(function, nullptr);
@@ -1600,7 +1728,8 @@ TEST(DecompilerCorpus, AppliedPrototypeReachesAnO0SpilledParameter) {
 #endif
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O0_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
   ASSERT_NE(function, nullptr);
@@ -1663,7 +1792,8 @@ TEST(DecompilerCorpus, AppliedPrototypeThatContradictsTheFunctionIsRefused) {
 #endif
   auto loaded = donkey::load_binary(DONKEY_CORPUS_O2_PATH);
   ASSERT_TRUE(loaded.has_value());
-  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, {});
+  auto analysis =
+      donkey::analyze(loaded.value().image, loaded.value().data, corpus_analysis_options());
   ASSERT_TRUE(analysis.has_value());
   const donkey::Function* function = find_corpus_function(analysis.value(), "c_point_sum");
   ASSERT_NE(function, nullptr);
@@ -1729,7 +1859,7 @@ TEST(DecompilerCorpus, EveryPrintedFunctionPassesTheControlFlowCheck) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
-    donkey::AnalysisOptions analysis_options;
+    donkey::AnalysisOptions analysis_options = corpus_analysis_options();
     auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, analysis_options);
     ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
     for (const donkey::Function& function : analysis.value().functions) {
@@ -1819,7 +1949,7 @@ TEST(DecompilerCorpus, EveryKeptStatementIsPrinted) {
   for (const Library& library : kLibraries) {
     auto loaded = donkey::load_binary(library.path);
     ASSERT_TRUE(loaded.has_value()) << library.path << ": " << loaded.diagnostic().message;
-    donkey::AnalysisOptions analysis_options;
+    donkey::AnalysisOptions analysis_options = corpus_analysis_options();
     auto analysis = donkey::analyze(loaded.value().image, loaded.value().data, analysis_options);
     ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
     for (const donkey::Function& function : analysis.value().functions) {
