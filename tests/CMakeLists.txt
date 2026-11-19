@@ -1252,6 +1252,8 @@ add_test(NAME cli.decompile_notes_a_library_prototype
                  --project ${DONKEY_CLI_TYPELIB_DB} --function 0x1070)
 set_tests_properties(cli.decompile_notes_a_library_prototype PROPERTIES
   FIXTURES_REQUIRED typelib_db_applied
+  # It opens the shared project database, so it runs alone with the cli.project_ tests.
+  RESOURCE_LOCK donkey_cli_project_db
   PASS_REGULAR_EXPRESSION "// note: library prototype \\(musl-libc 1.2.4\\): int puts\\(char \\*\\)")
 
 # A library for another architecture applies nothing (stubs_aarch64 with the x86_64 library).
