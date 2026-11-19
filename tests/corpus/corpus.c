@@ -2,12 +2,14 @@
  * and -O3 with the host C compiler; each function is lifted from the built
  * library, run in the IR interpreter and compared with calling the compiled
  * function itself. Integer-only: floating point and SIMD are outside the
- * decompiler's supported subset. The calls section at the end calls helpers of
- * the same library (G21).
+ * decompiler's supported subset. The calls section calls helpers of the same
+ * library (G21); the C library section calls C library functions the
+ * interpreter runs from executable models (G21-T7).
  *
  * Every function is exported, which also keeps compilers from cloning or
  * specialising it (an exported symbol can be interposed). */
 #include <stdint.h>
+#include <string.h>
 
 #if defined(_WIN32)
 #define CORPUS __declspec(dllexport) __declspec(noinline)
@@ -412,4 +414,73 @@ CORPUS_HELPER int k_scaled_sum(int a, int b) {
 /* A call chain two levels deep: c_call_nested -> k_scaled_sum -> k_add2 and k_triple. */
 CORPUS int c_call_nested(int a, int b) {
   return k_scaled_sum(a, b) + 1;
+}
+
+/* ---- C library calls (G21-T7) ----
+   Each calls C library functions that have executable models: the interpreter runs the model,
+   the compiled code runs the C library. A pointer result is returned as an index, so the compiled
+   and interpreted runs (with different addresses) compare equal. */
+CORPUS size_t c_lib_strlen(const char *s) {
+  return strlen(s);
+}
+
+/* The result is used in arithmetic after the call. */
+CORPUS long c_lib_strlen_scaled(const char *s, long k) {
+  return (long)strlen(s) * 3 + k;
+}
+
+CORPUS long c_lib_strchr_index(const char *s, int c) {
+  const char *p = strchr(s, c);
+  return p != 0 ? p - s : -1;
+}
+
+CORPUS long c_lib_strrchr_index(const char *s, int c) {
+  const char *p = strrchr(s, c);
+  return p != 0 ? p - s : -1;
+}
+
+CORPUS long c_lib_memchr_index(const char *s, int c, unsigned n) {
+  const char *p = memchr(s, c, n);
+  return p != 0 ? p - s : -1;
+}
+
+CORPUS size_t c_lib_strspn(const char *s, const char *set) {
+  return strspn(s, set);
+}
+
+CORPUS size_t c_lib_strcspn(const char *s, const char *set) {
+  return strcspn(s, set);
+}
+
+/* Calls inside a loop, with a set from the library's read-only data. */
+CORPUS size_t c_lib_count_words(const char *s) {
+  size_t words = 0;
+  s += strspn(s, " ");
+  while (*s != 0) {
+    ++words;
+    s += strcspn(s, " ");
+    s += strspn(s, " ");
+  }
+  return words;
+}
+
+/* memcpy into the output buffer, then a loop over what it wrote. */
+CORPUS long c_lib_memcpy_sum(int *out, const int *in, unsigned n) {
+  long total = 0;
+  memcpy(out, in, n * sizeof(int));
+  for (unsigned i = 0; i < n; ++i) {
+    total += out[i] * (long)(i + 1);
+  }
+  return total;
+}
+
+CORPUS int c_lib_memset_first(int *out, int c, unsigned n) {
+  memset(out, c, n * sizeof(int));
+  return n != 0 ? out[0] : -1;
+}
+
+/* An overlapping move inside the text buffer. */
+CORPUS int c_lib_memmove_shift(char *s, unsigned n) {
+  memmove(s + 1, s, n);
+  return s[0] + s[n];
 }

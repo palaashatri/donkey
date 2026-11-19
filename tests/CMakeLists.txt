@@ -146,6 +146,7 @@ add_executable(donkey_unit_tests
   unit/link_calls_test.cpp
   unit/import_names_test.cpp
   unit/no_return_test.cpp
+  unit/libc_models_test.cpp
   unit/link_aarch64_test.cpp
   unit/condition_test.cpp
   unit/string_literals_test.cpp
