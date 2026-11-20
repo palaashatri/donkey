@@ -2222,6 +2222,10 @@ sources only, a preprocessor at build time). What was built and measured:
   `Types.PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration`. The musl library text is unchanged.
   `fuzz_cdecl` now picks the bit-field rules from its first byte too; it ran 605,844 inputs in 91 s with no
   finding. Debug 1,027/1,027 and Release 1,028/1,028 pass on Linux x86-64.
+- CI evidence for the parser and the shipped library: the `ci` workflow passed at a28d681 (the reviewed head,
+  which includes every test named above and `TypeLibMake.ShippedMuslLibraryLoads`):
+  [run 44775011731](https://github.com/palaashatri/donkey/actions/runs/44775011731): Linux x86-64 and
+  AArch64, macOS arm64, Windows x64 (MinGW-w64) headless, the desktop shell under Xvfb, and clang-format.
 - Not done here: FreeBSD and MinGW-w64 libraries (allowed, each file's licence to be checked), the `.winmd`
   reader, and function pointers (parenthesised declarators, G05).
   Applying a library to code is T3.
