@@ -1954,4 +1954,11 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   }
 }
 
+bool is_zeroing_idiom(const IrStatement& statement) noexcept {
+  return (statement.op == IrOp::Xor || statement.op == IrOp::Sub) &&
+         statement.a.kind == IrOperandKind::Register &&
+         statement.b.kind == IrOperandKind::Register && !statement.a.reg.empty() &&
+         statement.a.reg == statement.b.reg && statement.a.width == statement.b.width;
+}
+
 }  // namespace donkey

@@ -322,10 +322,17 @@ CREATE TABLE local_names (
 PRAGMA user_version=7;
 )sql";
 
-/// v8 lists the type libraries loaded into the project, and records where each type application
+/// v8 marks the unnamed bit-fields of a struct or union (`TypeField::padding`): layout only, never
+/// a member. Existing rows are members.
+constexpr const char* kMigrateV7ToV8 = R"sql(
+ALTER TABLE type_fields ADD COLUMN padding INTEGER NOT NULL DEFAULT 0 CHECK (padding IN (0, 1));
+PRAGMA user_version=8;
+)sql";
+
+/// v9 lists the type libraries loaded into the project, and records where each type application
 /// came from (G22-T3): 0 user, 1 DWARF, 2 PDB, 3 inferred, 4 a type library, as TypeProvenance
 /// numbers them. Existing rows were made by the user.
-constexpr const char* kMigrateV7ToV8 = R"sql(
+constexpr const char* kMigrateV8ToV9 = R"sql(
 CREATE TABLE IF NOT EXISTS type_libraries (
   id INTEGER PRIMARY KEY,
   library TEXT NOT NULL,
@@ -336,16 +343,16 @@ CREATE TABLE IF NOT EXISTS type_libraries (
   collisions INTEGER NOT NULL CHECK (collisions >= 0),
   UNIQUE (library, library_version, architecture)
 );
-PRAGMA user_version=8;
+PRAGMA user_version=9;
 )sql";
 
-/// The column of v8 that records the source of a type application. It is added only when missing.
+/// The column of v9 that records the source of a type application. It is added only when missing.
 constexpr const char* kAddApplicationSource = R"sql(
 ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0
   CHECK (source BETWEEN 0 AND 4);
 )sql";
 
-/// The two columns version 5 gained in place (see the v7 to v8 step of Project::open).
+/// The two columns version 5 gained in place (see the v8 to v9 step of Project::open).
 constexpr const char* kRepairV5TypeColumns = R"sql(
 ALTER TABLE types ADD COLUMN count_known INTEGER NOT NULL DEFAULT 1 CHECK (count_known IN (0, 1));
 ALTER TABLE types ADD COLUMN alignment INTEGER NOT NULL DEFAULT 0 CHECK (alignment >= 0);
@@ -663,6 +670,20 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 7) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v7->v8: " + message);
+      }
+      schema = 8;
+    }
+    if (schema == 8) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       // Version 5 gained the types table's count_known and alignment columns after some files
       // had been written with it, so such a file reaches here without them. They are added with
       // the values every type had before the change: a known count and the natural alignment.
@@ -674,7 +695,7 @@ Result<Project> Project::open(const std::string& path) {
         rc_repair = sqlite3_exec(db, kAddApplicationSource, nullptr, nullptr, nullptr);
       }
       const int rc_migrate = rc_repair == SQLITE_OK
-                                 ? sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr)
+                                 ? sqlite3_exec(db, kMigrateV8ToV9, nullptr, nullptr, nullptr)
                                  : rc_repair;
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
@@ -683,9 +704,9 @@ Result<Project> Project::open(const std::string& path) {
         const std::string message = sqlite3_errmsg(db);
         execute(db, "ROLLBACK");
         return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v7->v8: " + message);
+                                   "migrate v8->v9: " + message);
       }
-      schema = 8;
+      schema = 9;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -1272,7 +1293,8 @@ Result<TypeTable> Project::types() const {
   TypeTable table;
   for (TypeDefinition& definition : definitions) {
     Statement fields(db,
-                     "SELECT name, offset, field_type, bit_offset, bit_size FROM type_fields "
+                     "SELECT name, offset, field_type, bit_offset, bit_size, padding FROM "
+                     "type_fields "
                      "WHERE type_id = ?1 ORDER BY ordinal");
     fields.bind(1, static_cast<std::int64_t>(definition.id.value()));
     while (fields.ok() && fields.step()) {
@@ -1282,6 +1304,7 @@ Result<TypeTable> Project::types() const {
       field.type = TypeId(static_cast<std::uint64_t>(fields.integer(2)));
       field.bit_offset = static_cast<std::uint8_t>(fields.integer(3));
       field.bit_size = static_cast<std::uint8_t>(fields.integer(4));
+      field.padding = fields.integer(5) != 0;
       definition.fields.push_back(std::move(field));
     }
     if (!fields.ok() || !fields.done()) {
@@ -1399,7 +1422,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       const TypeField& field = definition.fields[ordinal];
       Statement insert(db,
                        "INSERT INTO type_fields(type_id, ordinal, name, offset, field_type, "
-                       "bit_offset, bit_size) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                       "bit_offset, bit_size, padding) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
       insert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       insert.bind(2, static_cast<std::int64_t>(ordinal));
       insert.bind(3, field.name);
@@ -1407,6 +1430,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       insert.bind(5, static_cast<std::int64_t>(field.type.value()));
       insert.bind(6, static_cast<std::int64_t>(field.bit_offset));
       insert.bind(7, static_cast<std::int64_t>(field.bit_size));
+      insert.bind(8, static_cast<std::int64_t>(field.padding ? 1 : 0));
       if (!insert.execute_statement()) {
         return fail("project.type_write_failed", "write a type member");
       }

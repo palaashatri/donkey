@@ -587,6 +587,7 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   options.pointer_size = lib.pointer_size;
   options.long_size = lib.long_size;
   options.char_is_signed = lib.char_is_signed;
+  options.bit_fields = bit_field_layout(lib.abi);
 
   // A library parses on its own, against the built-in names only, so the table it is read into
   // cannot change what its text means (a typedef there could otherwise shadow a built-in name).
@@ -625,12 +626,12 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   }
 
   // C keeps two name spaces apart: the tags of structs, unions and enums, and the ordinary names
-  // of typedefs and functions. One spelling may be a tag and an ordinary name at once (`struct
-  // stat` and the function `stat`, or `typedef struct point point`). Within one name space a name
-  // is declared once: a typedef and a function with one name is typelib.type_and_function, and
-  // any other repeat is typelib.duplicate_name. The parser lists each declared name with its name
-  // space, so a typedef that names an untagged struct (whose type takes the typedef's name) is an
-  // ordinary name, not a tag.
+  // of typedefs, enumeration constants and functions. One spelling may be a tag and an ordinary
+  // name at once (`struct stat` and the function `stat`, or `typedef struct point point`). Within
+  // one name space a name is declared once: a function and another ordinary name with one spelling
+  // is typelib.type_and_function, and any other repeat is typelib.duplicate_name. The parser lists
+  // each declared name with its name space, so a typedef that names an untagged struct (whose type
+  // takes the typedef's name) is an ordinary name, not a tag.
   std::map<std::string, TypeKind> tags;
   std::map<std::string, TypeKind> ordinary;
   for (const CDeclaredName& name : declared) {
@@ -645,7 +646,9 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
     if (name.space == CNameSpace::Ordinary &&
         (entry->second == TypeKind::Function) != (name.kind == TypeKind::Function)) {
       return refuse<Out>(Status::InvalidInput, "typelib.type_and_function",
-                         "'" + name.name + "' is used both as a typedef and as a function");
+                         "'" + name.name +
+                             "' is used both as a function and as a typedef or enumeration "
+                             "constant");
     }
     return refuse<Out>(
         Status::InvalidInput, "typelib.duplicate_name",
@@ -670,6 +673,16 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
 }
 
 }  // namespace
+
+CBitFieldLayout bit_field_layout(std::string_view abi) noexcept {
+  if (abi == "sysv") {
+    return CBitFieldLayout::SystemV;
+  }
+  if (abi == "aapcs64") {
+    return CBitFieldLayout::Aapcs64;
+  }
+  return CBitFieldLayout::Unmodelled;
+}
 
 Result<TypeLibrary> read_type_library(std::string_view text, const TypeTable& known) {
   if (text.size() > kMaxTypeLibraryBytes) {

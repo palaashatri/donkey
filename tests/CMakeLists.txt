@@ -693,12 +693,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 8.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 9.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
@@ -811,7 +811,7 @@ add_test(NAME cli.project_type_save
          COMMAND donkey-cli project save ${DONKEY_CLI_TYPES_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --clear --json)
 set_tests_properties(cli.project_type_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"integrity\": true"
   DEPENDS cli.project_type_reset)
 
 add_test(NAME cli.project_type_add
@@ -874,7 +874,7 @@ add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -925,14 +925,14 @@ add_test(NAME cli.project_backup_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_backup_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8"
+  PASS_REGULAR_EXPRESSION "\"schema\": 9"
   DEPENDS cli.project_annotations_after_clear)
 
 add_test(NAME cli.project_backup_json
          COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
                  --json)
 set_tests_properties(cli.project_backup_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 8.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 9.*\"integrity\": true"
   DEPENDS cli.project_backup_save)
 
 add_test(NAME cli.project_backup_refuses_overwrite
@@ -949,7 +949,7 @@ set_tests_properties(cli.project_backup_force PROPERTIES
 add_test(NAME cli.project_restore_json
          COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
 set_tests_properties(cli.project_restore_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 8.*\"integrity\": true.*\"images\": 1"
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 9.*\"integrity\": true.*\"images\": 1"
   DEPENDS cli.project_backup_force)
 
 add_test(NAME cli.project_restore_rejects_non_database
@@ -1190,6 +1190,10 @@ add_test(NAME cli.link_needs_a_library
 set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
 
 # G22-T2: the shipped musl type library loads and describes itself.
+add_test(NAME cli.typelib_make_rejects_a_bad_char_signed
+         COMMAND donkey-cli typelib make missing.i --out unused.dtl --char-signed tru)
+set_tests_properties(cli.typelib_make_rejects_a_bad_char_signed PROPERTIES
+  PASS_REGULAR_EXPRESSION "--char-signed takes true or false")
 add_test(NAME cli.typelib_show_musl
          COMMAND donkey-cli typelib show ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
 set_tests_properties(cli.typelib_show_musl PROPERTIES

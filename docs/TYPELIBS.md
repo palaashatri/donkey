@@ -41,7 +41,7 @@ preprocessor at build time (`tools/typelib/make-musl.sh` runs `gcc -E -P -nostdi
 headers), never Donkey at run time. The generator keeps each top-level declaration that Donkey's C
 parser accepts together with every declaration kept before it, and lists each other one as
 `skipped: <name>: <reason>`: a variable, a function definition, a name declared twice, a type the
-parser does not model (an array bound with `sizeof`, a bit-field, `__builtin_va_list`), an attribute
+parser does not model (a function pointer, `__builtin_va_list`), an attribute
 that may change a type (`aligned`, `packed`, `vector_size`, `mode`, or one it does not know), and
 anything that needs one of those. It drops only what changes neither a type nor its layout: `restrict`,
 `__extension__`, `_Noreturn`, `__inline`, `__asm__(...)` labels, and attributes such as `noreturn`,
