@@ -54,6 +54,9 @@ const char* annotation_kind_name(AnnotationKind kind) noexcept {
 
 namespace {
 
+/// How long opening a project waits for another connection's lock, in milliseconds.
+constexpr int kProjectBusyTimeoutMs = 5000;
+
 /// Plain decimal digits only, with no sign, space or leading zero, so each value has exactly one
 /// text. Nineteen digits cannot overflow 64 bits.
 bool parse_decimal(const std::string& digits, std::uint64_t& out) noexcept {
@@ -474,6 +477,9 @@ Result<Project> Project::open(const std::string& path) {
                                  "could not open project '" + path + "': " + message);
     }
     project.impl_->db = db;
+    // Another connection (the desktop app, a second CLI run) may hold the file's lock for a moment:
+    // wait for it instead of failing at once with "database is locked".
+    sqlite3_busy_timeout(db, kProjectBusyTimeoutMs);
 
     if (!execute(db, "PRAGMA foreign_keys=ON") || !execute(db, "PRAGMA synchronous=FULL")) {
       // A file that is not a SQLite database must be reported as corrupt input,
