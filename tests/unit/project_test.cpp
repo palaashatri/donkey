@@ -5,6 +5,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -1649,6 +1650,28 @@ TEST(Types, PaddingFieldsAndRecordAlignmentAreChecked) {
   aligned.alignment = 3;
   table.put(aligned);
   EXPECT_EQ(table.validate().diagnostic().code, "type.bad_alignment");
+
+  // An empty record with its own alignment follows one rule: a power of two, and a size of 0 or
+  // the alignment.
+  donkey::TypeDefinition empty;
+  empty.id = donkey::TypeId(500);
+  empty.kind = donkey::TypeKind::Struct;
+  empty.name = "empty";
+  empty.alignment = 8;
+  donkey::TypeTable empties;
+  empties.put(empty);
+  EXPECT_TRUE(empties.validate().has_value()) << empties.validate().diagnostic().message;
+  EXPECT_EQ(empties.alignment_of(empty.id).value(), 8U);
+  empty.size = 8;
+  empties.put(empty);
+  EXPECT_TRUE(empties.validate().has_value()) << empties.validate().diagnostic().message;
+  empty.size = 4;
+  empties.put(empty);
+  EXPECT_EQ(empties.validate().diagnostic().code, "type.size_mismatch");
+  empty.size = 0;
+  empty.alignment = 3;
+  empties.put(empty);
+  EXPECT_EQ(empties.validate().diagnostic().code, "type.bad_alignment");
 }
 
 // Padding fields and a record's own alignment are stored (schema v8), and a v7 project gains the
@@ -1692,7 +1715,8 @@ TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(raw,
                            "DELETE FROM type_fields WHERE padding = 1; DELETE FROM types WHERE "
-                           "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; PRAGMA "
+                           "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE "
+                           "types DROP COLUMN local; PRAGMA "
                            "user_version=7",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
@@ -1710,6 +1734,44 @@ TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
   EXPECT_FALSE(m->fields[0].padding);
   EXPECT_FALSE(m->fields[1].padding);
   EXPECT_EQ(m->fields[1].offset, 4U);
+}
+
+// A migration that cannot begin its transaction changes nothing: no step runs outside it.
+TEST(Types, AMigrationThatCannotBeginChangesNothing) {
+  TempPath path("migration-busy");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  }
+  sqlite3* raw = nullptr;
+  ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(raw,
+                         "ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE types DROP "
+                         "COLUMN local; PRAGMA user_version=7",
+                         nullptr, nullptr, nullptr),
+            SQLITE_OK);
+  // Another connection holds the write lock.
+  ASSERT_EQ(sqlite3_exec(raw, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+  {
+    auto blocked = Project::open(path.str());
+    ASSERT_FALSE(blocked.has_value());
+    EXPECT_EQ(blocked.diagnostic().code, "project.migration_failed");
+  }
+  ASSERT_EQ(sqlite3_exec(raw, "COMMIT", nullptr, nullptr, nullptr), SQLITE_OK);
+  int columns = -1;
+  ASSERT_EQ(sqlite3_exec(
+                raw, "SELECT COUNT(*) FROM pragma_table_info('type_fields') WHERE name = 'padding'",
+                [](void* out, int, char** values, char**) {
+                  *static_cast<int*>(out) = std::atoi(values[0]);
+                  return 0;
+                },
+                &columns, nullptr),
+            SQLITE_OK);
+  EXPECT_EQ(columns, 0);  // the v7 to v8 step did not run
+  sqlite3_close(raw);
+  auto reopened = Project::open(path.str());
+  ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
 }
 
 TEST(Types, ConstantExpressionsFollowC) {
@@ -1830,6 +1892,71 @@ TEST(Types, PrototypesAreScopes) {
   expect_located_error("enum { N }; typedef int N;", "cdecl.redefinition", "line 1, column 25: ");
   expect_located_error("struct b; void h(struct b { int x; } *p);", "cdecl.prototype_tag",
                        "line 1, column 25: ");
+}
+
+// What a prototype declares stays out of scope in a later parse against the same table, as when
+// `project type add` runs again: its types are marked local.
+TEST(Types, PrototypeScopeLastsAcrossParses) {
+  donkey::TypeTable table;
+  const auto first =
+      donkey::parse_c_declarations("void f(enum { N = 3 } x);\nint g(struct hidden *h);\n", table);
+  ASSERT_TRUE(first.has_value()) << first.diagnostic().message;
+  std::size_t local = 0;
+  for (const donkey::TypeDefinition& type : first.value()) {
+    table.put(type);
+    local += type.local ? 1U : 0U;
+  }
+  EXPECT_EQ(local, 2U);  // the enum and struct hidden
+  const auto second = donkey::parse_c_declarations("typedef char a[N];", table);
+  ASSERT_FALSE(second.has_value());
+  EXPECT_EQ(second.diagnostic().code, "cdecl.not_constant");
+  const auto defined = donkey::parse_c_declarations("struct hidden { int x; };", table);
+  ASSERT_TRUE(defined.has_value()) << defined.diagnostic().message;
+  const auto* hidden = named_type(defined.value(), "hidden");
+  ASSERT_NE(hidden, nullptr);
+  EXPECT_FALSE(hidden->local);
+  EXPECT_EQ(hidden->fields.size(), 1U);
+}
+
+// A parameter is an ordinary identifier in the declarators after it, and so is a prototype's
+// enumeration constant: each hides a typedef or an outer constant there.
+TEST(Types, ParameterNamesAndPrototypeConstantsHideOuterNames) {
+  const auto hidden_typedef = donkey::parse_c_declarations(
+      "typedef int N; void f(enum { N = 3 } x, char a[1][(N)+1]);", donkey::TypeTable{});
+  ASSERT_TRUE(hidden_typedef.has_value()) << hidden_typedef.diagnostic().message;
+  const auto* f = named_type(hidden_typedef.value(), "f");
+  ASSERT_NE(f, nullptr);
+  ASSERT_EQ(f->fields.size(), 2U);
+  const auto* pointer = type_by_id(hidden_typedef.value(), f->fields[1].type);
+  ASSERT_NE(pointer, nullptr);
+  const auto* row = type_by_id(hidden_typedef.value(), pointer->target);
+  ASSERT_NE(row, nullptr);
+  EXPECT_EQ(row->count, 4U);  // (N)+1 with N the constant 3, not a cast of +1
+
+  expect_located_error("enum { N = 1 }; void f(int N, char a[1][N]);", "cdecl.not_constant",
+                       "line 1, column 41: ");
+  expect_located_error("typedef int T; void f(int T, T x);", "cdecl.unknown_type",
+                       "line 1, column 30: ");
+  expect_located_error("void f(int a, int a);", "cdecl.redefinition", "line 1, column 19: ");
+  expect_located_error("enum { g }; int g(void);", "cdecl.redefinition", "line 1, column 17: ");
+  expect_located_error("typedef int h; int h(void);", "cdecl.redefinition", "line 1, column 20: ");
+  // Outside the list the outer names are back.
+  EXPECT_TRUE(donkey::parse_c_declarations("enum { N = 1 }; void f(int N); typedef char a[N];",
+                                           donkey::TypeTable{})
+                  .has_value());
+}
+
+// A comma operator is a constant expression only where it is not evaluated (C11 6.6p3).
+TEST(Types, ACommaOperatorIsAllowedOnlyWhereNotEvaluated) {
+  const auto parsed =
+      donkey::parse_c_declarations("typedef char t[sizeof((1, 2))];", donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto* t = named_type(parsed.value(), "t");
+  ASSERT_NE(t, nullptr);
+  const auto* array = type_by_id(parsed.value(), t->target);
+  ASSERT_NE(array, nullptr);
+  EXPECT_EQ(array->count, 4U);
+  expect_located_error("typedef char t[(1, 2)];", "cdecl.not_constant", "line 1, column 18: ");
 }
 
 TEST(Types, ACastKeepsItsTypeUntilAnOperatorPromotesIt) {
@@ -2364,6 +2491,7 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(raw,
                            "DROP TABLE local_names; ALTER TABLE type_fields DROP COLUMN padding; "
+                           "ALTER TABLE types DROP COLUMN local; "
                            "PRAGMA user_version=6",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);

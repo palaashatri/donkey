@@ -2185,9 +2185,11 @@ sources only, a preprocessor at build time). What was built and measured:
   `pthread_create` listed as skipped for its function pointer), `cli.typelib_show_musl`.
 - C parser, for the review of #70 (G05): integer constant expressions in array sizes, enumerator values and
   bit-field widths (literals typed as C11 6.4.4.1 types them, enumeration constants, `sizeof(type)` and
-  `sizeof expr`, casts to integer types, every unary, binary and conditional operator, with the promotions and
-  usual arithmetic conversions; the untaken side of `&&`, `||` and `?:` and the operand of `sizeof` are not
-  evaluated; division by zero, bad shift counts and signed overflow are errors), and bit-fields laid out as the
+  `sizeof expr`, casts to integer types, the unary `+ - ~ !`, the binary `* / % + - << >> < > <= >= == != & ^ |
+  && ||`, `?:`, and a comma inside parentheses where it is not evaluated, with the promotions and usual
+  arithmetic conversions; the untaken side of `&&`, `||` and `?:` and the operand of `sizeof` are not
+  evaluated; division by zero, bad shift counts and signed overflow are errors, and syntax outside these, such
+  as `++`, `--`, `->`, assignment or a function call, is refused even where it would not be evaluated), and bit-fields laid out as the
   System V ABI lays them out (a field does not cross a unit of its type; an unnamed one pads without aligning
   the struct; width zero moves to the next unit). Tests: `Types.BitFieldsAreLaidOutAsTheCompilerLaysThemOut`
   and `Types.ConstantExpressionsFollowC` compare with GCC 13.3 on x86-64 Linux; `Types.ParserErrorsAreLocated`
@@ -2222,6 +2224,20 @@ sources only, a preprocessor at build time). What was built and measured:
   `Types.PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration`. The musl library text is unchanged.
   `fuzz_cdecl` now picks the bit-field rules from its first byte too; it ran 605,844 inputs in 91 s with no
   finding. Debug 1,027/1,027 and Release 1,028/1,028 pass on Linux x86-64.
+- Fourth review of #70 (2026-11-20): `bit_field_layout` takes the platform too (AAPCS64 bit-fields only on
+  Linux and FreeBSD; Apple arm64 departs from AAPCS64 and refuses them). A type declared inside a prototype is
+  marked `TypeDefinition::local` (stored in schema v8 with the padding flag), so a later parse against the same
+  table, as a second `project type add`, does not see its tag or constants at file scope. A parameter name and
+  a prototype's enumeration constant hide a typedef or an outer constant in the declarators after them; a
+  parameter in an array bound is `cdecl.not_constant`. A comma operator is accepted where it is not evaluated.
+  Comments in the generator's input are spaces. A prototype named after a typedef or an enumeration constant is
+  `cdecl.redefinition`, so the generator skips it rather than write a library the reader refuses. An empty
+  record with its own alignment has a power-of-two alignment and a size of 0 or that alignment. Every schema
+  step stops before its SQL when `BEGIN IMMEDIATE` fails, so a busy database is never left between versions. Tests: `Types.PrototypeScopeLastsAcrossParses`,
+  `Types.ParameterNamesAndPrototypeConstantsHideOuterNames`, `Types.ACommaOperatorIsAllowedOnlyWhereNotEvaluated`,
+  `Types.AMigrationThatCannotBeginChangesNothing`, `TypeLibMake.CommentsAreSpaces`,
+  `TypeLibMake.BitFieldsFollowTheAbiAndThePlatform`, and new cases in `Types.PaddingFieldsAndRecordAlignmentAreChecked`.
+  `fuzz_cdecl` ran 573,326 inputs in 91 s with no finding.
 - CI evidence for the parser and the shipped library: the `ci` workflow passed at a28d681 (the reviewed head,
   which includes every test named above and `TypeLibMake.ShippedMuslLibraryLoads`):
   [run 44775011731](https://github.com/palaashatri/donkey/actions/runs/44775011731): Linux x86-64 and

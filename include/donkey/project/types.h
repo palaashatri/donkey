@@ -91,6 +91,10 @@ struct TypeDefinition {
   /// AAPCS64 does for the type of an unnamed bit-field. 0 means the members' alignment; otherwise
   /// a power of two at least that alignment.
   std::uint64_t alignment = 0;
+  /// Structs, unions and enums declared inside a function prototype's parameter list: their tag
+  /// and enumeration constants are visible only there (C11 6.2.1), so a later parse does not see
+  /// them at file scope. The type itself stays, as the parameter's type.
+  bool local = false;
 };
 
 /// A set of types, keyed by id. `validate` checks the whole set; the other

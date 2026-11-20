@@ -357,6 +357,20 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       i = end - 1;
       continue;
     }
+    if (c == '/' && i + 1 < preprocessed.size() &&
+        (preprocessed[i + 1] == '*' || preprocessed[i + 1] == '/')) {
+      // A comment (input preprocessed with -C keeps them) is one space, as C reads it; its
+      // contents are not delimiters, and a line comment keeps the line break that ends it.
+      if (preprocessed[i + 1] == '*') {
+        const std::size_t close = preprocessed.find("*/", i + 2);
+        i = close == std::string_view::npos ? preprocessed.size() : close + 1;
+      } else {
+        const std::size_t newline = preprocessed.find('\n', i + 2);
+        i = (newline == std::string_view::npos ? preprocessed.size() : newline) - 1;
+      }
+      current.push_back(' ');
+      continue;
+    }
     current.push_back(c);
     if (c == '(') {
       ++parens;
@@ -465,7 +479,7 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   parse_options.pointer_size = options.pointer_size;
   parse_options.long_size = options.long_size;
   parse_options.char_is_signed = options.char_is_signed;
-  parse_options.bit_fields = bit_field_layout(options.abi);
+  parse_options.bit_fields = bit_field_layout(options.abi, options.platform);
 
   TypeLibraryMakeResult made;
   std::set<std::string> tags;
