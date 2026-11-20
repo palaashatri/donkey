@@ -330,11 +330,13 @@ TEST(Project, OpeningWaitsForAnotherConnectionsLock) {
   ASSERT_EQ(sqlite3_exec(other, "PRAGMA journal_mode=DELETE", nullptr, nullptr, nullptr),
             SQLITE_OK);
   ASSERT_EQ(sqlite3_exec(other, "BEGIN EXCLUSIVE", nullptr, nullptr, nullptr), SQLITE_OK);
+  // Timed from before the release thread starts: the lock is held for at least 300 ms from here,
+  // however late this thread runs.
+  const auto started = std::chrono::steady_clock::now();
   std::thread release([other] {
     std::this_thread::sleep_for(std::chrono::milliseconds(300));
     sqlite3_exec(other, "COMMIT", nullptr, nullptr, nullptr);
   });
-  const auto started = std::chrono::steady_clock::now();
   auto reopened = Project::open(path.str());
   const auto waited = std::chrono::steady_clock::now() - started;
   release.join();
