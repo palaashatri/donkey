@@ -4890,6 +4890,37 @@ TEST(Ir, CallerSavedRegistersTheCalleeDoesNotWriteSurviveACall) {
   EXPECT_FALSE(f.partial);
 }
 
+// Layout: 0x1000 call 0x100b; 0x1005 xor ecx, ecx; mov rax, rcx; ret; 0x100b mov rcx, rdi;
+// mov rax, rdi; ret.
+// The callee changes rcx, but `xor ecx, ecx` reads no value of it: the 32-bit write defines all of
+// rcx again, so the read after it is the caller's own zero, not the clobbered value.
+TEST(Ir, AZeroingIdiomAfterACallReadsNoClobberedValue) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0xe8, 0x06, 0x00, 0x00, 0x00, 0x31, 0xc9, 0x48, 0x89, 0xc8, 0xc3,
+                               0x48, 0x89, 0xf9, 0x48, 0x89, 0xf8, 0xc3},
+                              f));
+  std::string notes;
+  for (const std::string& note : f.notes) notes += note + "; ";
+  EXPECT_FALSE(f.partial) << notes;
+  // `xor cl, cl` writes only the low byte: the rest of rcx is still the callee's.
+  donkey::IrFunction low;
+  ASSERT_TRUE(lift_raw_x86_64({0xe8, 0x06, 0x00, 0x00, 0x00, 0x30, 0xc9, 0x48, 0x89, 0xc8, 0xc3,
+                               0x48, 0x89, 0xf9, 0x48, 0x89, 0xf8, 0xc3},
+                              low));
+  EXPECT_TRUE(low.partial);
+}
+
+// `xor edi, edi` at the entry is not a read of an incoming rdi: the function takes no parameter.
+// `sub esi, esi` neither. `xor edi, esi` reads both.
+TEST(Ir, AZeroingIdiomIsNotAParameterRead) {
+  donkey::IrFunction f;
+  ASSERT_TRUE(lift_raw_x86_64({0x31, 0xff, 0x29, 0xf6, 0x89, 0xf8, 0x01, 0xf0, 0xc3}, f));
+  EXPECT_TRUE(f.parameters.empty()) << f.parameters.size();
+  donkey::IrFunction both;
+  ASSERT_TRUE(lift_raw_x86_64({0x31, 0xf7, 0x89, 0xf8, 0xc3}, both));
+  EXPECT_EQ(both.parameters.size(), 2U);
+}
+
 TEST(Ir, VerifierRejectsACallWithArgumentsButNoSignature) {
   donkey::IrFunction f;
   f.address = 0x1000;

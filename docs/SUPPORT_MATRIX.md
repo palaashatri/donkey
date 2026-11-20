@@ -78,9 +78,9 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   `strlen`, `strnlen`, `memchr`, `strchr`, `strrchr`, `strspn`, `strcspn`, `memcpy`, `memmove` or
   `memset` carries the function's prototype, and the interpreter runs an executable model of it.
   Every model is compared with the host C library on random inputs
-  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, 43 of the 44 `c_lib_*`
-  corpus results are Complete and verified (48 vectors each); `c_lib_memcpy_sum` above -O0 is
-  Partial (a zeroing `xor` after the call). Not tested on Windows, macOS (Mach-O imports are not
+  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, all 44 `c_lib_*`
+  corpus results are Complete and verified (48 vectors each), `c_lib_memcpy_sum`'s zeroing `xor`
+  after the call included. Not tested on Windows, macOS (Mach-O imports are not
   bound) or FreeBSD hosts.
 - Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
   `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).

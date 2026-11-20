@@ -2762,6 +2762,9 @@ void collect_reads(const IrStatement& statement, std::vector<std::string>& out) 
   if (statement.dest.kind == IrOperandKind::Memory) {
     add(statement.dest);  // a store's address is read; a register destination is only written
   }
+  if (is_zeroing_idiom(statement)) {
+    return;  // `xor ecx, ecx` reads no value of rcx: its operands are registers, nothing else
+  }
   add(statement.a);
   add(statement.b);
   add(statement.c);
