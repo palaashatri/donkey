@@ -331,6 +331,24 @@ std::string hex_digest(std::string_view text) {
       std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
 }
 
+/// Where the comment that starts at `i` ends: past its `*/`, or at the line break that ends a line
+/// comment (which is not part of it). `i` itself when no comment starts there; the end of the text
+/// for an unterminated one.
+std::size_t comment_end(std::string_view text, std::size_t i) {
+  if (text[i] != '/' || i + 1 >= text.size()) {
+    return i;
+  }
+  if (text[i + 1] == '*') {
+    const std::size_t close = text.find("*/", i + 2);
+    return close == std::string_view::npos ? text.size() : close + 2;
+  }
+  if (text[i + 1] == '/') {
+    const std::size_t newline = text.find('\n', i + 2);
+    return newline == std::string_view::npos ? text.size() : newline;
+  }
+  return i;
+}
+
 }  // namespace
 
 std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
@@ -346,6 +364,13 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       while (i < preprocessed.size() && preprocessed[i] != '\n') {
         ++i;
       }
+      continue;
+    }
+    if (const std::size_t after = comment_end(preprocessed, i); after != i) {
+      // A comment (input preprocessed with -C keeps them) is one space, as C reads it: its
+      // contents are not delimiters, and a directive may still follow it on the line.
+      current.push_back(' ');
+      i = after - 1;
       continue;
     }
     // A directive's '#' may follow spaces or tabs.
@@ -444,6 +469,15 @@ std::string layout_pragma(std::string_view preprocessed) {
       line_start = true;
       continue;
     }
+    if (const std::size_t after = comment_end(preprocessed, i); after != i) {
+      i = after - 1;  // a comment is a space: a pragma inside one is not a pragma
+      continue;
+    }
+    if (opens_literal(c)) {
+      i = skip_literal(preprocessed, i) - 1;  // a literal's "/*" opens no comment
+      line_start = false;
+      continue;
+    }
     // A directive's '#' may follow spaces or tabs.
     line_start = c == '\n' || (line_start && (c == ' ' || c == '\t'));
   }
@@ -465,7 +499,7 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   parse_options.pointer_size = options.pointer_size;
   parse_options.long_size = options.long_size;
   parse_options.char_is_signed = options.char_is_signed;
-  parse_options.bit_fields = bit_field_layout(options.abi);
+  parse_options.bit_fields = bit_field_layout(options.abi, options.platform);
 
   TypeLibraryMakeResult made;
   std::set<std::string> tags;

@@ -432,6 +432,9 @@ class Parser {
   Parser(std::vector<Token> tokens, const TypeTable& known, const CDeclarationOptions& options)
       : tokens_(std::move(tokens)), options_(options), working_(known), next_(known.next_id()) {
     for (const TypeDefinition& definition : known.list()) {
+      if (definition.local) {
+        continue;  // declared in a prototype: neither its tag nor its constants are in scope
+      }
       if (definition.kind == TypeKind::Enum) {
         for (const TypeEnumerator& enumerator : definition.enumerators) {
           enum_constants_.emplace(enumerator.name, EnumConstant{enumerator.value, 0});
@@ -621,8 +624,33 @@ class Parser {
     enum_constants_[name] = EnumConstant{value, prototype_scope_};
   }
 
-  /// Leaves a prototype: its tags and enumeration constants go out of scope.
+  /// The prototype depth of the innermost parameter with this name, or -1.
+  [[nodiscard]] int parameter_scope(const std::string& name) const {
+    for (auto it = parameter_names_.rbegin(); it != parameter_names_.rend(); ++it) {
+      if (it->first == name) {
+        return it->second;
+      }
+    }
+    return -1;
+  }
+
+  /// Whether `name` is a typedef name here: a typedef that no parameter or enumeration constant
+  /// hides. Typedefs are declared only at file scope, so any such binding is an inner one.
+  [[nodiscard]] bool typedef_visible(const std::string& name) const {
+    return typedef_names_.count(name) != 0 && !hidden_by_ordinary_name(name);
+  }
+
+  /// Whether an enumeration constant or a parameter in scope hides a type name (a typedef, or a
+  /// built-in name such as `size_t`).
+  [[nodiscard]] bool hidden_by_ordinary_name(const std::string& name) const {
+    return enum_constants_.count(name) != 0 || parameter_scope(name) >= 0;
+  }
+
+  /// Leaves a prototype: its tags, enumeration constants and parameter names go out of scope.
   void leave_prototype() {
+    while (!parameter_names_.empty() && parameter_names_.back().second == prototype_scope_) {
+      parameter_names_.pop_back();
+    }
     while (!tag_undo_.empty() && tag_undo_.back().scope == prototype_scope_) {
       const TagBinding& binding = tag_undo_.back();
       if (binding.previous) {
@@ -774,12 +802,13 @@ class Parser {
         break;  // this identifier is the declarator's name
       }
       if (const auto typedef_name = typedef_names_.find(word);
-          typedef_name != typedef_names_.end()) {
+          typedef_name != typedef_names_.end() && typedef_visible(word)) {
         named = typedef_name->second;
         advance();
         continue;
       }
-      if (const auto fixed = fixed_width_integer(word, options_)) {
+      if (const auto fixed = fixed_width_integer(word, options_);
+          fixed && !hidden_by_ordinary_name(word)) {
         named = scalar(word, TypeKind::Integer, fixed->size, fixed->is_signed);
         advance();
         continue;
@@ -929,6 +958,7 @@ class Parser {
         TypeDefinition shell;
         shell.kind = is_union ? TypeKind::Union : TypeKind::Struct;
         shell.name = tag;
+        shell.local = prototype_scope_ > 0;
         id = add(std::move(shell));
         if (!tag.empty()) {
           bind_tag(tags, tag, id);
@@ -959,6 +989,7 @@ class Parser {
     TypeDefinition shell;
     shell.kind = is_union ? TypeKind::Union : TypeKind::Struct;
     shell.name = tag;
+    shell.local = prototype_scope_ > 0;
     const TypeId id = add(std::move(shell));
     bind_tag(tags, tag, id);
     note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
@@ -1179,6 +1210,7 @@ class Parser {
     definition.kind = TypeKind::Enum;
     definition.name = tag;
     definition.size = 4;
+    definition.local = prototype_scope_ > 0;
     std::int64_t next_value = 0;
     while (!at_symbol("}")) {
       if (peek().kind != Token::Kind::Identifier || is_keyword(peek().text)) {
@@ -1215,7 +1247,8 @@ class Parser {
       enumerator.value = next_value;
       if (const auto existing = enum_constants_.find(enumerator.name);
           (existing != enum_constants_.end() && existing->second.scope == prototype_scope_) ||
-          (prototype_scope_ == 0 && typedef_names_.count(enumerator.name) != 0)) {
+          (prototype_scope_ == 0 && typedef_names_.count(enumerator.name) != 0) ||
+          (prototype_scope_ > 0 && parameter_scope(enumerator.name) == prototype_scope_)) {
         return located<TypeId>(name_line, name_column, "cdecl.redefinition",
                                "'" + enumerator.name + "' is already declared");
       }
@@ -1262,8 +1295,9 @@ class Parser {
     static const std::set<std::string, std::less<>> kTypeWords = {
         "void",     "_Bool",  "char",  "short", "int",   "long",     "float",    "double", "signed",
         "unsigned", "struct", "union", "enum",  "const", "volatile", "restrict", "_Atomic"};
-    return kTypeWords.count(token.text) != 0 || typedef_names_.count(token.text) != 0 ||
-           fixed_width_integer(token.text, options_).has_value();
+    return kTypeWords.count(token.text) != 0 || typedef_visible(token.text) ||
+           (fixed_width_integer(token.text, options_).has_value() &&
+            !hidden_by_ordinary_name(token.text));
   }
 
   /// A type name: specifiers and an abstract declarator.
@@ -1625,6 +1659,20 @@ class Parser {
       if (!value) {
         return value;
       }
+      // A comma operator may appear only where nothing is evaluated (C11 6.6p3), as in the operand
+      // of `sizeof`; its value and type are those of its right operand.
+      while (at_symbol(",")) {
+        if (evaluate) {
+          return located<Constant>(peek().line, peek().column, "cdecl.not_constant",
+                                   "a comma operator is a constant expression only where it is "
+                                   "not evaluated");
+        }
+        advance();
+        value = constant_expression(/*evaluate=*/false, depth);
+        if (!value) {
+          return value;
+        }
+      }
       if (auto close = expect(")"); !close) {
         return propagate<Constant>(close);
       }
@@ -1632,6 +1680,13 @@ class Parser {
     }
     if (token.kind == Token::Kind::Identifier && !is_keyword(token.text)) {
       const auto constant = enum_constants_.find(token.text);
+      const int parameter = parameter_scope(token.text);
+      if (parameter >= 0 &&
+          (constant == enum_constants_.end() || parameter >= constant->second.scope)) {
+        return located<Constant>(
+            token.line, token.column, "cdecl.not_constant",
+            "'" + token.text + "' is a parameter here, not an integer constant");
+      }
       if (constant == enum_constants_.end()) {
         return located<Constant>(token.line, token.column, "cdecl.not_constant",
                                  "'" + token.text + "' is not an integer constant");
@@ -1825,6 +1880,17 @@ class Parser {
         return located<void>(declared.line, declared.column, "cdecl.incomplete_type",
                              "a parameter needs a complete type");
       }
+      if (!declared.name.empty()) {
+        // In scope for the declarators that follow it in this list.
+        if (parameter_scope(declared.name) == prototype_scope_ ||
+            (enum_constants_.count(declared.name) != 0 &&
+             enum_constants_.at(declared.name).scope == prototype_scope_)) {
+          return located<void>(
+              declared.line, declared.column, "cdecl.redefinition",
+              "'" + declared.name + "' is already declared in this parameter list");
+        }
+        parameter_names_.emplace_back(declared.name, prototype_scope_);
+      }
       TypeField field;
       field.name = declared.name;
       field.type = parameter_type;
@@ -1889,6 +1955,11 @@ class Parser {
           note(declared.name, CNameSpace::Ordinary, TypeKind::Typedef);
         }
       } else if (declared.is_function) {
+        if (enum_constants_.count(declared.name) != 0 || typedef_names_.count(declared.name) != 0) {
+          return located<void>(
+              declared.line, declared.column, "cdecl.redefinition",
+              "'" + declared.name + "' is already a typedef or an enumeration constant");
+        }
         // A prototype: the function type takes the function's name.
         TypeDefinition named;
         if (const TypeDefinition* function = working_.find(declared.type)) {
@@ -1948,6 +2019,10 @@ class Parser {
   };
   std::vector<TagBinding> tag_undo_;
   std::vector<ConstantBinding> constant_undo_;
+  /// The parameter names of the prototypes being parsed, with the depth of their prototype. A
+  /// parameter is an ordinary identifier: it hides a typedef or an enumeration constant of an outer
+  /// scope in the declarators after it.
+  std::vector<std::pair<std::string, int>> parameter_names_;
   std::set<TypeId> incomplete_;
   /// Tags this text named by a forward reference and has not defined yet.
   std::set<TypeId> forward_tags_;

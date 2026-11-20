@@ -74,6 +74,71 @@ TEST(TypeLibMake, LayoutPragmasAreRefused) {
   EXPECT_EQ(harmless.value().kept, 1U);
 }
 
+// Comments in the input (gcc -C keeps them) are spaces: they neither join declarations nor count
+// as delimiters.
+TEST(TypeLibMake, CommentsAreSpaces) {
+  const auto made = donkey::make_type_library(
+      "typedef int A; // note\n"
+      "typedef int B; /* a ; { } */ typedef int C;\n"
+      "/* unterminated ; ",
+      test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 3U);
+  EXPECT_TRUE(made.value().skipped.empty());
+  const auto split = donkey::split_c_declarations("typedef int A; // ;\ntypedef int B;\n");
+  ASSERT_EQ(split.size(), 2U);
+  // A pragma inside a comment is not one; a directive after a comment on its line is; and a "/*"
+  // inside a literal opens no comment that could hide a pragma.
+  const auto commented = donkey::make_type_library(
+      "/*\n#pragma pack(1)\n*/\ntypedef int A;\n// #pragma pack(2)\ntypedef int B;\n",
+      test_options());
+  ASSERT_TRUE(commented.has_value()) << commented.diagnostic().message;
+  EXPECT_EQ(commented.value().kept, 2U);
+  for (const char* input :
+       {"/* note */ #pragma pack(1)\nstruct s { char c; int i; };\n",
+        "const char *p = \"/*\";\n#pragma pack(1)\nstruct s { char c; int i; };\n"}) {
+    SCOPED_TRACE(input);
+    const auto refused = donkey::make_type_library(input, test_options());
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.diagnostic().code, "typelib_make.pragma");
+  }
+}
+
+// Bit-field rules come from the ABI and the platform: AAPCS64 on Linux is modelled, Apple arm64 is
+// not, so a declaration with a bit-field is skipped there and the rest of the library is kept.
+TEST(TypeLibMake, BitFieldsFollowTheAbiAndThePlatform) {
+  EXPECT_EQ(donkey::bit_field_layout("sysv", "linux"), donkey::CBitFieldLayout::SystemV);
+  EXPECT_EQ(donkey::bit_field_layout("aapcs64", "linux"), donkey::CBitFieldLayout::Aapcs64);
+  EXPECT_EQ(donkey::bit_field_layout("aapcs64", "freebsd"), donkey::CBitFieldLayout::Aapcs64);
+  EXPECT_EQ(donkey::bit_field_layout("aapcs64", "macos"), donkey::CBitFieldLayout::Unmodelled);
+  EXPECT_EQ(donkey::bit_field_layout("win64", "windows"), donkey::CBitFieldLayout::Unmodelled);
+
+  auto options = test_options();
+  options.platform = "macos";
+  options.architecture = "aarch64";
+  options.abi = "aapcs64";
+  options.char_is_signed = true;
+  const auto made = donkey::make_type_library(
+      "struct flags { unsigned a : 1; };\nstruct plain { int x; };\n", options);
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 1U);
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_NE(made.value().skipped[0].reason.find("cdecl.bitfield_abi"), std::string::npos);
+
+  // A library text for Apple arm64 that does contain a bit-field is refused when read.
+  options.platform = "linux";
+  const auto linux_made = donkey::make_type_library("struct flags { unsigned a : 1; };\n", options);
+  ASSERT_TRUE(linux_made.has_value()) << linux_made.diagnostic().message;
+  std::string text = linux_made.value().text;
+  const std::size_t platform = text.find("platform: linux");
+  ASSERT_NE(platform, std::string::npos);
+  text.replace(platform, std::string("platform: linux").size(), "platform: macos");
+  const auto read = donkey::read_type_library(text);
+  ASSERT_FALSE(read.has_value());
+  EXPECT_NE(read.diagnostic().message.find("bit-field layout is not modelled"), std::string::npos)
+      << read.diagnostic().message;
+}
+
 // An untagged enum declares no type name, but its constants are names later declarations use.
 TEST(TypeLibMake, AnUntaggedEnumIsKeptForItsConstants) {
   const auto made = donkey::make_type_library(
