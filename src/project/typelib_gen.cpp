@@ -465,6 +465,7 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   parse_options.pointer_size = options.pointer_size;
   parse_options.long_size = options.long_size;
   parse_options.char_is_signed = options.char_is_signed;
+  parse_options.bit_fields = bit_field_layout(options.abi);
 
   TypeLibraryMakeResult made;
   std::set<std::string> tags;

@@ -18,6 +18,15 @@
 
 namespace donkey {
 
+/// How bit-fields are laid out. The placement rule is the same for the two modelled ABIs (a field
+/// starts at the next free bit unless it would cross a unit of its type's size); they differ in
+/// whether an unnamed bit-field's type aligns the record.
+enum class CBitFieldLayout : std::uint8_t {
+  SystemV,     ///< System V x86-64: an unnamed bit-field does not align the record
+  Aapcs64,     ///< AAPCS64 (AArch64 Linux): an unnamed bit-field's type aligns the record too
+  Unmodelled,  ///< any other ABI (Win64, Apple arm64): a bit-field is refused
+};
+
 /// The sizes the parser assumes for the target ABI. The defaults are LP64, the
 /// System V and Apple x86-64 and AArch64 model. `long double` is always 16 bytes.
 struct CDeclarationOptions {
@@ -26,6 +35,8 @@ struct CDeclarationOptions {
   /// Whether plain `char` is signed: true on x86-64 and Apple arm64, false on
   /// Linux AArch64.
   bool char_is_signed = true;
+  /// The bit-field rules; the default is System V x86-64's.
+  CBitFieldLayout bit_fields = CBitFieldLayout::SystemV;
 };
 
 /// Largest input the parser accepts, in bytes.

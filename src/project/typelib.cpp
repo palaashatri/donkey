@@ -587,6 +587,7 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   options.pointer_size = lib.pointer_size;
   options.long_size = lib.long_size;
   options.char_is_signed = lib.char_is_signed;
+  options.bit_fields = bit_field_layout(lib.abi);
 
   // A library parses on its own, against the built-in names only, so the table it is read into
   // cannot change what its text means (a typedef there could otherwise shadow a built-in name).
@@ -672,6 +673,16 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
 }
 
 }  // namespace
+
+CBitFieldLayout bit_field_layout(std::string_view abi) noexcept {
+  if (abi == "sysv") {
+    return CBitFieldLayout::SystemV;
+  }
+  if (abi == "aapcs64") {
+    return CBitFieldLayout::Aapcs64;
+  }
+  return CBitFieldLayout::Unmodelled;
+}
 
 Result<TypeLibrary> read_type_library(std::string_view text, const TypeTable& known) {
   if (text.size() > kMaxTypeLibraryBytes) {

@@ -2206,6 +2206,22 @@ sources only, a preprocessor at build time). What was built and measured:
   `cli.typelib_make_rejects_a_bad_char_signed`, and new cases in `Types.ParserErrorsAreLocated`. `fuzz_cdecl`
   (clang 18, ASan and UBSan) ran 544,286 inputs in 91 s with no finding; Debug 1,024/1,024 and Release
   1,025/1,025 pass on Linux x86-64.
+- Third review of #70 (2026-11-20): bit-field layout follows the library's declared ABI
+  (`CDeclarationOptions::bit_fields`, from the `abi` header through `bit_field_layout`). System V x86-64
+  and AAPCS64 place bit-fields alike, but an AAPCS64 record is also aligned to the type of each unnamed
+  bit-field; Win64 and any other ABI refuse a bit-field (`cdecl.bitfield_abi`) instead of using the System V
+  rules. An unnamed bit-field is kept as a padding field (`TypeField::padding`: no name, its bits, or for
+  width zero a marker at the offset it moves to), so a trailing `int :0;` or `int :3;` counts in the size the
+  type store checks; a record that the ABI aligns more than its members carries that alignment
+  (`TypeDefinition::alignment`, now also for structs and unions). Project schema v8 stores `padding`
+  (migration from v7: every existing member stays a member). Tests:
+  `Types.BitFieldsAreLaidOutAsTheCompilerLaysThemOut` (System V x86-64, GCC 13.3) and
+  `Types.Aapcs64BitFieldsAlignTheRecordToUnnamedBitFields` (aarch64-linux-gnu-gcc 13.3 run under
+  qemu-aarch64) check the same 14 declarations against each compiler, with trailing unnamed bit-fields;
+  `Types.PaddingFieldsAndRecordAlignmentAreChecked`, and
+  `Types.PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration`. The musl library text is unchanged.
+  `fuzz_cdecl` now picks the bit-field rules from its first byte too; it ran 605,844 inputs in 91 s with no
+  finding. Debug 1,027/1,027 and Release 1,028/1,028 pass on Linux x86-64.
 - Not done here: FreeBSD and MinGW-w64 libraries (allowed, each file's licence to be checked), the `.winmd`
   reader, and function pointers (parenthesised declarators, G05).
   Applying a library to code is T3.
@@ -2223,7 +2239,7 @@ sources only, a preprocessor at build time). What was built and measured:
 4. *Functions identified by G09.* The library prototype goes through `apply_prototype` on the matched
    function's body, which works today. The G09 name stays; the type's provenance is `Library`.
 5. *Provenance per application.* Add a `source` column (user, dwarf, pdb, library, inferred) to
-   `type_applications`, with a schema migration (v7 to v8) and a test that opens a v7 project. Order:
+   `type_applications`, with a schema migration (v8 to v9) and a test that opens a v8 project. Order:
    a user application is never replaced by a library one; a DWARF or PDB type is not replaced by a
    library one; a user edit replaces a library application.
 6. *Name collisions.* A library type name that matches a user, DWARF or PDB type is a collision. The

@@ -322,6 +322,13 @@ CREATE TABLE local_names (
 PRAGMA user_version=7;
 )sql";
 
+/// v8 marks the unnamed bit-fields of a struct or union (`TypeField::padding`): layout only, never
+/// a member. Existing rows are members.
+constexpr const char* kMigrateV7ToV8 = R"sql(
+ALTER TABLE type_fields ADD COLUMN padding INTEGER NOT NULL DEFAULT 0 CHECK (padding IN (0, 1));
+PRAGMA user_version=8;
+)sql";
+
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
   return Diagnostic::make(Status::InternalError, std::move(code),
@@ -617,6 +624,20 @@ Result<Project> Project::open(const std::string& path) {
                                    "migrate v6->v7: " + message);
       }
       schema = 7;
+    }
+    if (schema == 7) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v7->v8: " + message);
+      }
+      schema = 8;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -1203,7 +1224,8 @@ Result<TypeTable> Project::types() const {
   TypeTable table;
   for (TypeDefinition& definition : definitions) {
     Statement fields(db,
-                     "SELECT name, offset, field_type, bit_offset, bit_size FROM type_fields "
+                     "SELECT name, offset, field_type, bit_offset, bit_size, padding FROM "
+                     "type_fields "
                      "WHERE type_id = ?1 ORDER BY ordinal");
     fields.bind(1, static_cast<std::int64_t>(definition.id.value()));
     while (fields.ok() && fields.step()) {
@@ -1213,6 +1235,7 @@ Result<TypeTable> Project::types() const {
       field.type = TypeId(static_cast<std::uint64_t>(fields.integer(2)));
       field.bit_offset = static_cast<std::uint8_t>(fields.integer(3));
       field.bit_size = static_cast<std::uint8_t>(fields.integer(4));
+      field.padding = fields.integer(5) != 0;
       definition.fields.push_back(std::move(field));
     }
     if (!fields.ok() || !fields.done()) {
@@ -1330,7 +1353,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       const TypeField& field = definition.fields[ordinal];
       Statement insert(db,
                        "INSERT INTO type_fields(type_id, ordinal, name, offset, field_type, "
-                       "bit_offset, bit_size) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                       "bit_offset, bit_size, padding) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
       insert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       insert.bind(2, static_cast<std::int64_t>(ordinal));
       insert.bind(3, field.name);
@@ -1338,6 +1361,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       insert.bind(5, static_cast<std::int64_t>(field.type.value()));
       insert.bind(6, static_cast<std::int64_t>(field.bit_offset));
       insert.bind(7, static_cast<std::int64_t>(field.bit_size));
+      insert.bind(8, static_cast<std::int64_t>(field.padding ? 1 : 0));
       if (!insert.execute_statement()) {
         return fail("project.type_write_failed", "write a type member");
       }

@@ -986,7 +986,10 @@ class Parser {
     };
     std::vector<TypeField> fields;
     std::uint64_t end_bits = 0;
-    std::uint64_t alignment = 1;
+    std::uint64_t alignment = 1;  // the members' alignment
+    // The record's alignment where the ABI aligns it more than its members: AAPCS64 aligns a
+    // record to the type of each unnamed bit-field too.
+    std::uint64_t record_alignment = 1;
     while (!at_symbol("}")) {
       if (at_end()) {
         return unexpected<TypeId>("'}'");
@@ -1031,6 +1034,10 @@ class Parser {
         }
 
         if (at_symbol(":")) {
+          if (options_.bit_fields == CBitFieldLayout::Unmodelled) {
+            return located<TypeId>(peek().line, peek().column, "cdecl.bitfield_abi",
+                                   "bit-field layout is not modelled for this ABI");
+          }
           advance();
           const Token width_at = peek();
           auto width_value = constant_expression(/*evaluate=*/true, /*depth=*/0);
@@ -1053,6 +1060,9 @@ class Parser {
             return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
                                    "the width of " + described + " is wider than _Bool's one bit");
           }
+          if (member.name.empty() && options_.bit_fields == CBitFieldLayout::Aapcs64) {
+            record_alignment = std::max(record_alignment, layout->alignment);
+          }
           if (width == 0) {
             if (!member.name.empty()) {
               return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
@@ -1065,6 +1075,12 @@ class Parser {
               }
               end_bits = *aligned;
             }
+            // Kept as layout: the next member, or the record's end, starts at this offset.
+            TypeField marker;
+            marker.offset = is_union ? 0 : end_bits / 8;
+            marker.type = member.type;
+            marker.padding = true;
+            fields.push_back(std::move(marker));
           } else {
             std::uint64_t start = 0;
             if (!is_union) {
@@ -1083,14 +1099,16 @@ class Parser {
             end_bits = is_union ? std::max(end_bits, width) : start + width;
             if (!member.name.empty()) {
               alignment = std::max(alignment, layout->alignment);
-              TypeField field;
-              field.name = member.name;
-              field.offset = start / 8;
-              field.type = member.type;
-              field.bit_offset = static_cast<std::uint8_t>(start % 8);
-              field.bit_size = static_cast<std::uint8_t>(width);
-              fields.push_back(std::move(field));
             }
+            // An unnamed bit-field is kept as padding: it takes its bits but is not a member.
+            TypeField field;
+            field.name = member.name;
+            field.offset = start / 8;
+            field.type = member.type;
+            field.bit_offset = static_cast<std::uint8_t>(start % 8);
+            field.bit_size = static_cast<std::uint8_t>(width);
+            field.padding = member.name.empty();
+            fields.push_back(std::move(field));
           }
         } else {
           if (member.name.empty()) {
@@ -1129,7 +1147,8 @@ class Parser {
     }
     advance();  // the closing '}'
 
-    const auto size = round_up_checked((end_bits + 7) / 8, alignment);
+    const std::uint64_t record = std::max(alignment, record_alignment);
+    const auto size = round_up_checked((end_bits + 7) / 8, record);
     if (!size) {
       return located<TypeId>(peek().line, peek().column, "cdecl.too_large",
                              "the " + what + " is larger than 64 bits can count");
@@ -1143,6 +1162,7 @@ class Parser {
     definition.name = tag;
     definition.size = *size;
     definition.fields = std::move(fields);
+    definition.alignment = record > alignment ? record : 0;
     replace(definition);
     return id;
   }

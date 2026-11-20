@@ -1033,7 +1033,7 @@ TEST(Project, MigratesSchemaV3AnnotationsToV4AndAcceptsFunctionEdits) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
     auto stored = project.value().annotations(image_id);
     ASSERT_TRUE(stored.has_value());
     ASSERT_EQ(stored.value().size(), 2U);
@@ -1165,7 +1165,7 @@ TEST(Types, MigratesFromSchemaV4) {
   {
     auto project = Project::create(path.str());
     ASSERT_TRUE(project.has_value());
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
   }
   // A v4 project has no type tables; drop them and set the version back to 4.
   {
@@ -1181,7 +1181,7 @@ TEST(Types, MigratesFromSchemaV4) {
   }
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 7);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto empty = reopened.value().types();
   ASSERT_TRUE(empty.has_value());
   EXPECT_EQ(empty.value().size(), 0U);
@@ -1493,7 +1493,7 @@ void reset(void);
 namespace {
 
 struct ExpectedBits {
-  const char* name;
+  const char* name;  ///< "" for an unnamed bit-field, which is padding
   std::uint64_t offset;
   std::uint8_t bit_offset;
   std::uint8_t bit_size;
@@ -1510,27 +1510,24 @@ void expect_layout(const std::vector<donkey::TypeDefinition>& types, const char*
   for (const donkey::TypeDefinition& definition : types) {
     table.put(definition);
   }
+  ASSERT_TRUE(table.validate().has_value()) << table.validate().diagnostic().message;
   const auto aligned = table.alignment_of(type->id);
   ASSERT_TRUE(aligned.has_value());
   EXPECT_EQ(aligned.value(), alignment);
   ASSERT_EQ(type->fields.size(), fields.size());
   std::size_t index = 0;
   for (const ExpectedBits& expected : fields) {
-    SCOPED_TRACE(expected.name);
+    SCOPED_TRACE(index);
     const donkey::TypeField& field = type->fields[index++];
     EXPECT_EQ(field.name, expected.name);
+    EXPECT_EQ(field.padding, std::string_view(expected.name).empty());
     EXPECT_EQ(field.offset, expected.offset);
     EXPECT_EQ(field.bit_offset, expected.bit_offset);
     EXPECT_EQ(field.bit_size, expected.bit_size);
   }
 }
 
-}  // namespace
-
-// The layouts and values are GCC's for x86-64 Linux (`sizeof`, `_Alignof`, `offsetof`, and the
-// bits each bit-field sets), so the parser is checked against the compiler, not against itself.
-TEST(Types, BitFieldsAreLaidOutAsTheCompilerLaysThemOut) {
-  const char* text = R"(
+constexpr const char* kBitFieldDeclarations = R"(
 struct b1 { unsigned a:3; unsigned b:5; unsigned c:24; char d; };
 struct b2 { char a; int b:3; };
 struct b3 { char a; int :0; char b; };
@@ -1542,8 +1539,20 @@ struct timespec { time_t tv_sec; int :8*(sizeof(time_t)-sizeof(long))*(1234==432
 struct b6 { char a; int :3; char b; };
 union u1 { int a:3; char b; };
 struct b7 { _Bool f:1; unsigned char g:7; unsigned short h:9; };
+struct t1 { char c; int :0; };
+struct t2 { char c; int :3; };
+union u2 { char c; int :3; };
+struct t3 { char c; long :0; char d; };
 )";
-  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+
+}  // namespace
+
+// The layouts are GCC 13.3's: for System V x86-64 from the host compiler, for AAPCS64 from
+// aarch64-linux-gnu-gcc run under qemu-aarch64 (`sizeof`, `_Alignof`, `offsetof`, and the bits each
+// bit-field sets), so the parser is checked against the compilers, not against itself. An unnamed
+// bit-field is kept as padding, which the type store accounts for.
+TEST(Types, BitFieldsAreLaidOutAsTheCompilerLaysThemOut) {
+  const auto parsed = donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{});
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
   const auto& types = parsed.value();
   expect_layout(types, "b1", 8, 4,
@@ -1551,16 +1560,154 @@ struct b7 { _Bool f:1; unsigned char g:7; unsigned short h:9; };
   expect_layout(types, "b2", 4, 4, {{"a", 0, 0, 0}, {"b", 1, 0, 3}});
   // A zero-width bit-field moves the next member to an int boundary, but does not align the
   // struct.
-  expect_layout(types, "b3", 5, 1, {{"a", 0, 0, 0}, {"b", 4, 0, 0}});
+  expect_layout(types, "b3", 5, 1, {{"a", 0, 0, 0}, {"", 4, 0, 0}, {"b", 4, 0, 0}});
   // A bit-field that would cross a unit of its type starts the next unit.
   expect_layout(types, "b4", 12, 4, {{"a", 0, 0, 0}, {"b", 4, 0, 30}, {"c", 8, 0, 3}});
   expect_layout(types, "b5", 16, 8, {{"a", 0, 0, 40}, {"b", 8, 0, 30}});
   // musl's padding for a 32-bit `long`: both widths are zero on LP64.
-  expect_layout(types, "timespec", 16, 8, {{"tv_sec", 0, 0, 0}, {"tv_nsec", 8, 0, 0}});
+  expect_layout(types, "timespec", 16, 8,
+                {{"tv_sec", 0, 0, 0}, {"", 8, 0, 0}, {"tv_nsec", 8, 0, 0}, {"", 16, 0, 0}});
   // An unnamed bit-field pads, but its type does not align the struct.
-  expect_layout(types, "b6", 3, 1, {{"a", 0, 0, 0}, {"b", 2, 0, 0}});
+  expect_layout(types, "b6", 3, 1, {{"a", 0, 0, 0}, {"", 1, 0, 3}, {"b", 2, 0, 0}});
   expect_layout(types, "u1", 4, 4, {{"a", 0, 0, 3}, {"b", 0, 0, 0}});
   expect_layout(types, "b7", 4, 2, {{"f", 0, 0, 1}, {"g", 0, 1, 7}, {"h", 2, 0, 9}});
+  // Trailing unnamed bit-fields: the record's size counts them.
+  expect_layout(types, "t1", 4, 1, {{"c", 0, 0, 0}, {"", 4, 0, 0}});
+  expect_layout(types, "t2", 2, 1, {{"c", 0, 0, 0}, {"", 1, 0, 3}});
+  expect_layout(types, "u2", 1, 1, {{"c", 0, 0, 0}, {"", 0, 0, 3}});
+  expect_layout(types, "t3", 9, 1, {{"c", 0, 0, 0}, {"", 8, 0, 0}, {"d", 8, 0, 0}});
+}
+
+TEST(Types, Aapcs64BitFieldsAlignTheRecordToUnnamedBitFields) {
+  donkey::CDeclarationOptions aapcs64;
+  aapcs64.char_is_signed = false;
+  aapcs64.bit_fields = donkey::CBitFieldLayout::Aapcs64;
+  const auto parsed =
+      donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{}, aapcs64);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  // The same places as System V; the records an unnamed bit-field's type aligns differ.
+  expect_layout(types, "b1", 8, 4,
+                {{"a", 0, 0, 3}, {"b", 0, 3, 5}, {"c", 1, 0, 24}, {"d", 4, 0, 0}});
+  expect_layout(types, "b3", 8, 4, {{"a", 0, 0, 0}, {"", 4, 0, 0}, {"b", 4, 0, 0}});
+  expect_layout(types, "b4", 12, 4, {{"a", 0, 0, 0}, {"b", 4, 0, 30}, {"c", 8, 0, 3}});
+  expect_layout(types, "b5", 16, 8, {{"a", 0, 0, 40}, {"b", 8, 0, 30}});
+  expect_layout(types, "timespec", 16, 8,
+                {{"tv_sec", 0, 0, 0}, {"", 8, 0, 0}, {"tv_nsec", 8, 0, 0}, {"", 16, 0, 0}});
+  expect_layout(types, "b6", 4, 4, {{"a", 0, 0, 0}, {"", 1, 0, 3}, {"b", 2, 0, 0}});
+  expect_layout(types, "u1", 4, 4, {{"a", 0, 0, 3}, {"b", 0, 0, 0}});
+  expect_layout(types, "b7", 4, 2, {{"f", 0, 0, 1}, {"g", 0, 1, 7}, {"h", 2, 0, 9}});
+  expect_layout(types, "t1", 4, 4, {{"c", 0, 0, 0}, {"", 4, 0, 0}});
+  expect_layout(types, "t2", 4, 4, {{"c", 0, 0, 0}, {"", 1, 0, 3}});
+  expect_layout(types, "u2", 4, 4, {{"c", 0, 0, 0}, {"", 0, 0, 3}});
+  expect_layout(types, "t3", 16, 8, {{"c", 0, 0, 0}, {"", 8, 0, 0}, {"d", 8, 0, 0}});
+
+  // Win64 (and any ABI not modelled) refuses a bit-field rather than lay it out as System V does.
+  donkey::CDeclarationOptions win64;
+  win64.long_size = 4;
+  win64.bit_fields = donkey::CBitFieldLayout::Unmodelled;
+  const auto refused = donkey::parse_c_declarations(
+      "struct w { unsigned char a : 1; unsigned int b : 1; };", donkey::TypeTable{}, win64);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "cdecl.bitfield_abi");
+  // A struct without bit-fields is unaffected.
+  EXPECT_TRUE(
+      donkey::parse_c_declarations("struct w { char a; int b; };", donkey::TypeTable{}, win64)
+          .has_value());
+}
+
+// The type store checks padding fields and a record's own alignment.
+TEST(Types, PaddingFieldsAndRecordAlignmentAreChecked) {
+  const auto parsed =
+      donkey::parse_c_declarations("struct t { char c; int :3; };", donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : parsed.value()) {
+    table.put(definition);
+  }
+  const auto* original = named_type(parsed.value(), "t");
+  ASSERT_NE(original, nullptr);
+  ASSERT_TRUE(table.validate().has_value());
+
+  donkey::TypeDefinition named = *original;
+  named.fields[1].name = "x";  // a padding field has no name
+  table.put(named);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.named_padding");
+
+  donkey::TypeDefinition no_padding = *original;
+  no_padding.fields.pop_back();  // without the padding, 2 bytes is more than the members need
+  table.put(no_padding);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.size_mismatch");
+
+  donkey::TypeDefinition aligned = *original;
+  aligned.alignment = 4;  // as AAPCS64 lays it out: 4 bytes, aligned to 4
+  aligned.size = 4;
+  table.put(aligned);
+  EXPECT_TRUE(table.validate().has_value()) << table.validate().diagnostic().message;
+  EXPECT_EQ(table.alignment_of(aligned.id).value(), 4U);
+
+  aligned.alignment = 3;
+  table.put(aligned);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.bad_alignment");
+}
+
+// Padding fields and a record's own alignment are stored (schema v8), and a v7 project gains the
+// column with every existing member read as a member.
+TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
+  TempPath path("types-padding");
+  donkey::CDeclarationOptions aapcs64;
+  aapcs64.bit_fields = donkey::CBitFieldLayout::Aapcs64;
+  const auto parsed = donkey::parse_c_declarations(
+      "struct t { char c; int :3; }; struct m { char a; int b; };", donkey::TypeTable{}, aapcs64);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : parsed.value()) {
+    table.put(definition);
+  }
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+  }
+  {
+    auto reopened = Project::open(path.str());
+    ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+    auto stored = reopened.value().types();
+    ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+    const auto* t = named_type(stored.value().list(), "t");
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->size, 4U);
+    EXPECT_EQ(t->alignment, 4U);
+    ASSERT_EQ(t->fields.size(), 2U);
+    EXPECT_FALSE(t->fields[0].padding);
+    EXPECT_TRUE(t->fields[1].padding);
+    EXPECT_EQ(t->fields[1].bit_size, 3U);
+    EXPECT_TRUE(stored.value().validate().has_value());
+  }
+
+  // Back to a v7 database: without the column, and without the padding row it would describe.
+  {
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "DELETE FROM type_fields WHERE padding = 1; DELETE FROM types WHERE "
+                           "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; PRAGMA "
+                           "user_version=7",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(raw);
+  }
+  auto migrated = Project::open(path.str());
+  ASSERT_TRUE(migrated.has_value()) << migrated.diagnostic().message;
+  EXPECT_EQ(migrated.value().schema_version(), donkey::kProjectSchemaVersion);
+  auto kept = migrated.value().types();
+  ASSERT_TRUE(kept.has_value()) << kept.diagnostic().message;
+  const auto* m = named_type(kept.value().list(), "m");
+  ASSERT_NE(m, nullptr);
+  ASSERT_EQ(m->fields.size(), 2U);
+  EXPECT_FALSE(m->fields[0].padding);
+  EXPECT_FALSE(m->fields[1].padding);
+  EXPECT_EQ(m->fields[1].offset, 4U);
 }
 
 TEST(Types, ConstantExpressionsFollowC) {
@@ -2154,7 +2301,7 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
 
   auto project = Project::open(path.str());
   ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-  EXPECT_EQ(project.value().schema_version(), 7);
+  EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
   auto images = project.value().images();
   ASSERT_TRUE(images.has_value());
   ASSERT_EQ(images.value().size(), 1U);
@@ -2183,7 +2330,7 @@ TEST(Project, MigratesSchemaV5AnnotationsToV6AndKeepsThem) {
                   .has_value());
   auto reopened = Project::open(path.str());
   ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
-  EXPECT_EQ(reopened.value().schema_version(), 7);
+  EXPECT_EQ(reopened.value().schema_version(), donkey::kProjectSchemaVersion);
   auto rows = reopened.value().annotations(image_id);
   ASSERT_TRUE(rows.has_value());
   EXPECT_EQ(rows.value().size(), 5U);
@@ -2202,7 +2349,7 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     auto project = Project::open(path.str());
     ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
-    EXPECT_EQ(project.value().schema_version(), 7);
+    EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
     auto images = project.value().images();
     ASSERT_TRUE(images.has_value());
     ASSERT_EQ(images.value().size(), 1U);
@@ -2213,15 +2360,17 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
-    ASSERT_EQ(sqlite3_exec(raw, "DROP TABLE local_names; PRAGMA user_version=6", nullptr, nullptr,
-                           nullptr),
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "DROP TABLE local_names; ALTER TABLE type_fields DROP COLUMN padding; "
+                           "PRAGMA user_version=6",
+                           nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
   }
 
   auto migrated = Project::open(path.str());
   ASSERT_TRUE(migrated.has_value()) << migrated.diagnostic().message;
-  EXPECT_EQ(migrated.value().schema_version(), 7);
+  EXPECT_EQ(migrated.value().schema_version(), donkey::kProjectSchemaVersion);
   auto rows = migrated.value().annotations(image_id);
   ASSERT_TRUE(rows.has_value());
   EXPECT_EQ(rows.value().size(), 3U);
