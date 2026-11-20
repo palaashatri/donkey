@@ -331,6 +331,24 @@ std::string hex_digest(std::string_view text) {
       std::span<const std::byte>(reinterpret_cast<const std::byte*>(text.data()), text.size()));
 }
 
+/// Where the comment that starts at `i` ends: past its `*/`, or at the line break that ends a line
+/// comment (which is not part of it). `i` itself when no comment starts there; the end of the text
+/// for an unterminated one.
+std::size_t comment_end(std::string_view text, std::size_t i) {
+  if (text[i] != '/' || i + 1 >= text.size()) {
+    return i;
+  }
+  if (text[i + 1] == '*') {
+    const std::size_t close = text.find("*/", i + 2);
+    return close == std::string_view::npos ? text.size() : close + 2;
+  }
+  if (text[i + 1] == '/') {
+    const std::size_t newline = text.find('\n', i + 2);
+    return newline == std::string_view::npos ? text.size() : newline;
+  }
+  return i;
+}
+
 }  // namespace
 
 std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
@@ -348,6 +366,13 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       }
       continue;
     }
+    if (const std::size_t after = comment_end(preprocessed, i); after != i) {
+      // A comment (input preprocessed with -C keeps them) is one space, as C reads it: its
+      // contents are not delimiters, and a directive may still follow it on the line.
+      current.push_back(' ');
+      i = after - 1;
+      continue;
+    }
     // A directive's '#' may follow spaces or tabs.
     line_start = c == '\n' || (line_start && (c == ' ' || c == '\t'));
     if (opens_literal(c)) {
@@ -355,20 +380,6 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       const std::size_t end = skip_literal(preprocessed, i);
       current.append(preprocessed.substr(i, end - i));
       i = end - 1;
-      continue;
-    }
-    if (c == '/' && i + 1 < preprocessed.size() &&
-        (preprocessed[i + 1] == '*' || preprocessed[i + 1] == '/')) {
-      // A comment (input preprocessed with -C keeps them) is one space, as C reads it; its
-      // contents are not delimiters, and a line comment keeps the line break that ends it.
-      if (preprocessed[i + 1] == '*') {
-        const std::size_t close = preprocessed.find("*/", i + 2);
-        i = close == std::string_view::npos ? preprocessed.size() : close + 1;
-      } else {
-        const std::size_t newline = preprocessed.find('\n', i + 2);
-        i = (newline == std::string_view::npos ? preprocessed.size() : newline) - 1;
-      }
-      current.push_back(' ');
       continue;
     }
     current.push_back(c);
@@ -456,6 +467,15 @@ std::string layout_pragma(std::string_view preprocessed) {
       }
       i = end;
       line_start = true;
+      continue;
+    }
+    if (const std::size_t after = comment_end(preprocessed, i); after != i) {
+      i = after - 1;  // a comment is a space: a pragma inside one is not a pragma
+      continue;
+    }
+    if (opens_literal(c)) {
+      i = skip_literal(preprocessed, i) - 1;  // a literal's "/*" opens no comment
+      line_start = false;
       continue;
     }
     // A directive's '#' may follow spaces or tabs.

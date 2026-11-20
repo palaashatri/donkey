@@ -1933,6 +1933,20 @@ TEST(Types, ParameterNamesAndPrototypeConstantsHideOuterNames) {
   ASSERT_NE(row, nullptr);
   EXPECT_EQ(row->count, 4U);  // (N)+1 with N the constant 3, not a cast of +1
 
+  // A built-in type name is hidden the same way.
+  const auto hidden_builtin = donkey::parse_c_declarations(
+      "void f(enum { size_t = 3 } x, char a[1][(size_t)+1]);", donkey::TypeTable{});
+  ASSERT_TRUE(hidden_builtin.has_value()) << hidden_builtin.diagnostic().message;
+  const auto* g = named_type(hidden_builtin.value(), "f");
+  ASSERT_NE(g, nullptr);
+  ASSERT_EQ(g->fields.size(), 2U);
+  const auto* g_pointer = type_by_id(hidden_builtin.value(), g->fields[1].type);
+  ASSERT_NE(g_pointer, nullptr);
+  const auto* g_row = type_by_id(hidden_builtin.value(), g_pointer->target);
+  ASSERT_NE(g_row, nullptr);
+  EXPECT_EQ(g_row->count, 4U);
+  expect_located_error("void f(int uint8_t, uint8_t x);", "cdecl.unknown_type",
+                       "line 1, column 21: ");
   expect_located_error("enum { N = 1 }; void f(int N, char a[1][N]);", "cdecl.not_constant",
                        "line 1, column 41: ");
   expect_located_error("typedef int T; void f(int T, T x);", "cdecl.unknown_type",

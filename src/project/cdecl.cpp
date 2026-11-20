@@ -637,8 +637,13 @@ class Parser {
   /// Whether `name` is a typedef name here: a typedef that no parameter or enumeration constant
   /// hides. Typedefs are declared only at file scope, so any such binding is an inner one.
   [[nodiscard]] bool typedef_visible(const std::string& name) const {
-    return typedef_names_.count(name) != 0 && enum_constants_.count(name) == 0 &&
-           parameter_scope(name) < 0;
+    return typedef_names_.count(name) != 0 && !hidden_by_ordinary_name(name);
+  }
+
+  /// Whether an enumeration constant or a parameter in scope hides a type name (a typedef, or a
+  /// built-in name such as `size_t`).
+  [[nodiscard]] bool hidden_by_ordinary_name(const std::string& name) const {
+    return enum_constants_.count(name) != 0 || parameter_scope(name) >= 0;
   }
 
   /// Leaves a prototype: its tags, enumeration constants and parameter names go out of scope.
@@ -802,7 +807,8 @@ class Parser {
         advance();
         continue;
       }
-      if (const auto fixed = fixed_width_integer(word, options_)) {
+      if (const auto fixed = fixed_width_integer(word, options_);
+          fixed && !hidden_by_ordinary_name(word)) {
         named = scalar(word, TypeKind::Integer, fixed->size, fixed->is_signed);
         advance();
         continue;
@@ -1290,7 +1296,8 @@ class Parser {
         "void",     "_Bool",  "char",  "short", "int",   "long",     "float",    "double", "signed",
         "unsigned", "struct", "union", "enum",  "const", "volatile", "restrict", "_Atomic"};
     return kTypeWords.count(token.text) != 0 || typedef_visible(token.text) ||
-           fixed_width_integer(token.text, options_).has_value();
+           (fixed_width_integer(token.text, options_).has_value() &&
+            !hidden_by_ordinary_name(token.text));
   }
 
   /// A type name: specifiers and an abstract declarator.
