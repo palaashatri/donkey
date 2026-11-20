@@ -87,6 +87,21 @@ TEST(TypeLibMake, CommentsAreSpaces) {
   EXPECT_TRUE(made.value().skipped.empty());
   const auto split = donkey::split_c_declarations("typedef int A; // ;\ntypedef int B;\n");
   ASSERT_EQ(split.size(), 2U);
+  // A pragma inside a comment is not one; a directive after a comment on its line is; and a "/*"
+  // inside a literal opens no comment that could hide a pragma.
+  const auto commented = donkey::make_type_library(
+      "/*\n#pragma pack(1)\n*/\ntypedef int A;\n// #pragma pack(2)\ntypedef int B;\n",
+      test_options());
+  ASSERT_TRUE(commented.has_value()) << commented.diagnostic().message;
+  EXPECT_EQ(commented.value().kept, 2U);
+  for (const char* input :
+       {"/* note */ #pragma pack(1)\nstruct s { char c; int i; };\n",
+        "const char *p = \"/*\";\n#pragma pack(1)\nstruct s { char c; int i; };\n"}) {
+    SCOPED_TRACE(input);
+    const auto refused = donkey::make_type_library(input, test_options());
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.diagnostic().code, "typelib_make.pragma");
+  }
 }
 
 // Bit-field rules come from the ABI and the platform: AAPCS64 on Linux is modelled, Apple arm64 is
