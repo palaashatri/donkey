@@ -1674,7 +1674,8 @@ TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
     ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
     auto stored = reopened.value().types();
     ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
-    const auto* t = named_type(stored.value().list(), "t");
+    const std::vector<donkey::TypeDefinition> stored_types = stored.value().list();
+    const auto* t = named_type(stored_types, "t");
     ASSERT_NE(t, nullptr);
     EXPECT_EQ(t->size, 4U);
     EXPECT_EQ(t->alignment, 4U);
@@ -1702,7 +1703,8 @@ TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
   EXPECT_EQ(migrated.value().schema_version(), donkey::kProjectSchemaVersion);
   auto kept = migrated.value().types();
   ASSERT_TRUE(kept.has_value()) << kept.diagnostic().message;
-  const auto* m = named_type(kept.value().list(), "m");
+  const std::vector<donkey::TypeDefinition> kept_types = kept.value().list();
+  const auto* m = named_type(kept_types, "m");
   ASSERT_NE(m, nullptr);
   ASSERT_EQ(m->fields.size(), 2U);
   EXPECT_FALSE(m->fields[0].padding);
