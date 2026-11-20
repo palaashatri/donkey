@@ -9,6 +9,7 @@
 #include <map>
 #include <optional>
 #include <random>
+#include <set>
 #include <span>
 #include <string>
 #include <vector>
@@ -180,7 +181,8 @@ std::optional<OpenedProject> open_with_library(const std::string& path, const st
       std::move(project.value()), imported.value(),
       donkey::import_sites(loaded.value().image, loaded.value().data, analysis.value(), search),
       donkey::image_abi(donkey::format_name(loaded.value().image.format),
-                        donkey::architecture_name(loaded.value().image.architecture))};
+                        donkey::architecture_name(loaded.value().image.architecture),
+                        loaded.value().image.bits)};
   return out;
 }
 
@@ -377,12 +379,29 @@ TEST(TypeLibApply, AmbiguousVersionsApplyNothing) {
   EXPECT_EQ(matched[0].prototype.value(), 0U);
 }
 
+// An import by ordinal (the import directory says so) is never matched; a function whose name
+// only starts like one is matched as any other name.
 TEST(TypeLibApply, OrdinalImportIsNotMatched) {
   const donkey::TypeTable empty;
-  auto merge = donkey::merge_type_library(empty, library_of("int ordinal_7(void);\n", empty));
+  auto merge = donkey::merge_type_library(
+      empty, library_of("int ordinal_7(void);\nint ordinal_lookup(void);\n", empty));
   ASSERT_TRUE(merge.has_value());
-  const auto matched = donkey::match_import_prototypes({site("ordinal_7")}, merge.value());
+  donkey::ImportSite by_ordinal = site("ordinal_7");
+  by_ordinal.by_ordinal = true;
+  const auto matched =
+      donkey::match_import_prototypes({by_ordinal, site("ordinal_lookup")}, merge.value());
   EXPECT_EQ(matched[0].reason, "ordinal import");
+  EXPECT_TRUE(matched[1].prototype.valid()) << matched[1].reason;
+}
+
+// Only 64-bit images have an ABI a library describes: an x32 ELF image (x86-64, ELFCLASS32) has
+// none, so nothing applies to it.
+TEST(TypeLibApply, AnX32ImageHasNoLibraryAbi) {
+  EXPECT_EQ(donkey::image_abi("ELF", "x86_64", 64).abi, "sysv");
+  EXPECT_EQ(donkey::image_abi("ELF", "x86_64", 64).data_model, "LP64");
+  EXPECT_TRUE(donkey::image_abi("ELF", "x86_64", 32).abi.empty());
+  EXPECT_EQ(donkey::image_abi("PE", "x86_64", 64).abi, "win64");
+  EXPECT_TRUE(donkey::image_abi("PE", "x86", 32).abi.empty());
 }
 
 // Only a function type the library brought matches: a user function that kept the name on a
@@ -711,4 +730,105 @@ TEST(Types, CDeclarationPrintsCDeclarators) {
               array_parameter == "long table_of(char **names)")
       << array_parameter;
   EXPECT_EQ(donkey::c_declaration(table, donkey::TypeId{999'999}, "x"), "? x");
+}
+
+// Two libraries that declare one name each keep their own prototype; the apply step takes the one
+// whose library provides the DLL the import names. (The MinGW fixture imports puts from
+// msvcrt.dll; a library for another DLL is loaded first.)
+TEST(TypeLib, EachLibraryKeepsItsOwnPrototypeOfAName) {
+  TempProject temp;
+  donkey::TypeTable empty;
+  auto other = donkey::read_type_library(
+      library_text("long puts(long n);\n", "other-dll", kWin64Abi, {"other.dll"}), empty);
+  ASSERT_TRUE(other.has_value()) << other.diagnostic().message;
+  auto opened = open_with_library(temp.str(), "stubs/stubs_x86_64.exe", other.value());
+  ASSERT_TRUE(opened.has_value());
+  auto msvcrt = donkey::read_type_library(
+      library_text("int puts(const char *s);\n", "msvcrt-test", kWin64Abi, {"msvcrt.dll"}), empty);
+  ASSERT_TRUE(msvcrt.has_value()) << msvcrt.diagnostic().message;
+  donkey::TypeLibraryRecord record;
+  record.library = msvcrt.value().library;
+  record.library_version = msvcrt.value().library_version;
+  record.architecture = msvcrt.value().architecture;
+  record.platform = msvcrt.value().platform;
+  record.abi = msvcrt.value().abi;
+  record.data_model = msvcrt.value().data_model;
+  record.provides = msvcrt.value().provides;
+  record.body_sha256 = msvcrt.value().body_sha256;
+  auto second = opened->project.load_type_library(
+      record,
+      [&](const donkey::TypeTable& types,
+          std::int64_t id) -> donkey::Result<donkey::TypeLibraryLoad> {
+        auto merged = donkey::merge_type_library(types, msvcrt.value(), id);
+        if (!merged) {
+          return merged.diagnostic();
+        }
+        EXPECT_TRUE(merged.value().collisions.empty());  // another library's puts is not one
+        return donkey::TypeLibraryLoad{merged.value().table, merged.value().added,
+                                       merged.value().collisions.size()};
+      });
+  ASSERT_TRUE(second.has_value()) << second.diagnostic().message;
+  auto applied = donkey::apply_library_prototypes(opened->project, opened->image_id, opened->sites,
+                                                  opened->abi);
+  ASSERT_TRUE(applied.has_value()) << applied.diagnostic().message;
+  auto table = opened->project.types();
+  ASSERT_TRUE(table.has_value());
+  const auto* puts = entry_named(applied.value(), "puts");
+  ASSERT_NE(puts, nullptr);
+  ASSERT_TRUE(puts->prototype.valid()) << puts->reason;
+  EXPECT_EQ(puts->library, "msvcrt-test 1");
+  EXPECT_EQ(donkey::c_declaration(table.value(), puts->prototype, "puts"), "int puts(char *s)");
+}
+
+// A library type built on a name the project defines differently is not added: a prototype whose
+// parameter is the library's `double` item_t would otherwise take the project's integer one.
+TEST(TypeLibApply, ATypeBuiltOnADifferentCollisionIsNotAdded) {
+  donkey::TypeTable user;
+  auto declared = donkey::parse_c_declarations("typedef unsigned long item_t;\n", user);
+  ASSERT_TRUE(declared.has_value());
+  for (const auto& type : declared.value()) {
+    user.put(type);
+  }
+  const auto library = library_of(
+      "typedef double item_t;\ndouble measure(item_t x);\nstruct box { item_t v; };\n"
+      "int plain(int n);\n",
+      user);
+  auto merge = donkey::merge_type_library(user, library);
+  ASSERT_TRUE(merge.has_value()) << merge.diagnostic().message;
+  ASSERT_EQ(merge.value().collisions.size(), 1U);
+  EXPECT_TRUE(merge.value().collisions[0].differs);
+  EXPECT_FALSE(merge.value().ordinary.contains("measure"));
+  EXPECT_FALSE(merge.value().tags.contains("box"));
+  EXPECT_TRUE(merge.value().ordinary.contains("plain"));
+  std::set<std::string> dependent(merge.value().dependent.begin(), merge.value().dependent.end());
+  EXPECT_TRUE(dependent.contains("measure"));
+  EXPECT_TRUE(dependent.contains("box"));
+  const auto matched = donkey::match_import_prototypes({site("measure")}, merge.value());
+  EXPECT_EQ(matched[0].reason, "no prototype");
+}
+
+// Comparing two collisions that share subtrees visits each pair once: a chain of records whose two
+// members both point at the previous record is compared in linear time, not exponential.
+TEST(TypeLibApply, CollisionComparisonIsBounded) {
+  std::string text = "struct r0 { int v; };\n";
+  for (int level = 1; level <= 40; ++level) {
+    text += "struct r" + std::to_string(level) + " { struct r" + std::to_string(level - 1) +
+            " *a; struct r" + std::to_string(level - 1) + " *b; };\n";
+  }
+  donkey::TypeTable user;
+  auto declared = donkey::parse_c_declarations(text, user);
+  ASSERT_TRUE(declared.has_value()) << declared.diagnostic().message;
+  for (const auto& type : declared.value()) {
+    user.put(type);
+  }
+  const auto library = library_of(text, user);
+  const auto started = std::chrono::steady_clock::now();
+  auto merge = donkey::merge_type_library(user, library);
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  ASSERT_TRUE(merge.has_value()) << merge.diagnostic().message;
+  EXPECT_EQ(merge.value().collisions.size(), 41U);
+  for (const auto& collision : merge.value().collisions) {
+    EXPECT_FALSE(collision.differs) << collision.name;
+  }
+  EXPECT_LT(elapsed, std::chrono::seconds(5));
 }

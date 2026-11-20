@@ -1051,6 +1051,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     std::optional<ParsedLibrary> library;
     LoaderPath location;  ///< where the file was found, as the loader names it
     std::string reason;
+    bool musl_loader = false;  ///< a C library name musl's loader gave to itself
   };
   // Looks in one directory, as the loader does: its hardware-capability subdirectories first.
   const auto look_in = [&](const LoaderPath& directory, const std::string& name) -> Search {
@@ -1112,6 +1113,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
                        : std::move(found.reason);
       out.library = std::move(found.library);
       out.location = file;
+      out.musl_loader = true;
       return out;
     }
     if (raw_name.find('/') != std::string::npos || raw_name.find('$') != std::string::npos) {
@@ -1428,6 +1430,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     LoaderPath origin;
     if (found.state == Probe::State::Taken && found.library.has_value()) {
       library.path = spelled(found.location, sysroot);
+      library.musl_loader = found.musl_loader;
       std::error_code error;
       const fs::path real = fs::canonical(resolve(found.location, sysroot).host, error);
       const std::string identity = error ? library.path : "file:" + real.generic_string();

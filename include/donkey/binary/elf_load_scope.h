@@ -104,6 +104,9 @@ struct ElfScopeLibrary {
   std::string path;
   std::string soname;
   bool preloaded = false;
+  /// musl's loader, given a C library name (`libc.so`, `libc.musl-x86_64.so.1`) the program needs:
+  /// the scope's own evidence that this object is musl's C library, whatever its names say.
+  bool musl_loader = false;
 };
 
 /// Where a reference binds.

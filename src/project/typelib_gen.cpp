@@ -518,10 +518,27 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   std::string body;
   std::size_t kept_lines = 0;  // lines of the kept text (one per declaration)
   std::size_t kept_names = 0;  // names the kept text lists
-  for (const std::string& declaration : split_c_declarations(preprocessed)) {
+  const std::vector<std::string> declarations = split_c_declarations(preprocessed);
+  // A name an assembler label renames anywhere has another symbol name everywhere: every
+  // declaration of it is skipped, before or after the labelled one.
+  std::set<std::string> relabelled;
+  for (const std::string& declaration : declarations) {
+    if (declaration.find("__asm__") != std::string::npos) {
+      relabelled.insert(name_of(declaration));
+    }
+  }
+  for (const std::string& declaration : declarations) {
     std::string name = record_text(name_of(declaration), 96, false);
     if (declaration.find('{') != std::string::npos && declaration.back() == '}') {
       made.skipped.push_back({name, "a function definition (only declarations are kept)"});
+      continue;
+    }
+    if (declaration.find("__asm__") == std::string::npos &&
+        relabelled.contains(name_of(declaration))) {
+      made.skipped.push_back(
+          {name,
+           "another declaration of it has an assembler label, which gives it another symbol "
+           "name the format cannot record"});
       continue;
     }
     if (const std::size_t attribute =

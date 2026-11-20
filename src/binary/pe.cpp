@@ -347,6 +347,7 @@ Result<void> parse_pe(ByteReader reader, BinaryImage& image) {
         const std::uint64_t ordinal_mask = plus ? (1ULL << 63U) : (1ULL << 31U);
         if ((value & ordinal_mask) != 0) {
           symbol.name = "ordinal_" + std::to_string(value & 0xFFFFU);
+          symbol.by_ordinal = true;
         } else {
           auto symbol_name =
               read_c_string(static_cast<std::uint32_t>(value & 0x7FFFFFFFU) + 2U, symbol.name);

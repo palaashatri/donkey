@@ -197,6 +197,11 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
                           name + " is a function; a function has no size by value");
     case TypeKind::Struct:
     case TypeKind::Union: {
+      if (!definition.complete) {
+        // Only declared (`struct opaque;`): a pointer to it is fine, an object of it is not.
+        return fail<Layout>("type.incomplete",
+                            name + " is only declared, so it has no size or layout");
+      }
       const bool is_union = definition.kind == TypeKind::Union;
       if (definition.fields.empty() && definition.alignment == 0 &&
           (definition.size == 0 || definition.size == 1)) {
@@ -361,6 +366,24 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
 
 /// True for a function type, or a typedef that names one. Such a type has no size,
 /// so it is checked where it is used by value and not as a type in its own right.
+/// Whether `id` names, through typedefs, a struct or union that is only declared.
+bool names_incomplete_record(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
+  for (int hop = 0; hop < kMaxNesting && id.valid(); ++hop) {
+    const auto found = types.find(id);
+    if (found == types.end()) {
+      return false;
+    }
+    if (found->second.kind == TypeKind::Struct || found->second.kind == TypeKind::Union) {
+      return !found->second.complete;
+    }
+    if (found->second.kind != TypeKind::Typedef) {
+      return false;
+    }
+    id = found->second.target;
+  }
+  return false;
+}
+
 bool names_a_function(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
   for (int hop = 0; hop < kMaxNesting && id.valid(); ++hop) {
     const auto found = types.find(id);
@@ -610,6 +633,14 @@ Result<void> TypeTable::validate() const {
                                             std::to_string(definition.target.value()) +
                                             ", which is not in the table");
     }
+    if (!definition.complete &&
+        ((definition.kind != TypeKind::Struct && definition.kind != TypeKind::Union) ||
+         !definition.fields.empty() || definition.size != 0)) {
+      return fail<void>("type.bad_incomplete",
+                        name +
+                            " is marked as only declared, but is not a struct or union "
+                            "without members and size");
+    }
     if (!definition.fields.empty() && definition.kind != TypeKind::Struct &&
         definition.kind != TypeKind::Union && definition.kind != TypeKind::Function) {
       return fail<void>("type.unexpected_fields",
@@ -662,9 +693,10 @@ Result<void> TypeTable::validate() const {
   }
 
   for (const auto& [id, definition] : types_) {
-    // A function has no size, and an array of unknown bound has none of its own: each is checked
-    // where a complete type uses it by value.
-    if (names_a_function(types_, id) || unbounded_array(types_, id) != nullptr) {
+    // A function has no size, an array of unknown bound has none of its own, and neither has a
+    // record that is only declared: each is checked where a complete type uses it by value.
+    if (names_a_function(types_, id) || unbounded_array(types_, id) != nullptr ||
+        names_incomplete_record(types_, id)) {
       continue;
     }
     auto layout = layout_of(types_, id, 0);

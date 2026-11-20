@@ -385,3 +385,18 @@ TEST(TypeLibMake, AnAssemblerLabelIsSkipped) {
   const std::string& text = made.value().text;
   EXPECT_EQ(text.find("public_api", text.find("\n\n")), std::string::npos);  // not in the body
 }
+
+// Every declaration of an assembler-labelled name is skipped, in either order: an unlabelled
+// redeclaration would otherwise keep the prototype under the wrong symbol name.
+TEST(TypeLibMake, EveryDeclarationOfALabelledNameIsSkipped) {
+  for (const char* text : {"int f(int) __asm__(\"actual_f\");\nint f(int);\nint g(int);\n",
+                           "int f(int);\nint f(int) __asm__(\"actual_f\");\nint g(int);\n"}) {
+    SCOPED_TRACE(text);
+    const auto made = donkey::make_type_library(text, test_options());
+    ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+    EXPECT_EQ(made.value().kept, 1U);  // g
+    ASSERT_EQ(made.value().skipped.size(), 2U);
+    EXPECT_EQ(made.value().skipped[0].name, "f");
+    EXPECT_EQ(made.value().skipped[1].name, "f");
+  }
+}

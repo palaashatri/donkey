@@ -2359,6 +2359,24 @@ where the import is shown to bind to a file the library describes:
   `cli.project_type_applications_refuses_a_missing_image`, `cli.project_type_add_*_bit_fields_*`. The fixture
   `tests/fixtures/loadscope/musl` (a program linked with musl-gcc, and a stand-in loader) is described in its
   PROVENANCE.
+
+**T3 review, second round (2026-11-20, CodeRabbit on 93ea0ad, 19 findings).**
+- No-return binding: a file merely named `libc.so` is no longer the C library; the load scope marks the object
+  it found as musl's loader (`ElfScopeLibrary::musl_loader`), and that is the evidence
+  (`NoReturn.AFileNamedLibcSoIsNotTheCLibrary`, a glibc program needing a returning `libc.so`).
+- musl search: tests for the path file (`:` and line ends), its default directories, an unreadable path file, a
+  library with a version table, and a dlopen scope (`ElfLoadScope.MuslSearchesItsPathFileOrItsDefaultDirectories`,
+  `MuslDoesNotBindIntoAVersionedLibrary`, `MuslDlopenSearchIsNotKnown`; fixtures in `tests/fixtures/loadscope/musl`).
+- Merge: a library type that depends on a collision that differs is not added (`dependent`); two libraries keep
+  their own prototype of one name, and the apply step takes the first whose library fits and provides the import's
+  file; collision comparison visits each pair once per query under a budget.
+- Apply: imports by ordinal come from the PE import directory, not the `ordinal_` name prefix; a 32-bit image
+  (ELF x32 included) has no library ABI; a prototype another connection wrote meanwhile is reported `kept`.
+- Storage: a migration step re-reads the version under the write lock and skips what another connection did;
+  loads roll back on an exception from the merge; `project type add` reads, parses and writes in one transaction
+  (`Project::update_types`); a type store layout of a declared-only record is refused (`type.incomplete`).
+- Generator: every declaration of an assembler-labelled name is skipped; `typelib make` writes to a file it
+  creates exclusively under a random name. CLI refusal tests check the exit status (`cmake/checks/expect_refusal.cmake`).
 - Not done here: a per-user library directory (the caller passes the path), the desktop app, and typed call
   arguments (T4, after G21).
 

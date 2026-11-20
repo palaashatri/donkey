@@ -143,3 +143,36 @@ Built twice; the bytes are the same.
 |---|---|
 | `musl/stubs_musl_x86_64` | `157e0a93172dedb76c522ebda4832b0db19427db9183fe2e59a9b370ec698ce5` |
 | `musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1` | `6011cd5ecaaf9449a9a4427bfc26bbebfebef0cf206f217777349603f7f3c6b9` |
+
+## More musl and `libc.so` fixtures (G22-T3 review)
+
+Run from this directory:
+
+    mkdir -p fakename musl/sysroot-x86_64/usr/local/lib musl/sysroot-path/lib musl/sysroot-path/etc \
+        musl/sysroot-path/opt/c musl/sysroot-unreadable/lib musl/sysroot-unreadable/etc/ld-musl-x86_64.path
+    gcc -O1 -fPIC -shared -s -fno-builtin-exit -Wl,-soname,libc.so -Wl,--build-id=none \
+        -o fakename/libc.so src/steal_exit.c
+    gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed \
+        -Wl,--enable-new-dtags,-rpath,'$ORIGIN/fakename' -o fakename_consumer src/steal_consumer.c fakename/libc.so
+    gcc -O1 -fPIC -shared -nostdlib -s -Wl,-soname,libextra.so.1 -Wl,--version-script,src/extra.map \
+        -Wl,--build-id=none -o musl/sysroot-x86_64/usr/local/lib/libextra.so.1 src/extra.c
+    cp musl/sysroot-x86_64/usr/local/lib/libextra.so.1 musl/sysroot-path/opt/c/
+    cp musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 musl/sysroot-path/lib/
+    cp musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 musl/sysroot-unreadable/lib/
+    printf '/opt/a:/opt/b\n/opt/c\n' > musl/sysroot-path/etc/ld-musl-x86_64.path
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -o musl/extra_consumer \
+        src/extra_consumer.c musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+    musl-gcc -O1 -fPIC -shared -s -Wl,-soname,libplugin.so.1 -Wl,--build-id=none -Wl,--no-as-needed \
+        -o musl/libplugin.so.1 src/plugin.c musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+
+`fakename_consumer` is a glibc program that needs `libc.so` (a library whose `exit` returns, found through
+its RUNPATH) before `libc.so.6`. `musl/sysroot-unreadable/etc/ld-musl-x86_64.path` is a directory, so
+the path file cannot be read. `musl/extra_consumer` and `musl/libplugin.so.1` link musl's startup objects (MIT).
+
+| File | SHA-256 |
+|---|---|
+| `fakename/libc.so` | `0106b01b17f94371ea2772efdc7be1e1b8f27fc7f6cde4c87d13d8c1aa73e732` |
+| `fakename_consumer` | `e0b26996f3244275494113213922045192f7995eeb5962566a3fbefcf1cc2a0a` |
+| `musl/sysroot-x86_64/usr/local/lib/libextra.so.1` | `44a16985bf7aa9f634b22b61a6b6d1e2584192865398a73ec5670735e8fca33b` |
+| `musl/extra_consumer` | `528e120188429dd4b556ed8a3678e806b3821c3ca7e773246e6cd5633121cc63` |
+| `musl/libplugin.so.1` | `ce0ac0233ef6c52a488455683451faac177ba7049d20b693f70b833919a1d967` |

@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -215,15 +216,24 @@ class Project {
   /// its applications with it.
   [[nodiscard]] Result<void> replace_types(const TypeTable& table);
 
+  /// Reads the type store, gives it to `update`, and stores what it returns, all in one write
+  /// transaction: an addition made from the types as they are now, not from an earlier read that a
+  /// concurrent library load may have changed. A refusal from `update` changes nothing.
+  [[nodiscard]] Result<void> update_types(
+      const std::function<Result<TypeTable>(const TypeTable& types)>& update);
+
   /// Type applications for one image, ordered by address.
   [[nodiscard]] Result<std::vector<TypeApplication>> type_applications(std::int64_t image_id) const;
 
   /// Apply a type to an address of an image. A type id of zero removes the application.
   /// A library application (`source` Library) does not replace an application of another source;
   /// any other source replaces a library one.
+  /// When the write is skipped because a library application meets another source's, `kept` (if
+  /// given) is set to that source; it is left empty when the application was written.
   [[nodiscard]] Result<void> set_type_application(std::int64_t image_id, TypeApplicationKind kind,
                                                   std::uint64_t address, TypeId type_id,
-                                                  TypeProvenance source = TypeProvenance::User);
+                                                  TypeProvenance source = TypeProvenance::User,
+                                                  std::optional<TypeProvenance>* kept = nullptr);
 
   /// The type libraries loaded into the project, in the order they were loaded.
   [[nodiscard]] Result<std::vector<TypeLibraryRecord>> type_libraries() const;

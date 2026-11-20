@@ -12,11 +12,21 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <cerrno>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/analysis/link_calls.h"
@@ -2088,8 +2098,8 @@ int command_project_type_library_apply(const std::string& database, std::string_
                                      " image is not supported: its import stubs are not bound to "
                                      "the libraries that define them"));
   }
-  const donkey::ImageAbi abi =
-      donkey::image_abi(format_name(image.format), architecture_name(image.architecture));
+  const donkey::ImageAbi abi = donkey::image_abi(format_name(image.format),
+                                                 architecture_name(image.architecture), image.bits);
   auto analysis = analyze(image, loaded.value().data, analysis_options());
   if (!analysis) {
     return fail(analysis.diagnostic());
@@ -2266,10 +2276,6 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     if (!project) {
       return fail(project.diagnostic());
     }
-    auto known = project.value().types();
-    if (!known) {
-      return fail(known.diagnostic());
-    }
     // Layouts that depend on the target (bit-fields, long double) follow the project's images when
     // they all follow one ABI; otherwise they are not known, and the parser refuses them.
     auto images = project.value().images();
@@ -2280,7 +2286,7 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     std::optional<donkey::ImageAbi> project_abi;
     bool one_abi = !images.value().empty();
     for (const ProjectImage& image : images.value()) {
-      const donkey::ImageAbi abi = donkey::image_abi(image.format, image.architecture);
+      const donkey::ImageAbi abi = donkey::image_abi(image.format, image.architecture, image.bits);
       if (abi.abi.empty() ||
           (project_abi && (project_abi->abi != abi.abi || project_abi->platform != abi.platform))) {
         one_abi = false;
@@ -2296,15 +2302,22 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
           project_abi->abi, platform,
           project_abi->architecture != "aarch64" || platform == "macos");
     }
-    auto declared = donkey::parse_c_declarations(text, known.value(), parse_options);
-    if (!declared) {
-      return fail(declared.diagnostic());
-    }
-    donkey::TypeTable table = known.value();
-    for (const donkey::TypeDefinition& definition : declared.value()) {
-      table.put(definition);
-    }
-    auto saved = project.value().replace_types(table);
+    // Parsed against the types as they are under the write lock, and stored in the same
+    // transaction, so a library loaded meanwhile is neither lost nor overwritten.
+    std::size_t added = 0;
+    auto saved = project.value().update_types(
+        [&](const donkey::TypeTable& known) -> Result<donkey::TypeTable> {
+          auto declared = donkey::parse_c_declarations(text, known, parse_options);
+          if (!declared) {
+            return declared.diagnostic();
+          }
+          donkey::TypeTable table = known;
+          for (const donkey::TypeDefinition& definition : declared.value()) {
+            table.put(definition);
+          }
+          added = declared.value().size();
+          return table;
+        });
     if (!saved) {
       return fail(saved.diagnostic());
     }
@@ -2315,10 +2328,10 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
       out += "  \"tool_version\": " + quote(version()) + ",\n";
       out += "  \"database\": " + quote(database) + ",\n";
       out += "  \"declarations\": " + quote(path) + ",\n";
-      out += "  \"added\": " + std::to_string(declared.value().size()) + "\n}\n";
+      out += "  \"added\": " + std::to_string(added) + "\n}\n";
       std::fwrite(out.data(), 1, out.size(), stdout);
     } else {
-      std::printf("Added %zu types from %s\n", declared.value().size(), path.c_str());
+      std::printf("Added %zu types from %s\n", added, path.c_str());
     }
     return kExitOk;
   }
@@ -2688,6 +2701,53 @@ int command_sig(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+/// Writes `text` to a file beside `destination` that this call creates itself (exclusively, with a
+/// random name) and returns its path, or an empty string when it cannot. The file is removed on
+/// failure.
+static std::string write_new_file_beside(const std::string& destination, const std::string& text) {
+  std::random_device random;
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    char suffix[24];
+    std::snprintf(suffix, sizeof(suffix), ".%08x.tmp", static_cast<unsigned>(random()));
+    const std::string path = destination + suffix;
+#ifdef _WIN32
+    const int fd =
+        _open(path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+#endif
+    if (fd < 0) {
+      if (errno == EEXIST) {
+        continue;  // another run's file: try another name
+      }
+      return {};
+    }
+    bool ok = true;
+    for (std::size_t at = 0; ok && at < text.size();) {
+      const std::size_t chunk = std::min<std::size_t>(text.size() - at, 1U << 20);
+#ifdef _WIN32
+      const int wrote = _write(fd, text.data() + at, static_cast<unsigned>(chunk));
+#else
+      const ssize_t wrote = ::write(fd, text.data() + at, chunk);
+#endif
+      ok = wrote > 0;
+      at += ok ? static_cast<std::size_t>(wrote) : 0;
+    }
+#ifdef _WIN32
+    ok = _close(fd) == 0 && ok;
+#else
+    ok = ::close(fd) == 0 && ok;
+#endif
+    if (!ok) {
+      std::error_code ignored;
+      std::filesystem::remove(path, ignored);
+      return {};
+    }
+    return path;
+  }
+  return {};
+}
+
 int command_typelib(const std::vector<std::string_view>& arguments) {
   if (arguments.empty() || (arguments[0] != "make" && arguments[0] != "show")) {
     return usage_error("typelib needs a subcommand: make or show");
@@ -2810,20 +2870,12 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   if (!made) {
     return fail(made.diagnostic());
   }
-  // Written beside the destination and renamed over it, so a failed write leaves the old library
-  // as it was.
-  const std::string temporary = out + ".tmp";
-  {
-    std::ofstream written(temporary, std::ios::binary | std::ios::trunc);
-    written << made.value().text;
-    // Closing flushes the buffer: a failed write shows here, before success is reported.
-    written.close();
-    if (!written) {
-      std::error_code ignored;
-      std::filesystem::remove(temporary, ignored);
-      return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
-                             "cannot write the library file", std::nullopt});
-    }
+  // Written to a new file beside the destination, which this run alone creates, and renamed over
+  // it: a failed write leaves the old library as it was, and two runs never share the file.
+  const std::string temporary = write_new_file_beside(out, made.value().text);
+  if (temporary.empty()) {
+    return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
+                           "cannot write the library file", std::nullopt});
   }
   std::error_code renamed;
   std::filesystem::rename(temporary, out, renamed);

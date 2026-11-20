@@ -1235,10 +1235,12 @@ add_test(NAME cli.project_type_library_apply_save
 set_tests_properties(cli.project_type_library_apply_save PROPERTIES
   FIXTURES_REQUIRED typelib_db_reset FIXTURES_SETUP typelib_db_saved)
 add_test(NAME cli.project_type_library_apply_needs_a_library
-         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_DB} 1)
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;library;apply;${DONKEY_CLI_TYPELIB_DB};1"
+                 "-DEXPECT=project.no_type_library"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 set_tests_properties(cli.project_type_library_apply_needs_a_library PROPERTIES
-  FIXTURES_REQUIRED typelib_db_saved FIXTURES_SETUP typelib_db_checked
-  PASS_REGULAR_EXPRESSION "project.no_type_library")
+  FIXTURES_REQUIRED typelib_db_saved FIXTURES_SETUP typelib_db_checked)
 add_test(NAME cli.project_type_library_apply_add
          COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPELIB_DB}
                  ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
@@ -1261,10 +1263,12 @@ set_tests_properties(cli.project_type_applications_show_the_source PROPERTIES
   FIXTURES_REQUIRED typelib_db_applied
   PASS_REGULAR_EXPRESSION "0x1020  prototype library  int puts\\(char \\*\\)")
 add_test(NAME cli.project_type_applications_refuses_a_missing_image
-         COMMAND donkey-cli project type applications ${DONKEY_CLI_TYPELIB_DB} 2)
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;applications;${DONKEY_CLI_TYPELIB_DB};2"
+                 "-DEXPECT=project.image_missing"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 set_tests_properties(cli.project_type_applications_refuses_a_missing_image PROPERTIES
-  FIXTURES_REQUIRED typelib_db_applied
-  PASS_REGULAR_EXPRESSION "project.image_missing")
+  FIXTURES_REQUIRED typelib_db_applied)
 add_test(NAME cli.decompile_notes_a_library_prototype
          COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM}
                  --project ${DONKEY_CLI_TYPELIB_DB} --function 0x1020)
@@ -1316,10 +1320,12 @@ set_tests_properties(cli.project_type_library_apply_refuses_another_architecture
   FIXTURES_REQUIRED typelib_glibc_loaded
   PASS_REGULAR_EXPRESSION "\"applied\": 0,.*\"not_applied\": \"musl-libc 1.2.4 is for x86_64 sysv LP64, the image is aarch64 aapcs64 LP64\"")
 add_test(NAME cli.project_type_library_apply_refuses_mach_o
-         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_GLIBC_DB} 3)
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;library;apply;${DONKEY_CLI_TYPELIB_GLIBC_DB};3"
+                 "-DEXPECT=project.type_library_format.*Mach-O image is not supported"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 set_tests_properties(cli.project_type_library_apply_refuses_mach_o PROPERTIES
-  FIXTURES_REQUIRED typelib_glibc_loaded
-  PASS_REGULAR_EXPRESSION "project.type_library_format.*Mach-O image is not supported")
+  FIXTURES_REQUIRED typelib_glibc_loaded)
 
 # G24-T3: a call to a bound no-return import ends its path; no `return` follows it, and the
 # function list says why the import does not return.
@@ -1425,8 +1431,9 @@ set_tests_properties(cli.project_type_add_lays_out_bit_fields_for_the_image PROP
   RESOURCE_LOCK donkey_cli_project_db
   FAIL_REGULAR_EXPRESSION "cdecl\\.")
 add_test(NAME cli.project_type_add_refuses_bit_fields_without_one_abi
-         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPELIB_GLIBC_DB}
-                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bitfield.h)
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;add;${DONKEY_CLI_TYPELIB_GLIBC_DB};${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bitfield.h"
+                 "-DEXPECT=cdecl.bitfield_abi"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 set_tests_properties(cli.project_type_add_refuses_bit_fields_without_one_abi PROPERTIES
-  FIXTURES_REQUIRED typelib_glibc_loaded
-  PASS_REGULAR_EXPRESSION "cdecl.bitfield_abi")
+  FIXTURES_REQUIRED typelib_glibc_loaded)

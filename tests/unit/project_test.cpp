@@ -10,6 +10,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -2880,6 +2882,15 @@ TEST(Types, ATagOnlyDeclaredStaysIncompleteAcrossParses) {
     EXPECT_EQ(refused.diagnostic().code, "cdecl.incomplete_type");
   }
   EXPECT_TRUE(donkey::parse_c_declarations("void use(struct opaque *p);", table).has_value());
+  // The type store keeps it valid, but gives it no size.
+  EXPECT_TRUE(table.validate().has_value());
+  for (const auto& type : table.list()) {
+    if (type.kind == donkey::TypeKind::Struct && type.name == "opaque") {
+      const auto size = table.size_of(type.id);
+      ASSERT_FALSE(size.has_value());
+      EXPECT_EQ(size.diagnostic().code, "type.incomplete");
+    }
+  }
   // An empty struct that is defined is complete.
   auto empty = donkey::parse_c_declarations(
       "struct none {};\ntypedef char z[sizeof(struct none) + 1];", donkey::TypeTable{});
@@ -3000,4 +3011,157 @@ TEST(Types, APrintedDeclarationIsBounded) {
   const std::string bounded = donkey::c_declaration(bare, previous, "x");
   EXPECT_LT(bounded.size(), 1U << 20);
   EXPECT_NE(bounded.find("..."), std::string::npos);
+}
+
+// A library application that meets another source's is kept, and the store says which source it
+// kept, so a caller does not count a write that did not happen.
+TEST(Types, AKeptApplicationIsReportedAsKept) {
+  TempPath path("types-kept");
+  auto loaded = donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/stubs/stubs_x86_64");
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(analysis.has_value());
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  auto image = project.value().import(loaded.value(), analysis.value());
+  ASSERT_TRUE(image.has_value());
+  donkey::TypeTable table;
+  auto declared = donkey::parse_c_declarations("int f(int);\nint g(int);\n", table);
+  ASSERT_TRUE(declared.has_value());
+  donkey::TypeId f{};
+  donkey::TypeId g{};
+  for (const auto& type : declared.value()) {
+    table.put(type);
+    f = type.name == "f" ? type.id : f;
+    g = type.name == "g" ? type.id : g;
+  }
+  ASSERT_TRUE(project.value().replace_types(table).has_value());
+  std::optional<donkey::TypeProvenance> kept;
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, f,
+                                        donkey::TypeProvenance::Library, &kept)
+                  .has_value());
+  EXPECT_FALSE(kept.has_value());  // written
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, g)
+                  .has_value());
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, f,
+                                        donkey::TypeProvenance::Library, &kept)
+                  .has_value());
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(*kept, donkey::TypeProvenance::User);
+}
+
+// A load whose merge throws leaves no transaction open: the next load on the same connection works,
+// and nothing of the failed one is stored.
+TEST(Types, ALoadWhoseMergeThrowsLeavesNothing) {
+  TempPath path("types-throw");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  donkey::TypeLibraryRecord record;
+  record.library = "throws";
+  record.library_version = "1";
+  record.architecture = "x86_64";
+  record.platform = "linux";
+  record.abi = "sysv";
+  record.data_model = "LP64";
+  record.body_sha256 = std::string(64, 'c');
+  EXPECT_THROW(
+      {
+        auto ignored = project.value().load_type_library(
+            record,
+            [](const donkey::TypeTable&, std::int64_t) -> donkey::Result<donkey::TypeLibraryLoad> {
+              throw std::runtime_error("merge failed");
+            });
+        (void)ignored;
+      },
+      std::runtime_error);
+  auto none = project.value().type_libraries();
+  ASSERT_TRUE(none.has_value()) << none.diagnostic().message;
+  EXPECT_TRUE(none.value().empty());
+  auto again =
+      project.value().load_type_library(record, [](const donkey::TypeTable& types, std::int64_t) {
+        return donkey::Result<donkey::TypeLibraryLoad>(donkey::TypeLibraryLoad{types, 0, 0});
+      });
+  EXPECT_TRUE(again.has_value()) << again.diagnostic().message;
+}
+
+// `update_types` reads and writes under one lock: what it stores is built from the types as
+// committed, and a refusal stores nothing.
+TEST(Types, UpdateTypesBuildsOnTheStoredTypes) {
+  TempPath path("types-update");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  const auto add = [](const char* text) {
+    return [text](const donkey::TypeTable& known) -> donkey::Result<donkey::TypeTable> {
+      auto declared = donkey::parse_c_declarations(text, known);
+      if (!declared) {
+        return declared.diagnostic();
+      }
+      donkey::TypeTable table = known;
+      for (const auto& type : declared.value()) {
+        table.put(type);
+      }
+      return table;
+    };
+  };
+  ASSERT_TRUE(project.value().update_types(add("struct a { int x; };")).has_value());
+  ASSERT_TRUE(project.value().update_types(add("struct b { struct a inner; };")).has_value());
+  const auto refused = project.value().update_types(add("struct c { struct missing m; };"));
+  EXPECT_FALSE(refused.has_value());
+  auto stored = project.value().types();
+  ASSERT_TRUE(stored.has_value());
+  std::set<std::string> names;
+  for (const auto& type : stored.value().list()) {
+    if (type.kind == donkey::TypeKind::Struct) {
+      names.insert(type.name);
+    }
+  }
+  EXPECT_EQ(names, (std::set<std::string>{"a", "b"}));
+}
+
+// Two connections open a v8 file at once: the one that waits for the migration lock finds the
+// other's migration done, and opens the file instead of running the step again.
+TEST(Project, AMigrationAnotherConnectionFinishedIsNotRunAgain) {
+  TempPath path("migrate-race");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+  }
+  sqlite3* other = nullptr;
+  ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &other, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(other, (std::string(kDowngradeV9ToV8) + "PRAGMA user_version=8;").c_str(),
+                         nullptr, nullptr, nullptr),
+            SQLITE_OK);
+  // The other connection holds the write lock, as if it were migrating.
+  ASSERT_EQ(sqlite3_exec(other, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+  std::optional<donkey::Result<Project>> opened;
+  std::thread waiter([&] { opened.emplace(Project::open(path.str())); });
+  std::this_thread::sleep_for(std::chrono::milliseconds(300));
+  // ... and finishes version 9 itself, the way the v8 step does, before it lets go.
+  ASSERT_EQ(
+      sqlite3_exec(other,
+                   "ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0 "
+                   "CHECK (source BETWEEN 0 AND 4); "
+                   "CREATE TABLE type_libraries (id INTEGER PRIMARY KEY, library TEXT NOT "
+                   "NULL, library_version TEXT NOT NULL, architecture TEXT NOT NULL, "
+                   "body_sha256 TEXT NOT NULL, added_types INTEGER NOT NULL, collisions "
+                   "INTEGER NOT NULL, platform TEXT NOT NULL, abi TEXT NOT NULL, data_model "
+                   "TEXT NOT NULL, provides TEXT NOT NULL, UNIQUE (library, "
+                   "library_version, architecture)); "
+                   "ALTER TABLE types ADD COLUMN complete INTEGER NOT NULL DEFAULT 1; "
+                   "ALTER TABLE types ADD COLUMN typedef_named INTEGER NOT NULL DEFAULT 0; "
+                   "ALTER TABLE types ADD COLUMN library INTEGER NOT NULL DEFAULT 0; "
+                   "PRAGMA user_version=9; COMMIT",
+                   nullptr, nullptr, nullptr),
+      SQLITE_OK);
+  waiter.join();
+  sqlite3_close(other);
+  ASSERT_TRUE(opened.has_value());
+  ASSERT_TRUE(opened->has_value()) << opened->diagnostic().message;
+  EXPECT_EQ(opened->value().schema_version(), donkey::kProjectSchemaVersion);
 }

@@ -106,10 +106,8 @@ bool ends_with(std::string_view text, std::string_view suffix) {
 bool elf_library_provides(std::string_view file, Provider provider) {
   switch (provider) {
     case Provider::C:
-      // `libc.so` is musl's own name for itself (a glibc program never needs it: glibc's libc.so
-      // is a linker script).
       return file == "libc.so.6" || file == "libc.so.7" || file == "libpthread.so.0" ||
-             file == "libc.so" || (starts_with(file, "libc.musl-") && ends_with(file, ".so.1")) ||
+             (starts_with(file, "libc.musl-") && ends_with(file, ".so.1")) ||
              (starts_with(file, "ld-musl-") && ends_with(file, ".so.1"));
     case Provider::Cxx:
       return file == "libstdc++.so.6" || file == "libc++.so.1" || file == "libc++abi.so.1" ||
@@ -247,7 +245,14 @@ RuntimeImportBindings bind_runtime_imports(const BinaryImage& image,
         // library that calls itself libc.so.6 under another name is not taken for the C library.
         const ElfScopeLibrary& library = scope.libraries()[binding.library];
         const std::string loaded_as = library.name.substr(library.name.find_last_of('/') + 1);
+        // musl's loader, reached by a C library name the program needs, is the C library: the
+        // scope found it as the interpreter, so neither its file name nor its (missing) soname is
+        // taken as the proof. A file merely named like one (`libc.so` in a search directory of a
+        // glibc program) is not.
         const auto provides = [&](Provider provider) {
+          if (library.musl_loader) {
+            return provider == Provider::C;
+          }
           return elf_library_provides(loaded_as, provider) &&
                  (library.soname.empty() || elf_library_provides(library.soname, provider));
         };

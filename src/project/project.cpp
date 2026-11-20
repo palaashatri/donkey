@@ -468,6 +468,43 @@ bool execute(sqlite3* db, const char* sql) {
   return sqlite3_exec(db, sql, nullptr, nullptr, nullptr) == SQLITE_OK;
 }
 
+/// A write transaction that rolls back when it leaves scope uncommitted: by an error return, or by
+/// an exception from a callback run inside it.
+class WriteTransaction {
+ public:
+  explicit WriteTransaction(sqlite3* db) : db_(db) {}
+  WriteTransaction(const WriteTransaction&) = delete;
+  WriteTransaction& operator=(const WriteTransaction&) = delete;
+  ~WriteTransaction() {
+    if (open_) {
+      sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+  }
+  /// Commits; on failure the transaction stays open and the destructor rolls it back.
+  [[nodiscard]] bool commit() {
+    if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK) {
+      return false;
+    }
+    open_ = false;
+    return true;
+  }
+
+ private:
+  sqlite3* db_;
+  bool open_ = true;
+};
+
+/// The schema version as committed now, or -1 when it cannot be read.
+int schema_version_now(sqlite3* db) {
+  sqlite3_stmt* statement = nullptr;
+  if (sqlite3_prepare_v2(db, "PRAGMA user_version", -1, &statement, nullptr) != SQLITE_OK) {
+    return -1;
+  }
+  const int version = sqlite3_step(statement) == SQLITE_ROW ? sqlite3_column_int(statement, 0) : -1;
+  sqlite3_finalize(statement);
+  return version;
+}
+
 Result<int> read_schema_version(sqlite3* db) {
   Statement statement(db, "PRAGMA user_version");
   if (!statement.ok() || !statement.step()) {
@@ -579,22 +616,32 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
-      const int rc_schema3 = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
-      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema3 != SQLITE_OK ||
-          rc_version != SQLITE_OK || rc_commit != SQLITE_OK) {
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 0) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
-                                       std::string(sqlite3_errstr(rc_schema)) + "/" +
-                                       std::string(sqlite3_errstr(rc_schema3)) + "/" +
-                                       std::string(sqlite3_errstr(rc_version)) + "/" +
-                                       std::string(sqlite3_errstr(rc_commit)) +
-                                       " msg=" + sqlite3_errmsg(db));
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
+        const int rc_schema3 = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+        const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
+        const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+        if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_schema3 != SQLITE_OK ||
+            rc_version != SQLITE_OK || rc_commit != SQLITE_OK) {
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
+                                         std::string(sqlite3_errstr(rc_schema)) + "/" +
+                                         std::string(sqlite3_errstr(rc_schema3)) + "/" +
+                                         std::string(sqlite3_errstr(rc_version)) + "/" +
+                                         std::string(sqlite3_errstr(rc_commit)) +
+                                         " msg=" + sqlite3_errmsg(db));
+        }
+        schema = 3;
       }
-      schema = 3;
     } else if (schema == 1) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
@@ -604,20 +651,30 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
-      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-      if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_version != SQLITE_OK ||
-          rc_commit != SQLITE_OK) {
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 1) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v1->v3: " + std::string(sqlite3_errstr(rc_begin)) +
-                                       "/" + std::string(sqlite3_errstr(rc_schema)) + "/" +
-                                       std::string(sqlite3_errstr(rc_version)) + "/" +
-                                       std::string(sqlite3_errstr(rc_commit)) +
-                                       " msg=" + sqlite3_errmsg(db));
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+        const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
+        const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+        if (rc_begin != SQLITE_OK || rc_schema != SQLITE_OK || rc_version != SQLITE_OK ||
+            rc_commit != SQLITE_OK) {
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v1->v3: " + std::string(sqlite3_errstr(rc_begin)) +
+                                         "/" + std::string(sqlite3_errstr(rc_schema)) + "/" +
+                                         std::string(sqlite3_errstr(rc_version)) + "/" +
+                                         std::string(sqlite3_errstr(rc_commit)) +
+                                         " msg=" + sqlite3_errmsg(db));
+        }
+        schema = 3;
       }
-      schema = 3;
     } else if (schema == 2) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
@@ -627,32 +684,43 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_rename = sqlite3_exec(db, "ALTER TABLE annotations RENAME TO annotations_v2_old",
-                                         nullptr, nullptr, nullptr);
-      const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
-      const int rc_copy =
-          sqlite3_exec(db,
-                       "INSERT INTO annotations (image_id, kind, address, text, updated_at) "
-                       "SELECT image_id, kind, address, text, updated_at FROM annotations_v2_old",
-                       nullptr, nullptr, nullptr);
-      const int rc_drop =
-          sqlite3_exec(db, "DROP TABLE annotations_v2_old", nullptr, nullptr, nullptr);
-      const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
-      const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
-      if (rc_begin != SQLITE_OK || rc_rename != SQLITE_OK || rc_schema != SQLITE_OK ||
-          rc_copy != SQLITE_OK || rc_drop != SQLITE_OK || rc_version != SQLITE_OK ||
-          rc_commit != SQLITE_OK) {
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 2) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(
-            Status::InternalError, "project.migration_failed",
-            "migrate v2->v3: " + std::string(sqlite3_errstr(rc_begin)) + "/" +
-                std::string(sqlite3_errstr(rc_rename)) + "/" +
-                std::string(sqlite3_errstr(rc_schema)) + "/" +
-                std::string(sqlite3_errstr(rc_copy)) + "/" + std::string(sqlite3_errstr(rc_drop)) +
-                "/" + std::string(sqlite3_errstr(rc_version)) + "/" +
-                std::string(sqlite3_errstr(rc_commit)) + " msg=" + sqlite3_errmsg(db));
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_rename = sqlite3_exec(
+            db, "ALTER TABLE annotations RENAME TO annotations_v2_old", nullptr, nullptr, nullptr);
+        const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
+        const int rc_copy =
+            sqlite3_exec(db,
+                         "INSERT INTO annotations (image_id, kind, address, text, updated_at) "
+                         "SELECT image_id, kind, address, text, updated_at FROM annotations_v2_old",
+                         nullptr, nullptr, nullptr);
+        const int rc_drop =
+            sqlite3_exec(db, "DROP TABLE annotations_v2_old", nullptr, nullptr, nullptr);
+        const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
+        const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
+        if (rc_begin != SQLITE_OK || rc_rename != SQLITE_OK || rc_schema != SQLITE_OK ||
+            rc_copy != SQLITE_OK || rc_drop != SQLITE_OK || rc_version != SQLITE_OK ||
+            rc_commit != SQLITE_OK) {
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v2->v3: " + std::string(sqlite3_errstr(rc_begin)) +
+                                         "/" + std::string(sqlite3_errstr(rc_rename)) + "/" +
+                                         std::string(sqlite3_errstr(rc_schema)) + "/" +
+                                         std::string(sqlite3_errstr(rc_copy)) + "/" +
+                                         std::string(sqlite3_errstr(rc_drop)) + "/" +
+                                         std::string(sqlite3_errstr(rc_version)) + "/" +
+                                         std::string(sqlite3_errstr(rc_commit)) +
+                                         " msg=" + sqlite3_errmsg(db));
+        }
+        schema = 3;
       }
-      schema = 3;
     }
     if (schema == 3) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -663,17 +731,27 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_migrate = sqlite3_exec(db, kMigrateV3ToV4, nullptr, nullptr, nullptr);
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 3) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v3->v4: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_migrate = sqlite3_exec(db, kMigrateV3ToV4, nullptr, nullptr, nullptr);
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v3->v4: " + message);
+        }
+        schema = 4;
       }
-      schema = 4;
     }
     if (schema == 4) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -684,17 +762,27 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_migrate = sqlite3_exec(db, kMigrateV4ToV5, nullptr, nullptr, nullptr);
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 4) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v4->v5: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_migrate = sqlite3_exec(db, kMigrateV4ToV5, nullptr, nullptr, nullptr);
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v4->v5: " + message);
+        }
+        schema = 5;
       }
-      schema = 5;
     }
     if (schema == 5) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -705,17 +793,27 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_migrate = sqlite3_exec(db, kMigrateV5ToV6, nullptr, nullptr, nullptr);
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 5) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v5->v6: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_migrate = sqlite3_exec(db, kMigrateV5ToV6, nullptr, nullptr, nullptr);
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v5->v6: " + message);
+        }
+        schema = 6;
       }
-      schema = 6;
     }
     if (schema == 6) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -726,17 +824,27 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_migrate = sqlite3_exec(db, kMigrateV6ToV7, nullptr, nullptr, nullptr);
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 6) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v6->v7: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_migrate = sqlite3_exec(db, kMigrateV6ToV7, nullptr, nullptr, nullptr);
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v6->v7: " + message);
+        }
+        schema = 7;
       }
-      schema = 7;
     }
     if (schema == 7) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -747,17 +855,27 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 7) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v7->v8: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v7->v8: " + message);
+        }
+        schema = 8;
       }
-      schema = 8;
     }
     if (schema == 8) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
@@ -768,29 +886,46 @@ Result<Project> Project::open(const std::string& path) {
             Status::InternalError, "project.migration_failed",
             "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
       }
-      // Version 5 gained the types table's count_known and alignment columns after some files
-      // had been written with it, so such a file reaches here without them. They are added with
-      // the values every type had before the change: a known count and the natural alignment.
-      int rc_repair = SQLITE_OK;
-      if (!table_has_column(db, "types", "count_known")) {
-        rc_repair = sqlite3_exec(db, kRepairV5TypeColumns, nullptr, nullptr, nullptr);
-      }
-      if (rc_repair == SQLITE_OK && !table_has_column(db, "type_applications", "source")) {
-        rc_repair = sqlite3_exec(db, kAddApplicationSource, nullptr, nullptr, nullptr);
-      }
-      const int rc_migrate = rc_repair == SQLITE_OK
-                                 ? sqlite3_exec(db, kMigrateV8ToV9, nullptr, nullptr, nullptr)
-                                 : rc_repair;
-      const int rc_commit = rc_migrate == SQLITE_OK
-                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
-                                : rc_migrate;
-      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
-        const std::string message = sqlite3_errmsg(db);
+      // Another connection may have run this step while this one waited for the lock.
+      if (const int now = schema_version_now(db); now != 8) {
         execute(db, "ROLLBACK");
-        return make_error<Project>(Status::InternalError, "project.migration_failed",
-                                   "migrate v8->v9: " + message);
+        if (now < 0) {
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "could not read the schema version under the migration lock");
+        }
+        schema = now;
+      } else {
+        // Version 5 gained the types table's count_known and alignment columns after some files
+        // had been written with it, so such a file reaches here without them. They are added with
+        // the values every type had before the change: a known count and the natural alignment.
+        int rc_repair = SQLITE_OK;
+        if (!table_has_column(db, "types", "count_known")) {
+          rc_repair = sqlite3_exec(db, kRepairV5TypeColumns, nullptr, nullptr, nullptr);
+        }
+        if (rc_repair == SQLITE_OK && !table_has_column(db, "type_applications", "source")) {
+          rc_repair = sqlite3_exec(db, kAddApplicationSource, nullptr, nullptr, nullptr);
+        }
+        const int rc_migrate = rc_repair == SQLITE_OK
+                                   ? sqlite3_exec(db, kMigrateV8ToV9, nullptr, nullptr, nullptr)
+                                   : rc_repair;
+        const int rc_commit = rc_migrate == SQLITE_OK
+                                  ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                  : rc_migrate;
+        if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+          const std::string message = sqlite3_errmsg(db);
+          execute(db, "ROLLBACK");
+          return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                     "migrate v8->v9: " + message);
+        }
+        schema = 9;
       }
-      schema = 9;
+    }
+    if (schema > kProjectSchemaVersion) {
+      // Another connection migrated the file past this version while this one waited.
+      return make_error<Project>(Status::Unsupported, "project.schema_too_new",
+                                 "project schema " + std::to_string(schema) +
+                                     " is newer than supported schema " +
+                                     std::to_string(kProjectSchemaVersion));
     }
     project.impl_->schema_version = schema;
     return project;
@@ -1601,7 +1736,11 @@ Result<std::vector<TypeApplication>> Project::type_applications(std::int64_t ima
 
 Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicationKind kind,
                                            std::uint64_t address, TypeId type_id,
-                                           TypeProvenance source) {
+                                           TypeProvenance source,
+                                           std::optional<TypeProvenance>* kept) {
+  if (kept != nullptr) {
+    kept->reset();
+  }
   if (!is_open()) {
     return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
   }
@@ -1673,6 +1812,11 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
     }
     if (current.step()) {
       if (current.integer(0) != static_cast<std::int64_t>(TypeProvenance::Library)) {
+        if (kept != nullptr) {
+          const std::int64_t stored = current.integer(0);
+          *kept = stored >= 0 && stored <= 4 ? static_cast<TypeProvenance>(stored)
+                                             : TypeProvenance::User;
+        }
         return Result<void>();  // kept: another source's application
       }
     } else if (!current.done()) {
@@ -2330,8 +2474,9 @@ Result<std::int64_t> Project::load_type_library(
         Status::InternalError, "project.transaction_failed",
         storage_error(db, "project.transaction_failed", "begin a type library load").message);
   }
+  // Rolled back on every way out but a commit, an exception from `merge` included.
+  WriteTransaction transaction(db);
   const auto rollback = [&](Diagnostic diagnostic) {
-    execute(db, "ROLLBACK");
     return Result<std::int64_t>(std::move(diagnostic));
   };
   const auto storage = [&](const char* code, const char* context) {
@@ -2392,10 +2537,43 @@ Result<std::int64_t> Project::load_type_library(
       return storage("project.type_library_failed", "record a type library's counts");
     }
   }
-  if (!execute(db, "COMMIT")) {
+  if (!transaction.commit()) {
     return storage("project.transaction_failed", "commit a type library load");
   }
   return id;
+}
+
+Result<void> Project::update_types(
+    const std::function<Result<TypeTable>(const TypeTable& types)>& update) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  // The write lock is taken before the types are read, so the table `update` starts from is the
+  // one the write replaces: a library loaded meanwhile is not lost.
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(Status::InternalError, "project.transaction_failed",
+                           storage_error(db, "project.transaction_failed", "begin types").message);
+  }
+  WriteTransaction transaction(db);
+  auto stored = types();
+  if (!stored) {
+    return make_void_error(stored.diagnostic().status, stored.diagnostic().code,
+                           stored.diagnostic().message);
+  }
+  auto updated = update(stored.value());
+  if (!updated) {
+    return make_void_error(updated.diagnostic().status, updated.diagnostic().code,
+                           updated.diagnostic().message);
+  }
+  if (auto written = write_type_rows(db, updated.value()); !written) {
+    return written;
+  }
+  if (!transaction.commit()) {
+    return make_void_error(Status::InternalError, "project.transaction_failed",
+                           storage_error(db, "project.transaction_failed", "commit types").message);
+  }
+  return Result<void>();
 }
 
 }  // namespace donkey

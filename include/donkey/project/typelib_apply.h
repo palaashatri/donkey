@@ -42,14 +42,23 @@ struct TypeLibraryMerge {
   /// prototype is in neither: it is not a file-scope name.
   std::map<std::string, TypeId> tags;
   std::map<std::string, TypeId> ordinary;
+  /// The library function prototypes, by name: one per library that declares the name (a
+  /// prototype of another library with the same name is not a collision).
+  std::map<std::string, std::vector<TypeId>> functions;
   std::vector<TypeLibraryCollision> collisions;
+  /// Library types not added because they refer, directly or through other library types, to a
+  /// name the project defines differently (a collision that `differs`): moving their references to
+  /// the project's definition would change what they mean.
+  std::vector<std::string> dependent;
   std::size_t added = 0;
 };
 
 /// Merges the library's types into `existing`. A library type whose name an existing file-scope
 /// type has in the same name space is not added: references to it are moved to the existing type,
-/// and the collision is listed (`differs` when the definitions do not match). Every other type is
-/// added with a fresh id, provenance Library and `library` set to `library_id`. The result is
+/// and the collision is listed (`differs` when the definitions do not match). A library type that
+/// depends on a collision that differs is not added either (`dependent`). A function prototype that
+/// another library brought under the same name is not a collision: both are kept. Every other type
+/// is added with a fresh id, provenance Library and `library` set to `library_id`. The result is
 /// validated as a whole; an invalid table is refused (`typelib_apply.invalid`) and `existing` is
 /// unchanged.
 [[nodiscard]] Result<TypeLibraryMerge> merge_type_library(const TypeTable& existing,
@@ -70,8 +79,10 @@ struct ImageAbi {
 };
 
 /// The ABI of an image of `format` and `architecture`, spelled as format_name and
-/// architecture_name spell them (`ELF`, `x86_64`).
-[[nodiscard]] ImageAbi image_abi(std::string_view format, std::string_view architecture);
+/// architecture_name spell them (`ELF`, `x86_64`), with `bits` its class. Only 64-bit images have
+/// one: an ELF x32 image (x86-64 in ELFCLASS32, ILP32) gets none.
+[[nodiscard]] ImageAbi image_abi(std::string_view format, std::string_view architecture,
+                                 unsigned bits);
 
 /// Why a loaded library does not describe code of `image`, or empty when it does: the
 /// architecture, ABI and data model must be the image's, and so must the platform where the image
@@ -92,6 +103,8 @@ struct ImportSite {
   /// Why the provider is not shown, when it is not (a library of the load scope that could not be
   /// read, a name that binds nowhere, a format whose stubs are not bound).
   std::string unbound;
+  /// PE: imported by ordinal (the import directory says so; the name is then `ordinal_N`).
+  bool by_ordinal = false;
 };
 
 /// The import stubs and thunks of an analysed image, each with where its references bind: on ELF
@@ -105,16 +118,18 @@ struct ImportSite {
 /// One import matched to a prototype, or not.
 struct ImportPrototype {
   std::string import;  ///< as the image names it
-  TypeId prototype{};  ///< the function type, or 0 when none applies
+  TypeId prototype{};  ///< the first candidate, or 0 when none applies
+  /// Every library prototype of the name, one per library, in id order.
+  std::vector<TypeId> candidates;
   /// Empty when matched; otherwise why not: `no prototype`, `ordinal import`, or `ambiguous` (the
   /// name is imported with two different versions, and a library has one prototype per name).
   std::string reason;
 };
 
-/// Matches each site to a library function prototype of the merge, by its match name. Only a
+/// Matches each site to the library function prototypes of the merge, by its match name. Only a
 /// function type with provenance Library matches: a user, DWARF or PDB type that kept a library
-/// name on a collision is not a library prototype. An ordinal import (`ordinal_N`, PE) is never
-/// matched.
+/// name on a collision is not a library prototype. An import by ordinal (`ImportSite::by_ordinal`)
+/// is never matched.
 [[nodiscard]] std::vector<ImportPrototype> match_import_prototypes(
     const std::vector<ImportSite>& sites, const TypeLibraryMerge& merge);
 
@@ -138,10 +153,10 @@ struct LibraryPrototypeApplication {
 [[nodiscard]] TypeLibraryMerge library_prototypes(const TypeTable& table);
 
 /// Applies the library prototypes of the project's type table to the import sites of one image, as
-/// FunctionPrototype applications with source Library: a site gets its prototype only when the
-/// library that brought it fits `image` (library_misfit) and every reference of the site binds to
-/// a file the library `provides`. A site whose address already has an application of another
-/// source keeps it.
+/// FunctionPrototype applications with source Library: a site gets the first candidate whose
+/// library fits `image` (library_misfit) and `provides` the file every reference of the site binds
+/// to. A site whose address already has an application of another source keeps it, also one
+/// another connection wrote after this call read the applications (`kept: ...`).
 [[nodiscard]] Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
     Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
     const ImageAbi& image);

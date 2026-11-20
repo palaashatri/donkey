@@ -43,10 +43,11 @@ preprocessor at build time (`tools/typelib/make-musl.sh` runs `gcc -E -P -nostdi
 headers), never Donkey at run time. The generator keeps each top-level declaration that Donkey's C
 parser accepts together with every declaration kept before it, and lists each other one as
 `skipped: <name>: <reason>`: a variable, a function definition, a name declared twice, a type the
-parser does not model (a function pointer, `__builtin_va_list`), an attribute
+parser does not model (a function pointer, `__builtin_va_list`), every declaration of a name that
+an assembler label (`__asm__("symbol")`) gives another symbol name, an attribute
 that may change a type (`aligned`, `packed`, `vector_size`, `mode`, or one it does not know), and
 anything that needs one of those. It drops only what changes neither a type nor its layout: `restrict`,
-`__extension__`, `_Noreturn`, `__inline`, `__asm__(...)` labels, and attributes such as `noreturn`,
+`__extension__`, `_Noreturn`, `__inline`, and attributes such as `noreturn`,
 `nonnull`, `format`, `deprecated` and `visibility`. Character and string literals are copied as they
 are; their contents are never taken for delimiters. The kept text and each new declaration are parsed
 together, as the reader parses the file, so a struct named first by a forward reference (`struct
@@ -68,8 +69,8 @@ note: a hand-written fixture
 - The first line is the format line. Version 1 is the only one. Another version is refused.
 - Header lines are `key: value`. Every single key is required and may appear once. The keys and
   their values are in the header comment of `typelib.h`.
-- Repeated records come after the single keys, in this order: `source_file`, `macro`, `skipped`,
-  `note`. Each keeps its order in the library.
+- Repeated records come after the single keys, in this order: `provides`, `source_file`,
+  `macro`, `skipped`, `note`. Each keeps its order in the library.
 - The C text is parsed by `parse_c_declarations` (`include/donkey/project/cdecl.h`, G05-T2). It may name
   the built-in names only, and its own declarations: a library parses on its own, so the table it is
   read into cannot change what its text means. Its types are then moved up to take their ids from
@@ -122,15 +123,22 @@ of `typelib.h`.
 and records the library, in one write transaction: a file-scope name the project already has (a
 tag, or a typedef or function name; a tag declared inside a prototype is neither) keeps the
 project's type and is counted as a collision, which `differs` when the two definitions do not
-match through the types they refer to. Each added type records the library that brought it.
+match through the types they refer to. A library type built, directly or through other types, on
+a name the project defines differently is not added (`dependent`): moving its references to the
+project's definition would change what it means. A prototype that another library brought under
+the same name is not a collision; each library keeps its own. Each added type records the library
+that brought it.
 
 `project type library apply <db> <image-id>` gives an import stub of the image a library prototype
 only when all of these hold:
 
-- the stub's import is matched by name (an `ordinal_N` import is not, and neither is a name the
-  image imports with two different symbol versions, read from the dynamic symbols);
+- the stub's import is matched by name (an import by ordinal, as the PE import directory marks
+  it, is not, and neither is a name the image imports with two different symbol versions, read
+  from the dynamic symbols); of the prototypes several libraries have for the name, the first that
+  passes the next two checks applies;
 - the library that brought the prototype is for the image's architecture, ABI and data model
-  (an ELF x86-64 image is `sysv` `LP64`, a PE x64 image `win64` `LLP64` on `windows`);
+  (a 64-bit ELF x86-64 image is `sysv` `LP64`, a PE x64 image `win64` `LLP64` on `windows`; a
+  32-bit image, an ELF x32 one included, has no ABI a library describes);
 - every reference of the import is shown to bind to a file the library `provides`. On ELF the
   dynamic loader's search and lookup decide (`ElfLoadScope`, glibc's rules, or musl's for a program
   whose interpreter is musl's loader), under `--sysroot`, `--library-path` and `--program`; on PE,
