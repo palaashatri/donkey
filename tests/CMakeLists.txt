@@ -1156,6 +1156,10 @@ add_test(NAME cli.link_needs_a_library
 set_tests_properties(cli.link_needs_a_library PROPERTIES WILL_FAIL TRUE)
 
 # G22-T2: the shipped musl type library loads and describes itself.
+add_test(NAME cli.typelib_make_rejects_a_bad_char_signed
+         COMMAND donkey-cli typelib make missing.i --out unused.dtl --char-signed tru)
+set_tests_properties(cli.typelib_make_rejects_a_bad_char_signed PROPERTIES
+  PASS_REGULAR_EXPRESSION "--char-signed takes true or false")
 add_test(NAME cli.typelib_show_musl
          COMMAND donkey-cli typelib show ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
 set_tests_properties(cli.typelib_show_musl PROPERTIES

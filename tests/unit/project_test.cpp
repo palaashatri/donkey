@@ -1308,11 +1308,12 @@ void expect_located_error(std::string_view text, const char* code, std::string_v
 }  // namespace
 
 TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
-  // A tag the first time it is named (here by a forward reference in a prototype), then again at
-  // its definition, marked as completing it; a typedef that names an untagged struct, a plain
-  // typedef and a prototype.
+  // A tag the first time it is named (here by a forward declaration at file scope), then again at
+  // its definition, marked as completing it; a prototype that uses it; a typedef that names an
+  // untagged struct, a plain typedef, an enum tag and its constant.
   std::vector<donkey::CDeclaredName> names;
   const auto parsed = donkey::parse_c_declarations(
+      "struct box;\n"
       "int32_t area(const struct box *b);\n"
       "struct box { int32_t w; int32_t h; };\n"
       "typedef struct { int32_t x; } item;\n"
@@ -1320,7 +1321,7 @@ TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
       "enum mode { MODE_A = 1 };\n",
       donkey::TypeTable{}, {}, &names);
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
-  ASSERT_EQ(names.size(), 6U);
+  ASSERT_EQ(names.size(), 7U);
   EXPECT_EQ(names[0].name, "box");
   EXPECT_EQ(names[0].space, donkey::CNameSpace::Tag);
   EXPECT_EQ(names[0].kind, donkey::TypeKind::Struct);
@@ -1337,9 +1338,22 @@ TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
   EXPECT_FALSE(names[3].completes);
   EXPECT_EQ(names[4].name, "count_t");
   EXPECT_EQ(names[4].kind, donkey::TypeKind::Typedef);
-  EXPECT_EQ(names[5].name, "mode");
-  EXPECT_EQ(names[5].space, donkey::CNameSpace::Tag);
+  // An enum's constants are listed as its body is read, before the tag it completes.
+  EXPECT_EQ(names[5].name, "MODE_A");
+  EXPECT_EQ(names[5].space, donkey::CNameSpace::Ordinary);
   EXPECT_EQ(names[5].kind, donkey::TypeKind::Enum);
+  EXPECT_EQ(names[6].name, "mode");
+  EXPECT_EQ(names[6].space, donkey::CNameSpace::Tag);
+  EXPECT_EQ(names[6].kind, donkey::TypeKind::Enum);
+  // The prototype's parameter points to the completed struct.
+  const auto* area = named_type(parsed.value(), "area");
+  const auto* box = named_type(parsed.value(), "box");
+  ASSERT_NE(area, nullptr);
+  ASSERT_NE(box, nullptr);
+  ASSERT_EQ(area->fields.size(), 1U);
+  const auto* box_pointer = type_by_id(parsed.value(), area->fields[0].type);
+  ASSERT_NE(box_pointer, nullptr);
+  EXPECT_EQ(box_pointer->target, box->id);
 
   // A tag defined without a forward reference is listed once, not as completing anything.
   std::vector<donkey::CDeclaredName> once;
@@ -1610,6 +1624,87 @@ typedef char enum_bound[C - A];
   EXPECT_EQ(narrow_array->count, 9U);
 }
 
+// A parameter list is a scope (C11 6.2.1): what it declares is not visible after it, and hides
+// outer names only inside it.
+TEST(Types, PrototypesAreScopes) {
+  std::vector<donkey::CDeclaredName> names;
+  const auto parsed = donkey::parse_c_declarations(
+      "enum { N = 2 };\n"
+      "void f(enum { N = 3 } x, char (*unused));\n",
+      donkey::TypeTable{}, {}, &names);
+  // The parenthesised declarator is refused; the scope is checked without it below.
+  ASSERT_FALSE(parsed.has_value());
+
+  const auto scoped = donkey::parse_c_declarations(
+      "enum { N = 2 };\n"
+      "void f(enum { N = 3 } x, char y[N]);\n"
+      "typedef char after[N];\n"
+      "int32_t g(struct hidden *h);\n"
+      "struct hidden { int32_t x; };\n",
+      donkey::TypeTable{}, {}, &names);
+  ASSERT_TRUE(scoped.has_value()) << scoped.diagnostic().message;
+  const auto& types = scoped.value();
+  // The file-scope N is 2 again after f's prototype.
+  const auto* after = named_type(types, "after");
+  ASSERT_NE(after, nullptr);
+  const auto* after_array = type_by_id(types, after->target);
+  ASSERT_NE(after_array, nullptr);
+  EXPECT_EQ(after_array->count, 2U);
+  // `struct hidden` in g's prototype is its own, incomplete type, not the later definition.
+  const auto* g = named_type(types, "g");
+  ASSERT_NE(g, nullptr);
+  ASSERT_EQ(g->fields.size(), 1U);
+  const auto* pointer = type_by_id(types, g->fields[0].type);
+  ASSERT_NE(pointer, nullptr);
+  const auto* pointee = type_by_id(types, pointer->target);
+  ASSERT_NE(pointee, nullptr);
+  EXPECT_TRUE(pointee->fields.empty());
+  const donkey::TypeDefinition* defined = nullptr;
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.name == "hidden" && !type.fields.empty()) {
+      defined = &type;
+    }
+  }
+  ASSERT_NE(defined, nullptr);
+  EXPECT_NE(defined->id, pointee->id);
+  // Names declared inside a prototype are not listed; the file-scope ones are, once each.
+  std::vector<std::string> listed;
+  for (const donkey::CDeclaredName& name : names) {
+    listed.push_back(name.name);
+    EXPECT_FALSE(name.completes) << name.name;
+  }
+  EXPECT_EQ(listed, (std::vector<std::string>{"N", "f", "after", "g", "hidden"}));
+
+  expect_located_error("enum { N = 1 }; enum { N = 2 };", "cdecl.redefinition",
+                       "line 1, column 24: ");
+  expect_located_error("typedef int N; enum { N };", "cdecl.redefinition", "line 1, column 23: ");
+  expect_located_error("enum { N }; typedef int N;", "cdecl.redefinition", "line 1, column 25: ");
+  expect_located_error("struct b; void h(struct b { int x; } *p);", "cdecl.prototype_tag",
+                       "line 1, column 25: ");
+}
+
+TEST(Types, ACastKeepsItsTypeUntilAnOperatorPromotesIt) {
+  const auto parsed = donkey::parse_c_declarations(
+      "typedef char plain[sizeof((unsigned char)1)];\n"
+      "typedef char promoted[sizeof(+(unsigned char)1)];\n"
+      "typedef char boolean[sizeof((_Bool)5)];\n"
+      "typedef char wide[sizeof((short)1 + (short)1)];\n"
+      "typedef char narrowed[(unsigned char)-1];\n",
+      donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto count = [&](const char* name) -> std::uint64_t {
+    const auto* typedef_type = named_type(parsed.value(), name);
+    const auto* array =
+        typedef_type == nullptr ? nullptr : type_by_id(parsed.value(), typedef_type->target);
+    return array == nullptr ? 0 : array->count;
+  };
+  EXPECT_EQ(count("plain"), 1U);
+  EXPECT_EQ(count("promoted"), 4U);
+  EXPECT_EQ(count("boolean"), 1U);
+  EXPECT_EQ(count("wide"), 4U);
+  EXPECT_EQ(count("narrowed"), 255U);
+}
+
 TEST(Types, ParserErrorsAreLocated) {
   expect_located_error("struct s { int x }", "cdecl.unexpected_token", "line 1, column 18: ");
   expect_located_error("typedef int T;\n  #define X 1\n", "cdecl.preprocessor",
@@ -1666,8 +1761,16 @@ TEST(Types, ParserErrorsAreLocated) {
   expect_located_error(
       "typedef char t[" + std::string(100, '(') + "1" + std::string(100, ')') + "];",
       "cdecl.nesting", "line 1, column ");
-  expect_located_error("typedef char t[" + std::string(100, '-') + "1];", "cdecl.nesting",
-                       "line 1, column ");
+  std::string minuses;
+  for (int i = 0; i < 100; ++i) {
+    minuses += "- ";
+  }
+  expect_located_error("typedef char t[" + minuses + "1];", "cdecl.nesting", "line 1, column ");
+  // `++` and `--` are C operators the subset does not have, not two signs.
+  expect_located_error("typedef char t[1++1];", "cdecl.unexpected_token", "line 1, column 17: ");
+  expect_located_error("typedef char t[1--1];", "cdecl.unexpected_token", "line 1, column 17: ");
+  expect_located_error("typedef _Bool flag; struct s { flag f : 2; };", "cdecl.bitfield_width",
+                       "line 1, column 41: ");
   // An array of arrays whose total size does not fit in 64 bits is refused by the
   // type store's whole-table check.
   expect_located_error("typedef long long huge[9223372036854775807][4];", "cdecl.invalid_type", "");

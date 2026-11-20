@@ -17,8 +17,8 @@ generator: donkey-cli typelib make 1
 generator_command: sh tools/typelib/make-musl.sh
 preprocessor: gcc 13.3.0 -E -P -nostdinc -isystem /usr/include/x86_64-linux-musl -D_GNU_SOURCE (CPATH, C_INCLUDE_PATH and the like unset)
 created: 2026-11-18
-body_sha256: f9dcaa928ee52509aec16208dd9e11a34822d2e44870f8dcd3b99ef698d77b64
-declarations: 3289
+body_sha256: 7c0c83994e0a531a0101e1ccfa95e3f86285a9f438245eb873bdcbd4188b4a18
+declarations: 3323
 source_file: aio.h fdb50a494eb52d43b674f8debe75d72224bc022d52dfbc53fc519895305ab1ee
 source_file: alloca.h 8768404d7cf4af5fb135b1a2ca91765bd2be311ac072e0ec8b68f5cb3e6e0f3e
 source_file: ar.h a32ed9d5a0e19c2d40781a05e4a0ef094d24b69a5752dc3849b92e4502481bd4
@@ -109,30 +109,7 @@ source_file: values.h 7c5f56c3e180acfe7008a7369700bde9ecc3b85d5d457fbf94efa1a0df
 source_file: wchar.h 18c5adbb8fe770aeccc0a1721b03352c6a07fb8ea373a6fcdfe88be76ca5e312
 source_file: wctype.h cfb9a3d564aad013b7bb8d326fd9b01263c87ff73fb69c823e7695b4989fc2e9
 source_file: wordexp.h f72323c01c310d9a7aabb4ea62e6a20d3f2be8a390173796c100dd85e2915855
-macro: _GNU_SOURCE=
-skipped: REG_R8: declares no type, typedef or function
-skipped: REG_R9: declares no type, typedef or function
-skipped: REG_R10: declares no type, typedef or function
-skipped: REG_R11: declares no type, typedef or function
-skipped: REG_R12: declares no type, typedef or function
-skipped: REG_R13: declares no type, typedef or function
-skipped: REG_R14: declares no type, typedef or function
-skipped: REG_R15: declares no type, typedef or function
-skipped: REG_RDI: declares no type, typedef or function
-skipped: REG_RSI: declares no type, typedef or function
-skipped: REG_RBP: declares no type, typedef or function
-skipped: REG_RBX: declares no type, typedef or function
-skipped: REG_RDX: declares no type, typedef or function
-skipped: REG_RAX: declares no type, typedef or function
-skipped: REG_RCX: declares no type, typedef or function
-skipped: REG_RSP: declares no type, typedef or function
-skipped: REG_RIP: declares no type, typedef or function
-skipped: REG_EFL: declares no type, typedef or function
-skipped: REG_CSGSFS: declares no type, typedef or function
-skipped: REG_ERR: declares no type, typedef or function
-skipped: REG_TRAPNO: declares no type, typedef or function
-skipped: REG_OLDMASK: declares no type, typedef or function
-skipped: REG_CR2: declares no type, typedef or function
+macro: _GNU_SOURCE=1
 skipped: sigaction: cdecl.parenthesized_declarator line 1, column 33: a parenthesised declarator, as in a function pointer, is not supported
 skipped: sigevent: cdecl.parenthesized_declarator line 1, column 187: a parenthesised declarator, as in a function pointer, is not supported
 skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
@@ -216,7 +193,6 @@ skipped: crealf: cdecl.unexpected_token line 1, column 20: expected ')', found '
 skipped: creall: cdecl.unexpected_token line 1, column 32: expected ')', found '_Complex'
 skipped: __isspace: a function definition (only declarations are kept)
 skipped: scandir: cdecl.parenthesized_declarator line 1, column 50: a parenthesised declarator, as in a function pointer, is not supported
-skipped: Val_GNU_MIPS_ABI_FP_MAX: declares no type, typedef or function
 skipped: __bswap16: a function definition (only declarations are kept)
 skipped: __bswap32: a function definition (only declarations are kept)
 skipped: __bswap64: a function definition (only declarations are kept)
@@ -321,8 +297,6 @@ skipped: ioctl: declared again (the first declaration is kept)
 skipped: vsyslog: cdecl.unknown_type line 1, column 34: 'va_list' is not a type
 skipped: thrd_start_t: cdecl.parenthesized_declarator line 1, column 13: a parenthesised declarator, as in a function pointer, is not supported
 skipped: tss_dtor_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
-skipped: thrd_timedout: declares no type, typedef or function
-skipped: mtx_timed: declares no type, typedef or function
 skipped: thrd_create: cdecl.unknown_type line 1, column 27: 'thrd_start_t' is not a type
 skipped: call_once: cdecl.parenthesized_declarator line 1, column 34: a parenthesised declarator, as in a function pointer, is not supported
 skipped: tss_create: cdecl.unknown_type line 1, column 25: 'tss_dtor_t' is not a type
@@ -372,6 +346,29 @@ typedef struct __pthread * pthread_t;
 typedef struct __sigset_t { unsigned long __bits[128/sizeof(long)]; } sigset_t;
 typedef struct { union { int __i[sizeof(long)==8?14:9]; volatile int __vi[sizeof(long)==8?14:9]; unsigned long __s[sizeof(long)==8?7:9]; } __u; } pthread_attr_t;
 typedef struct sigaltstack stack_t;
+enum { REG_R8 = 0 };
+enum { REG_R9 = 1 };
+enum { REG_R10 = 2 };
+enum { REG_R11 = 3 };
+enum { REG_R12 = 4 };
+enum { REG_R13 = 5 };
+enum { REG_R14 = 6 };
+enum { REG_R15 = 7 };
+enum { REG_RDI = 8 };
+enum { REG_RSI = 9 };
+enum { REG_RBP = 10 };
+enum { REG_RBX = 11 };
+enum { REG_RDX = 12 };
+enum { REG_RAX = 13 };
+enum { REG_RCX = 14 };
+enum { REG_RSP = 15 };
+enum { REG_RIP = 16 };
+enum { REG_EFL = 17 };
+enum { REG_CSGSFS = 18 };
+enum { REG_ERR = 19 };
+enum { REG_TRAPNO = 20 };
+enum { REG_OLDMASK = 21 };
+enum { REG_CR2 = 22 };
 typedef long long greg_t, gregset_t[23];
 typedef struct _fpstate { unsigned short cwd, swd, ftw, fop; unsigned long long rip, rdp; unsigned mxcsr, mxcr_mask; struct { unsigned short significand[4], exponent, padding[3]; } _st[8]; struct { unsigned element[4]; } _xmm[16]; unsigned padding[24]; } *fpregset_t;
 struct sigcontext { unsigned long r8, r9, r10, r11, r12, r13, r14, r15; unsigned long rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags; unsigned short cs, gs, fs, __pad0; unsigned long err, trapno, oldmask, cr2; struct _fpstate *fpstate; unsigned long __reserved1[8]; };
@@ -600,6 +597,7 @@ typedef struct { Elf32_Word l_name; Elf32_Word l_time_stamp; Elf32_Word l_checks
 typedef struct { Elf64_Word l_name; Elf64_Word l_time_stamp; Elf64_Word l_checksum; Elf64_Word l_version; Elf64_Word l_flags; } Elf64_Lib;
 typedef Elf32_Addr Elf32_Conflict;
 typedef struct { Elf32_Half version; unsigned char isa_level; unsigned char isa_rev; unsigned char gpr_size; unsigned char cpr1_size; unsigned char cpr2_size; unsigned char fp_abi; Elf32_Word isa_ext; Elf32_Word ases; Elf32_Word flags1; Elf32_Word flags2; } Elf_MIPS_ABIFlags_v0;
+enum { Val_GNU_MIPS_ABI_FP_ANY = 0, Val_GNU_MIPS_ABI_FP_DOUBLE = 1, Val_GNU_MIPS_ABI_FP_SINGLE = 2, Val_GNU_MIPS_ABI_FP_SOFT = 3, Val_GNU_MIPS_ABI_FP_OLD_64 = 4, Val_GNU_MIPS_ABI_FP_XX = 5, Val_GNU_MIPS_ABI_FP_64 = 6, Val_GNU_MIPS_ABI_FP_64A = 7, Val_GNU_MIPS_ABI_FP_MAX = 7 };
 void warn(const char *, ...);
 void warnx(const char *, ...);
 void err(int, const char *, ...);
@@ -1628,6 +1626,8 @@ typedef int once_flag;
 typedef unsigned tss_t;
 typedef struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } mtx_t;
 typedef struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } cnd_t;
+enum { thrd_success = 0, thrd_busy = 1, thrd_error = 2, thrd_nomem = 3, thrd_timedout = 4, };
+enum { mtx_plain = 0, mtx_recursive = 1, mtx_timed = 2, };
 void thrd_exit(int);
 int thrd_detach(thrd_t);
 int thrd_join(thrd_t, int *);

@@ -55,6 +55,48 @@ TEST(TypeLibMake, SplitsTopLevelDeclarations) {
   EXPECT_EQ(declarations[3], "void *memcpy(void *, const void *, size_t);");
 }
 
+// A pragma that may change a layout is not dropped: the input is refused. Pragmas known to change
+// no type pass, as before.
+TEST(TypeLibMake, LayoutPragmasAreRefused) {
+  for (const char* pragma :
+       {"#pragma pack(push, 1)\n", "  #  pragma pack(1)\n",
+        "#pragma scalar_storage_order big-endian\n", "#pragma something_unknown\n"}) {
+    SCOPED_TRACE(pragma);
+    const auto made = donkey::make_type_library(
+        std::string(pragma) + "struct s { char c; int i; };\n", test_options());
+    ASSERT_FALSE(made.has_value());
+    EXPECT_EQ(made.diagnostic().code, "typelib_make.pragma");
+  }
+  const auto harmless = donkey::make_type_library(
+      "  #  pragma GCC diagnostic push\nstruct s { char c; int i; };\n#pragma GCC diagnostic pop\n",
+      test_options());
+  ASSERT_TRUE(harmless.has_value()) << harmless.diagnostic().message;
+  EXPECT_EQ(harmless.value().kept, 1U);
+}
+
+// An untagged enum declares no type name, but its constants are names later declarations use.
+TEST(TypeLibMake, AnUntaggedEnumIsKeptForItsConstants) {
+  const auto made = donkey::make_type_library(
+      "typedef int ok;\nenum { N = 4 };\ntypedef int A[N];\n"
+      "enum { N = 5 };\n",  // N again: skipped
+      test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 3U);
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  auto library = donkey::read_type_library(made.value().text);
+  ASSERT_TRUE(library.has_value()) << library.diagnostic().message;
+  const auto* array_typedef = type_named(library.value(), "A", donkey::TypeKind::Typedef);
+  ASSERT_NE(array_typedef, nullptr);
+  const donkey::TypeDefinition* array = nullptr;
+  for (const donkey::TypeDefinition& type : library.value().types) {
+    if (type.id == array_typedef->target) {
+      array = &type;
+    }
+  }
+  ASSERT_NE(array, nullptr);
+  EXPECT_EQ(array->count, 4U);
+}
+
 TEST(TypeLibMake, KeepsWhatParsesAndListsTheRest) {
   const char* input =
       "typedef int myint;\n"

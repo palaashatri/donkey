@@ -200,7 +200,8 @@ Result<std::vector<Token>> tokenize(std::string_view text) {
     } else if (const std::string_view pair =
                    i + 1 < text.size() ? text.substr(i, 2) : std::string_view();
                pair == "<<" || pair == ">>" || pair == "<=" || pair == ">=" || pair == "==" ||
-               pair == "!=" || pair == "&&" || pair == "||") {
+               pair == "!=" || pair == "&&" || pair == "||" || pair == "++" || pair == "--" ||
+               pair == "->") {
       token.kind = Token::Kind::Symbol;
       token.text = std::string(pair);
       i += 2;
@@ -259,8 +260,8 @@ std::optional<std::uint64_t> round_up_checked(std::uint64_t value, std::uint64_t
 
 // ---- integer constants ----------------------------------------------------------------
 
-/// The value and C type of an integer constant expression. After the integer promotions every
-/// operand is 4 or 8 bytes; a cast to a narrower type is promoted back to `int`.
+/// The value and C type of an integer constant expression: 1, 2, 4 or 8 bytes. Only a cast gives
+/// a type narrower than int, and every operator applies the integer promotions first.
 struct Constant {
   std::uint64_t bits = 0;  ///< the value, truncated to `size` bytes
   std::uint64_t size = 4;
@@ -301,6 +302,11 @@ Constant convert(const Constant& value, std::uint64_t size, bool is_signed) {
   const std::uint64_t wide =
       value.is_signed ? static_cast<std::uint64_t>(signed_value(value)) : value.bits;
   return Constant{wide & mask_of(size), size, is_signed};
+}
+
+/// The integer promotions: a type narrower than int becomes int, which holds all its values.
+Constant promote(const Constant& value) {
+  return value.size < 4 ? convert(value, 4, true) : value;
 }
 
 Constant int_constant(bool truth) {
@@ -428,7 +434,7 @@ class Parser {
     for (const TypeDefinition& definition : known.list()) {
       if (definition.kind == TypeKind::Enum) {
         for (const TypeEnumerator& enumerator : definition.enumerators) {
-          enum_constants_.emplace(enumerator.name, enumerator.value);
+          enum_constants_.emplace(enumerator.name, EnumConstant{enumerator.value, 0});
         }
       }
       if (definition.name.empty()) {
@@ -576,9 +582,66 @@ class Parser {
   }
 
   void note(const std::string& name, CNameSpace space, TypeKind kind, bool completes = false) {
-    if (names_ != nullptr) {
+    // A tag or enumeration constant declared inside a prototype is not visible after it.
+    if (names_ != nullptr && prototype_scope_ == 0) {
       names_->push_back(CDeclaredName{name, space, kind, completes});
     }
+  }
+
+  /// Binds a tag in the current scope. Inside a prototype the binding is logged, so that the
+  /// prototype's closing parenthesis restores what was bound before.
+  void bind_tag(std::map<std::string, TypeId>& tags, const std::string& name, TypeId id) {
+    if (prototype_scope_ > 0) {
+      const auto existing = tags.find(name);
+      tag_undo_.push_back(TagBinding{
+          &tags, name,
+          existing == tags.end() ? std::nullopt : std::optional<TypeId>(existing->second),
+          prototype_scope_});
+    }
+    tags[name] = id;
+  }
+
+  /// Whether the current prototype bound this tag (false at file scope).
+  [[nodiscard]] bool bound_in_this_prototype(const std::map<std::string, TypeId>& tags,
+                                             const std::string& name) const {
+    return std::any_of(tag_undo_.begin(), tag_undo_.end(), [&](const TagBinding& binding) {
+      return binding.scope == prototype_scope_ && binding.tags == &tags && binding.name == name;
+    });
+  }
+
+  void bind_constant(const std::string& name, std::int64_t value) {
+    if (prototype_scope_ > 0) {
+      const auto existing = enum_constants_.find(name);
+      constant_undo_.push_back(ConstantBinding{name,
+                                               existing == enum_constants_.end()
+                                                   ? std::nullopt
+                                                   : std::optional<EnumConstant>(existing->second),
+                                               prototype_scope_});
+    }
+    enum_constants_[name] = EnumConstant{value, prototype_scope_};
+  }
+
+  /// Leaves a prototype: its tags and enumeration constants go out of scope.
+  void leave_prototype() {
+    while (!tag_undo_.empty() && tag_undo_.back().scope == prototype_scope_) {
+      const TagBinding& binding = tag_undo_.back();
+      if (binding.previous) {
+        (*binding.tags)[binding.name] = *binding.previous;
+      } else {
+        binding.tags->erase(binding.name);
+      }
+      tag_undo_.pop_back();
+    }
+    while (!constant_undo_.empty() && constant_undo_.back().scope == prototype_scope_) {
+      const ConstantBinding& binding = constant_undo_.back();
+      if (binding.previous) {
+        enum_constants_[binding.name] = *binding.previous;
+      } else {
+        enum_constants_.erase(binding.name);
+      }
+      constant_undo_.pop_back();
+    }
+    --prototype_scope_;
   }
 
   TypeId make_pointer(TypeId target) {
@@ -843,6 +906,14 @@ class Parser {
       TypeId id{};
       if (!tag.empty()) {
         const auto known = tags.find(tag);
+        if (known != tags.end() && prototype_scope_ > 0 && !bound_in_this_prototype(tags, tag)) {
+          // C gives a definition inside a parameter list its own type, hiding the outer tag
+          // only there; the subset does not model that hiding.
+          return located<TagRef>(line, column, "cdecl.prototype_tag",
+                                 "'" + tag +
+                                     "' is defined inside a parameter list while an outer "
+                                     "declaration of it is visible; this is not supported");
+        }
         if (known != tags.end()) {
           if (incomplete_.count(known->second) == 0) {
             return located<TagRef>(line, column, "cdecl.redefinition",
@@ -860,7 +931,7 @@ class Parser {
         shell.name = tag;
         id = add(std::move(shell));
         if (!tag.empty()) {
-          tags.emplace(tag, id);
+          bind_tag(tags, tag, id);
           note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
         }
       }
@@ -882,12 +953,14 @@ class Parser {
     if (const auto known = tags.find(tag); known != tags.end()) {
       return TagRef{known->second, false};
     }
-    // A reference to a tag not yet defined is a forward declaration, completed later.
+    // A reference to a tag not yet defined is a forward declaration, completed later. Inside a
+    // prototype it declares a tag of the prototype's scope (C11 6.2.1): a later definition outside
+    // is a different type, and this one stays incomplete.
     TypeDefinition shell;
     shell.kind = is_union ? TypeKind::Union : TypeKind::Struct;
     shell.name = tag;
     const TypeId id = add(std::move(shell));
-    tags.emplace(tag, id);
+    bind_tag(tags, tag, id);
     note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
     incomplete_.insert(id);
     forward_tags_.insert(id);
@@ -976,6 +1049,10 @@ class Parser {
                 "the width of " + described + " is negative or wider than its type");
           }
           const std::uint64_t width = width_value.value().bits;
+          if (width > 1 && is_bool(member.type)) {
+            return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
+                                   "the width of " + described + " is wider than _Bool's one bit");
+          }
           if (width == 0) {
             if (!member.name.empty()) {
               return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
@@ -1116,8 +1193,15 @@ class Parser {
                                "an enumerator value must fit in 32 bits");
       }
       enumerator.value = next_value;
+      if (const auto existing = enum_constants_.find(enumerator.name);
+          (existing != enum_constants_.end() && existing->second.scope == prototype_scope_) ||
+          (prototype_scope_ == 0 && typedef_names_.count(enumerator.name) != 0)) {
+        return located<TypeId>(name_line, name_column, "cdecl.redefinition",
+                               "'" + enumerator.name + "' is already declared");
+      }
       // The constant is in scope from the end of its own enumerator.
-      enum_constants_[enumerator.name] = next_value;
+      bind_constant(enumerator.name, next_value);
+      note(enumerator.name, CNameSpace::Ordinary, TypeKind::Enum);
       definition.enumerators.push_back(enumerator);
       ++next_value;
       if (at_symbol(",")) {
@@ -1134,7 +1218,7 @@ class Parser {
     }
     const TypeId id = add(std::move(definition));
     if (!tag.empty()) {
-      enum_tags_.emplace(tag, id);
+      bind_tag(enum_tags_, tag, id);
       note(tag, CNameSpace::Tag, TypeKind::Enum);
     }
     return id;
@@ -1261,8 +1345,10 @@ class Parser {
     if (!second) {
       return second;
     }
-    const Constant type = common_type(first.value(), second.value());
-    return convert(first_taken ? first.value() : second.value(), type.size, type.is_signed);
+    const Constant first_value = promote(first.value());
+    const Constant second_value = promote(second.value());
+    const Constant type = common_type(first_value, second_value);
+    return convert(first_taken ? first_value : second_value, type.size, type.is_signed);
   }
 
   [[nodiscard]] int binary_precedence() const {
@@ -1306,7 +1392,7 @@ class Parser {
       if (!right) {
         return right;
       }
-      left = apply_binary(op, left.value(), right.value(), evaluate);
+      left = apply_binary(op, promote(left.value()), promote(right.value()), evaluate);
       if (!left) {
         return left;
       }
@@ -1426,7 +1512,7 @@ class Parser {
       if (!operand) {
         return operand;
       }
-      const Constant value = operand.value();
+      const Constant value = promote(operand.value());
       if (op.text == "+") {
         return value;
       }
@@ -1501,10 +1587,7 @@ class Parser {
       } else {
         converted = convert(operand.value(), target->size, target->is_signed);
       }
-      // A type narrower than int is promoted to int when it is used.
-      if (converted.size < 4) {
-        converted = convert(converted, 4, true);
-      }
+      // The cast keeps its type (`sizeof((char)1)` is 1); an operator promotes it when used.
       return converted;
     }
     return primary_expression(evaluate, depth);
@@ -1534,7 +1617,7 @@ class Parser {
                                  "'" + token.text + "' is not an integer constant");
       }
       advance();
-      return Constant{static_cast<std::uint64_t>(constant->second) & mask_of(4), 4, true};
+      return Constant{static_cast<std::uint64_t>(constant->second.value) & mask_of(4), 4, true};
     }
     return unexpected<Constant>("an integer constant expression");
   }
@@ -1659,10 +1742,19 @@ class Parser {
     return declarator;
   }
 
+  /// A parameter list. It is a scope: tags and enumeration constants it declares are not visible
+  /// after its closing parenthesis.
   Result<void> parse_parameters(std::vector<TypeField>& parameters, bool& variadic, int depth) {
     if (depth > kMaxCDeclarationNesting) {
       return nesting_error<void>(peek());
     }
+    ++prototype_scope_;
+    auto parsed = parse_parameter_list(parameters, variadic, depth);
+    leave_prototype();
+    return parsed;
+  }
+
+  Result<void> parse_parameter_list(std::vector<TypeField>& parameters, bool& variadic, int depth) {
     if (auto open = expect("("); !open) {
       return propagate<void>(open);
     }
@@ -1753,6 +1845,10 @@ class Parser {
           return located<void>(declared.line, declared.column, "cdecl.redefinition",
                                "'" + declared.name + "' is already a typedef");
         }
+        if (enum_constants_.count(declared.name) != 0) {
+          return located<void>(declared.line, declared.column, "cdecl.redefinition",
+                               "'" + declared.name + "' is already an enumeration constant");
+        }
         if (spec.value().anonymous.valid() && declared.type == spec.value().anonymous) {
           // `typedef struct { ... } name;`: the untagged type takes the typedef's name.
           TypeDefinition named;
@@ -1809,8 +1905,29 @@ class Parser {
   std::map<std::string, TypeId> enum_tags_;
   std::map<std::string, TypeId> typedef_names_;
   std::map<std::string, TypeId> scalars_;
-  /// Enumeration constants in scope, from the known table and this text.
-  std::map<std::string, std::int64_t> enum_constants_;
+  /// Enumeration constants in scope, from the known table and this text, with the scope that
+  /// declared each: 0 for file scope, otherwise the depth of the prototype.
+  struct EnumConstant {
+    std::int64_t value = 0;
+    int scope = 0;
+  };
+  std::map<std::string, EnumConstant> enum_constants_;
+  /// Prototypes being parsed, innermost last (a prototype is a scope, C11 6.2.1).
+  int prototype_scope_ = 0;
+  /// A binding made inside a prototype, undone at its closing parenthesis.
+  struct TagBinding {
+    std::map<std::string, TypeId>* tags = nullptr;
+    std::string name;
+    std::optional<TypeId> previous;
+    int scope = 0;
+  };
+  struct ConstantBinding {
+    std::string name;
+    std::optional<EnumConstant> previous;
+    int scope = 0;
+  };
+  std::vector<TagBinding> tag_undo_;
+  std::vector<ConstantBinding> constant_undo_;
   std::set<TypeId> incomplete_;
   /// Tags this text named by a forward reference and has not defined yet.
   std::set<TypeId> forward_tags_;

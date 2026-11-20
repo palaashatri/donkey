@@ -1,2 +1,2 @@
-enum e { A = 1 << 4, B = (unsigned char)300 | A, C = 0 ? 1/0 : -1 };
+Denum e { A = 1 << 4, B = (unsigned char)300 | A, C = 0 ? 1/0 : -1 };
 typedef char t[sizeof(int[3]) % 5 + C];

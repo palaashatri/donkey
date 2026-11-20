@@ -625,12 +625,12 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
   }
 
   // C keeps two name spaces apart: the tags of structs, unions and enums, and the ordinary names
-  // of typedefs and functions. One spelling may be a tag and an ordinary name at once (`struct
-  // stat` and the function `stat`, or `typedef struct point point`). Within one name space a name
-  // is declared once: a typedef and a function with one name is typelib.type_and_function, and
-  // any other repeat is typelib.duplicate_name. The parser lists each declared name with its name
-  // space, so a typedef that names an untagged struct (whose type takes the typedef's name) is an
-  // ordinary name, not a tag.
+  // of typedefs, enumeration constants and functions. One spelling may be a tag and an ordinary
+  // name at once (`struct stat` and the function `stat`, or `typedef struct point point`). Within
+  // one name space a name is declared once: a function and another ordinary name with one spelling
+  // is typelib.type_and_function, and any other repeat is typelib.duplicate_name. The parser lists
+  // each declared name with its name space, so a typedef that names an untagged struct (whose type
+  // takes the typedef's name) is an ordinary name, not a tag.
   std::map<std::string, TypeKind> tags;
   std::map<std::string, TypeKind> ordinary;
   for (const CDeclaredName& name : declared) {
@@ -645,7 +645,9 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
     if (name.space == CNameSpace::Ordinary &&
         (entry->second == TypeKind::Function) != (name.kind == TypeKind::Function)) {
       return refuse<Out>(Status::InvalidInput, "typelib.type_and_function",
-                         "'" + name.name + "' is used both as a typedef and as a function");
+                         "'" + name.name +
+                             "' is used both as a function and as a typedef or enumeration "
+                             "constant");
     }
     return refuse<Out>(
         Status::InvalidInput, "typelib.duplicate_name",

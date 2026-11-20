@@ -2151,17 +2151,20 @@ the public standard it follows.
 sources only, a preprocessor at build time). What was built and measured:
 - `include/donkey/project/typelib_gen.h`, `src/project/typelib_gen.cpp`: `split_c_declarations` (top-level
   declarations of preprocessed text, one line each, with the words that do not change a type dropped) and
-  `make_type_library`: a declaration is kept only when the parser accepts it against the kept table and the
-  whole kept text plus it parses on its own (a struct whose member's type was skipped parses against the table,
-  which knows the type from a pointer, but not on its own); everything else is listed as `skipped` with the
-  reason, never dropped. The output is read back with `read_type_library` before it is returned.
+  `make_type_library`: each candidate is appended to the kept text, and the whole text is parsed from an empty
+  type table, as the reader parses the file; the candidate is kept when that parse succeeds and the names it
+  declares are new. Everything else is listed as `skipped` with the reason, never dropped. An input with a
+  pragma that may change a layout (`pack`, `scalar_storage_order`, or any pragma not known to change no type)
+  is refused (`typelib_make.pragma`). The output is read back with `read_type_library` before it is
+  returned.
 - `donkey-cli typelib make` and `typelib show`. `tools/typelib/make-musl.sh` runs `gcc -E -P -nostdinc
   -D_GNU_SOURCE` on every top-level header of the `musl-dev` 1.2.4-2 package (90; `wait.h`, which only
   redirects, is left out), with each header's path and SHA-256 recorded.
-- `typelibs/musl-1.2.4-x86_64-linux.dtl`: 1,537 declarations kept, 3,289 types (scalars, pointers and arrays
-  included), 249 skipped and listed (variables, function pointers and other parenthesised declarators,
-  `__builtin_va_list` and the `v*printf` family that uses it, and what depends on them). 104 KiB. Generated
-  twice with `CREATED=2026-11-18`, `musl-dev` 1.2.4-2 and GCC 13.3.0: byte-identical. Kept since the C parser
+- `typelibs/musl-1.2.4-x86_64-linux.dtl`: 1,563 declarations kept, 3,323 types (scalars, pointers and arrays
+  included), 223 skipped and listed (variables, function pointers and other parenthesised declarators,
+  `__builtin_va_list` and the `v*printf` family that uses it, function definitions, names declared again, and
+  what depends on them). 104 KiB. Regenerated on Ubuntu 24.04 x86-64 with `CREATED=2026-11-18`, `musl-dev`
+  1.2.4-2 and GCC 13.3.0, the output is byte-identical to the committed file (`cmp`, 2026-11-20). Kept since the C parser
   evaluates constant expressions and lays out bit-fields (below): `struct timespec` (padded with
   `int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`), `struct stat`, `sigset_t`, `fd_set`, `cpu_set_t`,
   `fenv_t`, `jmp_buf`, `sem_t` and the `pthread_*_t` types, each with GCC's size and alignment for the same
@@ -2189,6 +2192,20 @@ sources only, a preprocessor at build time). What was built and measured:
   the struct; width zero moves to the next unit). Tests: `Types.BitFieldsAreLaidOutAsTheCompilerLaysThemOut`
   and `Types.ConstantExpressionsFollowC` compare with GCC 13.3 on x86-64 Linux; `Types.ParserErrorsAreLocated`
   covers each new error and the nesting bound, which expressions inside `sizeof(struct { ... })` share.
+- Second review of #70 (2026-11-20): a parameter list is a scope (C11 6.2.1), so a tag first named in a
+  prototype is the prototype's own incomplete type, not a later file-scope definition, and an enumeration
+  constant declared there no longer replaces a file-scope one after it; a definition of an outer tag inside a
+  parameter list is refused (`cdecl.prototype_tag`). Enumeration constants are names (an untagged enum of
+  constants is kept: the `REG_*` constants of `<sys/ucontext.h>` and 25 others), and a constant declared twice
+  in one scope, or with a typedef's name, is `cdecl.redefinition`. A cast keeps its type until an operator
+  promotes it (`sizeof((unsigned char)1)` is 1), a `_Bool` bit-field is at most one bit wide, `++`, `--` and
+  `->` are tokens the subset refuses, a directive's `#` may follow spaces, `typelib make --char-signed` takes
+  only `true` or `false`, and `make-musl.sh` records `_GNU_SOURCE=1`, the value `-D_GNU_SOURCE` defines.
+  Tests: `Types.PrototypesAreScopes`, `Types.ACastKeepsItsTypeUntilAnOperatorPromotesIt`,
+  `TypeLibMake.LayoutPragmasAreRefused`, `TypeLibMake.AnUntaggedEnumIsKeptForItsConstants`,
+  `cli.typelib_make_rejects_a_bad_char_signed`, and new cases in `Types.ParserErrorsAreLocated`. `fuzz_cdecl`
+  (clang 18, ASan and UBSan) ran 544,286 inputs in 91 s with no finding; Debug 1,024/1,024 and Release
+  1,025/1,025 pass on Linux x86-64.
 - Not done here: FreeBSD and MinGW-w64 libraries (allowed, each file's licence to be checked), the `.winmd`
   reader, and function pointers (parenthesised declarators, G05).
   Applying a library to code is T3.

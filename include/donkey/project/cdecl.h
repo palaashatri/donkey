@@ -37,16 +37,18 @@ inline constexpr int kMaxCDeclarationNesting = 64;
 /// function names (C's ordinary identifiers) share the other.
 enum class CNameSpace : std::uint8_t { Tag, Ordinary };
 
-/// A name the text declares, in declaration order: a tag the first time the text names it (by a
-/// definition or a forward reference), a typedef name, or a function prototype's name. Names that
-/// come from the known table are not listed. A definition that completes a tag the text named
-/// earlier by a forward reference is listed again, with `completes` set, at the definition.
+/// A name the text declares at file scope, in declaration order: a tag the first time the text
+/// names it (by a definition or a forward reference), a typedef name, an enumeration constant, or a
+/// function prototype's name. Names that come from the known table are not listed, and neither are
+/// tags and constants declared inside a parameter list, whose scope ends with it (C11 6.2.1). A
+/// definition that completes a tag the text named earlier by a forward reference is listed again,
+/// with `completes` set, at the definition.
 struct CDeclaredName {
   std::string name;
   CNameSpace space = CNameSpace::Ordinary;
   /// Struct, Union or Enum for a tag. Typedef for a typedef name, also one that names an untagged
   /// struct, union or enum (`typedef struct { ... } name;`, whose type takes the name). Function
-  /// for a prototype.
+  /// for a prototype. Enum, in the ordinary name space, for an enumeration constant.
   TypeKind kind = TypeKind::Void;
   /// The definition of a tag this text named earlier only by a forward reference: not a second
   /// declaration of the name.
