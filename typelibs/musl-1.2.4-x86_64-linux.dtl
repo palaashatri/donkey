@@ -1,0 +1,1901 @@
+donkey-typelib 1
+library: musl-libc
+library_version: 1.2.4
+platform: linux
+architecture: x86_64
+abi: sysv
+data_model: LP64
+pointer_size: 8
+long_size: 8
+char_is_signed: true
+source: musl-dev 1.2.4-2 (Ubuntu 24.04), headers in /usr/include/x86_64-linux-musl
+source_sha256: 3cfafef162063362a07a0ea496776b6903fbec916d136fdf1f6bdf16eba8c16a
+licence: MIT
+licence_file: usr/share/doc/musl-dev/copyright
+licence_sha256: dd775ee077963e377a0ab31e1db27229442d5cfd18f183c2df1e6a552522f585
+generator: donkey-cli typelib make 1
+generator_command: sh tools/typelib/make-musl.sh
+preprocessor: gcc 13.3.0 -E -P -nostdinc -isystem /usr/include/x86_64-linux-musl -D_GNU_SOURCE (CPATH, C_INCLUDE_PATH and the like unset)
+created: 2026-11-18
+body_sha256: 7c0c83994e0a531a0101e1ccfa95e3f86285a9f438245eb873bdcbd4188b4a18
+declarations: 3323
+source_file: aio.h fdb50a494eb52d43b674f8debe75d72224bc022d52dfbc53fc519895305ab1ee
+source_file: alloca.h 8768404d7cf4af5fb135b1a2ca91765bd2be311ac072e0ec8b68f5cb3e6e0f3e
+source_file: ar.h a32ed9d5a0e19c2d40781a05e4a0ef094d24b69a5752dc3849b92e4502481bd4
+source_file: assert.h 477f9fcf67e8eccb59dea935f0dc7abd40829f8d61a3e73e4151ff6a18ef25f9
+source_file: byteswap.h e51244bc6433d77aba368aa53863850d6d06890c3d8691b27619a737401ec1e5
+source_file: complex.h 4cf3568e8ab98be6d2ee34023a8d3376d0b2cdce5f3fc867ecd96ea95728e91c
+source_file: cpio.h fd1fdd0848156a84d2af916be5069cc688117b38f4d44012e19f02bd14b6a8a9
+source_file: ctype.h 0bf45ee657538bf2033a9a17f286f5a4cbcba22a19667deb28d43ac8952c6d30
+source_file: dirent.h 62f0387e896572d0360c7d696ac928a33191446ee5132cc22821bc4d0a5dbb3b
+source_file: dlfcn.h 5e0ca32c6bd7e817e55d36513efef3070bf27f36496be39fb6d52d83b93f3d6a
+source_file: elf.h a6ffb38364effd623e135b206ec97ff9e6826a1f285e349a3633df55db38bc9e
+source_file: endian.h 4414084736937798abcc075d1f8053e116d873c81dda0908013bfca3331771b9
+source_file: err.h d13794712c2b56a15b3d095034a07ba79f0bbc3b76997808e39275f815169099
+source_file: errno.h a461912e4058202de8ec414cbd67e04a84965bbff9aff61523bd3baf090b217d
+source_file: fcntl.h 2c3d01be623dec69461af03f269953ebaeb9ba92ae6237e86d1b093f8d8adc21
+source_file: features.h 6d228e77b88b69f70f9157548b6ec673ffc6b998ce6035fbbee0caddb8442903
+source_file: fenv.h 9b6d535409cac95bb00e3305f7724af42b7003909a833b7622d6d18d7e650e2c
+source_file: float.h d513aa2c48b2d60672ab10dbab0ab80347db9f1b353db4ea3fae2018907964c1
+source_file: fmtmsg.h 0f7f7ee214fa88a63c23ce123520ed3ef34339d9c32128d4d937a19bb2431cd2
+source_file: fnmatch.h 31f19cc2974807ef2c516816a8188e4fbd99e35b85df9514c13276594bc30107
+source_file: fts.h e9c12ec01903fcff2a015fdf651d0a095ffcd080b227fbf4790236532541343a
+source_file: ftw.h 1a1cae62ae50cb0d21b899b931ace769d129d1af0ad8787c60a076801e2677b8
+source_file: getopt.h f1d0e215fba663710ca0108338fdafa334b7095e512d0b0f29f8110d78fbb4e4
+source_file: glob.h c794618de7c80782719d82279e02683fc147b359bc58176cd20efe7ab70a05db
+source_file: grp.h e602ccbb836b06b2824671a7609ef139744e7c4f47e257ca3dbeb6086d5d6e74
+source_file: iconv.h 7c9edd7c6ed3d036f11ec2a24f46a203c0657e5d7eea8b8cc8cd22ab705c873e
+source_file: ifaddrs.h 130ca46a90011e4e2db4bae62c7ea686d86938a879226d0c2c7dac4c61635423
+source_file: inttypes.h 01a5b59471e351039310fc1cfb8bf8cf89e53ef957236118876ea20aea743bfb
+source_file: iso646.h e2f3fe42ea3e1f7b236a5b37bf8c3e9a870094b81b264ad1df32845546662c08
+source_file: langinfo.h a5117674322bf3a85f4e6db2c8c7bd375f90366020549cb665ebf99d4241b1f2
+source_file: lastlog.h 3c33c9e2fee950cd8545f69d5a8db1f529934b31f940a43ef9c7aadc40e4b2c0
+source_file: libgen.h 8dc8c0b1ed63e0d411b2a8742aa7aa7ed9612c2e9b8c125f17bfc4a5a6f21aa9
+source_file: libintl.h fc92ac87ad9726228173fbd47c162187c6e35ffc56696209a2d6d39df3bca350
+source_file: limits.h d6fb743478f7a8dd27f057db844a806165709641b0d0e78fbf0cabf5c88f1e12
+source_file: link.h 696718093684a61944d7a00ef39d723b05f691fd2edc895af2c526751c74ff22
+source_file: locale.h 34f98ecb36b5dd160ca0991dcc59bf0d86ca7ee82c6da831dbb6284826ea8e9d
+source_file: malloc.h 8aba27d6cf64d9a93cf3fbd534f5c81b00e6e8419a2f3ec075ee012e834b2c02
+source_file: math.h 5559892c51d9625616fde0c4d25609f1e68e0aa3aee090d1842c6f894e63352a
+source_file: memory.h 7c7dfb862fbd4063378bb2086e49db0857322c3de8cb9d570f175da1d253a682
+source_file: mntent.h da0f41bd65ee34c3c909de7c94792b30e67f558a29b64599738ecadb6c6a1fcc
+source_file: monetary.h 4c02befe1f9197f86e2f1128d1f31c369289cb4917b2c80b5aa87b387c76aef8
+source_file: mqueue.h 4379aac3732e6285f41f6d7af993e6a69eb61979dc96f7c214923dd98b07adb9
+source_file: netdb.h 6f069a2a0a72a1e03866f426cc6a03990e6bfe3b601215e7b7780b6536c8f50b
+source_file: nl_types.h a0275f524b09db6dae742b73409214ef1836cc54fad803816254055008c97654
+source_file: paths.h 9653e09329756ef2c1c51ac65f0519cc5a40156373e59bfcd3a67b8dc94c1629
+source_file: poll.h 6d24b741409b405d3978ac9907d137a05da29d85e003fd8aaffef0f1d9b71109
+source_file: pthread.h 85ecd05b6e9845851bf5444b480326281fb1484d3e4646742a50aaea612c4ef3
+source_file: pty.h b5a3539229b3c2f578febf901f8971518489d97ba706cdd5aa61ec536c4ffc7f
+source_file: pwd.h eb3f630e09e209770f6771488e8938c22067e13f6b97cea83898b3944a0f740f
+source_file: regex.h 4acf94cf0e0f14b2eb50accac93fee886fcc4f821a9b7bb5347a5d035a027ad3
+source_file: resolv.h adcdb3600df635f2b6fee42987e33f3ca7a8a1e142d2f2b5d83be6fb585e8453
+source_file: sched.h c8375060a9ce8c5f39f64fae3c0a31f1c36cc42fbab9aa0303b06a7075eb6778
+source_file: search.h fd1e900bedd1b91d98772ead5624a0f1f23efa70fc8272b1dac1d47e9ba2617e
+source_file: semaphore.h c20f266e552137e6827b6622f2ddf60cf09f08175cf0c34f673910cb14a0cc05
+source_file: setjmp.h 24bc8a19bbd58f75c8223af762dfd9bd41f6aaca6cb3246145c58203c8a0e42e
+source_file: shadow.h 77c5f46b97a1a9a8c927389ea67eae5f547268b4ce53f4676b3f3b26c5cbffb2
+source_file: signal.h 2410adbea406ecb28e00e2f376ef772837dae5a7ce187ace1d9eb2aec9cc9d44
+source_file: spawn.h edec771e83d270d98aab7e8ceebcd9920d719f9148dd226b84a397b28ddba41f
+source_file: stdalign.h 54289e3284182b1a521dd7f8bdd8e9f4b2a85879b8da761b4ad8c421598a12f1
+source_file: stdarg.h 20b903cf4ddd7e0244e0bee6e615e24e1921bab2f0986957fe4f7869c608890a
+source_file: stdbool.h 5cd1f701b5e927e4e39bcc69f4b7e437a98c8821168e69171c626502a6fc13d9
+source_file: stdc-predef.h e1987ea23606c0ff0c4caf242349705de5730be0f2140ae2c3933d1022d3fee8
+source_file: stddef.h 14e9b057525207b625943c8cdfeac111807a1c26e73af8a5415a965d37f19d78
+source_file: stdint.h b6e77f1611e56cf499233172cab8bc09c0f7d937f3daa5ad552e1712fc6663e5
+source_file: stdio.h 36dda63d91161ecdd42755393bc7ff827dbfe82e512b630d2f2386c1acb8dbfa
+source_file: stdio_ext.h d16a5f865a20b7ed68803f3da8fdc5011989e6fb1ecae31049654423899e4ffd
+source_file: stdlib.h 9dade04aa761839017a0de3023d9e5500cb1e431682fc89d84f9a956e4a7c9d6
+source_file: stdnoreturn.h f5a2d37ef43395cd433e95b238a27f9be5bf20355ffaea66afe7df90fab04f50
+source_file: string.h f99cdd1bfe0b3fa01e0a5d790fb24a01949ada0a4577fc753490868768c66753
+source_file: strings.h b8fde0a141ac481de1f88abafbf5678ddfd8d89b309e3253adea1fa0ecb8d9e4
+source_file: stropts.h 8b02f372fc4c5c0399181013b7b949475df3dafbd33787f7fcc6898a9ce43336
+source_file: syscall.h b7bd8aa55ec85e943bb746706a569f5a455594c4e493bbbe8cf32149545de9e4
+source_file: sysexits.h 821f3fce57e599da2bfa414fbc7aa79a2b6d5d2aeeb1e79cc61c570b23f7b001
+source_file: syslog.h c1f3f7a96b9f35c641ec85b51c8119910e8bbe46e4d4933b987f5e515922690e
+source_file: tar.h 93bcefe2026e4909baae5f6de2357ebc0dbc6344c96c9eeb6f648bf8accf6809
+source_file: termios.h 09b969e2fc65d080cd77a889cc728fa464de38a1edabbed145d9cbf1d567da51
+source_file: tgmath.h 7c4b6a2e99f4e72a6ebad763ac452c60fede23e99f27106ab3b03edf24b60769
+source_file: threads.h 492800b04a38491e2da73fbcfee02bf006717898fcd7568329bc2d641b5d7aff
+source_file: time.h f1574ec543bc9e810f7369a0e50290d51f5b7b57082eedc41db5060ff3b9c0a6
+source_file: uchar.h 53230de6c8fa9309ddd35de9ee75fcaac703b72fc0422117ad492a717d3aa77d
+source_file: ucontext.h 75108c66f9904f2034ef4113762dd16a929dead6ce09438b6da87911d6d091d4
+source_file: ulimit.h a61e61d1ed7a81a26d0890a2148c0cd68d122d25dfe661e4821eb413a0e0fc6b
+source_file: unistd.h d6365cc93a99349c2b5ef3eb9211659497c1390d0ad302454fabfaef78c98711
+source_file: utime.h 43a15b0733f47a396b40d525cb1764d5973d4d6e9b4791bb64be92c12a54ecbb
+source_file: utmp.h 4efac28368f7a32374de846c266e2444c864ae548746aa581f50db1f56f9ea8a
+source_file: utmpx.h 20f84b9fad1c60fbbd81eda0088ceae7acf014d3e9d29c067d5b9209c05e59df
+source_file: values.h 7c5f56c3e180acfe7008a7369700bde9ecc3b85d5d457fbf94efa1a0df1ba3d8
+source_file: wchar.h 18c5adbb8fe770aeccc0a1721b03352c6a07fb8ea373a6fcdfe88be76ca5e312
+source_file: wctype.h cfb9a3d564aad013b7bb8d326fd9b01263c87ff73fb69c823e7695b4989fc2e9
+source_file: wordexp.h f72323c01c310d9a7aabb4ea62e6a20d3f2be8a390173796c100dd85e2915855
+macro: _GNU_SOURCE=1
+skipped: sigaction: cdecl.parenthesized_declarator line 1, column 33: a parenthesised declarator, as in a function pointer, is not supported
+skipped: sigevent: cdecl.parenthesized_declarator line 1, column 187: a parenthesised declarator, as in a function pointer, is not supported
+skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
+skipped: sig_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
+skipped: sighandler_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
+skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
+skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tzname: cdecl.variable line 1, column 14: 'tzname' declares a variable; only types and function prototypes are in this subset
+skipped: daylight: cdecl.variable line 1, column 12: 'daylight' declares a variable; only types and function prototypes are in this subset
+skipped: timezone: cdecl.variable line 1, column 13: 'timezone' declares a variable; only types and function prototypes are in this subset
+skipped: getdate_err: cdecl.variable line 1, column 12: 'getdate_err' declares a variable; only types and function prototypes are in this subset
+skipped: aiocb: cdecl.incomplete_type line 1, column 120: member 'aio_sigevent' has a type whose size is not known
+skipped: __bswap_16: a function definition (only declarations are kept)
+skipped: __bswap_32: a function definition (only declarations are kept)
+skipped: __bswap_64: a function definition (only declarations are kept)
+skipped: cacos: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: cacosf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: cacosl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: casin: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: casinf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: casinl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: catan: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: catanf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: catanl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: ccos: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: ccosf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: ccosl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: csin: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: csinf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: csinl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: ctan: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: ctanf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: ctanl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: cacosh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: cacoshf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: cacoshl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: casinh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: casinhf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: casinhl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: catanh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: catanhf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: catanhl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: ccosh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: ccoshf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: ccoshl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: csinh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: csinhf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: csinhl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: ctanh: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: ctanhf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: ctanhl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: cexp: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: cexpf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: cexpl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: clog: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: clogf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: clogl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: cabs: cdecl.unexpected_token line 1, column 20: expected ')', found '_Complex'
+skipped: cabsf: cdecl.unexpected_token line 1, column 19: expected ')', found '_Complex'
+skipped: cabsl: cdecl.unexpected_token line 1, column 31: expected ')', found '_Complex'
+skipped: cpow: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: cpowf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: cpowl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: csqrt: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: csqrtf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: csqrtl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: carg: cdecl.unexpected_token line 1, column 20: expected ')', found '_Complex'
+skipped: cargf: cdecl.unexpected_token line 1, column 19: expected ')', found '_Complex'
+skipped: cargl: cdecl.unexpected_token line 1, column 31: expected ')', found '_Complex'
+skipped: cimag: cdecl.unexpected_token line 1, column 21: expected ')', found '_Complex'
+skipped: cimagf: cdecl.unexpected_token line 1, column 20: expected ')', found '_Complex'
+skipped: cimagl: cdecl.unexpected_token line 1, column 32: expected ')', found '_Complex'
+skipped: conj: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: conjf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: conjl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: cproj: cdecl.unexpected_token line 1, column 8: expected a name, found '_Complex'
+skipped: cprojf: cdecl.unexpected_token line 1, column 7: expected a name, found '_Complex'
+skipped: cprojl: cdecl.unexpected_token line 1, column 13: expected a name, found '_Complex'
+skipped: creal: cdecl.unexpected_token line 1, column 21: expected ')', found '_Complex'
+skipped: crealf: cdecl.unexpected_token line 1, column 20: expected ')', found '_Complex'
+skipped: creall: cdecl.unexpected_token line 1, column 32: expected ')', found '_Complex'
+skipped: __isspace: a function definition (only declarations are kept)
+skipped: scandir: cdecl.parenthesized_declarator line 1, column 50: a parenthesised declarator, as in a function pointer, is not supported
+skipped: __bswap16: a function definition (only declarations are kept)
+skipped: __bswap32: a function definition (only declarations are kept)
+skipped: __bswap64: a function definition (only declarations are kept)
+skipped: va_list: cdecl.unknown_type line 1, column 9: '__builtin_va_list' is not a type
+skipped: vwarn: cdecl.unknown_type line 1, column 26: 'va_list' is not a type
+skipped: vwarnx: cdecl.unknown_type line 1, column 27: 'va_list' is not a type
+skipped: verr: cdecl.unknown_type line 1, column 30: 'va_list' is not a type
+skipped: verrx: cdecl.unknown_type line 1, column 31: 'va_list' is not a type
+skipped: program_invocation_short_name: cdecl.variable line 1, column 14: 'program_invocation_short_name' declares a variable; only types and function prototypes are in this subset
+skipped: file_handle: cdecl.array_size_required line 1, column 84: an array needs a size, except the outermost dimension of a parameter
+skipped: fts_compar: cdecl.parenthesized_declarator line 1, column 197: a parenthesised declarator, as in a function pointer, is not supported
+skipped: fts_children: cdecl.unknown_type line 1, column 22: 'FTS' is not a type
+skipped: fts_close: cdecl.unknown_type line 1, column 15: 'FTS' is not a type
+skipped: fts_open: cdecl.unknown_type line 1, column 1: 'FTS' is not a type
+skipped: fts_read: cdecl.unknown_type line 1, column 18: 'FTS' is not a type
+skipped: fts_set: cdecl.unknown_type line 1, column 13: 'FTS' is not a type
+skipped: ftw: cdecl.parenthesized_declarator line 1, column 27: a parenthesised declarator, as in a function pointer, is not supported
+skipped: nftw: cdecl.parenthesized_declarator line 1, column 28: a parenthesised declarator, as in a function pointer, is not supported
+skipped: optarg: cdecl.variable line 1, column 14: 'optarg' declares a variable; only types and function prototypes are in this subset
+skipped: optind: cdecl.variable line 1, column 12: 'optind' declares a variable; only types and function prototypes are in this subset
+skipped: glob: cdecl.parenthesized_declarator line 1, column 33: a parenthesised declarator, as in a function pointer, is not supported
+skipped: timespec: declares no type, typedef or function
+skipped: in6addr_any: cdecl.variable line 1, column 30: 'in6addr_any' declares a variable; only types and function prototypes are in this subset
+skipped: dl_iterate_phdr: cdecl.parenthesized_declarator line 1, column 25: a parenthesised declarator, as in a function pointer, is not supported
+skipped: __FLOAT_BITS: a function definition (only declarations are kept)
+skipped: __DOUBLE_BITS: a function definition (only declarations are kept)
+skipped: __islessf: a function definition (only declarations are kept)
+skipped: __isless: a function definition (only declarations are kept)
+skipped: __islessl: a function definition (only declarations are kept)
+skipped: __islessequalf: a function definition (only declarations are kept)
+skipped: __islessequal: a function definition (only declarations are kept)
+skipped: __islessequall: a function definition (only declarations are kept)
+skipped: __islessgreaterf: a function definition (only declarations are kept)
+skipped: __islessgreater: a function definition (only declarations are kept)
+skipped: __islessgreaterl: a function definition (only declarations are kept)
+skipped: __isgreaterf: a function definition (only declarations are kept)
+skipped: __isgreater: a function definition (only declarations are kept)
+skipped: __isgreaterl: a function definition (only declarations are kept)
+skipped: __isgreaterequalf: a function definition (only declarations are kept)
+skipped: __isgreaterequal: a function definition (only declarations are kept)
+skipped: __isgreaterequall: a function definition (only declarations are kept)
+skipped: signgam: cdecl.variable line 1, column 12: 'signgam' declares a variable; only types and function prototypes are in this subset
+skipped: basename: declared again (the first declaration is kept)
+skipped: sigevent: declares no type, typedef or function
+skipped: clone: cdecl.parenthesized_declarator line 1, column 16: a parenthesised declarator, as in a function pointer, is not supported
+skipped: memcpy: declared again (the first declaration is kept)
+skipped: memcmp: declared again (the first declaration is kept)
+skipped: memset: declared again (the first declaration is kept)
+skipped: calloc: declared again (the first declaration is kept)
+skipped: free: declared again (the first declaration is kept)
+skipped: __CPU_AND_S: a function definition (only declarations are kept)
+skipped: __CPU_OR_S: a function definition (only declarations are kept)
+skipped: __CPU_XOR_S: a function definition (only declarations are kept)
+skipped: pthread_create: cdecl.parenthesized_declarator line 1, column 63: a parenthesised declarator, as in a function pointer, is not supported
+skipped: pthread_once: cdecl.parenthesized_declarator line 1, column 41: a parenthesised declarator, as in a function pointer, is not supported
+skipped: pthread_key_create: cdecl.parenthesized_declarator line 1, column 46: a parenthesised declarator, as in a function pointer, is not supported
+skipped: pthread_atfork: cdecl.parenthesized_declarator line 1, column 25: a parenthesised declarator, as in a function pointer, is not supported
+skipped: __ptcb: cdecl.parenthesized_declarator line 1, column 22: a parenthesised declarator, as in a function pointer, is not supported
+skipped: _pthread_cleanup_push: cdecl.parenthesized_declarator line 1, column 50: a parenthesised declarator, as in a function pointer, is not supported
+skipped: cpu_set_t: declares no type, typedef or function
+skipped: _ns_flagdata: cdecl.array_size_required line 1, column 46: an array needs a size, except the outermost dimension of a parameter
+skipped: lsearch: cdecl.parenthesized_declarator line 1, column 59: a parenthesised declarator, as in a function pointer, is not supported
+skipped: lfind: cdecl.parenthesized_declarator line 1, column 63: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tdelete: cdecl.parenthesized_declarator line 1, column 41: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tfind: cdecl.parenthesized_declarator line 1, column 45: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tsearch: cdecl.parenthesized_declarator line 1, column 42: a parenthesised declarator, as in a function pointer, is not supported
+skipped: twalk: cdecl.parenthesized_declarator line 1, column 31: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tdestroy: cdecl.parenthesized_declarator line 1, column 28: a parenthesised declarator, as in a function pointer, is not supported
+skipped: sched_param: declares no type, typedef or function
+skipped: __isoc_va_list: cdecl.unknown_type line 1, column 9: '__builtin_va_list' is not a type
+skipped: stdin: cdecl.variable line 1, column 20: 'stdin' declares a variable; only types and function prototypes are in this subset
+skipped: stdout: cdecl.variable line 1, column 20: 'stdout' declares a variable; only types and function prototypes are in this subset
+skipped: stderr: cdecl.variable line 1, column 20: 'stderr' declares a variable; only types and function prototypes are in this subset
+skipped: vprintf: cdecl.unknown_type line 1, column 27: '__isoc_va_list' is not a type
+skipped: vfprintf: cdecl.unknown_type line 1, column 36: '__isoc_va_list' is not a type
+skipped: vsprintf: cdecl.unknown_type line 1, column 36: '__isoc_va_list' is not a type
+skipped: vsnprintf: cdecl.unknown_type line 1, column 45: '__isoc_va_list' is not a type
+skipped: vscanf: cdecl.unknown_type line 1, column 26: '__isoc_va_list' is not a type
+skipped: vfscanf: cdecl.unknown_type line 1, column 35: '__isoc_va_list' is not a type
+skipped: vsscanf: cdecl.unknown_type line 1, column 41: '__isoc_va_list' is not a type
+skipped: vdprintf: cdecl.unknown_type line 1, column 33: '__isoc_va_list' is not a type
+skipped: vasprintf: cdecl.unknown_type line 1, column 38: '__isoc_va_list' is not a type
+skipped: ssize_t: cdecl.parenthesized_declarator line 1, column 17: a parenthesised declarator, as in a function pointer, is not supported
+skipped: ssize_t: cdecl.parenthesized_declarator line 1, column 17: a parenthesised declarator, as in a function pointer, is not supported
+skipped: int: cdecl.parenthesized_declarator line 1, column 13: a parenthesised declarator, as in a function pointer, is not supported
+skipped: int: cdecl.parenthesized_declarator line 1, column 13: a parenthesised declarator, as in a function pointer, is not supported
+skipped: cookie_io_functions_t: cdecl.unknown_type line 1, column 44: 'cookie_read_function_t' is not a type
+skipped: fopencookie: cdecl.unknown_type line 1, column 41: 'cookie_io_functions_t' is not a type
+skipped: malloc: declared again (the first declaration is kept)
+skipped: calloc: declared again (the first declaration is kept)
+skipped: realloc: declared again (the first declaration is kept)
+skipped: free: declared again (the first declaration is kept)
+skipped: atexit: cdecl.parenthesized_declarator line 1, column 18: a parenthesised declarator, as in a function pointer, is not supported
+skipped: at_quick_exit: cdecl.parenthesized_declarator line 1, column 25: a parenthesised declarator, as in a function pointer, is not supported
+skipped: bsearch: cdecl.parenthesized_declarator line 1, column 64: a parenthesised declarator, as in a function pointer, is not supported
+skipped: qsort: cdecl.parenthesized_declarator line 1, column 41: a parenthesised declarator, as in a function pointer, is not supported
+skipped: valloc: declared again (the first declaration is kept)
+skipped: memalign: declared again (the first declaration is kept)
+skipped: qsort_r: cdecl.parenthesized_declarator line 1, column 43: a parenthesised declarator, as in a function pointer, is not supported
+skipped: __locale_struct: declares no type, typedef or function
+skipped: ioctl: declared again (the first declaration is kept)
+skipped: vsyslog: cdecl.unknown_type line 1, column 34: 'va_list' is not a type
+skipped: thrd_start_t: cdecl.parenthesized_declarator line 1, column 13: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tss_dtor_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
+skipped: thrd_create: cdecl.unknown_type line 1, column 27: 'thrd_start_t' is not a type
+skipped: call_once: cdecl.parenthesized_declarator line 1, column 34: a parenthesised declarator, as in a function pointer, is not supported
+skipped: tss_create: cdecl.unknown_type line 1, column 25: 'tss_dtor_t' is not a type
+skipped: ucontext: declares no type, typedef or function
+skipped: makecontext: cdecl.parenthesized_declarator line 1, column 42: a parenthesised declarator, as in a function pointer, is not supported
+skipped: ctermid: declared again (the first declaration is kept)
+skipped: getopt: declared again (the first declaration is kept)
+skipped: optarg: cdecl.variable line 1, column 14: 'optarg' declares a variable; only types and function prototypes are in this subset
+skipped: optind: cdecl.variable line 1, column 12: 'optind' declares a variable; only types and function prototypes are in this subset
+skipped: lockf: declared again (the first declaration is kept)
+skipped: setgroups: declared again (the first declaration is kept)
+skipped: optreset: cdecl.variable line 1, column 12: 'optreset' declares a variable; only types and function prototypes are in this subset
+skipped: environ: cdecl.variable line 1, column 15: 'environ' declares a variable; only types and function prototypes are in this subset
+skipped: vwprintf: cdecl.unknown_type line 1, column 32: '__isoc_va_list' is not a type
+skipped: vfwprintf: cdecl.unknown_type line 1, column 41: '__isoc_va_list' is not a type
+skipped: vswprintf: cdecl.unknown_type line 1, column 52: '__isoc_va_list' is not a type
+skipped: vwscanf: cdecl.unknown_type line 1, column 31: '__isoc_va_list' is not a type
+skipped: vfwscanf: cdecl.unknown_type line 1, column 40: '__isoc_va_list' is not a type
+skipped: vswscanf: cdecl.unknown_type line 1, column 49: '__isoc_va_list' is not a type
+skipped: tm: declares no type, typedef or function
+skipped: iswalnum: declared again (the first declaration is kept)
+skipped: iswalpha: declared again (the first declaration is kept)
+skipped: iswblank: declared again (the first declaration is kept)
+skipped: iswcntrl: declared again (the first declaration is kept)
+skipped: iswdigit: declared again (the first declaration is kept)
+skipped: iswgraph: declared again (the first declaration is kept)
+skipped: iswlower: declared again (the first declaration is kept)
+skipped: iswprint: declared again (the first declaration is kept)
+skipped: iswpunct: declared again (the first declaration is kept)
+skipped: iswspace: declared again (the first declaration is kept)
+skipped: iswupper: declared again (the first declaration is kept)
+skipped: iswxdigit: declared again (the first declaration is kept)
+skipped: iswctype: declared again (the first declaration is kept)
+skipped: towlower: declared again (the first declaration is kept)
+skipped: towupper: declared again (the first declaration is kept)
+skipped: wctype: declared again (the first declaration is kept)
+note: source_sha256 is the SHA-256 of the whole preprocessed text; each source_file hash covers one top-level musl header, not the headers it includes
+note: musl include/* is public domain with a permission grant; the package licence is MIT
+
+typedef unsigned long size_t;
+typedef long time_t;
+typedef long clock_t;
+struct timespec { time_t tv_sec; int :8*(sizeof(time_t)-sizeof(long))*(1234==4321); long tv_nsec; int :8*(sizeof(time_t)-sizeof(long))*(1234!=4321); };
+typedef int pid_t;
+typedef unsigned uid_t;
+typedef struct __pthread * pthread_t;
+typedef struct __sigset_t { unsigned long __bits[128/sizeof(long)]; } sigset_t;
+typedef struct { union { int __i[sizeof(long)==8?14:9]; volatile int __vi[sizeof(long)==8?14:9]; unsigned long __s[sizeof(long)==8?7:9]; } __u; } pthread_attr_t;
+typedef struct sigaltstack stack_t;
+enum { REG_R8 = 0 };
+enum { REG_R9 = 1 };
+enum { REG_R10 = 2 };
+enum { REG_R11 = 3 };
+enum { REG_R12 = 4 };
+enum { REG_R13 = 5 };
+enum { REG_R14 = 6 };
+enum { REG_R15 = 7 };
+enum { REG_RDI = 8 };
+enum { REG_RSI = 9 };
+enum { REG_RBP = 10 };
+enum { REG_RBX = 11 };
+enum { REG_RDX = 12 };
+enum { REG_RAX = 13 };
+enum { REG_RCX = 14 };
+enum { REG_RSP = 15 };
+enum { REG_RIP = 16 };
+enum { REG_EFL = 17 };
+enum { REG_CSGSFS = 18 };
+enum { REG_ERR = 19 };
+enum { REG_TRAPNO = 20 };
+enum { REG_OLDMASK = 21 };
+enum { REG_CR2 = 22 };
+typedef long long greg_t, gregset_t[23];
+typedef struct _fpstate { unsigned short cwd, swd, ftw, fop; unsigned long long rip, rdp; unsigned mxcsr, mxcr_mask; struct { unsigned short significand[4], exponent, padding[3]; } _st[8]; struct { unsigned element[4]; } _xmm[16]; unsigned padding[24]; } *fpregset_t;
+struct sigcontext { unsigned long r8, r9, r10, r11, r12, r13, r14, r15; unsigned long rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags; unsigned short cs, gs, fs, __pad0; unsigned long err, trapno, oldmask, cr2; struct _fpstate *fpstate; unsigned long __reserved1[8]; };
+typedef struct { gregset_t gregs; fpregset_t fpregs; unsigned long long __reserved1[8]; } mcontext_t;
+struct sigaltstack { void *ss_sp; int ss_flags; size_t ss_size; };
+typedef struct ucontext { unsigned long uc_flags; struct ucontext *uc_link; stack_t uc_stack; mcontext_t uc_mcontext; sigset_t uc_sigmask; unsigned long __fpregs_mem[64]; } ucontext_t;
+union sigval { int sival_int; void *sival_ptr; };
+typedef struct { int si_signo, si_errno, si_code; union { char __pad[128 - 2*sizeof(int) - sizeof(long)]; struct { union { struct { pid_t si_pid; uid_t si_uid; } __piduid; struct { int si_timerid; int si_overrun; } __timer; } __first; union { union sigval si_value; struct { int si_status; clock_t si_utime, si_stime; } __sigchld; } __second; } __si_common; struct { void *si_addr; short si_addr_lsb; union { struct { void *si_lower; void *si_upper; } __addr_bnd; unsigned si_pkey; } __first; } __sigfault; struct { long si_band; int si_fd; } __sigpoll; struct { void *si_call_addr; int si_syscall; unsigned si_arch; } __sigsys; } __si_fields; } siginfo_t;
+int __libc_current_sigrtmin(void);
+int __libc_current_sigrtmax(void);
+int kill(pid_t, int);
+int sigemptyset(sigset_t *);
+int sigfillset(sigset_t *);
+int sigaddset(sigset_t *, int);
+int sigdelset(sigset_t *, int);
+int sigismember(const sigset_t *, int);
+int sigprocmask(int, const sigset_t *, sigset_t *);
+int sigsuspend(const sigset_t *);
+int sigaction(int, const struct sigaction *, struct sigaction *);
+int sigpending(sigset_t *);
+int sigwait(const sigset_t *, int *);
+int sigwaitinfo(const sigset_t *, siginfo_t *);
+int sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
+int sigqueue(pid_t, int, union sigval);
+int pthread_sigmask(int, const sigset_t *, sigset_t *);
+int pthread_kill(pthread_t, int);
+void psiginfo(const siginfo_t *, const char *);
+void psignal(int, const char *);
+int killpg(pid_t, int);
+int sigaltstack(const stack_t *, stack_t *);
+int sighold(int);
+int sigignore(int);
+int siginterrupt(int, int);
+int sigpause(int);
+int sigrelse(int);
+int sigisemptyset(const sigset_t *);
+int sigorset (sigset_t *, const sigset_t *, const sigset_t *);
+int sigandset(sigset_t *, const sigset_t *, const sigset_t *);
+typedef int sig_atomic_t;
+int raise(int);
+typedef void * timer_t;
+typedef int clockid_t;
+typedef struct __locale_struct * locale_t;
+struct tm { int tm_sec; int tm_min; int tm_hour; int tm_mday; int tm_mon; int tm_year; int tm_wday; int tm_yday; int tm_isdst; long tm_gmtoff; const char *tm_zone; };
+clock_t clock (void);
+time_t time (time_t *);
+double difftime (time_t, time_t);
+time_t mktime (struct tm *);
+size_t strftime (char *, size_t, const char *, const struct tm *);
+struct tm *gmtime (const time_t *);
+struct tm *localtime (const time_t *);
+char *asctime (const struct tm *);
+char *ctime (const time_t *);
+int timespec_get(struct timespec *, int);
+size_t strftime_l (char *, size_t, const char *, const struct tm *, locale_t);
+struct tm *gmtime_r (const time_t *, struct tm *);
+struct tm *localtime_r (const time_t *, struct tm *);
+char *asctime_r (const struct tm *, char *);
+char *ctime_r (const time_t *, char *);
+void tzset (void);
+struct itimerspec { struct timespec it_interval; struct timespec it_value; };
+int nanosleep (const struct timespec *, struct timespec *);
+int clock_getres (clockid_t, struct timespec *);
+int clock_gettime (clockid_t, struct timespec *);
+int clock_settime (clockid_t, const struct timespec *);
+int clock_nanosleep (clockid_t, int, const struct timespec *, struct timespec *);
+int clock_getcpuclockid (pid_t, clockid_t *);
+struct sigevent;
+int timer_create (clockid_t, struct sigevent *, timer_t *);
+int timer_delete (timer_t);
+int timer_settime (timer_t, int, const struct itimerspec *, struct itimerspec *);
+int timer_gettime (timer_t, struct itimerspec *);
+int timer_getoverrun (timer_t);
+char *strptime (const char *, const char *, struct tm *);
+struct tm *getdate (const char *);
+int stime(const time_t *);
+time_t timegm(struct tm *);
+typedef long ssize_t;
+typedef long off_t;
+int aio_read(struct aiocb *);
+int aio_write(struct aiocb *);
+int aio_error(const struct aiocb *);
+ssize_t aio_return(struct aiocb *);
+int aio_cancel(int, struct aiocb *);
+int aio_suspend(const struct aiocb *const [], int, const struct timespec *);
+int aio_fsync(int, struct aiocb *);
+int lio_listio(int, struct aiocb * const *, int, struct sigevent *);
+void *alloca(size_t);
+struct ar_hdr { char ar_name[16]; char ar_date[12]; char ar_uid[6], ar_gid[6]; char ar_mode[8]; char ar_size[10]; char ar_fmag[2]; };
+void __assert_fail (const char *, const char *, int, const char *);
+typedef unsigned long uintptr_t;
+typedef long intptr_t;
+typedef signed char int8_t;
+typedef signed short int16_t;
+typedef signed int int32_t;
+typedef signed long int64_t;
+typedef signed long intmax_t;
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
+typedef unsigned int uint32_t;
+typedef unsigned long uint64_t;
+typedef unsigned long uintmax_t;
+typedef int8_t int_fast8_t;
+typedef int64_t int_fast64_t;
+typedef int8_t int_least8_t;
+typedef int16_t int_least16_t;
+typedef int32_t int_least32_t;
+typedef int64_t int_least64_t;
+typedef uint8_t uint_fast8_t;
+typedef uint64_t uint_fast64_t;
+typedef uint8_t uint_least8_t;
+typedef uint16_t uint_least16_t;
+typedef uint32_t uint_least32_t;
+typedef uint64_t uint_least64_t;
+typedef int32_t int_fast16_t;
+typedef int32_t int_fast32_t;
+typedef uint32_t uint_fast16_t;
+typedef uint32_t uint_fast32_t;
+int isalnum(int);
+int isalpha(int);
+int isblank(int);
+int iscntrl(int);
+int isdigit(int);
+int isgraph(int);
+int islower(int);
+int isprint(int);
+int ispunct(int);
+int isspace(int);
+int isupper(int);
+int isxdigit(int);
+int tolower(int);
+int toupper(int);
+int isalnum_l(int, locale_t);
+int isalpha_l(int, locale_t);
+int isblank_l(int, locale_t);
+int iscntrl_l(int, locale_t);
+int isdigit_l(int, locale_t);
+int isgraph_l(int, locale_t);
+int islower_l(int, locale_t);
+int isprint_l(int, locale_t);
+int ispunct_l(int, locale_t);
+int isspace_l(int, locale_t);
+int isupper_l(int, locale_t);
+int isxdigit_l(int, locale_t);
+int tolower_l(int, locale_t);
+int toupper_l(int, locale_t);
+int isascii(int);
+int toascii(int);
+typedef unsigned long ino_t;
+struct dirent { ino_t d_ino; off_t d_off; unsigned short d_reclen; unsigned char d_type; char d_name[256]; };
+typedef struct __dirstream DIR;
+int closedir(DIR *);
+DIR *fdopendir(int);
+DIR *opendir(const char *);
+struct dirent *readdir(DIR *);
+int readdir_r(DIR *, struct dirent *, struct dirent **);
+void rewinddir(DIR *);
+int dirfd(DIR *);
+int alphasort(const struct dirent **, const struct dirent **);
+void seekdir(DIR *, long);
+long telldir(DIR *);
+int getdents(int, struct dirent *, size_t);
+int versionsort(const struct dirent **, const struct dirent **);
+int dlclose(void *);
+char *dlerror(void);
+void *dlopen(const char *, int);
+void *dlsym(void *, const char *);
+typedef struct { const char *dli_fname; void *dli_fbase; const char *dli_sname; void *dli_saddr; } Dl_info;
+int dladdr(const void *, Dl_info *);
+int dlinfo(void *, int, void *);
+typedef uint16_t Elf32_Half;
+typedef uint16_t Elf64_Half;
+typedef uint32_t Elf32_Word;
+typedef int32_t Elf32_Sword;
+typedef uint32_t Elf64_Word;
+typedef int32_t Elf64_Sword;
+typedef uint64_t Elf32_Xword;
+typedef int64_t Elf32_Sxword;
+typedef uint64_t Elf64_Xword;
+typedef int64_t Elf64_Sxword;
+typedef uint32_t Elf32_Addr;
+typedef uint64_t Elf64_Addr;
+typedef uint32_t Elf32_Off;
+typedef uint64_t Elf64_Off;
+typedef uint16_t Elf32_Section;
+typedef uint16_t Elf64_Section;
+typedef Elf32_Half Elf32_Versym;
+typedef Elf64_Half Elf64_Versym;
+typedef struct { unsigned char e_ident[(16)]; Elf32_Half e_type; Elf32_Half e_machine; Elf32_Word e_version; Elf32_Addr e_entry; Elf32_Off e_phoff; Elf32_Off e_shoff; Elf32_Word e_flags; Elf32_Half e_ehsize; Elf32_Half e_phentsize; Elf32_Half e_phnum; Elf32_Half e_shentsize; Elf32_Half e_shnum; Elf32_Half e_shstrndx; } Elf32_Ehdr;
+typedef struct { unsigned char e_ident[(16)]; Elf64_Half e_type; Elf64_Half e_machine; Elf64_Word e_version; Elf64_Addr e_entry; Elf64_Off e_phoff; Elf64_Off e_shoff; Elf64_Word e_flags; Elf64_Half e_ehsize; Elf64_Half e_phentsize; Elf64_Half e_phnum; Elf64_Half e_shentsize; Elf64_Half e_shnum; Elf64_Half e_shstrndx; } Elf64_Ehdr;
+typedef struct { Elf32_Word sh_name; Elf32_Word sh_type; Elf32_Word sh_flags; Elf32_Addr sh_addr; Elf32_Off sh_offset; Elf32_Word sh_size; Elf32_Word sh_link; Elf32_Word sh_info; Elf32_Word sh_addralign; Elf32_Word sh_entsize; } Elf32_Shdr;
+typedef struct { Elf64_Word sh_name; Elf64_Word sh_type; Elf64_Xword sh_flags; Elf64_Addr sh_addr; Elf64_Off sh_offset; Elf64_Xword sh_size; Elf64_Word sh_link; Elf64_Word sh_info; Elf64_Xword sh_addralign; Elf64_Xword sh_entsize; } Elf64_Shdr;
+typedef struct { Elf32_Word ch_type; Elf32_Word ch_size; Elf32_Word ch_addralign; } Elf32_Chdr;
+typedef struct { Elf64_Word ch_type; Elf64_Word ch_reserved; Elf64_Xword ch_size; Elf64_Xword ch_addralign; } Elf64_Chdr;
+typedef struct { Elf32_Word st_name; Elf32_Addr st_value; Elf32_Word st_size; unsigned char st_info; unsigned char st_other; Elf32_Section st_shndx; } Elf32_Sym;
+typedef struct { Elf64_Word st_name; unsigned char st_info; unsigned char st_other; Elf64_Section st_shndx; Elf64_Addr st_value; Elf64_Xword st_size; } Elf64_Sym;
+typedef struct { Elf32_Half si_boundto; Elf32_Half si_flags; } Elf32_Syminfo;
+typedef struct { Elf64_Half si_boundto; Elf64_Half si_flags; } Elf64_Syminfo;
+typedef struct { Elf32_Addr r_offset; Elf32_Word r_info; } Elf32_Rel;
+typedef struct { Elf64_Addr r_offset; Elf64_Xword r_info; } Elf64_Rel;
+typedef struct { Elf32_Addr r_offset; Elf32_Word r_info; Elf32_Sword r_addend; } Elf32_Rela;
+typedef struct { Elf64_Addr r_offset; Elf64_Xword r_info; Elf64_Sxword r_addend; } Elf64_Rela;
+typedef struct { Elf32_Word p_type; Elf32_Off p_offset; Elf32_Addr p_vaddr; Elf32_Addr p_paddr; Elf32_Word p_filesz; Elf32_Word p_memsz; Elf32_Word p_flags; Elf32_Word p_align; } Elf32_Phdr;
+typedef struct { Elf64_Word p_type; Elf64_Word p_flags; Elf64_Off p_offset; Elf64_Addr p_vaddr; Elf64_Addr p_paddr; Elf64_Xword p_filesz; Elf64_Xword p_memsz; Elf64_Xword p_align; } Elf64_Phdr;
+typedef struct { Elf32_Sword d_tag; union { Elf32_Word d_val; Elf32_Addr d_ptr; } d_un; } Elf32_Dyn;
+typedef struct { Elf64_Sxword d_tag; union { Elf64_Xword d_val; Elf64_Addr d_ptr; } d_un; } Elf64_Dyn;
+typedef struct { Elf32_Half vd_version; Elf32_Half vd_flags; Elf32_Half vd_ndx; Elf32_Half vd_cnt; Elf32_Word vd_hash; Elf32_Word vd_aux; Elf32_Word vd_next; } Elf32_Verdef;
+typedef struct { Elf64_Half vd_version; Elf64_Half vd_flags; Elf64_Half vd_ndx; Elf64_Half vd_cnt; Elf64_Word vd_hash; Elf64_Word vd_aux; Elf64_Word vd_next; } Elf64_Verdef;
+typedef struct { Elf32_Word vda_name; Elf32_Word vda_next; } Elf32_Verdaux;
+typedef struct { Elf64_Word vda_name; Elf64_Word vda_next; } Elf64_Verdaux;
+typedef struct { Elf32_Half vn_version; Elf32_Half vn_cnt; Elf32_Word vn_file; Elf32_Word vn_aux; Elf32_Word vn_next; } Elf32_Verneed;
+typedef struct { Elf64_Half vn_version; Elf64_Half vn_cnt; Elf64_Word vn_file; Elf64_Word vn_aux; Elf64_Word vn_next; } Elf64_Verneed;
+typedef struct { Elf32_Word vna_hash; Elf32_Half vna_flags; Elf32_Half vna_other; Elf32_Word vna_name; Elf32_Word vna_next; } Elf32_Vernaux;
+typedef struct { Elf64_Word vna_hash; Elf64_Half vna_flags; Elf64_Half vna_other; Elf64_Word vna_name; Elf64_Word vna_next; } Elf64_Vernaux;
+typedef struct { uint32_t a_type; union { uint32_t a_val; } a_un; } Elf32_auxv_t;
+typedef struct { uint64_t a_type; union { uint64_t a_val; } a_un; } Elf64_auxv_t;
+typedef struct { Elf32_Word n_namesz; Elf32_Word n_descsz; Elf32_Word n_type; } Elf32_Nhdr;
+typedef struct { Elf64_Word n_namesz; Elf64_Word n_descsz; Elf64_Word n_type; } Elf64_Nhdr;
+typedef struct { Elf32_Xword m_value; Elf32_Word m_info; Elf32_Word m_poffset; Elf32_Half m_repeat; Elf32_Half m_stride; } Elf32_Move;
+typedef struct { Elf64_Xword m_value; Elf64_Xword m_info; Elf64_Xword m_poffset; Elf64_Half m_repeat; Elf64_Half m_stride; } Elf64_Move;
+typedef union { struct { Elf32_Word gt_current_g_value; Elf32_Word gt_unused; } gt_header; struct { Elf32_Word gt_g_value; Elf32_Word gt_bytes; } gt_entry; } Elf32_gptab;
+typedef struct { Elf32_Word ri_gprmask; Elf32_Word ri_cprmask[4]; Elf32_Sword ri_gp_value; } Elf32_RegInfo;
+typedef struct { unsigned char kind; unsigned char size; Elf32_Section section; Elf32_Word info; } Elf_Options;
+typedef struct { Elf32_Word hwp_flags1; Elf32_Word hwp_flags2; } Elf_Options_Hw;
+typedef struct { Elf32_Word l_name; Elf32_Word l_time_stamp; Elf32_Word l_checksum; Elf32_Word l_version; Elf32_Word l_flags; } Elf32_Lib;
+typedef struct { Elf64_Word l_name; Elf64_Word l_time_stamp; Elf64_Word l_checksum; Elf64_Word l_version; Elf64_Word l_flags; } Elf64_Lib;
+typedef Elf32_Addr Elf32_Conflict;
+typedef struct { Elf32_Half version; unsigned char isa_level; unsigned char isa_rev; unsigned char gpr_size; unsigned char cpr1_size; unsigned char cpr2_size; unsigned char fp_abi; Elf32_Word isa_ext; Elf32_Word ases; Elf32_Word flags1; Elf32_Word flags2; } Elf_MIPS_ABIFlags_v0;
+enum { Val_GNU_MIPS_ABI_FP_ANY = 0, Val_GNU_MIPS_ABI_FP_DOUBLE = 1, Val_GNU_MIPS_ABI_FP_SINGLE = 2, Val_GNU_MIPS_ABI_FP_SOFT = 3, Val_GNU_MIPS_ABI_FP_OLD_64 = 4, Val_GNU_MIPS_ABI_FP_XX = 5, Val_GNU_MIPS_ABI_FP_64 = 6, Val_GNU_MIPS_ABI_FP_64A = 7, Val_GNU_MIPS_ABI_FP_MAX = 7 };
+void warn(const char *, ...);
+void warnx(const char *, ...);
+void err(int, const char *, ...);
+void errx(int, const char *, ...);
+int *__errno_location(void);
+typedef unsigned mode_t;
+struct iovec { void *iov_base; size_t iov_len; };
+struct flock { short l_type; short l_whence; off_t l_start; off_t l_len; pid_t l_pid; };
+int creat(const char *, mode_t);
+int fcntl(int, int, ...);
+int open(const char *, int, ...);
+int openat(int, const char *, int, ...);
+int posix_fadvise(int, off_t, off_t, int);
+int posix_fallocate(int, off_t, off_t);
+int lockf(int, int, off_t);
+struct f_owner_ex { int type; pid_t pid; };
+int fallocate(int, int, off_t, off_t);
+int name_to_handle_at(int, const char *, struct file_handle *, int *, int);
+int open_by_handle_at(int, struct file_handle *, int);
+ssize_t readahead(int, off_t, size_t);
+int sync_file_range(int, off_t, off_t, unsigned);
+ssize_t vmsplice(int, const struct iovec *, size_t, unsigned);
+ssize_t splice(int, off_t *, int, off_t *, size_t, unsigned);
+ssize_t tee(int, int, size_t, unsigned);
+typedef unsigned short fexcept_t;
+typedef struct { unsigned short __control_word; unsigned short __unused1; unsigned short __status_word; unsigned short __unused2; unsigned short __tags; unsigned short __unused3; unsigned int __eip; unsigned short __cs_selector; unsigned int __opcode:11; unsigned int __unused4:5; unsigned int __data_offset; unsigned short __data_selector; unsigned short __unused5; unsigned int __mxcsr; } fenv_t;
+int feclearexcept(int);
+int fegetexceptflag(fexcept_t *, int);
+int feraiseexcept(int);
+int fesetexceptflag(const fexcept_t *, int);
+int fetestexcept(int);
+int fegetround(void);
+int fesetround(int);
+int fegetenv(fenv_t *);
+int feholdexcept(fenv_t *);
+int fesetenv(const fenv_t *);
+int feupdateenv(const fenv_t *);
+int __flt_rounds(void);
+int fmtmsg(long, const char *, int, const char *, const char *, const char *);
+int fnmatch(const char *, const char *, int);
+typedef long register_t;
+typedef long suseconds_t;
+typedef unsigned long u_int64_t;
+typedef unsigned long nlink_t;
+typedef unsigned long dev_t;
+typedef long blksize_t;
+typedef long blkcnt_t;
+typedef unsigned long fsblkcnt_t;
+typedef unsigned long fsfilcnt_t;
+typedef unsigned id_t;
+typedef unsigned gid_t;
+typedef int key_t;
+typedef unsigned useconds_t;
+typedef int pthread_once_t;
+typedef unsigned pthread_key_t;
+typedef int pthread_spinlock_t;
+typedef struct { unsigned __attr; } pthread_mutexattr_t;
+typedef struct { unsigned __attr; } pthread_condattr_t;
+typedef struct { unsigned __attr; } pthread_barrierattr_t;
+typedef struct { unsigned __attr[2]; } pthread_rwlockattr_t;
+typedef struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } pthread_mutex_t;
+typedef struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } pthread_cond_t;
+typedef struct { union { int __i[sizeof(long)==8?14:8]; volatile int __vi[sizeof(long)==8?14:8]; void *__p[sizeof(long)==8?7:8]; } __u; } pthread_rwlock_t;
+typedef struct { union { int __i[sizeof(long)==8?8:5]; volatile int __vi[sizeof(long)==8?8:5]; void *__p[sizeof(long)==8?4:5]; } __u; } pthread_barrier_t;
+typedef unsigned char u_int8_t;
+typedef unsigned short u_int16_t;
+typedef unsigned u_int32_t;
+typedef char *caddr_t;
+typedef unsigned char u_char;
+typedef unsigned short u_short, ushort;
+typedef unsigned u_int, uint;
+typedef unsigned long u_long, ulong;
+typedef long long quad_t;
+typedef unsigned long long u_quad_t;
+struct timeval { time_t tv_sec; suseconds_t tv_usec; };
+typedef unsigned long fd_mask;
+typedef struct { unsigned long fds_bits[1024 / 8 / sizeof(long)]; } fd_set;
+int select (int, fd_set *, fd_set *, fd_set *, struct timeval *);
+int pselect (int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *);
+typedef struct _ftsent { struct _ftsent *fts_cycle; struct _ftsent *fts_parent; struct _ftsent *fts_link; int64_t fts_number; void *fts_pointer; char *fts_accpath; char *fts_path; int fts_errno; int fts_symfd; unsigned int fts_pathlen; unsigned int fts_namelen; ino_t fts_ino; dev_t fts_dev; nlink_t fts_nlink; int fts_level; unsigned short fts_info; unsigned short fts_flags; unsigned short fts_instr; struct stat *fts_statp; char fts_name[1]; } FTSENT;
+struct stat { dev_t st_dev; ino_t st_ino; nlink_t st_nlink; mode_t st_mode; uid_t st_uid; gid_t st_gid; unsigned int __pad0; dev_t st_rdev; off_t st_size; blksize_t st_blksize; blkcnt_t st_blocks; struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim; long __unused[3]; };
+int stat(const char *, struct stat *);
+int fstat(int, struct stat *);
+int lstat(const char *, struct stat *);
+int fstatat(int, const char *, struct stat *, int);
+int chmod(const char *, mode_t);
+int fchmod(int, mode_t);
+int fchmodat(int, const char *, mode_t, int);
+mode_t umask(mode_t);
+int mkdir(const char *, mode_t);
+int mkfifo(const char *, mode_t);
+int mkdirat(int, const char *, mode_t);
+int mkfifoat(int, const char *, mode_t);
+int mknod(const char *, mode_t, dev_t);
+int mknodat(int, const char *, mode_t, dev_t);
+int futimens(int, const struct timespec [2]);
+int utimensat(int, const char *, const struct timespec [2], int);
+int lchmod(const char *, mode_t);
+struct FTW { int base; int level; };
+int getopt(int, char * const [], const char *);
+struct option { const char *name; int has_arg; int *flag; int val; };
+int getopt_long(int, char *const *, const char *, const struct option *, int *);
+int getopt_long_only(int, char *const *, const char *, const struct option *, int *);
+typedef struct { size_t gl_pathc; char **gl_pathv; size_t gl_offs; int __dummy1; void *__dummy2[5]; } glob_t;
+void globfree(glob_t *);
+typedef struct _IO_FILE FILE;
+struct group { char *gr_name; char *gr_passwd; gid_t gr_gid; char **gr_mem; };
+struct group *getgrgid(gid_t);
+struct group *getgrnam(const char *);
+int getgrgid_r(gid_t, struct group *, char *, size_t, struct group **);
+int getgrnam_r(const char *, struct group *, char *, size_t, struct group **);
+struct group *getgrent(void);
+void endgrent(void);
+void setgrent(void);
+struct group *fgetgrent(FILE *);
+int putgrent(const struct group *, FILE *);
+int getgrouplist(const char *, gid_t, gid_t *, int *);
+int setgroups(size_t, const gid_t *);
+int initgroups(const char *, gid_t);
+typedef void *iconv_t;
+iconv_t iconv_open(const char *, const char *);
+size_t iconv(iconv_t, char **, size_t *, char **, size_t *);
+int iconv_close(iconv_t);
+typedef int wchar_t;
+typedef struct { intmax_t quot, rem; } imaxdiv_t;
+intmax_t imaxabs(intmax_t);
+imaxdiv_t imaxdiv(intmax_t, intmax_t);
+intmax_t strtoimax(const char *, char **, int);
+uintmax_t strtoumax(const char *, char **, int);
+intmax_t wcstoimax(const wchar_t *, wchar_t **, int);
+uintmax_t wcstoumax(const wchar_t *, wchar_t **, int);
+typedef unsigned socklen_t;
+typedef unsigned short sa_family_t;
+struct msghdr { void *msg_name; socklen_t msg_namelen; struct iovec *msg_iov; int msg_iovlen; int __pad1; void *msg_control; socklen_t msg_controllen; int __pad2; int msg_flags; };
+struct cmsghdr { socklen_t cmsg_len; int __pad1; int cmsg_level; int cmsg_type; };
+struct ucred { pid_t pid; uid_t uid; gid_t gid; };
+struct mmsghdr { struct msghdr msg_hdr; unsigned int msg_len; };
+int sendmmsg (int, struct mmsghdr *, unsigned int, unsigned int);
+int recvmmsg (int, struct mmsghdr *, unsigned int, unsigned int, struct timespec *);
+struct linger { int l_onoff; int l_linger; };
+struct sockaddr { sa_family_t sa_family; char sa_data[14]; };
+struct sockaddr_storage { sa_family_t ss_family; char __ss_padding[128-sizeof(long)-sizeof(sa_family_t)]; unsigned long __ss_align; };
+int socket (int, int, int);
+int socketpair (int, int, int, int [2]);
+int shutdown (int, int);
+int bind (int, const struct sockaddr *, socklen_t);
+int connect (int, const struct sockaddr *, socklen_t);
+int listen (int, int);
+int accept (int, struct sockaddr *, socklen_t *);
+int accept4(int, struct sockaddr *, socklen_t *, int);
+int getsockname (int, struct sockaddr *, socklen_t *);
+int getpeername (int, struct sockaddr *, socklen_t *);
+ssize_t send (int, const void *, size_t, int);
+ssize_t recv (int, void *, size_t, int);
+ssize_t sendto (int, const void *, size_t, int, const struct sockaddr *, socklen_t);
+ssize_t recvfrom (int, void *, size_t, int, struct sockaddr *, socklen_t *);
+ssize_t sendmsg (int, const struct msghdr *, int);
+ssize_t recvmsg (int, struct msghdr *, int);
+int getsockopt (int, int, int, void *, socklen_t *);
+int setsockopt (int, int, int, const void *, socklen_t);
+int sockatmark (int);
+typedef uint16_t in_port_t;
+typedef uint32_t in_addr_t;
+struct in_addr { in_addr_t s_addr; };
+struct sockaddr_in { sa_family_t sin_family; in_port_t sin_port; struct in_addr sin_addr; uint8_t sin_zero[8]; };
+struct in6_addr { union { uint8_t __s6_addr[16]; uint16_t __s6_addr16[8]; uint32_t __s6_addr32[4]; } __in6_union; };
+struct sockaddr_in6 { sa_family_t sin6_family; in_port_t sin6_port; uint32_t sin6_flowinfo; struct in6_addr sin6_addr; uint32_t sin6_scope_id; };
+struct ipv6_mreq { struct in6_addr ipv6mr_multiaddr; unsigned ipv6mr_interface; };
+uint32_t htonl(uint32_t);
+uint16_t htons(uint16_t);
+uint32_t ntohl(uint32_t);
+uint16_t ntohs(uint16_t);
+struct ip_opts { struct in_addr ip_dst; char ip_opts[40]; };
+struct ip_mreq { struct in_addr imr_multiaddr; struct in_addr imr_interface; };
+struct ip_mreqn { struct in_addr imr_multiaddr; struct in_addr imr_address; int imr_ifindex; };
+struct ip_mreq_source { struct in_addr imr_multiaddr; struct in_addr imr_interface; struct in_addr imr_sourceaddr; };
+struct ip_msfilter { struct in_addr imsf_multiaddr; struct in_addr imsf_interface; uint32_t imsf_fmode; uint32_t imsf_numsrc; struct in_addr imsf_slist[1]; };
+struct group_req { uint32_t gr_interface; struct sockaddr_storage gr_group; };
+struct group_source_req { uint32_t gsr_interface; struct sockaddr_storage gsr_group; struct sockaddr_storage gsr_source; };
+struct group_filter { uint32_t gf_interface; struct sockaddr_storage gf_group; uint32_t gf_fmode; uint32_t gf_numsrc; struct sockaddr_storage gf_slist[1]; };
+struct in_pktinfo { int ipi_ifindex; struct in_addr ipi_spec_dst; struct in_addr ipi_addr; };
+struct in6_pktinfo { struct in6_addr ipi6_addr; unsigned ipi6_ifindex; };
+struct ip6_mtuinfo { struct sockaddr_in6 ip6m_addr; uint32_t ip6m_mtu; };
+struct ifaddrs { struct ifaddrs *ifa_next; char *ifa_name; unsigned ifa_flags; struct sockaddr *ifa_addr; struct sockaddr *ifa_netmask; union { struct sockaddr *ifu_broadaddr; struct sockaddr *ifu_dstaddr; } ifa_ifu; void *ifa_data; };
+void freeifaddrs(struct ifaddrs *);
+int getifaddrs(struct ifaddrs **);
+typedef int nl_item;
+typedef void *nl_catd;
+nl_catd catopen (const char *, int);
+char *catgets (nl_catd, int, int, const char *);
+int catclose (nl_catd);
+char *nl_langinfo(nl_item);
+char *nl_langinfo_l(nl_item, locale_t);
+struct utmpx { short ut_type; short __ut_pad1; pid_t ut_pid; char ut_line[32]; char ut_id[4]; char ut_user[32]; char ut_host[256]; struct { short __e_termination; short __e_exit; } ut_exit; int ut_session, __ut_pad2; struct timeval ut_tv; unsigned ut_addr_v6[4]; char __unused[20]; };
+void endutxent(void);
+struct utmpx *getutxent(void);
+struct utmpx *getutxid(const struct utmpx *);
+struct utmpx *getutxline(const struct utmpx *);
+struct utmpx *pututxline(const struct utmpx *);
+void setutxent(void);
+void updwtmpx(const char *, const struct utmpx *);
+int utmpxname(const char *);
+struct lastlog { time_t ll_time; char ll_line[32]; char ll_host[256]; };
+void endutent(void);
+struct utmpx *getutent(void);
+struct utmpx *getutid(const struct utmpx *);
+struct utmpx *getutline(const struct utmpx *);
+struct utmpx *pututline(const struct utmpx *);
+void setutent(void);
+void updwtmp(const char *, const struct utmpx *);
+int utmpname(const char *);
+int login_tty(int);
+char *dirname(char *);
+char *basename(char *);
+char *gettext(const char *);
+char *dgettext(const char *, const char *);
+char *dcgettext(const char *, const char *, int);
+char *ngettext(const char *, const char *, unsigned long);
+char *dngettext(const char *, const char *, const char *, unsigned long);
+char *dcngettext(const char *, const char *, const char *, unsigned long, int);
+char *textdomain(const char *);
+char *bindtextdomain (const char *, const char *);
+char *bind_textdomain_codeset(const char *, const char *);
+typedef uint32_t Elf_Symndx;
+struct dl_phdr_info { Elf64_Addr dlpi_addr; const char *dlpi_name; const Elf64_Phdr *dlpi_phdr; Elf64_Half dlpi_phnum; unsigned long long int dlpi_adds; unsigned long long int dlpi_subs; size_t dlpi_tls_modid; void *dlpi_tls_data; };
+struct link_map { Elf64_Addr l_addr; char *l_name; Elf64_Dyn *l_ld; struct link_map *l_next, *l_prev; };
+struct r_debug { int r_version; struct link_map *r_map; Elf64_Addr r_brk; enum { RT_CONSISTENT, RT_ADD, RT_DELETE } r_state; Elf64_Addr r_ldbase; };
+struct lconv { char *decimal_point; char *thousands_sep; char *grouping; char *int_curr_symbol; char *currency_symbol; char *mon_decimal_point; char *mon_thousands_sep; char *mon_grouping; char *positive_sign; char *negative_sign; char int_frac_digits; char frac_digits; char p_cs_precedes; char p_sep_by_space; char n_cs_precedes; char n_sep_by_space; char p_sign_posn; char n_sign_posn; char int_p_cs_precedes; char int_p_sep_by_space; char int_n_cs_precedes; char int_n_sep_by_space; char int_p_sign_posn; char int_n_sign_posn; };
+char *setlocale (int, const char *);
+struct lconv *localeconv(void);
+locale_t duplocale(locale_t);
+void freelocale(locale_t);
+locale_t newlocale(int, const char *, locale_t);
+locale_t uselocale(locale_t);
+void *malloc (size_t);
+void *calloc (size_t, size_t);
+void *realloc (void *, size_t);
+void free (void *);
+void *valloc (size_t);
+void *memalign(size_t, size_t);
+size_t malloc_usable_size(void *);
+typedef float float_t;
+typedef double double_t;
+int __fpclassify(double);
+int __fpclassifyf(float);
+int __fpclassifyl(long double);
+int __signbit(double);
+int __signbitf(float);
+int __signbitl(long double);
+double acos(double);
+float acosf(float);
+long double acosl(long double);
+double acosh(double);
+float acoshf(float);
+long double acoshl(long double);
+double asin(double);
+float asinf(float);
+long double asinl(long double);
+double asinh(double);
+float asinhf(float);
+long double asinhl(long double);
+double atan(double);
+float atanf(float);
+long double atanl(long double);
+double atan2(double, double);
+float atan2f(float, float);
+long double atan2l(long double, long double);
+double atanh(double);
+float atanhf(float);
+long double atanhl(long double);
+double cbrt(double);
+float cbrtf(float);
+long double cbrtl(long double);
+double ceil(double);
+float ceilf(float);
+long double ceill(long double);
+double copysign(double, double);
+float copysignf(float, float);
+long double copysignl(long double, long double);
+double cos(double);
+float cosf(float);
+long double cosl(long double);
+double cosh(double);
+float coshf(float);
+long double coshl(long double);
+double erf(double);
+float erff(float);
+long double erfl(long double);
+double erfc(double);
+float erfcf(float);
+long double erfcl(long double);
+double exp(double);
+float expf(float);
+long double expl(long double);
+double exp2(double);
+float exp2f(float);
+long double exp2l(long double);
+double expm1(double);
+float expm1f(float);
+long double expm1l(long double);
+double fabs(double);
+float fabsf(float);
+long double fabsl(long double);
+double fdim(double, double);
+float fdimf(float, float);
+long double fdiml(long double, long double);
+double floor(double);
+float floorf(float);
+long double floorl(long double);
+double fma(double, double, double);
+float fmaf(float, float, float);
+long double fmal(long double, long double, long double);
+double fmax(double, double);
+float fmaxf(float, float);
+long double fmaxl(long double, long double);
+double fmin(double, double);
+float fminf(float, float);
+long double fminl(long double, long double);
+double fmod(double, double);
+float fmodf(float, float);
+long double fmodl(long double, long double);
+double frexp(double, int *);
+float frexpf(float, int *);
+long double frexpl(long double, int *);
+double hypot(double, double);
+float hypotf(float, float);
+long double hypotl(long double, long double);
+int ilogb(double);
+int ilogbf(float);
+int ilogbl(long double);
+double ldexp(double, int);
+float ldexpf(float, int);
+long double ldexpl(long double, int);
+double lgamma(double);
+float lgammaf(float);
+long double lgammal(long double);
+long long llrint(double);
+long long llrintf(float);
+long long llrintl(long double);
+long long llround(double);
+long long llroundf(float);
+long long llroundl(long double);
+double log(double);
+float logf(float);
+long double logl(long double);
+double log10(double);
+float log10f(float);
+long double log10l(long double);
+double log1p(double);
+float log1pf(float);
+long double log1pl(long double);
+double log2(double);
+float log2f(float);
+long double log2l(long double);
+double logb(double);
+float logbf(float);
+long double logbl(long double);
+long lrint(double);
+long lrintf(float);
+long lrintl(long double);
+long lround(double);
+long lroundf(float);
+long lroundl(long double);
+double modf(double, double *);
+float modff(float, float *);
+long double modfl(long double, long double *);
+double nan(const char *);
+float nanf(const char *);
+long double nanl(const char *);
+double nearbyint(double);
+float nearbyintf(float);
+long double nearbyintl(long double);
+double nextafter(double, double);
+float nextafterf(float, float);
+long double nextafterl(long double, long double);
+double nexttoward(double, long double);
+float nexttowardf(float, long double);
+long double nexttowardl(long double, long double);
+double pow(double, double);
+float powf(float, float);
+long double powl(long double, long double);
+double remainder(double, double);
+float remainderf(float, float);
+long double remainderl(long double, long double);
+double remquo(double, double, int *);
+float remquof(float, float, int *);
+long double remquol(long double, long double, int *);
+double rint(double);
+float rintf(float);
+long double rintl(long double);
+double round(double);
+float roundf(float);
+long double roundl(long double);
+double scalbln(double, long);
+float scalblnf(float, long);
+long double scalblnl(long double, long);
+double scalbn(double, int);
+float scalbnf(float, int);
+long double scalbnl(long double, int);
+double sin(double);
+float sinf(float);
+long double sinl(long double);
+double sinh(double);
+float sinhf(float);
+long double sinhl(long double);
+double sqrt(double);
+float sqrtf(float);
+long double sqrtl(long double);
+double tan(double);
+float tanf(float);
+long double tanl(long double);
+double tanh(double);
+float tanhf(float);
+long double tanhl(long double);
+double tgamma(double);
+float tgammaf(float);
+long double tgammal(long double);
+double trunc(double);
+float truncf(float);
+long double truncl(long double);
+double j0(double);
+double j1(double);
+double jn(int, double);
+double y0(double);
+double y1(double);
+double yn(int, double);
+double drem(double, double);
+float dremf(float, float);
+int finite(double);
+int finitef(float);
+double scalb(double, double);
+float scalbf(float, float);
+double significand(double);
+float significandf(float);
+double lgamma_r(double, int*);
+float lgammaf_r(float, int*);
+float j0f(float);
+float j1f(float);
+float jnf(int, float);
+float y0f(float);
+float y1f(float);
+float ynf(int, float);
+long double lgammal_r(long double, int*);
+void sincos(double, double*, double*);
+void sincosf(float, float*, float*);
+void sincosl(long double, long double*, long double*);
+double exp10(double);
+float exp10f(float);
+long double exp10l(long double);
+double pow10(double);
+float pow10f(float);
+long double pow10l(long double);
+void *memcpy (void *, const void *, size_t);
+void *memmove (void *, const void *, size_t);
+void *memset (void *, int, size_t);
+int memcmp (const void *, const void *, size_t);
+void *memchr (const void *, int, size_t);
+char *strcpy (char *, const char *);
+char *strncpy (char *, const char *, size_t);
+char *strcat (char *, const char *);
+char *strncat (char *, const char *, size_t);
+int strcmp (const char *, const char *);
+int strncmp (const char *, const char *, size_t);
+int strcoll (const char *, const char *);
+size_t strxfrm (char *, const char *, size_t);
+char *strchr (const char *, int);
+char *strrchr (const char *, int);
+size_t strcspn (const char *, const char *);
+size_t strspn (const char *, const char *);
+char *strpbrk (const char *, const char *);
+char *strstr (const char *, const char *);
+char *strtok (char *, const char *);
+size_t strlen (const char *);
+char *strerror (int);
+int bcmp (const void *, const void *, size_t);
+void bcopy (const void *, void *, size_t);
+void bzero (void *, size_t);
+char *index (const char *, int);
+char *rindex (const char *, int);
+int ffs (int);
+int ffsl (long);
+int ffsll (long long);
+int strcasecmp (const char *, const char *);
+int strncasecmp (const char *, const char *, size_t);
+int strcasecmp_l (const char *, const char *, locale_t);
+int strncasecmp_l (const char *, const char *, size_t, locale_t);
+char *strtok_r (char *, const char *, char **);
+int strerror_r (int, char *, size_t);
+char *stpcpy(char *, const char *);
+char *stpncpy(char *, const char *, size_t);
+size_t strnlen (const char *, size_t);
+char *strdup (const char *);
+char *strndup (const char *, size_t);
+char *strsignal(int);
+char *strerror_l (int, locale_t);
+int strcoll_l (const char *, const char *, locale_t);
+size_t strxfrm_l (char *, const char *, size_t, locale_t);
+void *memmem(const void *, size_t, const void *, size_t);
+void *memccpy (void *, const void *, int, size_t);
+char *strsep(char **, const char *);
+size_t strlcat (char *, const char *, size_t);
+size_t strlcpy (char *, const char *, size_t);
+void explicit_bzero (void *, size_t);
+int strverscmp (const char *, const char *);
+char *strchrnul(const char *, int);
+char *strcasestr(const char *, const char *);
+void *memrchr(const void *, int, size_t);
+void *mempcpy(void *, const void *, size_t);
+struct mntent { char *mnt_fsname; char *mnt_dir; char *mnt_type; char *mnt_opts; int mnt_freq; int mnt_passno; };
+FILE *setmntent(const char *, const char *);
+int endmntent(FILE *);
+struct mntent *getmntent(FILE *);
+struct mntent *getmntent_r(FILE *, struct mntent *, char *, int);
+int addmntent(FILE *, const struct mntent *);
+char *hasmntopt(const struct mntent *, const char *);
+ssize_t strfmon(char *, size_t, const char *, ...);
+ssize_t strfmon_l(char *, size_t, locale_t, const char *, ...);
+typedef int mqd_t;
+struct mq_attr { long mq_flags, mq_maxmsg, mq_msgsize, mq_curmsgs, __unused[4]; };
+int mq_close(mqd_t);
+int mq_getattr(mqd_t, struct mq_attr *);
+int mq_notify(mqd_t, const struct sigevent *);
+mqd_t mq_open(const char *, int, ...);
+ssize_t mq_receive(mqd_t, char *, size_t, unsigned *);
+int mq_send(mqd_t, const char *, size_t, unsigned);
+int mq_setattr(mqd_t, const struct mq_attr *, struct mq_attr *);
+ssize_t mq_timedreceive(mqd_t, char *, size_t, unsigned *, const struct timespec *);
+int mq_timedsend(mqd_t, const char *, size_t, unsigned, const struct timespec *);
+int mq_unlink(const char *);
+struct addrinfo { int ai_flags; int ai_family; int ai_socktype; int ai_protocol; socklen_t ai_addrlen; struct sockaddr *ai_addr; char *ai_canonname; struct addrinfo *ai_next; };
+int getaddrinfo (const char *, const char *, const struct addrinfo *, struct addrinfo **);
+void freeaddrinfo (struct addrinfo *);
+int getnameinfo (const struct sockaddr *, socklen_t, char *, socklen_t, char *, socklen_t, int);
+const char *gai_strerror(int);
+struct netent { char *n_name; char **n_aliases; int n_addrtype; uint32_t n_net; };
+struct hostent { char *h_name; char **h_aliases; int h_addrtype; int h_length; char **h_addr_list; };
+struct servent { char *s_name; char **s_aliases; int s_port; char *s_proto; };
+struct protoent { char *p_name; char **p_aliases; int p_proto; };
+void sethostent (int);
+void endhostent (void);
+struct hostent *gethostent (void);
+void setnetent (int);
+void endnetent (void);
+struct netent *getnetent (void);
+struct netent *getnetbyaddr (uint32_t, int);
+struct netent *getnetbyname (const char *);
+void setservent (int);
+void endservent (void);
+struct servent *getservent (void);
+struct servent *getservbyname (const char *, const char *);
+struct servent *getservbyport (int, const char *);
+void setprotoent (int);
+void endprotoent (void);
+struct protoent *getprotoent (void);
+struct protoent *getprotobyname (const char *);
+struct protoent *getprotobynumber (int);
+struct hostent *gethostbyname (const char *);
+struct hostent *gethostbyaddr (const void *, socklen_t, int);
+int *__h_errno_location(void);
+void herror(const char *);
+const char *hstrerror(int);
+int gethostbyname_r(const char *, struct hostent *, char *, size_t, struct hostent **, int *);
+int gethostbyname2_r(const char *, int, struct hostent *, char *, size_t, struct hostent **, int *);
+struct hostent *gethostbyname2(const char *, int);
+int gethostbyaddr_r(const void *, socklen_t, int, struct hostent *, char *, size_t, struct hostent **, int *);
+int getservbyport_r(int, const char *, struct servent *, char *, size_t, struct servent **);
+int getservbyname_r(const char *, const char *, struct servent *, char *, size_t, struct servent **);
+typedef unsigned long nfds_t;
+struct pollfd { int fd; short events; short revents; };
+int poll (struct pollfd *, nfds_t, int);
+int ppoll(struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);
+struct sched_param { int sched_priority; int __reserved1; struct { time_t __reserved1; long __reserved2; } __reserved2[2]; int __reserved3; };
+int sched_get_priority_max(int);
+int sched_get_priority_min(int);
+int sched_getparam(pid_t, struct sched_param *);
+int sched_getscheduler(pid_t);
+int sched_rr_get_interval(pid_t, struct timespec *);
+int sched_setparam(pid_t, const struct sched_param *);
+int sched_setscheduler(pid_t, int, const struct sched_param *);
+int sched_yield(void);
+int unshare(int);
+int setns(int, int);
+typedef struct cpu_set_t { unsigned long __bits[128/sizeof(long)]; } cpu_set_t;
+int __sched_cpucount(size_t, const cpu_set_t *);
+int sched_getcpu(void);
+int sched_getaffinity(pid_t, size_t, cpu_set_t *);
+int sched_setaffinity(pid_t, size_t, const cpu_set_t *);
+int pthread_detach(pthread_t);
+void pthread_exit(void *);
+int pthread_join(pthread_t, void **);
+pthread_t pthread_self(void);
+int pthread_equal(pthread_t, pthread_t);
+int pthread_setcancelstate(int, int *);
+int pthread_setcanceltype(int, int *);
+void pthread_testcancel(void);
+int pthread_cancel(pthread_t);
+int pthread_getschedparam(pthread_t, int *, struct sched_param *);
+int pthread_setschedparam(pthread_t, int, const struct sched_param *);
+int pthread_setschedprio(pthread_t, int);
+int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
+int pthread_mutex_lock(pthread_mutex_t *);
+int pthread_mutex_unlock(pthread_mutex_t *);
+int pthread_mutex_trylock(pthread_mutex_t *);
+int pthread_mutex_timedlock(pthread_mutex_t *, const struct timespec *);
+int pthread_mutex_destroy(pthread_mutex_t *);
+int pthread_mutex_consistent(pthread_mutex_t *);
+int pthread_mutex_getprioceiling(const pthread_mutex_t *, int *);
+int pthread_mutex_setprioceiling(pthread_mutex_t *, int, int *);
+int pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
+int pthread_cond_destroy(pthread_cond_t *);
+int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+int pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
+int pthread_cond_broadcast(pthread_cond_t *);
+int pthread_cond_signal(pthread_cond_t *);
+int pthread_rwlock_init(pthread_rwlock_t *, const pthread_rwlockattr_t *);
+int pthread_rwlock_destroy(pthread_rwlock_t *);
+int pthread_rwlock_rdlock(pthread_rwlock_t *);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *);
+int pthread_rwlock_timedrdlock(pthread_rwlock_t *, const struct timespec *);
+int pthread_rwlock_wrlock(pthread_rwlock_t *);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *);
+int pthread_rwlock_timedwrlock(pthread_rwlock_t *, const struct timespec *);
+int pthread_rwlock_unlock(pthread_rwlock_t *);
+int pthread_spin_init(pthread_spinlock_t *, int);
+int pthread_spin_destroy(pthread_spinlock_t *);
+int pthread_spin_lock(pthread_spinlock_t *);
+int pthread_spin_trylock(pthread_spinlock_t *);
+int pthread_spin_unlock(pthread_spinlock_t *);
+int pthread_barrier_init(pthread_barrier_t *, const pthread_barrierattr_t *, unsigned);
+int pthread_barrier_destroy(pthread_barrier_t *);
+int pthread_barrier_wait(pthread_barrier_t *);
+int pthread_key_delete(pthread_key_t);
+void *pthread_getspecific(pthread_key_t);
+int pthread_setspecific(pthread_key_t, const void *);
+int pthread_attr_init(pthread_attr_t *);
+int pthread_attr_destroy(pthread_attr_t *);
+int pthread_attr_getguardsize(const pthread_attr_t *, size_t *);
+int pthread_attr_setguardsize(pthread_attr_t *, size_t);
+int pthread_attr_getstacksize(const pthread_attr_t *, size_t *);
+int pthread_attr_setstacksize(pthread_attr_t *, size_t);
+int pthread_attr_getdetachstate(const pthread_attr_t *, int *);
+int pthread_attr_setdetachstate(pthread_attr_t *, int);
+int pthread_attr_getstack(const pthread_attr_t *, void **, size_t *);
+int pthread_attr_setstack(pthread_attr_t *, void *, size_t);
+int pthread_attr_getscope(const pthread_attr_t *, int *);
+int pthread_attr_setscope(pthread_attr_t *, int);
+int pthread_attr_getschedpolicy(const pthread_attr_t *, int *);
+int pthread_attr_setschedpolicy(pthread_attr_t *, int);
+int pthread_attr_getschedparam(const pthread_attr_t *, struct sched_param *);
+int pthread_attr_setschedparam(pthread_attr_t *, const struct sched_param *);
+int pthread_attr_getinheritsched(const pthread_attr_t *, int *);
+int pthread_attr_setinheritsched(pthread_attr_t *, int);
+int pthread_mutexattr_destroy(pthread_mutexattr_t *);
+int pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *, int *);
+int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *, int *);
+int pthread_mutexattr_getpshared(const pthread_mutexattr_t *, int *);
+int pthread_mutexattr_getrobust(const pthread_mutexattr_t *, int *);
+int pthread_mutexattr_gettype(const pthread_mutexattr_t *, int *);
+int pthread_mutexattr_init(pthread_mutexattr_t *);
+int pthread_mutexattr_setprioceiling(pthread_mutexattr_t *, int);
+int pthread_mutexattr_setprotocol(pthread_mutexattr_t *, int);
+int pthread_mutexattr_setpshared(pthread_mutexattr_t *, int);
+int pthread_mutexattr_setrobust(pthread_mutexattr_t *, int);
+int pthread_mutexattr_settype(pthread_mutexattr_t *, int);
+int pthread_condattr_init(pthread_condattr_t *);
+int pthread_condattr_destroy(pthread_condattr_t *);
+int pthread_condattr_setclock(pthread_condattr_t *, clockid_t);
+int pthread_condattr_setpshared(pthread_condattr_t *, int);
+int pthread_condattr_getclock(const pthread_condattr_t *, clockid_t *);
+int pthread_condattr_getpshared(const pthread_condattr_t *, int *);
+int pthread_rwlockattr_init(pthread_rwlockattr_t *);
+int pthread_rwlockattr_destroy(pthread_rwlockattr_t *);
+int pthread_rwlockattr_setpshared(pthread_rwlockattr_t *, int);
+int pthread_rwlockattr_getpshared(const pthread_rwlockattr_t *, int *);
+int pthread_barrierattr_destroy(pthread_barrierattr_t *);
+int pthread_barrierattr_getpshared(const pthread_barrierattr_t *, int *);
+int pthread_barrierattr_init(pthread_barrierattr_t *);
+int pthread_barrierattr_setpshared(pthread_barrierattr_t *, int);
+int pthread_getconcurrency(void);
+int pthread_setconcurrency(int);
+int pthread_getcpuclockid(pthread_t, clockid_t *);
+void _pthread_cleanup_pop(struct __ptcb *, int);
+int pthread_getaffinity_np(pthread_t, size_t, struct cpu_set_t *);
+int pthread_setaffinity_np(pthread_t, size_t, const struct cpu_set_t *);
+int pthread_getattr_np(pthread_t, pthread_attr_t *);
+int pthread_setname_np(pthread_t, const char *);
+int pthread_getname_np(pthread_t, char *, size_t);
+int pthread_getattr_default_np(pthread_attr_t *);
+int pthread_setattr_default_np(const pthread_attr_t *);
+int pthread_tryjoin_np(pthread_t, void **);
+int pthread_timedjoin_np(pthread_t, void **, const struct timespec *);
+struct winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
+typedef unsigned char cc_t;
+typedef unsigned int speed_t;
+typedef unsigned int tcflag_t;
+struct termios { tcflag_t c_iflag; tcflag_t c_oflag; tcflag_t c_cflag; tcflag_t c_lflag; cc_t c_line; cc_t c_cc[32]; speed_t __c_ispeed; speed_t __c_ospeed; };
+speed_t cfgetospeed (const struct termios *);
+speed_t cfgetispeed (const struct termios *);
+int cfsetospeed (struct termios *, speed_t);
+int cfsetispeed (struct termios *, speed_t);
+int tcgetattr (int, struct termios *);
+int tcsetattr (int, int, const struct termios *);
+int tcgetwinsize (int, struct winsize *);
+int tcsetwinsize (int, const struct winsize *);
+int tcsendbreak (int, int);
+int tcdrain (int);
+int tcflush (int, int);
+int tcflow (int, int);
+pid_t tcgetsid (int);
+void cfmakeraw(struct termios *);
+int cfsetspeed(struct termios *, speed_t);
+int ioctl (int, int, ...);
+int openpty(int *, int *, char *, const struct termios *, const struct winsize *);
+int forkpty(int *, char *, const struct termios *, const struct winsize *);
+struct passwd { char *pw_name; char *pw_passwd; uid_t pw_uid; gid_t pw_gid; char *pw_gecos; char *pw_dir; char *pw_shell; };
+void setpwent (void);
+void endpwent (void);
+struct passwd *getpwent (void);
+struct passwd *getpwuid (uid_t);
+struct passwd *getpwnam (const char *);
+int getpwuid_r (uid_t, struct passwd *, char *, size_t, struct passwd **);
+int getpwnam_r (const char *, struct passwd *, char *, size_t, struct passwd **);
+struct passwd *fgetpwent(FILE *);
+int putpwent(const struct passwd *, FILE *);
+typedef long regoff_t;
+typedef struct re_pattern_buffer { size_t re_nsub; void *__opaque, *__padding[4]; size_t __nsub2; char __padding2; } regex_t;
+typedef struct { regoff_t rm_so; regoff_t rm_eo; } regmatch_t;
+int regcomp(regex_t *, const char *, int);
+int regexec(const regex_t *, const char *, size_t, regmatch_t *, int);
+void regfree(regex_t *);
+size_t regerror(int, const regex_t *, char *, size_t);
+typedef struct { long long __ll; long double __ld; } max_align_t;
+typedef long ptrdiff_t;
+typedef enum __ns_sect { ns_s_qd = 0, ns_s_zn = 0, ns_s_an = 1, ns_s_pr = 1, ns_s_ns = 2, ns_s_ud = 2, ns_s_ar = 3, ns_s_max = 4 } ns_sect;
+typedef struct __ns_msg { const unsigned char *_msg, *_eom; uint16_t _id, _flags, _counts[ns_s_max]; const unsigned char *_sections[ns_s_max]; ns_sect _sect; int _rrnum; const unsigned char *_msg_ptr; } ns_msg;
+struct _ns_flagdata { int mask, shift; };
+typedef struct __ns_rr { char name[1025]; uint16_t type; uint16_t rr_class; uint32_t ttl; uint16_t rdlength; const unsigned char *rdata; } ns_rr;
+typedef enum __ns_flag { ns_f_qr, ns_f_opcode, ns_f_aa, ns_f_tc, ns_f_rd, ns_f_ra, ns_f_z, ns_f_ad, ns_f_cd, ns_f_rcode, ns_f_max } ns_flag;
+typedef enum __ns_opcode { ns_o_query = 0, ns_o_iquery = 1, ns_o_status = 2, ns_o_notify = 4, ns_o_update = 5, ns_o_max = 6 } ns_opcode;
+typedef enum __ns_rcode { ns_r_noerror = 0, ns_r_formerr = 1, ns_r_servfail = 2, ns_r_nxdomain = 3, ns_r_notimpl = 4, ns_r_refused = 5, ns_r_yxdomain = 6, ns_r_yxrrset = 7, ns_r_nxrrset = 8, ns_r_notauth = 9, ns_r_notzone = 10, ns_r_max = 11, ns_r_badvers = 16, ns_r_badsig = 16, ns_r_badkey = 17, ns_r_badtime = 18 } ns_rcode;
+typedef enum __ns_update_operation { ns_uop_delete = 0, ns_uop_add = 1, ns_uop_max = 2 } ns_update_operation;
+struct ns_tsig_key { char name[1025], alg[1025]; unsigned char *data; int len; };
+typedef struct ns_tsig_key ns_tsig_key;
+struct ns_tcp_tsig_state { int counter; struct dst_key *key; void *ctx; unsigned char sig[512]; int siglen; };
+typedef struct ns_tcp_tsig_state ns_tcp_tsig_state;
+typedef enum __ns_type { ns_t_invalid = 0, ns_t_a = 1, ns_t_ns = 2, ns_t_md = 3, ns_t_mf = 4, ns_t_cname = 5, ns_t_soa = 6, ns_t_mb = 7, ns_t_mg = 8, ns_t_mr = 9, ns_t_null = 10, ns_t_wks = 11, ns_t_ptr = 12, ns_t_hinfo = 13, ns_t_minfo = 14, ns_t_mx = 15, ns_t_txt = 16, ns_t_rp = 17, ns_t_afsdb = 18, ns_t_x25 = 19, ns_t_isdn = 20, ns_t_rt = 21, ns_t_nsap = 22, ns_t_nsap_ptr = 23, ns_t_sig = 24, ns_t_key = 25, ns_t_px = 26, ns_t_gpos = 27, ns_t_aaaa = 28, ns_t_loc = 29, ns_t_nxt = 30, ns_t_eid = 31, ns_t_nimloc = 32, ns_t_srv = 33, ns_t_atma = 34, ns_t_naptr = 35, ns_t_kx = 36, ns_t_cert = 37, ns_t_a6 = 38, ns_t_dname = 39, ns_t_sink = 40, ns_t_opt = 41, ns_t_apl = 42, ns_t_ds = 43, ns_t_sshfp = 44, ns_t_ipseckey = 45, ns_t_rrsig = 46, ns_t_nsec = 47, ns_t_dnskey = 48, ns_t_dhcid = 49, ns_t_nsec3 = 50, ns_t_nsec3param = 51, ns_t_tlsa = 52, ns_t_smimea = 53, ns_t_hip = 55, ns_t_ninfo = 56, ns_t_rkey = 57, ns_t_talink = 58, ns_t_cds = 59, ns_t_cdnskey = 60, ns_t_openpgpkey = 61, ns_t_csync = 62, ns_t_spf = 99, ns_t_uinfo = 100, ns_t_uid = 101, ns_t_gid = 102, ns_t_unspec = 103, ns_t_nid = 104, ns_t_l32 = 105, ns_t_l64 = 106, ns_t_lp = 107, ns_t_eui48 = 108, ns_t_eui64 = 109, ns_t_tkey = 249, ns_t_tsig = 250, ns_t_ixfr = 251, ns_t_axfr = 252, ns_t_mailb = 253, ns_t_maila = 254, ns_t_any = 255, ns_t_zxfr = 256, ns_t_uri = 256, ns_t_caa = 257, ns_t_avc = 258, ns_t_ta = 32768, ns_t_dlv = 32769, ns_t_max = 65536 } ns_type;
+typedef enum __ns_class { ns_c_invalid = 0, ns_c_in = 1, ns_c_2 = 2, ns_c_chaos = 3, ns_c_hs = 4, ns_c_none = 254, ns_c_any = 255, ns_c_max = 65536 } ns_class;
+typedef enum __ns_key_types { ns_kt_rsa = 1, ns_kt_dh = 2, ns_kt_dsa = 3, ns_kt_private = 254 } ns_key_types;
+typedef enum __ns_cert_types { cert_t_pkix = 1, cert_t_spki = 2, cert_t_pgp = 3, cert_t_url = 253, cert_t_oid = 254 } ns_cert_types;
+unsigned ns_get16(const unsigned char *);
+unsigned long ns_get32(const unsigned char *);
+void ns_put16(unsigned, unsigned char *);
+void ns_put32(unsigned long, unsigned char *);
+int ns_initparse(const unsigned char *, int, ns_msg *);
+int ns_parserr(ns_msg *, ns_sect, int, ns_rr *);
+int ns_skiprr(const unsigned char *, const unsigned char *, ns_sect, int);
+int ns_name_uncompress(const unsigned char *, const unsigned char *, const unsigned char *, char *, size_t);
+typedef struct { unsigned id :16; unsigned rd :1; unsigned tc :1; unsigned aa :1; unsigned opcode :4; unsigned qr :1; unsigned rcode :4; unsigned cd: 1; unsigned ad: 1; unsigned unused :1; unsigned ra :1; unsigned qdcount :16; unsigned ancount :16; unsigned nscount :16; unsigned arcount :16; } HEADER;
+typedef struct __res_state { int retrans; int retry; unsigned long options; int nscount; struct sockaddr_in nsaddr_list[3]; unsigned short id; char *dnsrch[6 +1]; char defdname[256]; unsigned long pfcode; unsigned ndots:4; unsigned nsort:4; unsigned ipv6_unavail:1; unsigned unused:23; struct { struct in_addr addr; uint32_t mask; } sort_list[10]; void *qhook; void *rhook; int res_h_errno; int _vcsock; unsigned _flags; union { char pad[52]; struct { uint16_t nscount; uint16_t nsmap[3]; int nssocks[3]; uint16_t nscount6; uint16_t nsinit; struct sockaddr_in6 *nsaddrs[3]; unsigned int _initstamp[2]; } _ext; } _u; } *res_state;
+struct res_sym { int number; char *name; char *humanname; };
+struct __res_state *__res_state(void);
+int res_init(void);
+int res_query(const char *, int, int, unsigned char *, int);
+int res_querydomain(const char *, const char *, int, int, unsigned char *, int);
+int res_search(const char *, int, int, unsigned char *, int);
+int res_mkquery(int, const char *, int, int, const unsigned char *, int, const unsigned char*, unsigned char *, int);
+int res_send(const unsigned char *, int, unsigned char *, int);
+int dn_comp(const char *, unsigned char *, int, unsigned char **, unsigned char **);
+int dn_expand(const unsigned char *, const unsigned char *, const unsigned char *, char *, int);
+int dn_skipname(const unsigned char *, const unsigned char *);
+typedef enum { FIND, ENTER } ACTION;
+typedef enum { preorder, postorder, endorder, leaf } VISIT;
+typedef struct entry { char *key; void *data; } ENTRY;
+int hcreate(size_t);
+void hdestroy(void);
+ENTRY *hsearch(ENTRY, ACTION);
+struct hsearch_data { struct __tab *__tab; unsigned int __unused1; unsigned int __unused2; };
+int hcreate_r(size_t, struct hsearch_data *);
+void hdestroy_r(struct hsearch_data *);
+int hsearch_r(ENTRY, ACTION, ENTRY **, struct hsearch_data *);
+void insque(void *, void *);
+void remque(void *);
+struct qelem { struct qelem *q_forw, *q_back; char q_data[1]; };
+typedef struct { volatile int __val[4*sizeof(long)/sizeof(int)]; } sem_t;
+int sem_close(sem_t *);
+int sem_destroy(sem_t *);
+int sem_getvalue(sem_t *, int *);
+int sem_init(sem_t *, int, unsigned);
+sem_t *sem_open(const char *, int, ...);
+int sem_post(sem_t *);
+int sem_timedwait(sem_t *, const struct timespec *);
+int sem_trywait(sem_t *);
+int sem_unlink(const char *);
+int sem_wait(sem_t *);
+typedef unsigned long __jmp_buf[8];
+typedef struct __jmp_buf_tag { __jmp_buf __jb; unsigned long __fl; unsigned long __ss[128/sizeof(long)]; } jmp_buf[1];
+typedef jmp_buf sigjmp_buf;
+int sigsetjmp (sigjmp_buf, int);
+void siglongjmp (sigjmp_buf, int);
+int _setjmp (jmp_buf);
+void _longjmp (jmp_buf, int);
+int setjmp (jmp_buf);
+void longjmp (jmp_buf, int);
+struct spwd { char *sp_namp; char *sp_pwdp; long sp_lstchg; long sp_min; long sp_max; long sp_warn; long sp_inact; long sp_expire; unsigned long sp_flag; };
+void setspent(void);
+void endspent(void);
+struct spwd *getspent(void);
+struct spwd *fgetspent(FILE *);
+struct spwd *sgetspent(const char *);
+int putspent(const struct spwd *, FILE *);
+struct spwd *getspnam(const char *);
+int getspnam_r(const char *, struct spwd *, char *, size_t, struct spwd **);
+int lckpwdf(void);
+int ulckpwdf(void);
+typedef struct { int __flags; pid_t __pgrp; sigset_t __def, __mask; int __prio, __pol; void *__fn; char __pad[64-sizeof(void *)]; } posix_spawnattr_t;
+typedef struct { int __pad0[2]; void *__actions; int __pad[16]; } posix_spawn_file_actions_t;
+int posix_spawn(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const *, char *const *);
+int posix_spawnp(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const *, char *const *);
+int posix_spawnattr_init(posix_spawnattr_t *);
+int posix_spawnattr_destroy(posix_spawnattr_t *);
+int posix_spawnattr_setflags(posix_spawnattr_t *, short);
+int posix_spawnattr_getflags(const posix_spawnattr_t *, short *);
+int posix_spawnattr_setpgroup(posix_spawnattr_t *, pid_t);
+int posix_spawnattr_getpgroup(const posix_spawnattr_t *, pid_t *);
+int posix_spawnattr_setsigmask(posix_spawnattr_t *, const sigset_t *);
+int posix_spawnattr_getsigmask(const posix_spawnattr_t *, sigset_t *);
+int posix_spawnattr_setsigdefault(posix_spawnattr_t *, const sigset_t *);
+int posix_spawnattr_getsigdefault(const posix_spawnattr_t *, sigset_t *);
+int posix_spawnattr_setschedparam(posix_spawnattr_t *, const struct sched_param *);
+int posix_spawnattr_getschedparam(const posix_spawnattr_t *, struct sched_param *);
+int posix_spawnattr_setschedpolicy(posix_spawnattr_t *, int);
+int posix_spawnattr_getschedpolicy(const posix_spawnattr_t *, int *);
+int posix_spawn_file_actions_init(posix_spawn_file_actions_t *);
+int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *);
+int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *, int, const char *, int, mode_t);
+int posix_spawn_file_actions_addclose(posix_spawn_file_actions_t *, int);
+int posix_spawn_file_actions_adddup2(posix_spawn_file_actions_t *, int, int);
+int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *, const char *);
+int posix_spawn_file_actions_addfchdir_np(posix_spawn_file_actions_t *, int);
+typedef union _G_fpos64_t { char __opaque[16]; long long __lldata; double __align; } fpos_t;
+FILE *fopen(const char *, const char *);
+FILE *freopen(const char *, const char *, FILE *);
+int fclose(FILE *);
+int remove(const char *);
+int rename(const char *, const char *);
+int feof(FILE *);
+int ferror(FILE *);
+int fflush(FILE *);
+void clearerr(FILE *);
+int fseek(FILE *, long, int);
+long ftell(FILE *);
+void rewind(FILE *);
+int fgetpos(FILE *, fpos_t *);
+int fsetpos(FILE *, const fpos_t *);
+size_t fread(void *, size_t, size_t, FILE *);
+size_t fwrite(const void *, size_t, size_t, FILE *);
+int fgetc(FILE *);
+int getc(FILE *);
+int getchar(void);
+int ungetc(int, FILE *);
+int fputc(int, FILE *);
+int putc(int, FILE *);
+int putchar(int);
+char *fgets(char *, int, FILE *);
+int fputs(const char *, FILE *);
+int puts(const char *);
+int printf(const char *, ...);
+int fprintf(FILE *, const char *, ...);
+int sprintf(char *, const char *, ...);
+int snprintf(char *, size_t, const char *, ...);
+int scanf(const char *, ...);
+int fscanf(FILE *, const char *, ...);
+int sscanf(const char *, const char *, ...);
+void perror(const char *);
+int setvbuf(FILE *, char *, int, size_t);
+void setbuf(FILE *, char *);
+char *tmpnam(char *);
+FILE *tmpfile(void);
+FILE *fmemopen(void *, size_t, const char *);
+FILE *open_memstream(char **, size_t *);
+FILE *fdopen(int, const char *);
+FILE *popen(const char *, const char *);
+int pclose(FILE *);
+int fileno(FILE *);
+int fseeko(FILE *, off_t, int);
+off_t ftello(FILE *);
+int dprintf(int, const char *, ...);
+void flockfile(FILE *);
+int ftrylockfile(FILE *);
+void funlockfile(FILE *);
+int getc_unlocked(FILE *);
+int getchar_unlocked(void);
+int putc_unlocked(int, FILE *);
+int putchar_unlocked(int);
+ssize_t getdelim(char **, size_t *, int, FILE *);
+ssize_t getline(char **, size_t *, FILE *);
+int renameat(int, const char *, int, const char *);
+char *ctermid(char *);
+char *tempnam(const char *, const char *);
+char *cuserid(char *);
+void setlinebuf(FILE *);
+void setbuffer(FILE *, char *, size_t);
+int fgetc_unlocked(FILE *);
+int fputc_unlocked(int, FILE *);
+int fflush_unlocked(FILE *);
+size_t fread_unlocked(void *, size_t, size_t, FILE *);
+size_t fwrite_unlocked(const void *, size_t, size_t, FILE *);
+void clearerr_unlocked(FILE *);
+int feof_unlocked(FILE *);
+int ferror_unlocked(FILE *);
+int fileno_unlocked(FILE *);
+int getw(FILE *);
+int putw(int, FILE *);
+char *fgetln(FILE *, size_t *);
+int asprintf(char **, const char *, ...);
+char *fgets_unlocked(char *, int, FILE *);
+int fputs_unlocked(const char *, FILE *);
+void _flushlbf(void);
+int __fsetlocking(FILE *, int);
+int __fwriting(FILE *);
+int __freading(FILE *);
+int __freadable(FILE *);
+int __fwritable(FILE *);
+int __flbf(FILE *);
+size_t __fbufsize(FILE *);
+size_t __fpending(FILE *);
+int __fpurge(FILE *);
+size_t __freadahead(FILE *);
+const char *__freadptr(FILE *, size_t *);
+void __freadptrinc(FILE *, size_t);
+void __fseterr(FILE *);
+int atoi (const char *);
+long atol (const char *);
+long long atoll (const char *);
+double atof (const char *);
+float strtof (const char *, char **);
+double strtod (const char *, char **);
+long double strtold (const char *, char **);
+long strtol (const char *, char **, int);
+unsigned long strtoul (const char *, char **, int);
+long long strtoll (const char *, char **, int);
+unsigned long long strtoull (const char *, char **, int);
+int rand (void);
+void srand (unsigned);
+void *aligned_alloc(size_t, size_t);
+void abort (void);
+void exit (int);
+void _Exit (int);
+void quick_exit (int);
+char *getenv (const char *);
+int system (const char *);
+int abs (int);
+long labs (long);
+long long llabs (long long);
+typedef struct { int quot, rem; } div_t;
+typedef struct { long quot, rem; } ldiv_t;
+typedef struct { long long quot, rem; } lldiv_t;
+div_t div (int, int);
+ldiv_t ldiv (long, long);
+lldiv_t lldiv (long long, long long);
+int mblen (const char *, size_t);
+int mbtowc (wchar_t *, const char *, size_t);
+int wctomb (char *, wchar_t);
+size_t mbstowcs (wchar_t *, const char *, size_t);
+size_t wcstombs (char *, const wchar_t *, size_t);
+size_t __ctype_get_mb_cur_max(void);
+int posix_memalign (void **, size_t, size_t);
+int setenv (const char *, const char *, int);
+int unsetenv (const char *);
+int mkstemp (char *);
+int mkostemp (char *, int);
+char *mkdtemp (char *);
+int getsubopt (char **, char *const *, char **);
+int rand_r (unsigned *);
+char *realpath (const char *, char *);
+long int random (void);
+void srandom (unsigned int);
+char *initstate (unsigned int, char *, size_t);
+char *setstate (char *);
+int putenv (char *);
+int posix_openpt (int);
+int grantpt (int);
+int unlockpt (int);
+char *ptsname (int);
+char *l64a (long);
+long a64l (const char *);
+void setkey (const char *);
+double drand48 (void);
+double erand48 (unsigned short [3]);
+long int lrand48 (void);
+long int nrand48 (unsigned short [3]);
+long mrand48 (void);
+long jrand48 (unsigned short [3]);
+void srand48 (long);
+unsigned short *seed48 (unsigned short [3]);
+void lcong48 (unsigned short [7]);
+char *mktemp (char *);
+int mkstemps (char *, int);
+int mkostemps (char *, int, int);
+int getloadavg(double *, int);
+int clearenv(void);
+void *reallocarray (void *, size_t, size_t);
+int ptsname_r(int, char *, size_t);
+char *ecvt(double, int, int *, int *);
+char *fcvt(double, int, int *, int *);
+char *gcvt(double, int, char *);
+char *secure_getenv(const char *);
+float strtof_l(const char *, char **, struct __locale_struct *);
+double strtod_l(const char *, char **, struct __locale_struct *);
+long double strtold_l(const char *, char **, struct __locale_struct *);
+struct bandinfo { unsigned char bi_pri; int bi_flag; };
+struct strbuf { int maxlen; int len; char *buf; };
+struct strpeek { struct strbuf ctlbuf; struct strbuf databuf; unsigned flags; };
+struct strfdinsert { struct strbuf ctlbuf; struct strbuf databuf; unsigned flags; int fildes; int offset; };
+struct strioctl { int ic_cmd; int ic_timout; int ic_len; char *ic_dp; };
+struct strrecvfd { int fd; int uid; int gid; char __fill[8]; };
+struct str_mlist { char l_name[8 + 1]; };
+struct str_list { int sl_nmods; struct str_mlist *sl_modlist; };
+int isastream(int);
+void closelog (void);
+void openlog (const char *, int, int);
+int setlogmask (int);
+void syslog (int, const char *, ...);
+typedef struct __pthread *thrd_t;
+typedef int once_flag;
+typedef unsigned tss_t;
+typedef struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } mtx_t;
+typedef struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } cnd_t;
+enum { thrd_success = 0, thrd_busy = 1, thrd_error = 2, thrd_nomem = 3, thrd_timedout = 4, };
+enum { mtx_plain = 0, mtx_recursive = 1, mtx_timed = 2, };
+void thrd_exit(int);
+int thrd_detach(thrd_t);
+int thrd_join(thrd_t, int *);
+int thrd_sleep(const struct timespec *, struct timespec *);
+void thrd_yield(void);
+thrd_t thrd_current(void);
+int thrd_equal(thrd_t, thrd_t);
+int mtx_init(mtx_t *, int);
+void mtx_destroy(mtx_t *);
+int mtx_lock(mtx_t *);
+int mtx_timedlock(mtx_t *, const struct timespec *);
+int mtx_trylock(mtx_t *);
+int mtx_unlock(mtx_t *);
+int cnd_init(cnd_t *);
+void cnd_destroy(cnd_t *);
+int cnd_broadcast(cnd_t *);
+int cnd_signal(cnd_t *);
+int cnd_timedwait(cnd_t *, mtx_t *, const struct timespec *);
+int cnd_wait(cnd_t *, mtx_t *);
+void tss_delete(tss_t);
+int tss_set(tss_t, void *);
+void *tss_get(tss_t);
+typedef unsigned short char16_t;
+typedef unsigned char32_t;
+typedef struct __mbstate_t { unsigned __opaque1, __opaque2; } mbstate_t;
+size_t c16rtomb(char *, char16_t, mbstate_t *);
+size_t mbrtoc16(char16_t *, const char *, size_t, mbstate_t *);
+size_t c32rtomb(char *, char32_t, mbstate_t *);
+size_t mbrtoc32(char32_t *, const char *, size_t, mbstate_t *);
+int getcontext(struct ucontext *);
+int setcontext(const struct ucontext *);
+int swapcontext(struct ucontext *, const struct ucontext *);
+long ulimit (int, ...);
+int pipe(int [2]);
+int pipe2(int [2], int);
+int close(int);
+int posix_close(int, int);
+int dup(int);
+int dup2(int, int);
+int dup3(int, int, int);
+off_t lseek(int, off_t, int);
+int fsync(int);
+int fdatasync(int);
+ssize_t read(int, void *, size_t);
+ssize_t write(int, const void *, size_t);
+ssize_t pread(int, void *, size_t, off_t);
+ssize_t pwrite(int, const void *, size_t, off_t);
+int chown(const char *, uid_t, gid_t);
+int fchown(int, uid_t, gid_t);
+int lchown(const char *, uid_t, gid_t);
+int fchownat(int, const char *, uid_t, gid_t, int);
+int link(const char *, const char *);
+int linkat(int, const char *, int, const char *, int);
+int symlink(const char *, const char *);
+int symlinkat(const char *, int, const char *);
+ssize_t readlink(const char *, char *, size_t);
+ssize_t readlinkat(int, const char *, char *, size_t);
+int unlink(const char *);
+int unlinkat(int, const char *, int);
+int rmdir(const char *);
+int truncate(const char *, off_t);
+int ftruncate(int, off_t);
+int access(const char *, int);
+int faccessat(int, const char *, int, int);
+int chdir(const char *);
+int fchdir(int);
+char *getcwd(char *, size_t);
+unsigned alarm(unsigned);
+unsigned sleep(unsigned);
+int pause(void);
+pid_t fork(void);
+pid_t _Fork(void);
+int execve(const char *, char *const [], char *const []);
+int execv(const char *, char *const []);
+int execle(const char *, const char *, ...);
+int execl(const char *, const char *, ...);
+int execvp(const char *, char *const []);
+int execlp(const char *, const char *, ...);
+int fexecve(int, char *const [], char *const []);
+void _exit(int);
+pid_t getpid(void);
+pid_t getppid(void);
+pid_t getpgrp(void);
+pid_t getpgid(pid_t);
+int setpgid(pid_t, pid_t);
+pid_t setsid(void);
+pid_t getsid(pid_t);
+char *ttyname(int);
+int ttyname_r(int, char *, size_t);
+int isatty(int);
+pid_t tcgetpgrp(int);
+int tcsetpgrp(int, pid_t);
+uid_t getuid(void);
+uid_t geteuid(void);
+gid_t getgid(void);
+gid_t getegid(void);
+int getgroups(int, gid_t []);
+int setuid(uid_t);
+int seteuid(uid_t);
+int setgid(gid_t);
+int setegid(gid_t);
+char *getlogin(void);
+int getlogin_r(char *, size_t);
+int gethostname(char *, size_t);
+long pathconf(const char *, int);
+long fpathconf(int, int);
+long sysconf(int);
+size_t confstr(int, char *, size_t);
+int setreuid(uid_t, uid_t);
+int setregid(gid_t, gid_t);
+long gethostid(void);
+int nice(int);
+void sync(void);
+pid_t setpgrp(void);
+char *crypt(const char *, const char *);
+void encrypt(char *, int);
+void swab(const void *, void *, ssize_t);
+int usleep(unsigned);
+unsigned ualarm(unsigned, unsigned);
+int brk(void *);
+void *sbrk(intptr_t);
+pid_t vfork(void);
+int vhangup(void);
+int chroot(const char *);
+int getpagesize(void);
+int getdtablesize(void);
+int sethostname(const char *, size_t);
+int getdomainname(char *, size_t);
+int setdomainname(const char *, size_t);
+char *getpass(const char *);
+int daemon(int, int);
+void setusershell(void);
+void endusershell(void);
+char *getusershell(void);
+int acct(const char *);
+long syscall(long, ...);
+int execvpe(const char *, char *const [], char *const []);
+int issetugid(void);
+int getentropy(void *, size_t);
+int setresuid(uid_t, uid_t, uid_t);
+int setresgid(gid_t, gid_t, gid_t);
+int getresuid(uid_t *, uid_t *, uid_t *);
+int getresgid(gid_t *, gid_t *, gid_t *);
+char *get_current_dir_name(void);
+int syncfs(int);
+int euidaccess(const char *, int);
+int eaccess(const char *, int);
+ssize_t copy_file_range(int, off_t *, int, off_t *, size_t, unsigned);
+pid_t gettid(void);
+struct utimbuf { time_t actime; time_t modtime; };
+int utime (const char *, const struct utimbuf *);
+typedef unsigned wint_t;
+typedef unsigned long wctype_t;
+wchar_t *wcscpy (wchar_t *, const wchar_t *);
+wchar_t *wcsncpy (wchar_t *, const wchar_t *, size_t);
+wchar_t *wcscat (wchar_t *, const wchar_t *);
+wchar_t *wcsncat (wchar_t *, const wchar_t *, size_t);
+int wcscmp (const wchar_t *, const wchar_t *);
+int wcsncmp (const wchar_t *, const wchar_t *, size_t);
+int wcscoll(const wchar_t *, const wchar_t *);
+size_t wcsxfrm (wchar_t *, const wchar_t *, size_t);
+wchar_t *wcschr (const wchar_t *, wchar_t);
+wchar_t *wcsrchr (const wchar_t *, wchar_t);
+size_t wcscspn (const wchar_t *, const wchar_t *);
+size_t wcsspn (const wchar_t *, const wchar_t *);
+wchar_t *wcspbrk (const wchar_t *, const wchar_t *);
+wchar_t *wcstok (wchar_t *, const wchar_t *, wchar_t **);
+size_t wcslen (const wchar_t *);
+wchar_t *wcsstr (const wchar_t *, const wchar_t *);
+wchar_t *wcswcs (const wchar_t *, const wchar_t *);
+wchar_t *wmemchr (const wchar_t *, wchar_t, size_t);
+int wmemcmp (const wchar_t *, const wchar_t *, size_t);
+wchar_t *wmemcpy (wchar_t *, const wchar_t *, size_t);
+wchar_t *wmemmove (wchar_t *, const wchar_t *, size_t);
+wchar_t *wmemset (wchar_t *, wchar_t, size_t);
+wint_t btowc (int);
+int wctob (wint_t);
+int mbsinit (const mbstate_t *);
+size_t mbrtowc (wchar_t *, const char *, size_t, mbstate_t *);
+size_t wcrtomb (char *, wchar_t, mbstate_t *);
+size_t mbrlen (const char *, size_t, mbstate_t *);
+size_t mbsrtowcs (wchar_t *, const char **, size_t, mbstate_t *);
+size_t wcsrtombs (char *, const wchar_t **, size_t, mbstate_t *);
+float wcstof (const wchar_t *, wchar_t **);
+double wcstod (const wchar_t *, wchar_t **);
+long double wcstold (const wchar_t *, wchar_t **);
+long wcstol (const wchar_t *, wchar_t **, int);
+unsigned long wcstoul (const wchar_t *, wchar_t **, int);
+long long wcstoll (const wchar_t *, wchar_t **, int);
+unsigned long long wcstoull (const wchar_t *, wchar_t **, int);
+int fwide (FILE *, int);
+int wprintf (const wchar_t *, ...);
+int fwprintf (FILE *, const wchar_t *, ...);
+int swprintf (wchar_t *, size_t, const wchar_t *, ...);
+int wscanf (const wchar_t *, ...);
+int fwscanf (FILE *, const wchar_t *, ...);
+int swscanf (const wchar_t *, const wchar_t *, ...);
+wint_t fgetwc (FILE *);
+wint_t getwc (FILE *);
+wint_t getwchar (void);
+wint_t fputwc (wchar_t, FILE *);
+wint_t putwc (wchar_t, FILE *);
+wint_t putwchar (wchar_t);
+wchar_t *fgetws (wchar_t *, int, FILE *);
+int fputws (const wchar_t *, FILE *);
+wint_t ungetwc (wint_t, FILE *);
+size_t wcsftime (wchar_t *, size_t, const wchar_t *, const struct tm *);
+wint_t fgetwc_unlocked (FILE *);
+wint_t getwc_unlocked (FILE *);
+wint_t getwchar_unlocked (void);
+wint_t fputwc_unlocked (wchar_t, FILE *);
+wint_t putwc_unlocked (wchar_t, FILE *);
+wint_t putwchar_unlocked (wchar_t);
+wchar_t *fgetws_unlocked (wchar_t *, int, FILE *);
+int fputws_unlocked (const wchar_t *, FILE *);
+size_t wcsftime_l (wchar_t *, size_t, const wchar_t *, const struct tm *, locale_t);
+FILE *open_wmemstream(wchar_t **, size_t *);
+size_t mbsnrtowcs(wchar_t *, const char **, size_t, size_t, mbstate_t *);
+size_t wcsnrtombs(char *, const wchar_t **, size_t, size_t, mbstate_t *);
+wchar_t *wcsdup(const wchar_t *);
+size_t wcsnlen (const wchar_t *, size_t);
+wchar_t *wcpcpy (wchar_t *, const wchar_t *);
+wchar_t *wcpncpy (wchar_t *, const wchar_t *, size_t);
+int wcscasecmp(const wchar_t *, const wchar_t *);
+int wcscasecmp_l(const wchar_t *, const wchar_t *, locale_t);
+int wcsncasecmp(const wchar_t *, const wchar_t *, size_t);
+int wcsncasecmp_l(const wchar_t *, const wchar_t *, size_t, locale_t);
+int wcscoll_l(const wchar_t *, const wchar_t *, locale_t);
+size_t wcsxfrm_l(wchar_t *, const wchar_t *, size_t, locale_t);
+int wcwidth (wchar_t);
+int wcswidth (const wchar_t *, size_t);
+int iswalnum(wint_t);
+int iswalpha(wint_t);
+int iswblank(wint_t);
+int iswcntrl(wint_t);
+int iswdigit(wint_t);
+int iswgraph(wint_t);
+int iswlower(wint_t);
+int iswprint(wint_t);
+int iswpunct(wint_t);
+int iswspace(wint_t);
+int iswupper(wint_t);
+int iswxdigit(wint_t);
+int iswctype(wint_t, wctype_t);
+wint_t towlower(wint_t);
+wint_t towupper(wint_t);
+wctype_t wctype(const char *);
+typedef const int * wctrans_t;
+wint_t towctrans(wint_t, wctrans_t);
+wctrans_t wctrans(const char *);
+int iswalnum_l(wint_t, locale_t);
+int iswalpha_l(wint_t, locale_t);
+int iswblank_l(wint_t, locale_t);
+int iswcntrl_l(wint_t, locale_t);
+int iswdigit_l(wint_t, locale_t);
+int iswgraph_l(wint_t, locale_t);
+int iswlower_l(wint_t, locale_t);
+int iswprint_l(wint_t, locale_t);
+int iswpunct_l(wint_t, locale_t);
+int iswspace_l(wint_t, locale_t);
+int iswupper_l(wint_t, locale_t);
+int iswxdigit_l(wint_t, locale_t);
+int iswctype_l(wint_t, wctype_t, locale_t);
+wint_t towlower_l(wint_t, locale_t);
+wint_t towupper_l(wint_t, locale_t);
+wint_t towctrans_l(wint_t, wctrans_t, locale_t);
+wctrans_t wctrans_l(const char *, locale_t);
+wctype_t wctype_l(const char *, locale_t);
+typedef struct { size_t we_wordc; char **we_wordv; size_t we_offs; } wordexp_t;
+int wordexp (const char *, wordexp_t *, int);
+void wordfree (wordexp_t *);

@@ -1,0 +1,1 @@
+Lstruct t { char a; int :3; long b:9; int :0; char c; };

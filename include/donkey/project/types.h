@@ -51,6 +51,11 @@ struct TypeField {
   /// number of bits. `bit_size` is zero for an ordinary member.
   std::uint8_t bit_offset = 0;
   std::uint8_t bit_size = 0;
+  /// An unnamed bit-field of a struct or union (`int :3;`): layout only, never a member, so its
+  /// `name` is empty. It occupies its bits, and with `bit_size` zero (`int :0;`) it occupies none
+  /// but moves the layout to `offset`. It does not raise the record's alignment; an ABI whose
+  /// unnamed bit-fields do (AAPCS64) records that in the record's `alignment`.
+  bool padding = false;
 };
 
 struct TypeEnumerator {
@@ -82,7 +87,14 @@ struct TypeDefinition {
   bool count_known = true;
   /// Scalars: the alignment when the target aligns the scalar less than its size (for example an
   /// eight-byte scalar in a 32-bit System V unit). 0 means the size.
+  /// Structs and unions: the alignment when the ABI aligns the record more than its members, as
+  /// AAPCS64 does for the type of an unnamed bit-field. 0 means the members' alignment; otherwise
+  /// a power of two at least that alignment.
   std::uint64_t alignment = 0;
+  /// Structs, unions and enums declared inside a function prototype's parameter list: their tag
+  /// and enumeration constants are visible only there (C11 6.2.1), so a later parse does not see
+  /// them at file scope. The type itself stays, as the parameter's type.
+  bool local = false;
 };
 
 /// A set of types, keyed by id. `validate` checks the whole set; the other

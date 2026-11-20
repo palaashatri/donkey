@@ -16,7 +16,7 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 7;
+constexpr int kProjectSchemaVersion = 8;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.

@@ -1,6 +1,6 @@
 // libFuzzer entry point for the C declaration parser (G05-T2). The input is the
-// declaration text; the first byte picks the target ABI so both pointer widths and
-// both `long` widths are exercised. The harness asserts that the parser never
+// declaration text; the first byte picks the target ABI so both pointer widths, both `long`
+// widths and the bit-field rules are exercised. The harness asserts that the parser never
 // crashes, and that any declaration it accepts passes the type store's checks.
 //
 // Build: cmake --preset fuzz-macos
@@ -20,6 +20,11 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     options.pointer_size = (data[0] & 1U) != 0 ? 4 : 8;
     options.long_size = (data[0] & 2U) != 0 ? 4 : 8;
     options.char_is_signed = (data[0] & 4U) != 0;
+    // Bits 3 and 4 pick the bit-field rules: System V, AAPCS64, or none modelled.
+    const unsigned rules = (data[0] >> 3U) & 3U;
+    options.bit_fields = rules == 1   ? donkey::CBitFieldLayout::Aapcs64
+                         : rules >= 2 ? donkey::CBitFieldLayout::Unmodelled
+                                      : donkey::CBitFieldLayout::SystemV;
     text = std::string_view(reinterpret_cast<const char*>(data + 1), size - 1);
   }
 

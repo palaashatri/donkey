@@ -322,6 +322,15 @@ CREATE TABLE local_names (
 PRAGMA user_version=7;
 )sql";
 
+/// v8 marks the unnamed bit-fields of a struct or union (`TypeField::padding`): layout only, never
+/// a member; and the types declared inside a prototype (`TypeDefinition::local`), whose tags and
+/// constants are not in scope at file scope. Existing rows are members and file-scope types.
+constexpr const char* kMigrateV7ToV8 = R"sql(
+ALTER TABLE type_fields ADD COLUMN padding INTEGER NOT NULL DEFAULT 0 CHECK (padding IN (0, 1));
+ALTER TABLE types ADD COLUMN local INTEGER NOT NULL DEFAULT 0 CHECK (local IN (0, 1));
+PRAGMA user_version=8;
+)sql";
+
 Diagnostic storage_error(sqlite3* db, std::string code, const std::string& context) {
   const char* message = db != nullptr ? sqlite3_errmsg(db) : "no database";
   return Diagnostic::make(Status::InternalError, std::move(code),
@@ -501,6 +510,13 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 0) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_schema = sqlite3_exec(db, kSchemaV1, nullptr, nullptr, nullptr);
       const int rc_schema3 = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
       const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
@@ -519,6 +535,13 @@ Result<Project> Project::open(const std::string& path) {
       schema = 3;
     } else if (schema == 1) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
       const int rc_version = sqlite3_exec(db, "PRAGMA user_version=3", nullptr, nullptr, nullptr);
       const int rc_commit = sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr);
@@ -535,6 +558,13 @@ Result<Project> Project::open(const std::string& path) {
       schema = 3;
     } else if (schema == 2) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_rename = sqlite3_exec(db, "ALTER TABLE annotations RENAME TO annotations_v2_old",
                                          nullptr, nullptr, nullptr);
       const int rc_schema = sqlite3_exec(db, kSchemaV3, nullptr, nullptr, nullptr);
@@ -564,6 +594,13 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 3) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_migrate = sqlite3_exec(db, kMigrateV3ToV4, nullptr, nullptr, nullptr);
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
@@ -578,6 +615,13 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 4) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_migrate = sqlite3_exec(db, kMigrateV4ToV5, nullptr, nullptr, nullptr);
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
@@ -592,6 +636,13 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 5) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_migrate = sqlite3_exec(db, kMigrateV5ToV6, nullptr, nullptr, nullptr);
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
@@ -606,6 +657,13 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 6) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       const int rc_migrate = sqlite3_exec(db, kMigrateV6ToV7, nullptr, nullptr, nullptr);
       const int rc_commit = rc_migrate == SQLITE_OK
                                 ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
@@ -617,6 +675,27 @@ Result<Project> Project::open(const std::string& path) {
                                    "migrate v6->v7: " + message);
       }
       schema = 7;
+    }
+    if (schema == 7) {
+      const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet. Without the transaction a step could commit part of its change in
+        // an implicit transaction of its own and leave the schema between versions.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
+      const int rc_migrate = sqlite3_exec(db, kMigrateV7ToV8, nullptr, nullptr, nullptr);
+      const int rc_commit = rc_migrate == SQLITE_OK
+                                ? sqlite3_exec(db, "COMMIT", nullptr, nullptr, nullptr)
+                                : rc_migrate;
+      if (rc_begin != SQLITE_OK || rc_migrate != SQLITE_OK || rc_commit != SQLITE_OK) {
+        const std::string message = sqlite3_errmsg(db);
+        execute(db, "ROLLBACK");
+        return make_error<Project>(Status::InternalError, "project.migration_failed",
+                                   "migrate v7->v8: " + message);
+      }
+      schema = 8;
     }
     project.impl_->schema_version = schema;
     return project;
@@ -1167,7 +1246,7 @@ Result<TypeTable> Project::types() const {
   sqlite3* db = impl_->db;
   Statement rows(db,
                  "SELECT id, kind, name, provenance, size, is_signed, count, target, variadic, "
-                 "count_known, alignment "
+                 "count_known, alignment, local "
                  "FROM types ORDER BY id");
   if (!rows.ok()) {
     return make_error<TypeTable>(Status::InternalError, "project.query_failed",
@@ -1193,6 +1272,7 @@ Result<TypeTable> Project::types() const {
     definition.variadic = rows.integer(8) != 0;
     definition.count_known = rows.integer(9) != 0;
     definition.alignment = static_cast<std::uint64_t>(rows.integer(10));
+    definition.local = rows.integer(11) != 0;
     definitions.push_back(std::move(definition));
   }
   if (!rows.done()) {
@@ -1203,7 +1283,8 @@ Result<TypeTable> Project::types() const {
   TypeTable table;
   for (TypeDefinition& definition : definitions) {
     Statement fields(db,
-                     "SELECT name, offset, field_type, bit_offset, bit_size FROM type_fields "
+                     "SELECT name, offset, field_type, bit_offset, bit_size, padding FROM "
+                     "type_fields "
                      "WHERE type_id = ?1 ORDER BY ordinal");
     fields.bind(1, static_cast<std::int64_t>(definition.id.value()));
     while (fields.ok() && fields.step()) {
@@ -1213,6 +1294,7 @@ Result<TypeTable> Project::types() const {
       field.type = TypeId(static_cast<std::uint64_t>(fields.integer(2)));
       field.bit_offset = static_cast<std::uint8_t>(fields.integer(3));
       field.bit_size = static_cast<std::uint8_t>(fields.integer(4));
+      field.padding = fields.integer(5) != 0;
       definition.fields.push_back(std::move(field));
     }
     if (!fields.ok() || !fields.done()) {
@@ -1292,13 +1374,14 @@ Result<void> Project::replace_types(const TypeTable& table) {
     {
       Statement upsert(db,
                        "INSERT INTO types(id, kind, name, provenance, size, is_signed, count, "
-                       "target, variadic, count_known, alignment) "
-                       "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) "
+                       "target, variadic, count_known, alignment, local) "
+                       "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) "
                        "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, "
                        "provenance = excluded.provenance, size = excluded.size, "
                        "is_signed = excluded.is_signed, count = excluded.count, "
                        "target = excluded.target, variadic = excluded.variadic, "
-                       "count_known = excluded.count_known, alignment = excluded.alignment");
+                       "count_known = excluded.count_known, alignment = excluded.alignment, "
+                       "local = excluded.local");
       upsert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       upsert.bind(2, static_cast<std::int64_t>(definition.kind));
       upsert.bind(3, definition.name);
@@ -1310,6 +1393,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       upsert.bind(9, static_cast<std::int64_t>(definition.variadic ? 1 : 0));
       upsert.bind(10, static_cast<std::int64_t>(definition.count_known ? 1 : 0));
       upsert.bind(11, static_cast<std::int64_t>(definition.alignment));
+      upsert.bind(12, static_cast<std::int64_t>(definition.local ? 1 : 0));
       if (!upsert.execute_statement()) {
         return fail("project.type_write_failed", "write a type");
       }
@@ -1330,7 +1414,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       const TypeField& field = definition.fields[ordinal];
       Statement insert(db,
                        "INSERT INTO type_fields(type_id, ordinal, name, offset, field_type, "
-                       "bit_offset, bit_size) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7)");
+                       "bit_offset, bit_size, padding) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)");
       insert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       insert.bind(2, static_cast<std::int64_t>(ordinal));
       insert.bind(3, field.name);
@@ -1338,6 +1422,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
       insert.bind(5, static_cast<std::int64_t>(field.type.value()));
       insert.bind(6, static_cast<std::int64_t>(field.bit_offset));
       insert.bind(7, static_cast<std::int64_t>(field.bit_size));
+      insert.bind(8, static_cast<std::int64_t>(field.padding ? 1 : 0));
       if (!insert.execute_statement()) {
         return fail("project.type_write_failed", "write a type member");
       }

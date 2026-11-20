@@ -197,7 +197,15 @@ Result<std::vector<Token>> tokenize(std::string_view text) {
       token.kind = Token::Kind::Symbol;
       token.text = "...";
       i += 3;
-    } else if (std::string_view("{}()[];,*=:-+").find(c) != std::string_view::npos) {
+    } else if (const std::string_view pair =
+                   i + 1 < text.size() ? text.substr(i, 2) : std::string_view();
+               pair == "<<" || pair == ">>" || pair == "<=" || pair == ">=" || pair == "==" ||
+               pair == "!=" || pair == "&&" || pair == "||" || pair == "++" || pair == "--" ||
+               pair == "->") {
+      token.kind = Token::Kind::Symbol;
+      token.text = std::string(pair);
+      i += 2;
+    } else if (std::string_view("{}()[];,*=:-+!~/%&|^?<>").find(c) != std::string_view::npos) {
       token.kind = Token::Kind::Symbol;
       token.text = std::string(1, c);
       ++i;
@@ -250,6 +258,137 @@ std::optional<std::uint64_t> round_up_checked(std::uint64_t value, std::uint64_t
   return (value + alignment - 1) / alignment * alignment;
 }
 
+// ---- integer constants ----------------------------------------------------------------
+
+/// The value and C type of an integer constant expression: 1, 2, 4 or 8 bytes. Only a cast gives
+/// a type narrower than int, and every operator applies the integer promotions first.
+struct Constant {
+  std::uint64_t bits = 0;  ///< the value, truncated to `size` bytes
+  std::uint64_t size = 4;
+  bool is_signed = true;
+};
+
+std::uint64_t mask_of(std::uint64_t size) {
+  return size >= 8 ? ~std::uint64_t{0} : (std::uint64_t{1} << (size * 8)) - 1;
+}
+
+std::int64_t max_signed(std::uint64_t size) {
+  return size >= 8 ? std::numeric_limits<std::int64_t>::max()
+                   : static_cast<std::int64_t>(mask_of(size) >> 1U);
+}
+
+std::int64_t min_signed(std::uint64_t size) {
+  return -max_signed(size) - 1;
+}
+
+std::int64_t signed_value(const Constant& value) {
+  if (value.size >= 8) {
+    return static_cast<std::int64_t>(value.bits);
+  }
+  const std::uint64_t sign = std::uint64_t{1} << (value.size * 8 - 1);
+  return static_cast<std::int64_t>((value.bits ^ sign) - sign);
+}
+
+bool is_negative(const Constant& value) {
+  return value.is_signed && signed_value(value) < 0;
+}
+
+bool nonzero(const Constant& value) {
+  return value.bits != 0;
+}
+
+/// The value converted to the integer type of `size` bytes and the signedness, as C converts it.
+Constant convert(const Constant& value, std::uint64_t size, bool is_signed) {
+  const std::uint64_t wide =
+      value.is_signed ? static_cast<std::uint64_t>(signed_value(value)) : value.bits;
+  return Constant{wide & mask_of(size), size, is_signed};
+}
+
+/// The integer promotions: a type narrower than int becomes int, which holds all its values.
+Constant promote(const Constant& value) {
+  return value.size < 4 ? convert(value, 4, true) : value;
+}
+
+Constant int_constant(bool truth) {
+  return Constant{truth ? 1U : 0U, 4, true};
+}
+
+/// The common type of the usual arithmetic conversions, for two promoted operands.
+Constant common_type(const Constant& a, const Constant& b) {
+  if (a.is_signed == b.is_signed) {
+    return Constant{0, std::max(a.size, b.size), a.is_signed};
+  }
+  const Constant& unsigned_operand = a.is_signed ? b : a;
+  const Constant& signed_operand = a.is_signed ? a : b;
+  if (unsigned_operand.size >= signed_operand.size) {
+    return Constant{0, unsigned_operand.size, false};
+  }
+  return Constant{0, signed_operand.size, true};
+}
+
+/// The type of an integer literal (C11 6.4.4.1): the first of the candidate types for its base
+/// and suffix that can hold the value.
+Result<Constant> literal_constant(const Token& token, const CDeclarationOptions& options) {
+  const std::string& text = token.text;
+  const bool hex = text.size() > 1 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+  std::size_t digits_end = hex ? 2 : 0;
+  while (digits_end < text.size() &&
+         (hex ? is_hex_digit(text[digits_end]) : is_digit(text[digits_end]))) {
+    ++digits_end;
+  }
+  const std::string suffix = text.substr(digits_end);
+  int unsigned_marks = 0;
+  int long_level = 0;
+  for (std::size_t i = 0; i < suffix.size();) {
+    if (suffix[i] == 'u' || suffix[i] == 'U') {
+      ++unsigned_marks;
+      ++i;
+    } else if (long_level == 0 && i + 1 < suffix.size() &&
+               (suffix.compare(i, 2, "ll") == 0 || suffix.compare(i, 2, "LL") == 0)) {
+      long_level = 2;
+      i += 2;
+    } else if (long_level == 0) {
+      long_level = 1;
+      ++i;
+    } else {
+      long_level = 3;  // a second long suffix
+      ++i;
+    }
+  }
+  if (unsigned_marks > 1 || long_level > 2) {
+    return located<Constant>(token.line, token.column, "cdecl.bad_number",
+                             "'" + text + "' has an integer suffix C does not have");
+  }
+  struct Candidate {
+    std::uint64_t size;
+    bool is_signed;
+    int long_level;
+  };
+  const Candidate all[] = {
+      {4, true, 0}, {4, false, 0}, {options.long_size, true, 1}, {options.long_size, false, 1},
+      {8, true, 2}, {8, false, 2}};
+  for (const Candidate& candidate : all) {
+    if (candidate.long_level < long_level) {
+      continue;
+    }
+    if (unsigned_marks == 1 && candidate.is_signed) {
+      continue;
+    }
+    // Without a `u` suffix a decimal literal takes only signed types.
+    if (unsigned_marks == 0 && !hex && !candidate.is_signed) {
+      continue;
+    }
+    const std::uint64_t limit = candidate.is_signed
+                                    ? static_cast<std::uint64_t>(max_signed(candidate.size))
+                                    : mask_of(candidate.size);
+    if (token.number <= limit) {
+      return Constant{token.number, candidate.size, candidate.is_signed};
+    }
+  }
+  return located<Constant>(token.line, token.column, "cdecl.constant_too_large",
+                           "'" + text + "' is too large for any integer type");
+}
+
 // ---- parsing --------------------------------------------------------------------------
 
 struct SizeAlign {
@@ -293,6 +432,14 @@ class Parser {
   Parser(std::vector<Token> tokens, const TypeTable& known, const CDeclarationOptions& options)
       : tokens_(std::move(tokens)), options_(options), working_(known), next_(known.next_id()) {
     for (const TypeDefinition& definition : known.list()) {
+      if (definition.local) {
+        continue;  // declared in a prototype: neither its tag nor its constants are in scope
+      }
+      if (definition.kind == TypeKind::Enum) {
+        for (const TypeEnumerator& enumerator : definition.enumerators) {
+          enum_constants_.emplace(enumerator.name, EnumConstant{enumerator.value, 0});
+        }
+      }
       if (definition.name.empty()) {
         continue;
       }
@@ -437,10 +584,92 @@ class Parser {
     return SizeAlign{size.value(), alignment.value()};
   }
 
-  void note(const std::string& name, CNameSpace space, TypeKind kind) {
-    if (names_ != nullptr) {
-      names_->push_back(CDeclaredName{name, space, kind});
+  void note(const std::string& name, CNameSpace space, TypeKind kind, bool completes = false) {
+    // A tag or enumeration constant declared inside a prototype is not visible after it.
+    if (names_ != nullptr && prototype_scope_ == 0) {
+      names_->push_back(CDeclaredName{name, space, kind, completes});
     }
+  }
+
+  /// Binds a tag in the current scope. Inside a prototype the binding is logged, so that the
+  /// prototype's closing parenthesis restores what was bound before.
+  void bind_tag(std::map<std::string, TypeId>& tags, const std::string& name, TypeId id) {
+    if (prototype_scope_ > 0) {
+      const auto existing = tags.find(name);
+      tag_undo_.push_back(TagBinding{
+          &tags, name,
+          existing == tags.end() ? std::nullopt : std::optional<TypeId>(existing->second),
+          prototype_scope_});
+    }
+    tags[name] = id;
+  }
+
+  /// Whether the current prototype bound this tag (false at file scope).
+  [[nodiscard]] bool bound_in_this_prototype(const std::map<std::string, TypeId>& tags,
+                                             const std::string& name) const {
+    return std::any_of(tag_undo_.begin(), tag_undo_.end(), [&](const TagBinding& binding) {
+      return binding.scope == prototype_scope_ && binding.tags == &tags && binding.name == name;
+    });
+  }
+
+  void bind_constant(const std::string& name, std::int64_t value) {
+    if (prototype_scope_ > 0) {
+      const auto existing = enum_constants_.find(name);
+      constant_undo_.push_back(ConstantBinding{name,
+                                               existing == enum_constants_.end()
+                                                   ? std::nullopt
+                                                   : std::optional<EnumConstant>(existing->second),
+                                               prototype_scope_});
+    }
+    enum_constants_[name] = EnumConstant{value, prototype_scope_};
+  }
+
+  /// The prototype depth of the innermost parameter with this name, or -1.
+  [[nodiscard]] int parameter_scope(const std::string& name) const {
+    for (auto it = parameter_names_.rbegin(); it != parameter_names_.rend(); ++it) {
+      if (it->first == name) {
+        return it->second;
+      }
+    }
+    return -1;
+  }
+
+  /// Whether `name` is a typedef name here: a typedef that no parameter or enumeration constant
+  /// hides. Typedefs are declared only at file scope, so any such binding is an inner one.
+  [[nodiscard]] bool typedef_visible(const std::string& name) const {
+    return typedef_names_.count(name) != 0 && !hidden_by_ordinary_name(name);
+  }
+
+  /// Whether an enumeration constant or a parameter in scope hides a type name (a typedef, or a
+  /// built-in name such as `size_t`).
+  [[nodiscard]] bool hidden_by_ordinary_name(const std::string& name) const {
+    return enum_constants_.count(name) != 0 || parameter_scope(name) >= 0;
+  }
+
+  /// Leaves a prototype: its tags, enumeration constants and parameter names go out of scope.
+  void leave_prototype() {
+    while (!parameter_names_.empty() && parameter_names_.back().second == prototype_scope_) {
+      parameter_names_.pop_back();
+    }
+    while (!tag_undo_.empty() && tag_undo_.back().scope == prototype_scope_) {
+      const TagBinding& binding = tag_undo_.back();
+      if (binding.previous) {
+        (*binding.tags)[binding.name] = *binding.previous;
+      } else {
+        binding.tags->erase(binding.name);
+      }
+      tag_undo_.pop_back();
+    }
+    while (!constant_undo_.empty() && constant_undo_.back().scope == prototype_scope_) {
+      const ConstantBinding& binding = constant_undo_.back();
+      if (binding.previous) {
+        enum_constants_[binding.name] = *binding.previous;
+      } else {
+        enum_constants_.erase(binding.name);
+      }
+      constant_undo_.pop_back();
+    }
+    --prototype_scope_;
   }
 
   TypeId make_pointer(TypeId target) {
@@ -573,12 +802,13 @@ class Parser {
         break;  // this identifier is the declarator's name
       }
       if (const auto typedef_name = typedef_names_.find(word);
-          typedef_name != typedef_names_.end()) {
+          typedef_name != typedef_names_.end() && typedef_visible(word)) {
         named = typedef_name->second;
         advance();
         continue;
       }
-      if (const auto fixed = fixed_width_integer(word, options_)) {
+      if (const auto fixed = fixed_width_integer(word, options_);
+          fixed && !hidden_by_ordinary_name(word)) {
         named = scalar(word, TypeKind::Integer, fixed->size, fixed->is_signed);
         advance();
         continue;
@@ -705,21 +935,33 @@ class Parser {
       TypeId id{};
       if (!tag.empty()) {
         const auto known = tags.find(tag);
+        if (known != tags.end() && prototype_scope_ > 0 && !bound_in_this_prototype(tags, tag)) {
+          // C gives a definition inside a parameter list its own type, hiding the outer tag
+          // only there; the subset does not model that hiding.
+          return located<TagRef>(line, column, "cdecl.prototype_tag",
+                                 "'" + tag +
+                                     "' is defined inside a parameter list while an outer "
+                                     "declaration of it is visible; this is not supported");
+        }
         if (known != tags.end()) {
           if (incomplete_.count(known->second) == 0) {
             return located<TagRef>(line, column, "cdecl.redefinition",
                                    "'" + tag + "' is already defined");
           }
           id = known->second;  // completes an earlier forward declaration
+          if (forward_tags_.erase(id) != 0) {
+            note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct, true);
+          }
         }
       }
       if (!id.valid()) {
         TypeDefinition shell;
         shell.kind = is_union ? TypeKind::Union : TypeKind::Struct;
         shell.name = tag;
+        shell.local = prototype_scope_ > 0;
         id = add(std::move(shell));
         if (!tag.empty()) {
-          tags.emplace(tag, id);
+          bind_tag(tags, tag, id);
           note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
         }
       }
@@ -741,24 +983,44 @@ class Parser {
     if (const auto known = tags.find(tag); known != tags.end()) {
       return TagRef{known->second, false};
     }
-    // A reference to a tag not yet defined is a forward declaration, completed later.
+    // A reference to a tag not yet defined is a forward declaration, completed later. Inside a
+    // prototype it declares a tag of the prototype's scope (C11 6.2.1): a later definition outside
+    // is a different type, and this one stays incomplete.
     TypeDefinition shell;
     shell.kind = is_union ? TypeKind::Union : TypeKind::Struct;
     shell.name = tag;
+    shell.local = prototype_scope_ > 0;
     const TypeId id = add(std::move(shell));
-    tags.emplace(tag, id);
+    bind_tag(tags, tag, id);
     note(tag, CNameSpace::Tag, is_union ? TypeKind::Union : TypeKind::Struct);
     incomplete_.insert(id);
+    forward_tags_.insert(id);
     return TagRef{id, false};
   }
 
+  /// A struct or union body. Members are laid out as the System V ABI lays them out (x86-64 and
+  /// AArch64 agree here): each member at its natural alignment, the size padded to the largest
+  /// alignment. A bit-field sits at the next free bit unless it would cross a boundary of a unit
+  /// of its declared type's size, when it starts the next unit. A named bit-field aligns the
+  /// whole like a member of its declared type; an unnamed one only pads, and an unnamed one of
+  /// width zero moves the next member to its type's alignment.
   Result<TypeId> parse_struct_body(TypeId id, bool is_union, const std::string& tag) {
     if (auto open = expect("{"); !open) {
       return propagate<TypeId>(open);
     }
+    const std::string what = is_union ? "union" : "struct";
+    // Offsets are counted in bits; 2^61 bytes is far beyond any object.
+    constexpr std::uint64_t kMaxBits = std::numeric_limits<std::uint64_t>::max() / 8;
+    const auto too_large = [&](std::uint32_t line, std::uint32_t column) {
+      return located<TypeId>(line, column, "cdecl.too_large",
+                             "the " + what + " is larger than 2^61 bytes");
+    };
     std::vector<TypeField> fields;
-    std::uint64_t end = 0;
-    std::uint64_t alignment = 1;
+    std::uint64_t end_bits = 0;
+    std::uint64_t alignment = 1;  // the members' alignment
+    // The record's alignment where the ABI aligns it more than its members: AAPCS64 aligns a
+    // record to the type of each unnamed bit-field too.
+    std::uint64_t record_alignment = 1;
     while (!at_symbol("}")) {
       if (at_end()) {
         return unexpected<TypeId>("'}'");
@@ -776,43 +1038,134 @@ class Parser {
                                "a member without a name is not supported");
       }
       while (true) {
-        auto decl = parse_declarator(spec.value().type, /*abstract_allowed=*/false, /*depth=*/0,
-                                     /*parameter=*/false);
-        if (!decl) {
-          return propagate<TypeId>(decl);
+        Declarator member;
+        if (at_symbol(":")) {
+          // An unnamed bit-field.
+          member.type = spec.value().type;
+          member.line = peek().line;
+          member.column = peek().column;
+        } else {
+          auto decl = parse_declarator(spec.value().type, /*abstract_allowed=*/false,
+                                       /*depth=*/0, /*parameter=*/false);
+          if (!decl) {
+            return propagate<TypeId>(decl);
+          }
+          member = decl.value();
         }
-        const Declarator member = decl.value();
         if (member.is_function) {
           return located<TypeId>(member.line, member.column, "cdecl.function_member",
                                  "a member cannot be a function");
         }
-        if (at_symbol(":")) {
-          return located<TypeId>(peek().line, peek().column, "cdecl.bitfield_unsupported",
-                                 "bit-fields are not supported");
-        }
         const auto layout = measure(member.type);
+        const std::string described =
+            member.name.empty() ? "an unnamed bit-field" : "member '" + member.name + "'";
         if (!layout) {
           return located<TypeId>(member.line, member.column, "cdecl.incomplete_type",
-                                 "member '" + member.name + "' has a type whose size is not known");
+                                 described + " has a type whose size is not known");
         }
-        std::uint64_t offset = 0;
-        if (is_union) {
-          end = std::max(end, layout->size);
-        } else {
-          const auto aligned = round_up_checked(end, layout->alignment);
-          if (!aligned || *aligned > std::numeric_limits<std::uint64_t>::max() - layout->size) {
-            return located<TypeId>(member.line, member.column, "cdecl.too_large",
-                                   "the struct is larger than 64 bits can count");
+
+        if (at_symbol(":")) {
+          if (options_.bit_fields == CBitFieldLayout::Unmodelled) {
+            return located<TypeId>(peek().line, peek().column, "cdecl.bitfield_abi",
+                                   "bit-field layout is not modelled for this ABI");
           }
-          offset = *aligned;
-          end = offset + layout->size;
+          advance();
+          const Token width_at = peek();
+          auto width_value = constant_expression(/*evaluate=*/true, /*depth=*/0);
+          if (!width_value) {
+            return propagate<TypeId>(width_value);
+          }
+          const auto declared = integer_type(member.type);
+          if (!declared) {
+            return located<TypeId>(member.line, member.column, "cdecl.bitfield_type",
+                                   described + " needs an integer or enum type");
+          }
+          const std::uint64_t unit_bits = layout->size * 8;
+          if (is_negative(width_value.value()) || width_value.value().bits > unit_bits) {
+            return located<TypeId>(
+                width_at.line, width_at.column, "cdecl.bitfield_width",
+                "the width of " + described + " is negative or wider than its type");
+          }
+          const std::uint64_t width = width_value.value().bits;
+          if (width > 1 && is_bool(member.type)) {
+            return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
+                                   "the width of " + described + " is wider than _Bool's one bit");
+          }
+          if (member.name.empty() && options_.bit_fields == CBitFieldLayout::Aapcs64) {
+            record_alignment = std::max(record_alignment, layout->alignment);
+          }
+          if (width == 0) {
+            if (!member.name.empty()) {
+              return located<TypeId>(width_at.line, width_at.column, "cdecl.bitfield_width",
+                                     "a named bit-field cannot have width zero");
+            }
+            if (!is_union) {
+              const auto aligned = round_up_checked(end_bits, layout->alignment * 8);
+              if (!aligned || *aligned > kMaxBits) {
+                return too_large(member.line, member.column);
+              }
+              end_bits = *aligned;
+            }
+            // Kept as layout: the next member, or the record's end, starts at this offset.
+            TypeField marker;
+            marker.offset = is_union ? 0 : end_bits / 8;
+            marker.type = member.type;
+            marker.padding = true;
+            fields.push_back(std::move(marker));
+          } else {
+            std::uint64_t start = 0;
+            if (!is_union) {
+              start = end_bits;
+              if (start % unit_bits + width > unit_bits) {
+                const auto next_unit = round_up_checked(start, unit_bits);
+                if (!next_unit) {
+                  return too_large(member.line, member.column);
+                }
+                start = *next_unit;
+              }
+            }
+            if (start > kMaxBits - width) {
+              return too_large(member.line, member.column);
+            }
+            end_bits = is_union ? std::max(end_bits, width) : start + width;
+            if (!member.name.empty()) {
+              alignment = std::max(alignment, layout->alignment);
+            }
+            // An unnamed bit-field is kept as padding: it takes its bits but is not a member.
+            TypeField field;
+            field.name = member.name;
+            field.offset = start / 8;
+            field.type = member.type;
+            field.bit_offset = static_cast<std::uint8_t>(start % 8);
+            field.bit_size = static_cast<std::uint8_t>(width);
+            field.padding = member.name.empty();
+            fields.push_back(std::move(field));
+          }
+        } else {
+          if (member.name.empty()) {
+            return unexpected<TypeId>("a name");
+          }
+          std::uint64_t offset = 0;
+          if (layout->size > kMaxBits / 8) {
+            return too_large(member.line, member.column);
+          }
+          if (is_union) {
+            end_bits = std::max(end_bits, layout->size * 8);
+          } else {
+            const auto aligned = round_up_checked((end_bits + 7) / 8, layout->alignment);
+            if (!aligned || *aligned > kMaxBits / 8 - layout->size) {
+              return too_large(member.line, member.column);
+            }
+            offset = *aligned;
+            end_bits = (offset + layout->size) * 8;
+          }
+          alignment = std::max(alignment, layout->alignment);
+          TypeField field;
+          field.name = member.name;
+          field.offset = offset;
+          field.type = member.type;
+          fields.push_back(std::move(field));
         }
-        alignment = std::max(alignment, layout->alignment);
-        TypeField field;
-        field.name = member.name;
-        field.offset = offset;
-        field.type = member.type;
-        fields.push_back(std::move(field));
         if (at_symbol(",")) {
           advance();
           continue;
@@ -825,11 +1178,11 @@ class Parser {
     }
     advance();  // the closing '}'
 
-    const auto size = round_up_checked(end, alignment);
+    const std::uint64_t record = std::max(alignment, record_alignment);
+    const auto size = round_up_checked((end_bits + 7) / 8, record);
     if (!size) {
       return located<TypeId>(peek().line, peek().column, "cdecl.too_large",
-                             "the " + std::string(is_union ? "union" : "struct") +
-                                 " is larger than 64 bits can count");
+                             "the " + what + " is larger than 64 bits can count");
     }
     TypeDefinition definition;
     if (const TypeDefinition* current = working_.find(id)) {
@@ -840,6 +1193,7 @@ class Parser {
     definition.name = tag;
     definition.size = *size;
     definition.fields = std::move(fields);
+    definition.alignment = record > alignment ? record : 0;
     replace(definition);
     return id;
   }
@@ -856,6 +1210,7 @@ class Parser {
     definition.kind = TypeKind::Enum;
     definition.name = tag;
     definition.size = 4;
+    definition.local = prototype_scope_ > 0;
     std::int64_t next_value = 0;
     while (!at_symbol("}")) {
       if (peek().kind != Token::Kind::Identifier || is_keyword(peek().text)) {
@@ -868,31 +1223,38 @@ class Parser {
       advance();
       if (at_symbol("=")) {
         advance();
-        bool negative = false;
-        if (at_symbol("-")) {
-          negative = true;
-          advance();
-        } else if (at_symbol("+")) {
-          advance();
+        const Token value_at = peek();
+        auto value = constant_expression(/*evaluate=*/true, /*depth=*/0);
+        if (!value) {
+          return propagate<TypeId>(value);
         }
-        if (peek().kind != Token::Kind::Number) {
-          return unexpected<TypeId>("an integer constant");
-        }
-        const std::uint64_t magnitude = peek().number;
-        const auto limit = static_cast<std::uint64_t>(negative ? -kInt32Min : kInt32Max);
-        if (magnitude > limit) {
-          return located<TypeId>(peek().line, peek().column, "cdecl.enum_value_range",
+        const Constant& constant = value.value();
+        const bool fits =
+            constant.is_signed
+                ? signed_value(constant) >= kInt32Min && signed_value(constant) <= kInt32Max
+                : constant.bits <= static_cast<std::uint64_t>(kInt32Max);
+        if (!fits) {
+          return located<TypeId>(value_at.line, value_at.column, "cdecl.enum_value_range",
                                  "an enumerator value must fit in 32 bits");
         }
         next_value =
-            negative ? -static_cast<std::int64_t>(magnitude) : static_cast<std::int64_t>(magnitude);
-        advance();
+            constant.is_signed ? signed_value(constant) : static_cast<std::int64_t>(constant.bits);
       }
       if (next_value < kInt32Min || next_value > kInt32Max) {
         return located<TypeId>(name_line, name_column, "cdecl.enum_value_range",
                                "an enumerator value must fit in 32 bits");
       }
       enumerator.value = next_value;
+      if (const auto existing = enum_constants_.find(enumerator.name);
+          (existing != enum_constants_.end() && existing->second.scope == prototype_scope_) ||
+          (prototype_scope_ == 0 && typedef_names_.count(enumerator.name) != 0) ||
+          (prototype_scope_ > 0 && parameter_scope(enumerator.name) == prototype_scope_)) {
+        return located<TypeId>(name_line, name_column, "cdecl.redefinition",
+                               "'" + enumerator.name + "' is already declared");
+      }
+      // The constant is in scope from the end of its own enumerator.
+      bind_constant(enumerator.name, next_value);
+      note(enumerator.name, CNameSpace::Ordinary, TypeKind::Enum);
       definition.enumerators.push_back(enumerator);
       ++next_value;
       if (at_symbol(",")) {
@@ -909,10 +1271,430 @@ class Parser {
     }
     const TypeId id = add(std::move(definition));
     if (!tag.empty()) {
-      enum_tags_.emplace(tag, id);
+      bind_tag(enum_tags_, tag, id);
       note(tag, CNameSpace::Tag, TypeKind::Enum);
     }
     return id;
+  }
+
+  // ---- integer constant expressions ----------------------------------------------
+  //
+  // Array sizes, enumerator values and bit-field widths are integer constant expressions
+  // (C11 6.6): integer literals, enumeration constants, `sizeof`, casts to integer types and
+  // the unary, binary and conditional operators, with C's promotions and usual arithmetic
+  // conversions. An operand that is not evaluated (the untaken side of `&&`, `||` and `?:`, the
+  // operand of `sizeof`) is parsed for its type only. Division by zero, a shift by a negative
+  // count or by the width or more, and signed overflow are errors, as they are undefined in C.
+
+  /// Whether the token `ahead` begins a type name, as in a cast or `sizeof(type)`.
+  [[nodiscard]] bool starts_type_name(std::size_t ahead) const {
+    const Token& token = peek(ahead);
+    if (token.kind != Token::Kind::Identifier) {
+      return false;
+    }
+    static const std::set<std::string, std::less<>> kTypeWords = {
+        "void",     "_Bool",  "char",  "short", "int",   "long",     "float",    "double", "signed",
+        "unsigned", "struct", "union", "enum",  "const", "volatile", "restrict", "_Atomic"};
+    return kTypeWords.count(token.text) != 0 || typedef_visible(token.text) ||
+           (fixed_width_integer(token.text, options_).has_value() &&
+            !hidden_by_ordinary_name(token.text));
+  }
+
+  /// A type name: specifiers and an abstract declarator.
+  Result<TypeId> parse_type_name(int depth) {
+    const std::uint32_t line = peek().line;
+    const std::uint32_t column = peek().column;
+    auto spec = parse_decl_specifiers();
+    if (!spec) {
+      return propagate<TypeId>(spec);
+    }
+    if (spec.value().is_typedef) {
+      return located<TypeId>(line, column, "cdecl.bad_specifiers",
+                             "a type name cannot be a typedef");
+    }
+    auto decl = parse_declarator(spec.value().type, /*abstract_allowed=*/true, depth,
+                                 /*parameter=*/false);
+    if (!decl) {
+      return propagate<TypeId>(decl);
+    }
+    if (!decl.value().name.empty()) {
+      return located<TypeId>(decl.value().line, decl.value().column, "cdecl.unexpected_token",
+                             "a type name cannot declare '" + decl.value().name + "'");
+    }
+    return decl.value().type;
+  }
+
+  /// The integer type an id names, through typedefs. An enum is `int`.
+  [[nodiscard]] std::optional<Constant> integer_type(TypeId id) const {
+    for (int depth = 0; depth <= kMaxCDeclarationNesting && id.valid(); ++depth) {
+      const TypeDefinition* definition = working_.find(id);
+      if (definition == nullptr) {
+        return std::nullopt;
+      }
+      if (definition->kind == TypeKind::Typedef) {
+        id = definition->target;
+        continue;
+      }
+      if (definition->kind == TypeKind::Enum) {
+        return Constant{0, 4, true};
+      }
+      if (definition->kind == TypeKind::Integer &&
+          (definition->size == 1 || definition->size == 2 || definition->size == 4 ||
+           definition->size == 8)) {
+        return Constant{0, definition->size, definition->is_signed};
+      }
+      return std::nullopt;
+    }
+    return std::nullopt;
+  }
+
+  /// Whether the type is `_Bool`, through typedefs: a conversion to it tests for zero.
+  [[nodiscard]] bool is_bool(TypeId id) const {
+    for (int depth = 0; depth <= kMaxCDeclarationNesting && id.valid(); ++depth) {
+      const TypeDefinition* definition = working_.find(id);
+      if (definition == nullptr) {
+        return false;
+      }
+      if (definition->kind != TypeKind::Typedef) {
+        return definition->kind == TypeKind::Integer && definition->name == "_Bool";
+      }
+      id = definition->target;
+    }
+    return false;
+  }
+
+  /// Counts the open expression levels of the whole parse, so that expressions nested in a
+  /// struct inside `sizeof` share one bound with the expression around them.
+  class ExpressionLevel {
+   public:
+    explicit ExpressionLevel(int& open) : open_(open) { ++open_; }
+    ~ExpressionLevel() { --open_; }
+    ExpressionLevel(const ExpressionLevel&) = delete;
+    ExpressionLevel& operator=(const ExpressionLevel&) = delete;
+    [[nodiscard]] bool too_deep() const { return open_ > kMaxCDeclarationNesting; }
+
+   private:
+    int& open_;
+  };
+
+  Result<Constant> constant_expression(bool evaluate, int depth) {
+    const ExpressionLevel level(expression_levels_);
+    if (level.too_deep() || ++depth > kMaxCDeclarationNesting) {
+      return nesting_error<Constant>(peek());
+    }
+    auto condition = binary_expression(1, evaluate, depth);
+    if (!condition || !at_symbol("?")) {
+      return condition;
+    }
+    advance();
+    const bool first_taken = nonzero(condition.value());
+    auto first = constant_expression(evaluate && first_taken, depth);
+    if (!first) {
+      return first;
+    }
+    if (auto colon = expect(":"); !colon) {
+      return propagate<Constant>(colon);
+    }
+    auto second = constant_expression(evaluate && !first_taken, depth);
+    if (!second) {
+      return second;
+    }
+    const Constant first_value = promote(first.value());
+    const Constant second_value = promote(second.value());
+    const Constant type = common_type(first_value, second_value);
+    return convert(first_taken ? first_value : second_value, type.size, type.is_signed);
+  }
+
+  [[nodiscard]] int binary_precedence() const {
+    const Token& token = peek();
+    if (token.kind != Token::Kind::Symbol) {
+      return 0;
+    }
+    const std::string& op = token.text;
+    if (op == "||") return 1;
+    if (op == "&&") return 2;
+    if (op == "|") return 3;
+    if (op == "^") return 4;
+    if (op == "&") return 5;
+    if (op == "==" || op == "!=") return 6;
+    if (op == "<" || op == ">" || op == "<=" || op == ">=") return 7;
+    if (op == "<<" || op == ">>") return 8;
+    if (op == "+" || op == "-") return 9;
+    if (op == "*" || op == "/" || op == "%") return 10;
+    return 0;
+  }
+
+  Result<Constant> binary_expression(int minimum, bool evaluate, int depth) {
+    auto left = unary_expression(evaluate, depth);
+    if (!left) {
+      return left;
+    }
+    while (true) {
+      const int precedence = binary_precedence();
+      if (precedence == 0 || precedence < minimum) {
+        return left;
+      }
+      const Token op = peek();
+      advance();
+      bool right_evaluated = evaluate;
+      if (op.text == "&&") {
+        right_evaluated = evaluate && nonzero(left.value());
+      } else if (op.text == "||") {
+        right_evaluated = evaluate && !nonzero(left.value());
+      }
+      auto right = binary_expression(precedence + 1, right_evaluated, depth);
+      if (!right) {
+        return right;
+      }
+      left = apply_binary(op, promote(left.value()), promote(right.value()), evaluate);
+      if (!left) {
+        return left;
+      }
+    }
+  }
+
+  Result<Constant> apply_binary(const Token& op, const Constant& a, const Constant& b,
+                                bool evaluate) const {
+    const std::string& name = op.text;
+    if (name == "&&") {
+      return int_constant(nonzero(a) && nonzero(b));
+    }
+    if (name == "||") {
+      return int_constant(nonzero(a) || nonzero(b));
+    }
+    if (name == "<<" || name == ">>") {
+      // The result has the promoted type of the left operand.
+      if (!evaluate) {
+        return Constant{0, a.size, a.is_signed};
+      }
+      const std::uint64_t width = a.size * 8;
+      if (is_negative(b) || b.bits >= width) {
+        return located<Constant>(op.line, op.column, "cdecl.bad_shift",
+                                 "the shift count is negative or not less than the width of the "
+                                 "type");
+      }
+      const auto count = static_cast<unsigned>(b.bits);
+      if (name == ">>") {
+        if (a.is_signed) {
+          const std::int64_t shifted = signed_value(a) >> count;
+          return Constant{static_cast<std::uint64_t>(shifted) & mask_of(a.size), a.size, true};
+        }
+        return Constant{a.bits >> count, a.size, false};
+      }
+      if (a.is_signed) {
+        const std::int64_t value = signed_value(a);
+        if (value < 0 || value > (max_signed(a.size) >> count)) {
+          return located<Constant>(op.line, op.column, "cdecl.constant_overflow",
+                                   "the shift overflows its signed type");
+        }
+        return Constant{static_cast<std::uint64_t>(value) << count, a.size, true};
+      }
+      return Constant{(a.bits << count) & mask_of(a.size), a.size, false};
+    }
+
+    const Constant type = common_type(a, b);
+    const Constant x = convert(a, type.size, type.is_signed);
+    const Constant y = convert(b, type.size, type.is_signed);
+    if (name == "==" || name == "!=" || name == "<" || name == ">" || name == "<=" ||
+        name == ">=") {
+      int order = 0;
+      if (type.is_signed) {
+        const std::int64_t left = signed_value(x);
+        const std::int64_t right = signed_value(y);
+        order = left < right ? -1 : (left > right ? 1 : 0);
+      } else {
+        order = x.bits < y.bits ? -1 : (x.bits > y.bits ? 1 : 0);
+      }
+      if (name == "==") return int_constant(order == 0);
+      if (name == "!=") return int_constant(order != 0);
+      if (name == "<") return int_constant(order < 0);
+      if (name == ">") return int_constant(order > 0);
+      if (name == "<=") return int_constant(order <= 0);
+      return int_constant(order >= 0);
+    }
+    if (name == "&") return Constant{x.bits & y.bits, type.size, type.is_signed};
+    if (name == "^") return Constant{x.bits ^ y.bits, type.size, type.is_signed};
+    if (name == "|") return Constant{x.bits | y.bits, type.size, type.is_signed};
+    if (!evaluate) {
+      return Constant{0, type.size, type.is_signed};
+    }
+
+    if ((name == "/" || name == "%") && y.bits == 0) {
+      return located<Constant>(op.line, op.column, "cdecl.division_by_zero",
+                               "the constant expression divides by zero");
+    }
+    if (!type.is_signed) {
+      std::uint64_t result = 0;
+      if (name == "+") result = x.bits + y.bits;
+      if (name == "-") result = x.bits - y.bits;
+      if (name == "*") result = x.bits * y.bits;
+      if (name == "/") result = x.bits / y.bits;
+      if (name == "%") result = x.bits % y.bits;
+      return Constant{result & mask_of(type.size), type.size, false};
+    }
+    const std::int64_t left = signed_value(x);
+    const std::int64_t right = signed_value(y);
+    std::int64_t result = 0;
+    bool overflow = false;
+    if (name == "+") {
+      overflow = __builtin_add_overflow(left, right, &result);
+    } else if (name == "-") {
+      overflow = __builtin_sub_overflow(left, right, &result);
+    } else if (name == "*") {
+      overflow = __builtin_mul_overflow(left, right, &result);
+    } else if (left == min_signed(type.size) && right == -1) {
+      overflow = true;  // the quotient does not fit
+    } else {
+      result = name == "/" ? left / right : left % right;
+    }
+    if (overflow || result < min_signed(type.size) || result > max_signed(type.size)) {
+      return located<Constant>(op.line, op.column, "cdecl.constant_overflow",
+                               "the constant expression overflows its signed type");
+    }
+    return Constant{static_cast<std::uint64_t>(result) & mask_of(type.size), type.size, true};
+  }
+
+  Result<Constant> unary_expression(bool evaluate, int depth) {
+    const ExpressionLevel level(expression_levels_);
+    if (level.too_deep() || ++depth > kMaxCDeclarationNesting) {
+      return nesting_error<Constant>(peek());
+    }
+    const Token op = peek();
+    if (at_symbol("+") || at_symbol("-") || at_symbol("~") || at_symbol("!")) {
+      advance();
+      auto operand = unary_expression(evaluate, depth);
+      if (!operand) {
+        return operand;
+      }
+      const Constant value = promote(operand.value());
+      if (op.text == "+") {
+        return value;
+      }
+      if (op.text == "!") {
+        return int_constant(!nonzero(value));
+      }
+      if (op.text == "~") {
+        return Constant{~value.bits & mask_of(value.size), value.size, value.is_signed};
+      }
+      if (value.is_signed && evaluate && signed_value(value) == min_signed(value.size)) {
+        return located<Constant>(op.line, op.column, "cdecl.constant_overflow",
+                                 "the negation overflows its signed type");
+      }
+      return Constant{(std::uint64_t{0} - value.bits) & mask_of(value.size), value.size,
+                      value.is_signed};
+    }
+    if (at_word("sizeof")) {
+      advance();
+      std::uint64_t size = 0;
+      if (at_symbol("(") && starts_type_name(1)) {
+        advance();
+        const Token type_at = peek();
+        auto type = parse_type_name(depth);
+        if (!type) {
+          return propagate<Constant>(type);
+        }
+        if (auto close = expect(")"); !close) {
+          return propagate<Constant>(close);
+        }
+        const auto layout = measure(type.value());
+        if (!layout) {
+          return located<Constant>(type_at.line, type_at.column, "cdecl.incomplete_type",
+                                   "sizeof needs a type whose size is known");
+        }
+        size = layout->size;
+      } else {
+        // The operand is not evaluated: only its type counts.
+        auto operand = unary_expression(/*evaluate=*/false, depth);
+        if (!operand) {
+          return operand;
+        }
+        size = operand.value().size;
+      }
+      if (size > mask_of(options_.pointer_size)) {
+        return located<Constant>(op.line, op.column, "cdecl.constant_overflow",
+                                 "the size does not fit in size_t");
+      }
+      return Constant{size, options_.pointer_size, false};
+    }
+    if (at_symbol("(") && starts_type_name(1)) {
+      advance();
+      const Token type_at = peek();
+      auto type = parse_type_name(depth);
+      if (!type) {
+        return propagate<Constant>(type);
+      }
+      if (auto close = expect(")"); !close) {
+        return propagate<Constant>(close);
+      }
+      auto operand = unary_expression(evaluate, depth);
+      if (!operand) {
+        return operand;
+      }
+      const auto target = integer_type(type.value());
+      if (!target) {
+        return located<Constant>(type_at.line, type_at.column, "cdecl.not_integer",
+                                 "a constant expression can be cast only to an integer type");
+      }
+      Constant converted;
+      if (is_bool(type.value())) {
+        converted = Constant{nonzero(operand.value()) ? 1U : 0U, 1, false};
+      } else {
+        converted = convert(operand.value(), target->size, target->is_signed);
+      }
+      // The cast keeps its type (`sizeof((char)1)` is 1); an operator promotes it when used.
+      return converted;
+    }
+    return primary_expression(evaluate, depth);
+  }
+
+  Result<Constant> primary_expression(bool evaluate, int depth) {
+    const Token token = peek();
+    if (token.kind == Token::Kind::Number) {
+      advance();
+      return literal_constant(token, options_);
+    }
+    if (at_symbol("(")) {
+      advance();
+      auto value = constant_expression(evaluate, depth);
+      if (!value) {
+        return value;
+      }
+      // A comma operator may appear only where nothing is evaluated (C11 6.6p3), as in the operand
+      // of `sizeof`; its value and type are those of its right operand.
+      while (at_symbol(",")) {
+        if (evaluate) {
+          return located<Constant>(peek().line, peek().column, "cdecl.not_constant",
+                                   "a comma operator is a constant expression only where it is "
+                                   "not evaluated");
+        }
+        advance();
+        value = constant_expression(/*evaluate=*/false, depth);
+        if (!value) {
+          return value;
+        }
+      }
+      if (auto close = expect(")"); !close) {
+        return propagate<Constant>(close);
+      }
+      return value;
+    }
+    if (token.kind == Token::Kind::Identifier && !is_keyword(token.text)) {
+      const auto constant = enum_constants_.find(token.text);
+      const int parameter = parameter_scope(token.text);
+      if (parameter >= 0 &&
+          (constant == enum_constants_.end() || parameter >= constant->second.scope)) {
+        return located<Constant>(
+            token.line, token.column, "cdecl.not_constant",
+            "'" + token.text + "' is a parameter here, not an integer constant");
+      }
+      if (constant == enum_constants_.end()) {
+        return located<Constant>(token.line, token.column, "cdecl.not_constant",
+                                 "'" + token.text + "' is not an integer constant");
+      }
+      advance();
+      return Constant{static_cast<std::uint64_t>(constant->second.value) & mask_of(4), 4, true};
+    }
+    return unexpected<Constant>("an integer constant expression");
   }
 
   // ---- declarators ----------------------------------------------------------------
@@ -960,11 +1742,16 @@ class Parser {
         if (at_symbol("]")) {
           suffix.unknown_count = true;
         } else {
-          if (peek().kind != Token::Kind::Number) {
-            return unexpected<Declarator>("an array size");
+          const Token size_at = peek();
+          auto count = constant_expression(/*evaluate=*/true, depth);
+          if (!count) {
+            return propagate<Declarator>(count);
           }
-          suffix.count = peek().number;
-          advance();
+          if (is_negative(count.value())) {
+            return located<Declarator>(size_at.line, size_at.column, "cdecl.array_size_required",
+                                       "an array size cannot be negative");
+          }
+          suffix.count = count.value().bits;
         }
         if (auto close = expect("]"); !close) {
           return propagate<Declarator>(close);
@@ -1030,10 +1817,19 @@ class Parser {
     return declarator;
   }
 
+  /// A parameter list. It is a scope: tags and enumeration constants it declares are not visible
+  /// after its closing parenthesis.
   Result<void> parse_parameters(std::vector<TypeField>& parameters, bool& variadic, int depth) {
     if (depth > kMaxCDeclarationNesting) {
       return nesting_error<void>(peek());
     }
+    ++prototype_scope_;
+    auto parsed = parse_parameter_list(parameters, variadic, depth);
+    leave_prototype();
+    return parsed;
+  }
+
+  Result<void> parse_parameter_list(std::vector<TypeField>& parameters, bool& variadic, int depth) {
     if (auto open = expect("("); !open) {
       return propagate<void>(open);
     }
@@ -1084,6 +1880,17 @@ class Parser {
         return located<void>(declared.line, declared.column, "cdecl.incomplete_type",
                              "a parameter needs a complete type");
       }
+      if (!declared.name.empty()) {
+        // In scope for the declarators that follow it in this list.
+        if (parameter_scope(declared.name) == prototype_scope_ ||
+            (enum_constants_.count(declared.name) != 0 &&
+             enum_constants_.at(declared.name).scope == prototype_scope_)) {
+          return located<void>(
+              declared.line, declared.column, "cdecl.redefinition",
+              "'" + declared.name + "' is already declared in this parameter list");
+        }
+        parameter_names_.emplace_back(declared.name, prototype_scope_);
+      }
       TypeField field;
       field.name = declared.name;
       field.type = parameter_type;
@@ -1124,6 +1931,10 @@ class Parser {
           return located<void>(declared.line, declared.column, "cdecl.redefinition",
                                "'" + declared.name + "' is already a typedef");
         }
+        if (enum_constants_.count(declared.name) != 0) {
+          return located<void>(declared.line, declared.column, "cdecl.redefinition",
+                               "'" + declared.name + "' is already an enumeration constant");
+        }
         if (spec.value().anonymous.valid() && declared.type == spec.value().anonymous) {
           // `typedef struct { ... } name;`: the untagged type takes the typedef's name.
           TypeDefinition named;
@@ -1144,6 +1955,11 @@ class Parser {
           note(declared.name, CNameSpace::Ordinary, TypeKind::Typedef);
         }
       } else if (declared.is_function) {
+        if (enum_constants_.count(declared.name) != 0 || typedef_names_.count(declared.name) != 0) {
+          return located<void>(
+              declared.line, declared.column, "cdecl.redefinition",
+              "'" + declared.name + "' is already a typedef or an enumeration constant");
+        }
         // A prototype: the function type takes the function's name.
         TypeDefinition named;
         if (const TypeDefinition* function = working_.find(declared.type)) {
@@ -1180,8 +1996,38 @@ class Parser {
   std::map<std::string, TypeId> enum_tags_;
   std::map<std::string, TypeId> typedef_names_;
   std::map<std::string, TypeId> scalars_;
+  /// Enumeration constants in scope, from the known table and this text, with the scope that
+  /// declared each: 0 for file scope, otherwise the depth of the prototype.
+  struct EnumConstant {
+    std::int64_t value = 0;
+    int scope = 0;
+  };
+  std::map<std::string, EnumConstant> enum_constants_;
+  /// Prototypes being parsed, innermost last (a prototype is a scope, C11 6.2.1).
+  int prototype_scope_ = 0;
+  /// A binding made inside a prototype, undone at its closing parenthesis.
+  struct TagBinding {
+    std::map<std::string, TypeId>* tags = nullptr;
+    std::string name;
+    std::optional<TypeId> previous;
+    int scope = 0;
+  };
+  struct ConstantBinding {
+    std::string name;
+    std::optional<EnumConstant> previous;
+    int scope = 0;
+  };
+  std::vector<TagBinding> tag_undo_;
+  std::vector<ConstantBinding> constant_undo_;
+  /// The parameter names of the prototypes being parsed, with the depth of their prototype. A
+  /// parameter is an ordinary identifier: it hides a typedef or an enumeration constant of an outer
+  /// scope in the declarators after it.
+  std::vector<std::pair<std::string, int>> parameter_names_;
   std::set<TypeId> incomplete_;
-  int nesting_ = 0;  ///< struct and union bodies being parsed
+  /// Tags this text named by a forward reference and has not defined yet.
+  std::set<TypeId> forward_tags_;
+  int nesting_ = 0;            ///< struct and union bodies being parsed
+  int expression_levels_ = 0;  ///< constant expression levels open (see `ExpressionLevel`)
 };
 
 }  // namespace

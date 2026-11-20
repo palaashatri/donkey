@@ -381,3 +381,11 @@ Data ranges (G12-T2, partial): `A` defines a NUL-terminated byte string, `W` a N
 UTF-16LE string (both as data of their bytes, terminator included), and `Shift+D` an array. The
 Data window lists and previews them. Covered by the scripted tests `data` and `utf16`. Not done:
 the listing draws no data rows, and the decompiler does not print string literals.
+
+## Type libraries (G22)
+
+| What | Status | Evidence | Not done |
+|---|---|---|---|
+| Format and reader (T1) | Done | `TypeLib.*`, `fuzz_typelib` | |
+| Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte with `CREATED=2026-11-18`, `musl-dev` 1.2.4-2 and GCC 13.3.0 (checked on Ubuntu 24.04 x86-64 on 2026-11-20 by regenerating and comparing with the committed file using `cmp`) | FreeBSD and MinGW-w64 libraries; `.winmd`; function pointers (40 of the 223 musl declarations listed as skipped are refused for a parenthesised declarator, `pthread_create` among them; the others are variables, function definitions, names declared again, `__builtin_va_list` users and what depends on them) |
+| Applying a library to code (T3) | Not done | | the decompiler and the CLI do not use a library's types yet |

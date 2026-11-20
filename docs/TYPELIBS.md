@@ -5,9 +5,51 @@ its source. The reader is `read_type_library` in `include/donkey/project/typelib
 read, not applied: no code gets a type from a library yet (G22-T3 does that).
 
 **Status.** The reader and its format exist and are tested (`TypeLib.*` in
-`tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). No library is bundled
-(`typelibs/` holds a README only; the sources are an owner decision, G22-T2). A library's types do
-not appear in the decompiler or the CLI yet.
+`tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). One library is bundled:
+`typelibs/musl-1.2.4-x86_64-linux.dtl`, generated from the musl 1.2.4 headers (G22-T2, see
+"Generating a library" below). A library's types do not appear in the decompiler yet (G22-T3);
+`donkey-cli typelib show` reads one and summarises it.
+
+## Generating a library
+
+`donkey-cli typelib make <preprocessed.i> --out FILE` and these options, each with one value
+(`apps/donkey-cli/commands.cpp`, `include/donkey/project/typelib_gen.h`):
+
+- The library: `--library`, `--library-version`, `--platform`, `--architecture`, `--abi`,
+  `--data-model` (`LP64` or `LLP64`; it sets `long_size`), `--char-signed` (`true` or `false`).
+- Provenance: `--source`, `--source-sha256`, `--licence`, `--licence-file`, `--licence-sha256`,
+  `--command` (the `generator_command` record), `--preprocessor`, `--created` (`YYYY-MM-DD`).
+- Repeated records: `--source-file 'PATH SHA256'`, `--macro NAME=VALUE`, `--note TEXT`.
+
+The generator writes the other header values itself: `pointer_size` (8), `generator`,
+`body_sha256`, `declarations` and one `skipped` record per declaration it did not keep. For example,
+for a header `mylib.h` preprocessed into `all.i`, with its licence in `LICENSE`:
+
+```sh
+source_hash=$(sha256sum all.i | cut -d' ' -f1)
+licence_hash=$(sha256sum LICENSE | cut -d' ' -f1)
+header_hash=$(sha256sum mylib.h | cut -d' ' -f1)
+donkey-cli typelib make all.i --out mine.dtl \
+  --library mylib --library-version 1.0 --platform linux --architecture x86_64 --abi sysv \
+  --data-model LP64 --char-signed true --source "mylib 1.0 headers" --source-sha256 "$source_hash" \
+  --licence MIT --licence-file LICENSE --licence-sha256 "$licence_hash" --command "make-mylib.sh" \
+  --preprocessor "gcc 13.3.0 -E -P" --created 2026-11-18 --source-file "mylib.h $header_hash"
+```
+
+The input is the preprocessor's output: a script runs the
+preprocessor at build time (`tools/typelib/make-musl.sh` runs `gcc -E -P -nostdinc` on musl's own
+headers), never Donkey at run time. The generator keeps each top-level declaration that Donkey's C
+parser accepts together with every declaration kept before it, and lists each other one as
+`skipped: <name>: <reason>`: a variable, a function definition, a name declared twice, a type the
+parser does not model (a function pointer, `__builtin_va_list`), an attribute
+that may change a type (`aligned`, `packed`, `vector_size`, `mode`, or one it does not know), and
+anything that needs one of those. It drops only what changes neither a type nor its layout: `restrict`,
+`__extension__`, `_Noreturn`, `__inline`, `__asm__(...)` labels, and attributes such as `noreturn`,
+`nonnull`, `format`, `deprecated` and `visibility`. Character and string literals are copied as they
+are; their contents are never taken for delimiters. The kept text and each new declaration are parsed
+together, as the reader parses the file, so a struct named first by a forward reference (`struct
+stat *` in a member) is completed by its later definition. Before it writes, it reads its own output
+back with `read_type_library`, so a file it writes always loads.
 
 ## File layout
 
