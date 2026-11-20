@@ -78,9 +78,9 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   `strlen`, `strnlen`, `memchr`, `strchr`, `strrchr`, `strspn`, `strcspn`, `memcpy`, `memmove` or
   `memset` carries the function's prototype, and the interpreter runs an executable model of it.
   Every model is compared with the host C library on random inputs
-  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, 43 of the 44 `c_lib_*`
-  corpus results are Complete and verified (48 vectors each); `c_lib_memcpy_sum` above -O0 is
-  Partial (a zeroing `xor` after the call). Not tested on Windows, macOS (Mach-O imports are not
+  (`LibcModels.AgreeWithTheHostCLibrary`). Under GCC 13.3 on Linux x86-64, all 44 `c_lib_*`
+  corpus results are Complete and verified (48 vectors each), `c_lib_memcpy_sum`'s zeroing `xor`
+  after the call included. Not tested on Windows, macOS (Mach-O imports are not
   bound) or FreeBSD hosts.
 - Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
   `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).
@@ -387,6 +387,6 @@ the listing draws no data rows, and the decompiler does not print string literal
 | What | Status | Evidence | Not done |
 |---|---|---|---|
 | Format and reader (T1) | Done | `TypeLib.*`, `fuzz_typelib` | |
-| Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte with `CREATED=2026-11-18`, `musl-dev` 1.2.4-2 and GCC 13.3.0 (checked by generating twice on Ubuntu 24.04 x86-64) | FreeBSD and MinGW-w64 libraries; `.winmd`; `sizeof` and `?:` in array bounds, bit-fields (398 musl declarations listed as skipped, `struct stat` among them) |
+| Generator (T2) | Done for musl | `TypeLibMake.*`, `cli.typelib_show_musl`; `tools/typelib/make-musl.sh` regenerates `typelibs/musl-1.2.4-x86_64-linux.dtl` byte for byte with `CREATED=2026-11-18`, `musl-dev` 1.2.4-2 and GCC 13.3.0 (checked on Ubuntu 24.04 x86-64 on 2026-11-20 by regenerating and comparing with the committed file using `cmp`) | FreeBSD and MinGW-w64 libraries; `.winmd`; function pointers (40 of the 223 musl declarations listed as skipped are refused for a parenthesised declarator, `pthread_create` among them; the others are variables, function definitions, names declared again, `__builtin_va_list` users and what depends on them) |
+| Applying a library to code (T3) | Done for import stubs (ELF x86-64, PE) | `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`, `TypeLibApply.*`, `cli.project_type_library_apply*`, `cli.decompile_notes_a_library_prototype`; 807 of 2,725 stubs of the seven audit binaries get a musl prototype | calls take no arguments from a prototype (T4); GOT/IAT calls without a stub; versioned and ordinal imports not seen on a fixture; Mach-O not tried; no desktop UI |
 | Typed arguments at calls (T4) | Partial: x86-64 System V calls through an import stub, integer and pointer arguments | `Ir.LibraryPrototypeSuppliesTheArgumentsOfAnImportCall`, `Ir.*Mismatch*`, `Ir.VariadicPrototypeLeavesTheCallPartial`, `Ir.APeCallTakesNoLibraryPrototype`, `cli.decompile_prints_library_call_arguments`; 28,286 calls in 6,055 functions of the seven audit binaries | the caller stays Partial (an import is not executed); GOT calls without a stub, AArch64, Windows x64, floating-point, struct and stack arguments; a variadic call's extra arguments |
-| Applying a library to code (T3) | Done for import stubs (ELF x86-64, PE) | `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`, `TypeLibApply.*`, `cli.project_type_library_apply*`, `cli.decompile_notes_a_library_prototype`; 807 of 2,725 stubs of the seven audit binaries get a musl prototype | GOT/IAT calls without a stub; versioned and ordinal imports not seen on a fixture; Mach-O not tried; no desktop UI |

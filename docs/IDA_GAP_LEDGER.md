@@ -179,8 +179,8 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; 43 of 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,388 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A call through such a stub prints the prototype's arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 807 of 2,725 stubs of the seven audit binaries get a prototype; T4 PARTIAL: x86-64 System V calls through a stub, integer and pointer arguments; 28,286 calls in 6,055 functions of the seven binaries print them) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A call through such a stub prints the prototype's arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 807 of 2,725 stubs of the seven audit binaries get a prototype; T4 PARTIAL: x86-64 System V calls through a stub, integer and pointer arguments; 28,286 calls in 6,055 functions of the seven binaries print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -1029,8 +1029,9 @@ for Partial functions.
   bits is refused with `cdecl.invalid_type`. Evidence: `Types.ParsesCDeclarations` and
   `Types.ParserErrorsAreLocated`, all seven `Types.*` tests, and the headless ctest suite
   pass on Linux x86-64 with `-Werror`. `fuzz_cdecl` (clang 18, libFuzzer, ASan and UBSan)
-  ran 679,144 inputs in 61 s with no finding. Not supported: bit-fields, function
-  pointers and other parenthesised declarators, expressions other than integer constants,
+  ran 679,144 inputs in 61 s with no finding. Not supported: function
+  pointers and other parenthesised declarators (bit-fields and integer constant expressions
+  were added for G22-T2's review, 2026-11-19),
   variables, K&R definitions, octal literals, preprocessor lines and C++. Residual: the
   macOS and Windows CI legs have not run this yet.
 
@@ -1933,6 +1934,13 @@ output), and two of its seven binaries are shared libraries measured without the
 on 2026-11-18 with W1b and the library scope of G24-T3 (#76) merged in: Complete 177 → 180 again,
 and the gotos (13,758 in 913 functions) are the same with and without the models.
 
+**Zeroing idiom (2026-11-19).** A zeroing `xor r, r` or `sub r, r` reads no value of `r`: the clobber
+check no longer counts it as a read of a register the call clobbered, and parameter inference no
+longer counts it as a parameter read (`Ir.AZeroingIdiomAfterACallReadsNoClobberedValue`,
+`Ir.AZeroingIdiomIsNotAParameterRead`). `c_lib_memcpy_sum` above -O0 is now Complete and verified, so all 44
+`c_lib_*` results are (`DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` requires the 44). On the fixed
+sample: Complete 180 → 183, gotos unchanged (13,758 in 913 functions).
+
 ### G22 Type libraries (P1)
 
 **Why.** IDA Pro's type libraries and Ghidra's data type archives give every
@@ -1981,7 +1989,7 @@ and `src/ir/prototype.cpp` (`apply_prototype`, `IrPrototype`); `include/donkey/p
 - The type store validates references, cycles and ABI sizes. `TypeProvenance` has `User`, `Dwarf`,
   `Pdb`, `Inferred` and `Library`. Nothing assigns `Library` yet.
 - `parse_c_declarations` parses a C subset into `TypeDefinition`s with provenance `User`. It refuses a
-  preprocessor line (`cdecl.preprocessor`), a variable (`cdecl.variable`), a bit-field, a parenthesised
+  preprocessor line (`cdecl.preprocessor`), a variable (`cdecl.variable`), a parenthesised
   declarator such as a function pointer (`cdecl.parenthesized_declarator`), and an unknown type name.
   Built-in names are the fixed-width integers, `size_t`, `ptrdiff_t`, `intptr_t` and `uintptr_t`.
   `wchar_t`, `va_list`, `FILE`, `time_t` and `off_t` are not built in.
@@ -2143,21 +2151,24 @@ the public standard it follows.
 sources only, a preprocessor at build time). What was built and measured:
 - `include/donkey/project/typelib_gen.h`, `src/project/typelib_gen.cpp`: `split_c_declarations` (top-level
   declarations of preprocessed text, one line each, with the words that do not change a type dropped) and
-  `make_type_library`: a declaration is kept only when the parser accepts it against the kept table and the
-  whole kept text plus it parses on its own (a struct whose member's type was skipped parses against the table,
-  which knows the type from a pointer, but not on its own); everything else is listed as `skipped` with the
-  reason, never dropped. The output is read back with `read_type_library` before it is returned.
+  `make_type_library`: each candidate is appended to the kept text, and the whole text is parsed from an empty
+  type table, as the reader parses the file; the candidate is kept when that parse succeeds and the names it
+  declares are new. Everything else is listed as `skipped` with the reason, never dropped. An input with a
+  pragma that may change a layout (`pack`, `scalar_storage_order`, or any pragma not known to change no type)
+  is refused (`typelib_make.pragma`). The output is read back with `read_type_library` before it is
+  returned.
 - `donkey-cli typelib make` and `typelib show`. `tools/typelib/make-musl.sh` runs `gcc -E -P -nostdinc
   -D_GNU_SOURCE` on every top-level header of the `musl-dev` 1.2.4-2 package (90; `wait.h`, which only
   redirects, is left out), with each header's path and SHA-256 recorded.
-- `typelibs/musl-1.2.4-x86_64-linux.dtl`: 1,388 declarations kept, 2,852 types (scalars, pointers and arrays
-  included), 398 skipped and listed (variables, enum constants written as expressions, `pthread_*_t` and
-  `sigset_t` whose array bounds use `sizeof` or `?:`, `__builtin_va_list` and the `v*printf` family that uses it,
-  bit-fields, and what depends on them). 106 KiB. Generated twice with `CREATED=2026-11-18`, `musl-dev`
-  1.2.4-2 and GCC 13.3.0: byte-identical. `struct stat` is skipped: its `struct timespec` members pad with
-  bit-fields whose widths are constant expressions (`int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`),
-  which the parser does not evaluate (G05); the library has only the incomplete tag that `struct stat *`
-  makes. Review of #70 (2026-11-18): attributes that may change a type are no longer dropped, literals no
+- `typelibs/musl-1.2.4-x86_64-linux.dtl`: 1,563 declarations kept, 3,323 types (scalars, pointers and arrays
+  included), 223 skipped and listed (variables, function pointers and other parenthesised declarators,
+  `__builtin_va_list` and the `v*printf` family that uses it, function definitions, names declared again, and
+  what depends on them). 104 KiB. Regenerated on Ubuntu 24.04 x86-64 with `CREATED=2026-11-18`, `musl-dev`
+  1.2.4-2 and GCC 13.3.0, the output is byte-identical to the committed file (`cmp`, 2026-11-20). Kept since the C parser
+  evaluates constant expressions and lays out bit-fields (below): `struct timespec` (padded with
+  `int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`), `struct stat`, `sigset_t`, `fd_set`, `cpu_set_t`,
+  `fenv_t`, `jmp_buf`, `sem_t` and the `pthread_*_t` types, each with GCC's size and alignment for the same
+  headers. Review of #70 (2026-11-18): attributes that may change a type are no longer dropped, literals no
   longer count as delimiters, the kept text and each declaration are parsed together (so a tag named first by
   a forward reference is completed by its definition: `struct sigaltstack` and 46 other declarations are
   kept now), and a skipped record names the declarator the parser refused.
@@ -2168,11 +2179,55 @@ sources only, a preprocessor at build time). What was built and measured:
   `TypeLibMake.ASkippedRecordNamesTheRefusedDeclarator`, `Types.CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace`
   (a definition that completes a forward reference is listed with `completes`),
   `TypeLibMake.ShippedMuslLibraryLoads` (`puts`, `memcpy`, `strlen`, `malloc`, `open`, `fopen` as Library
-  functions, `printf` variadic, `struct sigaltstack` complete with `ss_size`, `struct stat` listed as skipped
-  for `st_atim`, and `pthread_create` listed as skipped), `cli.typelib_show_musl`.
+  functions, `printf` variadic, `struct sigaltstack` complete with `ss_size`; `struct stat`, `struct timespec`,
+  `struct itimerspec`, `sigset_t`, `pthread_attr_t`, `pthread_mutex_t`, `fd_set`, `fenv_t`, `cpu_set_t`,
+  `jmp_buf` and `sem_t` at GCC's size and alignment, `st_size`, `st_atim` and `st_ctim` at GCC's offsets; and
+  `pthread_create` listed as skipped for its function pointer), `cli.typelib_show_musl`.
+- C parser, for the review of #70 (G05): integer constant expressions in array sizes, enumerator values and
+  bit-field widths (literals typed as C11 6.4.4.1 types them, enumeration constants, `sizeof(type)` and
+  `sizeof expr`, casts to integer types, every unary, binary and conditional operator, with the promotions and
+  usual arithmetic conversions; the untaken side of `&&`, `||` and `?:` and the operand of `sizeof` are not
+  evaluated; division by zero, bad shift counts and signed overflow are errors), and bit-fields laid out as the
+  System V ABI lays them out (a field does not cross a unit of its type; an unnamed one pads without aligning
+  the struct; width zero moves to the next unit). Tests: `Types.BitFieldsAreLaidOutAsTheCompilerLaysThemOut`
+  and `Types.ConstantExpressionsFollowC` compare with GCC 13.3 on x86-64 Linux; `Types.ParserErrorsAreLocated`
+  covers each new error and the nesting bound, which expressions inside `sizeof(struct { ... })` share.
+- Second review of #70 (2026-11-20): a parameter list is a scope (C11 6.2.1), so a tag first named in a
+  prototype is the prototype's own incomplete type, not a later file-scope definition, and an enumeration
+  constant declared there no longer replaces a file-scope one after it; a definition of an outer tag inside a
+  parameter list is refused (`cdecl.prototype_tag`). Enumeration constants are names (an untagged enum of
+  constants is kept: the `REG_*` constants of `<sys/ucontext.h>` and 25 others), and a constant declared twice
+  in one scope, or with a typedef's name, is `cdecl.redefinition`. A cast keeps its type until an operator
+  promotes it (`sizeof((unsigned char)1)` is 1), a `_Bool` bit-field is at most one bit wide, `++`, `--` and
+  `->` are tokens the subset refuses, a directive's `#` may follow spaces, `typelib make --char-signed` takes
+  only `true` or `false`, and `make-musl.sh` records `_GNU_SOURCE=1`, the value `-D_GNU_SOURCE` defines.
+  Tests: `Types.PrototypesAreScopes`, `Types.ACastKeepsItsTypeUntilAnOperatorPromotesIt`,
+  `TypeLibMake.LayoutPragmasAreRefused`, `TypeLibMake.AnUntaggedEnumIsKeptForItsConstants`,
+  `cli.typelib_make_rejects_a_bad_char_signed`, and new cases in `Types.ParserErrorsAreLocated`. `fuzz_cdecl`
+  (clang 18, ASan and UBSan) ran 544,286 inputs in 91 s with no finding; Debug 1,024/1,024 and Release
+  1,025/1,025 pass on Linux x86-64.
+- Third review of #70 (2026-11-20): bit-field layout follows the library's declared ABI
+  (`CDeclarationOptions::bit_fields`, from the `abi` header through `bit_field_layout`). System V x86-64
+  and AAPCS64 place bit-fields alike, but an AAPCS64 record is also aligned to the type of each unnamed
+  bit-field; Win64 and any other ABI refuse a bit-field (`cdecl.bitfield_abi`) instead of using the System V
+  rules. An unnamed bit-field is kept as a padding field (`TypeField::padding`: no name, its bits, or for
+  width zero a marker at the offset it moves to), so a trailing `int :0;` or `int :3;` counts in the size the
+  type store checks; a record that the ABI aligns more than its members carries that alignment
+  (`TypeDefinition::alignment`, now also for structs and unions). Project schema v8 stores `padding`
+  (migration from v7: every existing member stays a member). Tests:
+  `Types.BitFieldsAreLaidOutAsTheCompilerLaysThemOut` (System V x86-64, GCC 13.3) and
+  `Types.Aapcs64BitFieldsAlignTheRecordToUnnamedBitFields` (aarch64-linux-gnu-gcc 13.3 run under
+  qemu-aarch64) check the same 14 declarations against each compiler, with trailing unnamed bit-fields;
+  `Types.PaddingFieldsAndRecordAlignmentAreChecked`, and
+  `Types.PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration`. The musl library text is unchanged.
+  `fuzz_cdecl` now picks the bit-field rules from its first byte too; it ran 605,844 inputs in 91 s with no
+  finding. Debug 1,027/1,027 and Release 1,028/1,028 pass on Linux x86-64.
+- CI evidence for the parser and the shipped library: the `ci` workflow passed at a28d681 (the reviewed head,
+  which includes every test named above and `TypeLibMake.ShippedMuslLibraryLoads`):
+  [run 44775011731](https://github.com/palaashatri/donkey/actions/runs/44775011731): Linux x86-64 and
+  AArch64, macOS arm64, Windows x64 (MinGW-w64) headless, the desktop shell under Xvfb, and clang-format.
 - Not done here: FreeBSD and MinGW-w64 libraries (allowed, each file's licence to be checked), the `.winmd`
-  reader, and an expression evaluator for `sizeof`, `?:` and comparisons in array bounds and bit-field widths
-  (G05; it would keep the pthread types, `struct timespec` and `struct stat`).
+  reader, and function pointers (parenthesised declarators, G05).
   Applying a library to code is T3.
 
 **T3 — application.**
@@ -2188,7 +2243,7 @@ sources only, a preprocessor at build time). What was built and measured:
 4. *Functions identified by G09.* The library prototype goes through `apply_prototype` on the matched
    function's body, which works today. The G09 name stays; the type's provenance is `Library`.
 5. *Provenance per application.* Add a `source` column (user, dwarf, pdb, library, inferred) to
-   `type_applications`, with a schema migration (v7 to v8) and a test that opens a v7 project. Order:
+   `type_applications`, with a schema migration (v8 to v9) and a test that opens a v8 project. Order:
    a user application is never replaced by a library one; a DWARF or PDB type is not replaced by a
    library one; a user edit replaces a library application.
 6. *Name collisions.* A library type name that matches a user, DWARF or PDB type is a collision. The
@@ -2207,7 +2262,7 @@ sources only, a preprocessor at build time). What was built and measured:
   - `TypeLib.OrdinalImportIsNotMatched` (negative, a PE fixture with an ordinal import).
   - `TypeLib.UserAndDebugTypesWinOverALibrary` (unit, both orders).
   - `TypeLib.SameNameDifferentLayoutIsACollision` (negative).
-  - `Types.MigratesFromSchemaV7` (unit: an older project opens; existing rows get source `user`).
+  - `Types.MigratesFromSchemaV8` (unit: an older project opens; existing rows get source `user`).
   - `cli.project_type_library_apply` (CLI, a committed fixture project).
 - *Done when.* The fixture ELF shows its `puts` and `memcpy` prototypes in the CLI with provenance
   `Library`; a user edit replaces the library application; the schema migration test passes; the PE
@@ -2223,8 +2278,8 @@ sources only, a preprocessor at build time). What was built and measured:
   types of provenance Library are prototypes) and `apply_library_prototypes` (a FunctionPrototype application with
   source Library at each matched stub; an address that already has a prototype of another source keeps it, as
   `kept: user`).
-- Schema v8: `type_applications.source` (existing rows become `user`) and a `type_libraries` table; the v8 step
-  also repairs the two type columns an early v5 database lacks. `Project::set_type_application` never lets a
+- Schema v9 (v8 is T2's padding column): `type_applications.source` (existing rows become `user`) and a
+  `type_libraries` table; the v9 step also repairs the two type columns an early v5 database lacks. `Project::set_type_application` never lets a
   library application replace another source, and any other source replaces a library one.
 - `c_declaration` (`types.h`): a type as C (`int puts(char *)`), used by the CLI and the note.
 - CLI: `project type library add <db> <library.dtl>`, `project type library list <db>`, `project type library
@@ -2242,7 +2297,7 @@ sources only, a preprocessor at build time). What was built and measured:
 - Tests: `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`,
   `TypeLibApply.*` (merge, collisions, `VersionedNameMatchesTheUnversionedLibraryName`, `AmbiguousVersionsApplyNothing`,
   `OrdinalImportIsNotMatched`, `OnlyLibraryFunctionTypesArePrototypes`), `Types.CDeclarationPrintsCDeclarators`,
-  `Types.MigratesFromSchemaV7`, and the CLI chain `cli.project_type_library_apply*`,
+  `Types.MigratesFromSchemaV8`, and the CLI chain `cli.project_type_library_apply*`,
   `cli.project_type_applications_show_the_source`, `cli.decompile_notes_a_library_prototype`.
 - Checks recorded, not done: Donkey's ELF loader names an import without its version, so the two-version case is
   tested on names only; the image's stubs never reach it yet (the G24-T3 version reader can supply versions once it

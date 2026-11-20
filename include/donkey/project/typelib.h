@@ -55,6 +55,7 @@
 #include <vector>
 
 #include "donkey/core/result.h"
+#include "donkey/project/cdecl.h"
 #include "donkey/project/types.h"
 
 namespace donkey {
@@ -154,6 +155,10 @@ struct TypeLibrary {
 ///   typelib.too_many_lines         more than kMaxTypeLibraryHeaderLines header lines
 ///   typelib.line_too_long          a header line over kMaxTypeLibraryHeaderLineBytes
 ///   typelib.too_many_declarations  a declarations count over kMaxTypeLibraryDeclarations
+/// The bit-field rules of a library's ABI (`sysv`, `aapcs64` or `win64`): System V x86-64 and
+/// AAPCS64 are modelled; Win64 (and anything else) is not, so a library for it refuses bit-fields.
+[[nodiscard]] CBitFieldLayout bit_field_layout(std::string_view abi) noexcept;
+
 [[nodiscard]] Result<TypeLibrary> read_type_library(std::string_view text,
                                                     const TypeTable& known = {});
 

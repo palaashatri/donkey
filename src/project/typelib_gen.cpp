@@ -4,6 +4,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <set>
 #include <span>
 #include <string>
@@ -347,7 +348,8 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
       }
       continue;
     }
-    line_start = c == '\n';
+    // A directive's '#' may follow spaces or tabs.
+    line_start = c == '\n' || (line_start && (c == ' ' || c == '\t'));
     if (opens_literal(c)) {
       // A literal's contents are not delimiters.
       const std::size_t end = skip_literal(preprocessed, i);
@@ -391,12 +393,79 @@ std::vector<std::string> split_c_declarations(std::string_view preprocessed) {
   return out;
 }
 
+namespace {
+
+/// The first pragma of the text that may change a type's layout, or an empty string. Only the
+/// pragmas known to change no type or layout are allowed: `pack`, `ms_struct`,
+/// `scalar_storage_order` and any pragma not listed here are refused, because dropping them would
+/// keep the declarations after them with a layout the compiler did not use.
+std::string layout_pragma(std::string_view preprocessed) {
+  bool line_start = true;
+  for (std::size_t i = 0; i < preprocessed.size(); ++i) {
+    const char c = preprocessed[i];
+    if (line_start && c == '#') {
+      std::size_t end = preprocessed.find('\n', i);
+      if (end == std::string_view::npos) {
+        end = preprocessed.size();
+      }
+      std::string_view line = preprocessed.substr(i + 1, end - i - 1);
+      const auto trim = [](std::string_view& text) {
+        while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) {
+          text.remove_prefix(1);
+        }
+      };
+      trim(line);
+      if (line.starts_with("pragma") && (line.size() == 6 || line[6] == ' ' || line[6] == '\t')) {
+        line.remove_prefix(6);
+        trim(line);
+        static constexpr std::string_view kHarmless[] = {"once",
+                                                         "GCC diagnostic",
+                                                         "clang diagnostic",
+                                                         "GCC system_header",
+                                                         "GCC visibility",
+                                                         "GCC poison",
+                                                         "GCC warning",
+                                                         "GCC error",
+                                                         "message",
+                                                         "STDC",
+                                                         "weak",
+                                                         "redefine_extname"};
+        const bool harmless =
+            std::any_of(std::begin(kHarmless), std::end(kHarmless), [&](std::string_view known) {
+              return line.starts_with(known) &&
+                     (line.size() == known.size() || line[known.size()] == ' ' ||
+                      line[known.size()] == '\t' || line[known.size()] == '(');
+            });
+        if (!harmless) {
+          return std::string(line.substr(0, std::min<std::size_t>(line.size(), 80)));
+        }
+      }
+      i = end;
+      line_start = true;
+      continue;
+    }
+    // A directive's '#' may follow spaces or tabs.
+    line_start = c == '\n' || (line_start && (c == ' ' || c == '\t'));
+  }
+  return {};
+}
+
+}  // namespace
+
 Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
                                                 const TypeLibraryMakeOptions& options) {
+  if (const std::string pragma = layout_pragma(preprocessed); !pragma.empty()) {
+    return make_error<TypeLibraryMakeResult>(
+        Status::InvalidInput, "typelib_make.pragma",
+        "'#pragma " + pragma +
+            "' may change the layout of the declarations after it, which the generator does not "
+            "model");
+  }
   CDeclarationOptions parse_options;
   parse_options.pointer_size = options.pointer_size;
   parse_options.long_size = options.long_size;
   parse_options.char_is_signed = options.char_is_signed;
+  parse_options.bit_fields = bit_field_layout(options.abi);
 
   TypeLibraryMakeResult made;
   std::set<std::string> tags;

@@ -1,9 +1,11 @@
 #pragma once
 
 // A bounded parser for a subset of C declarations (G05-T2): struct, union, enum,
-// typedef, pointers, arrays, function prototypes and the fixed-width integer names.
+// typedef, pointers, arrays, bit-fields, function prototypes and the fixed-width integer
+// names. Array sizes, enumerator values and bit-field widths are integer constant
+// expressions (literals, enumeration constants, sizeof, integer casts and the C operators).
 // It turns the declarations into type definitions for the type store; it does not run
-// a preprocessor, evaluate expressions other than integer literals, or accept C++.
+// a preprocessor or accept C++.
 
 #include <cstddef>
 #include <cstdint>
@@ -16,6 +18,15 @@
 
 namespace donkey {
 
+/// How bit-fields are laid out. The placement rule is the same for the two modelled ABIs (a field
+/// starts at the next free bit unless it would cross a unit of its type's size); they differ in
+/// whether an unnamed bit-field's type aligns the record.
+enum class CBitFieldLayout : std::uint8_t {
+  SystemV,     ///< System V x86-64: an unnamed bit-field does not align the record
+  Aapcs64,     ///< AAPCS64 (AArch64 Linux): an unnamed bit-field's type aligns the record too
+  Unmodelled,  ///< any other ABI (Win64, Apple arm64): a bit-field is refused
+};
+
 /// The sizes the parser assumes for the target ABI. The defaults are LP64, the
 /// System V and Apple x86-64 and AArch64 model. `long double` is always 16 bytes.
 struct CDeclarationOptions {
@@ -24,6 +35,8 @@ struct CDeclarationOptions {
   /// Whether plain `char` is signed: true on x86-64 and Apple arm64, false on
   /// Linux AArch64.
   bool char_is_signed = true;
+  /// The bit-field rules; the default is System V x86-64's.
+  CBitFieldLayout bit_fields = CBitFieldLayout::SystemV;
 };
 
 /// Largest input the parser accepts, in bytes.
@@ -35,16 +48,18 @@ inline constexpr int kMaxCDeclarationNesting = 64;
 /// function names (C's ordinary identifiers) share the other.
 enum class CNameSpace : std::uint8_t { Tag, Ordinary };
 
-/// A name the text declares, in declaration order: a tag the first time the text names it (by a
-/// definition or a forward reference), a typedef name, or a function prototype's name. Names that
-/// come from the known table are not listed. A definition that completes a tag the text named
-/// earlier by a forward reference is listed again, with `completes` set, at the definition.
+/// A name the text declares at file scope, in declaration order: a tag the first time the text
+/// names it (by a definition or a forward reference), a typedef name, an enumeration constant, or a
+/// function prototype's name. Names that come from the known table are not listed, and neither are
+/// tags and constants declared inside a parameter list, whose scope ends with it (C11 6.2.1). A
+/// definition that completes a tag the text named earlier by a forward reference is listed again,
+/// with `completes` set, at the definition.
 struct CDeclaredName {
   std::string name;
   CNameSpace space = CNameSpace::Ordinary;
   /// Struct, Union or Enum for a tag. Typedef for a typedef name, also one that names an untagged
   /// struct, union or enum (`typedef struct { ... } name;`, whose type takes the name). Function
-  /// for a prototype.
+  /// for a prototype. Enum, in the ordinary name space, for an enumeration constant.
   TypeKind kind = TypeKind::Void;
   /// The definition of a tag this text named earlier only by a forward reference: not a second
   /// declaration of the name.

@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -52,6 +53,48 @@ TEST(TypeLibMake, SplitsTopLevelDeclarations) {
   EXPECT_EQ(declarations[1], "struct point { int x; int y; };");
   EXPECT_EQ(declarations[2], "int add(int a, int b) { return a + b; }");
   EXPECT_EQ(declarations[3], "void *memcpy(void *, const void *, size_t);");
+}
+
+// A pragma that may change a layout is not dropped: the input is refused. Pragmas known to change
+// no type pass, as before.
+TEST(TypeLibMake, LayoutPragmasAreRefused) {
+  for (const char* pragma :
+       {"#pragma pack(push, 1)\n", "  #  pragma pack(1)\n",
+        "#pragma scalar_storage_order big-endian\n", "#pragma something_unknown\n"}) {
+    SCOPED_TRACE(pragma);
+    const auto made = donkey::make_type_library(
+        std::string(pragma) + "struct s { char c; int i; };\n", test_options());
+    ASSERT_FALSE(made.has_value());
+    EXPECT_EQ(made.diagnostic().code, "typelib_make.pragma");
+  }
+  const auto harmless = donkey::make_type_library(
+      "  #  pragma GCC diagnostic push\nstruct s { char c; int i; };\n#pragma GCC diagnostic pop\n",
+      test_options());
+  ASSERT_TRUE(harmless.has_value()) << harmless.diagnostic().message;
+  EXPECT_EQ(harmless.value().kept, 1U);
+}
+
+// An untagged enum declares no type name, but its constants are names later declarations use.
+TEST(TypeLibMake, AnUntaggedEnumIsKeptForItsConstants) {
+  const auto made = donkey::make_type_library(
+      "typedef int ok;\nenum { N = 4 };\ntypedef int A[N];\n"
+      "enum { N = 5 };\n",  // N again: skipped
+      test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 3U);
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  auto library = donkey::read_type_library(made.value().text);
+  ASSERT_TRUE(library.has_value()) << library.diagnostic().message;
+  const auto* array_typedef = type_named(library.value(), "A", donkey::TypeKind::Typedef);
+  ASSERT_NE(array_typedef, nullptr);
+  const donkey::TypeDefinition* array = nullptr;
+  for (const donkey::TypeDefinition& type : library.value().types) {
+    if (type.id == array_typedef->target) {
+      array = &type;
+    }
+  }
+  ASSERT_NE(array, nullptr);
+  EXPECT_EQ(array->count, 4U);
 }
 
 TEST(TypeLibMake, KeepsWhatParsesAndListsTheRest) {
@@ -200,21 +243,65 @@ TEST(TypeLibMake, ShippedMuslLibraryLoads) {
   ASSERT_EQ(sigaltstack->fields.size(), 3U);
   EXPECT_EQ(sigaltstack->fields[2].name, "ss_size");
   EXPECT_EQ(sigaltstack->size, 24U);
-  // struct stat is not: its timespec members pad with bit-fields whose widths are constant
-  // expressions (`int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`), outside the C subset. It
-  // is listed as skipped with that reason, and the library has only the incomplete tag that
-  // `struct stat *` makes, never a struct with no fields presented as complete.
-  bool stat_listed = false;
-  for (const donkey::TypeLibrarySkipped& skipped : library.value().skipped) {
-    stat_listed = stat_listed ||
-                  (skipped.name == "stat" && skipped.reason.find("st_atim") != std::string::npos);
+  // Layouts that need bit-fields and constant expressions: musl's timespec pads with
+  // `int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`, and sigset_t, pthread_attr_t, fd_set and
+  // the rest size their arrays with `sizeof`. The sizes, alignments and offsets are GCC's for the
+  // same musl-dev 1.2.4-2 headers on x86-64.
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& type : library.value().types) {
+    table.put(type);
   }
-  EXPECT_TRUE(stat_listed);
-  // pthread_attr_t's layout uses `sizeof` in an array bound, which the parser does not evaluate:
-  // it and the functions that name it are listed as skipped, not dropped.
+  // A name may be a typedef or, for `typedef struct { ... } name;`, the struct itself.
+  const auto type_or_typedef = [&](const std::string& name) -> const donkey::TypeDefinition* {
+    for (const donkey::TypeDefinition& type : library.value().types) {
+      if (type.name == name &&
+          (type.kind == donkey::TypeKind::Typedef || type.kind == donkey::TypeKind::Struct ||
+           type.kind == donkey::TypeKind::Union)) {
+        return &type;
+      }
+    }
+    return nullptr;
+  };
+  struct Expected {
+    const char* name;
+    std::uint64_t size;
+    std::uint64_t alignment;
+  };
+  for (const Expected& expected :
+       {Expected{"stat", 144, 8}, Expected{"timespec", 16, 8}, Expected{"itimerspec", 32, 8},
+        Expected{"sigset_t", 128, 8}, Expected{"pthread_attr_t", 56, 8},
+        Expected{"pthread_mutex_t", 40, 8}, Expected{"fd_set", 128, 8}, Expected{"fenv_t", 32, 4},
+        Expected{"cpu_set_t", 128, 8}, Expected{"jmp_buf", 200, 8}, Expected{"sem_t", 32, 4}}) {
+    SCOPED_TRACE(expected.name);
+    const auto* type = type_or_typedef(expected.name);
+    if (type == nullptr) {
+      ADD_FAILURE() << "missing";
+      continue;
+    }
+    const auto size = table.size_of(type->id);
+    const auto alignment = table.alignment_of(type->id);
+    if (!size || !alignment) {
+      ADD_FAILURE() << "no layout";
+      continue;
+    }
+    EXPECT_EQ(size.value(), expected.size);
+    EXPECT_EQ(alignment.value(), expected.alignment);
+  }
+  const auto* stat = type_named(library.value(), "stat", donkey::TypeKind::Struct);
+  ASSERT_NE(stat, nullptr);
+  std::map<std::string, std::uint64_t> offsets;
+  for (const donkey::TypeField& field : stat->fields) {
+    offsets[field.name] = field.offset;
+  }
+  EXPECT_EQ(offsets["st_size"], 48U);
+  EXPECT_EQ(offsets["st_atim"], 72U);
+  EXPECT_EQ(offsets["st_ctim"], 104U);
+  // pthread_create takes a function pointer, a parenthesised declarator the subset does not
+  // parse: it is listed as skipped, not dropped.
   bool listed = false;
   for (const donkey::TypeLibrarySkipped& skipped : library.value().skipped) {
-    listed = listed || skipped.name == "pthread_create";
+    listed = listed || (skipped.name == "pthread_create" &&
+                        skipped.reason.find("cdecl.parenthesized_declarator") != std::string::npos);
   }
   EXPECT_TRUE(listed);
 }

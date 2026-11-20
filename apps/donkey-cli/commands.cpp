@@ -2744,6 +2744,9 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
       options.data_model = value;
       options.long_size = value == "LLP64" ? 4 : 8;
     } else if (arg == "--char-signed") {
+      if (value != "true" && value != "false") {
+        return usage_error("typelib make: --char-signed takes true or false");
+      }
       options.char_is_signed = value == "true";
     } else if (arg == "--source") {
       options.source = value;

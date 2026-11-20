@@ -1308,11 +1308,12 @@ void expect_located_error(std::string_view text, const char* code, std::string_v
 }  // namespace
 
 TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
-  // A tag the first time it is named (here by a forward reference in a prototype), then again at
-  // its definition, marked as completing it; a typedef that names an untagged struct, a plain
-  // typedef and a prototype.
+  // A tag the first time it is named (here by a forward declaration at file scope), then again at
+  // its definition, marked as completing it; a prototype that uses it; a typedef that names an
+  // untagged struct, a plain typedef, an enum tag and its constant.
   std::vector<donkey::CDeclaredName> names;
   const auto parsed = donkey::parse_c_declarations(
+      "struct box;\n"
       "int32_t area(const struct box *b);\n"
       "struct box { int32_t w; int32_t h; };\n"
       "typedef struct { int32_t x; } item;\n"
@@ -1320,7 +1321,7 @@ TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
       "enum mode { MODE_A = 1 };\n",
       donkey::TypeTable{}, {}, &names);
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
-  ASSERT_EQ(names.size(), 6U);
+  ASSERT_EQ(names.size(), 7U);
   EXPECT_EQ(names[0].name, "box");
   EXPECT_EQ(names[0].space, donkey::CNameSpace::Tag);
   EXPECT_EQ(names[0].kind, donkey::TypeKind::Struct);
@@ -1337,9 +1338,22 @@ TEST(Types, CDeclarationsListTheNamesTheyDeclareWithTheirNameSpace) {
   EXPECT_FALSE(names[3].completes);
   EXPECT_EQ(names[4].name, "count_t");
   EXPECT_EQ(names[4].kind, donkey::TypeKind::Typedef);
-  EXPECT_EQ(names[5].name, "mode");
-  EXPECT_EQ(names[5].space, donkey::CNameSpace::Tag);
+  // An enum's constants are listed as its body is read, before the tag it completes.
+  EXPECT_EQ(names[5].name, "MODE_A");
+  EXPECT_EQ(names[5].space, donkey::CNameSpace::Ordinary);
   EXPECT_EQ(names[5].kind, donkey::TypeKind::Enum);
+  EXPECT_EQ(names[6].name, "mode");
+  EXPECT_EQ(names[6].space, donkey::CNameSpace::Tag);
+  EXPECT_EQ(names[6].kind, donkey::TypeKind::Enum);
+  // The prototype's parameter points to the completed struct.
+  const auto* area = named_type(parsed.value(), "area");
+  const auto* box = named_type(parsed.value(), "box");
+  ASSERT_NE(area, nullptr);
+  ASSERT_NE(box, nullptr);
+  ASSERT_EQ(area->fields.size(), 1U);
+  const auto* box_pointer = type_by_id(parsed.value(), area->fields[0].type);
+  ASSERT_NE(box_pointer, nullptr);
+  EXPECT_EQ(box_pointer->target, box->id);
 
   // A tag defined without a forward reference is listed once, not as completing anything.
   std::vector<donkey::CDeclaredName> once;
@@ -1476,6 +1490,370 @@ void reset(void);
   EXPECT_FALSE(plain_char->is_signed);
 }
 
+namespace {
+
+struct ExpectedBits {
+  const char* name;  ///< "" for an unnamed bit-field, which is padding
+  std::uint64_t offset;
+  std::uint8_t bit_offset;
+  std::uint8_t bit_size;
+};
+
+void expect_layout(const std::vector<donkey::TypeDefinition>& types, const char* tag,
+                   std::uint64_t size, std::uint64_t alignment,
+                   std::initializer_list<ExpectedBits> fields) {
+  SCOPED_TRACE(tag);
+  const auto* type = named_type(types, tag);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(type->size, size);
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : types) {
+    table.put(definition);
+  }
+  ASSERT_TRUE(table.validate().has_value()) << table.validate().diagnostic().message;
+  const auto aligned = table.alignment_of(type->id);
+  ASSERT_TRUE(aligned.has_value());
+  EXPECT_EQ(aligned.value(), alignment);
+  ASSERT_EQ(type->fields.size(), fields.size());
+  std::size_t index = 0;
+  for (const ExpectedBits& expected : fields) {
+    SCOPED_TRACE(index);
+    const donkey::TypeField& field = type->fields[index++];
+    EXPECT_EQ(field.name, expected.name);
+    EXPECT_EQ(field.padding, std::string_view(expected.name).empty());
+    EXPECT_EQ(field.offset, expected.offset);
+    EXPECT_EQ(field.bit_offset, expected.bit_offset);
+    EXPECT_EQ(field.bit_size, expected.bit_size);
+  }
+}
+
+constexpr const char* kBitFieldDeclarations = R"(
+struct b1 { unsigned a:3; unsigned b:5; unsigned c:24; char d; };
+struct b2 { char a; int b:3; };
+struct b3 { char a; int :0; char b; };
+struct b4 { char a; int b:30; int c:3; };
+struct b5 { long a:40; long b:30; };
+typedef long time_t;
+struct timespec { time_t tv_sec; int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);
+  long tv_nsec; int :8*(sizeof(time_t)-sizeof(long))*(1234!=4321); };
+struct b6 { char a; int :3; char b; };
+union u1 { int a:3; char b; };
+struct b7 { _Bool f:1; unsigned char g:7; unsigned short h:9; };
+struct t1 { char c; int :0; };
+struct t2 { char c; int :3; };
+union u2 { char c; int :3; };
+struct t3 { char c; long :0; char d; };
+)";
+
+}  // namespace
+
+// The layouts are GCC 13.3's: for System V x86-64 from the host compiler, for AAPCS64 from
+// aarch64-linux-gnu-gcc run under qemu-aarch64 (`sizeof`, `_Alignof`, `offsetof`, and the bits each
+// bit-field sets), so the parser is checked against the compilers, not against itself. An unnamed
+// bit-field is kept as padding, which the type store accounts for.
+TEST(Types, BitFieldsAreLaidOutAsTheCompilerLaysThemOut) {
+  const auto parsed = donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  expect_layout(types, "b1", 8, 4,
+                {{"a", 0, 0, 3}, {"b", 0, 3, 5}, {"c", 1, 0, 24}, {"d", 4, 0, 0}});
+  expect_layout(types, "b2", 4, 4, {{"a", 0, 0, 0}, {"b", 1, 0, 3}});
+  // A zero-width bit-field moves the next member to an int boundary, but does not align the
+  // struct.
+  expect_layout(types, "b3", 5, 1, {{"a", 0, 0, 0}, {"", 4, 0, 0}, {"b", 4, 0, 0}});
+  // A bit-field that would cross a unit of its type starts the next unit.
+  expect_layout(types, "b4", 12, 4, {{"a", 0, 0, 0}, {"b", 4, 0, 30}, {"c", 8, 0, 3}});
+  expect_layout(types, "b5", 16, 8, {{"a", 0, 0, 40}, {"b", 8, 0, 30}});
+  // musl's padding for a 32-bit `long`: both widths are zero on LP64.
+  expect_layout(types, "timespec", 16, 8,
+                {{"tv_sec", 0, 0, 0}, {"", 8, 0, 0}, {"tv_nsec", 8, 0, 0}, {"", 16, 0, 0}});
+  // An unnamed bit-field pads, but its type does not align the struct.
+  expect_layout(types, "b6", 3, 1, {{"a", 0, 0, 0}, {"", 1, 0, 3}, {"b", 2, 0, 0}});
+  expect_layout(types, "u1", 4, 4, {{"a", 0, 0, 3}, {"b", 0, 0, 0}});
+  expect_layout(types, "b7", 4, 2, {{"f", 0, 0, 1}, {"g", 0, 1, 7}, {"h", 2, 0, 9}});
+  // Trailing unnamed bit-fields: the record's size counts them.
+  expect_layout(types, "t1", 4, 1, {{"c", 0, 0, 0}, {"", 4, 0, 0}});
+  expect_layout(types, "t2", 2, 1, {{"c", 0, 0, 0}, {"", 1, 0, 3}});
+  expect_layout(types, "u2", 1, 1, {{"c", 0, 0, 0}, {"", 0, 0, 3}});
+  expect_layout(types, "t3", 9, 1, {{"c", 0, 0, 0}, {"", 8, 0, 0}, {"d", 8, 0, 0}});
+}
+
+TEST(Types, Aapcs64BitFieldsAlignTheRecordToUnnamedBitFields) {
+  donkey::CDeclarationOptions aapcs64;
+  aapcs64.char_is_signed = false;
+  aapcs64.bit_fields = donkey::CBitFieldLayout::Aapcs64;
+  const auto parsed =
+      donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{}, aapcs64);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  // The same places as System V; the records an unnamed bit-field's type aligns differ.
+  expect_layout(types, "b1", 8, 4,
+                {{"a", 0, 0, 3}, {"b", 0, 3, 5}, {"c", 1, 0, 24}, {"d", 4, 0, 0}});
+  expect_layout(types, "b3", 8, 4, {{"a", 0, 0, 0}, {"", 4, 0, 0}, {"b", 4, 0, 0}});
+  expect_layout(types, "b4", 12, 4, {{"a", 0, 0, 0}, {"b", 4, 0, 30}, {"c", 8, 0, 3}});
+  expect_layout(types, "b5", 16, 8, {{"a", 0, 0, 40}, {"b", 8, 0, 30}});
+  expect_layout(types, "timespec", 16, 8,
+                {{"tv_sec", 0, 0, 0}, {"", 8, 0, 0}, {"tv_nsec", 8, 0, 0}, {"", 16, 0, 0}});
+  expect_layout(types, "b6", 4, 4, {{"a", 0, 0, 0}, {"", 1, 0, 3}, {"b", 2, 0, 0}});
+  expect_layout(types, "u1", 4, 4, {{"a", 0, 0, 3}, {"b", 0, 0, 0}});
+  expect_layout(types, "b7", 4, 2, {{"f", 0, 0, 1}, {"g", 0, 1, 7}, {"h", 2, 0, 9}});
+  expect_layout(types, "t1", 4, 4, {{"c", 0, 0, 0}, {"", 4, 0, 0}});
+  expect_layout(types, "t2", 4, 4, {{"c", 0, 0, 0}, {"", 1, 0, 3}});
+  expect_layout(types, "u2", 4, 4, {{"c", 0, 0, 0}, {"", 0, 0, 3}});
+  expect_layout(types, "t3", 16, 8, {{"c", 0, 0, 0}, {"", 8, 0, 0}, {"d", 8, 0, 0}});
+
+  // Win64 (and any ABI not modelled) refuses a bit-field rather than lay it out as System V does.
+  donkey::CDeclarationOptions win64;
+  win64.long_size = 4;
+  win64.bit_fields = donkey::CBitFieldLayout::Unmodelled;
+  const auto refused = donkey::parse_c_declarations(
+      "struct w { unsigned char a : 1; unsigned int b : 1; };", donkey::TypeTable{}, win64);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "cdecl.bitfield_abi");
+  // A struct without bit-fields is unaffected.
+  EXPECT_TRUE(
+      donkey::parse_c_declarations("struct w { char a; int b; };", donkey::TypeTable{}, win64)
+          .has_value());
+}
+
+// The type store checks padding fields and a record's own alignment.
+TEST(Types, PaddingFieldsAndRecordAlignmentAreChecked) {
+  const auto parsed =
+      donkey::parse_c_declarations("struct t { char c; int :3; };", donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : parsed.value()) {
+    table.put(definition);
+  }
+  const auto* original = named_type(parsed.value(), "t");
+  ASSERT_NE(original, nullptr);
+  ASSERT_TRUE(table.validate().has_value());
+
+  donkey::TypeDefinition named = *original;
+  named.fields[1].name = "x";  // a padding field has no name
+  table.put(named);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.named_padding");
+
+  donkey::TypeDefinition no_padding = *original;
+  no_padding.fields.pop_back();  // without the padding, 2 bytes is more than the members need
+  table.put(no_padding);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.size_mismatch");
+
+  donkey::TypeDefinition aligned = *original;
+  aligned.alignment = 4;  // as AAPCS64 lays it out: 4 bytes, aligned to 4
+  aligned.size = 4;
+  table.put(aligned);
+  EXPECT_TRUE(table.validate().has_value()) << table.validate().diagnostic().message;
+  EXPECT_EQ(table.alignment_of(aligned.id).value(), 4U);
+
+  aligned.alignment = 3;
+  table.put(aligned);
+  EXPECT_EQ(table.validate().diagnostic().code, "type.bad_alignment");
+}
+
+// Padding fields and a record's own alignment are stored (schema v8), and a v7 project gains the
+// column with every existing member read as a member.
+TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
+  TempPath path("types-padding");
+  donkey::CDeclarationOptions aapcs64;
+  aapcs64.bit_fields = donkey::CBitFieldLayout::Aapcs64;
+  const auto parsed = donkey::parse_c_declarations(
+      "struct t { char c; int :3; }; struct m { char a; int b; };", donkey::TypeTable{}, aapcs64);
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : parsed.value()) {
+    table.put(definition);
+  }
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+  }
+  {
+    auto reopened = Project::open(path.str());
+    ASSERT_TRUE(reopened.has_value()) << reopened.diagnostic().message;
+    auto stored = reopened.value().types();
+    ASSERT_TRUE(stored.has_value()) << stored.diagnostic().message;
+    const std::vector<donkey::TypeDefinition> stored_types = stored.value().list();
+    const auto* t = named_type(stored_types, "t");
+    ASSERT_NE(t, nullptr);
+    EXPECT_EQ(t->size, 4U);
+    EXPECT_EQ(t->alignment, 4U);
+    ASSERT_EQ(t->fields.size(), 2U);
+    EXPECT_FALSE(t->fields[0].padding);
+    EXPECT_TRUE(t->fields[1].padding);
+    EXPECT_EQ(t->fields[1].bit_size, 3U);
+    EXPECT_TRUE(stored.value().validate().has_value());
+  }
+
+  // Back to a v7 database: without the column, and without the padding row it would describe.
+  {
+    sqlite3* raw = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(raw,
+                           "DELETE FROM type_fields WHERE padding = 1; DELETE FROM types WHERE "
+                           "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; PRAGMA "
+                           "user_version=7",
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(raw);
+  }
+  auto migrated = Project::open(path.str());
+  ASSERT_TRUE(migrated.has_value()) << migrated.diagnostic().message;
+  EXPECT_EQ(migrated.value().schema_version(), donkey::kProjectSchemaVersion);
+  auto kept = migrated.value().types();
+  ASSERT_TRUE(kept.has_value()) << kept.diagnostic().message;
+  const std::vector<donkey::TypeDefinition> kept_types = kept.value().list();
+  const auto* m = named_type(kept_types, "m");
+  ASSERT_NE(m, nullptr);
+  ASSERT_EQ(m->fields.size(), 2U);
+  EXPECT_FALSE(m->fields[0].padding);
+  EXPECT_FALSE(m->fields[1].padding);
+  EXPECT_EQ(m->fields[1].offset, 4U);
+}
+
+TEST(Types, ConstantExpressionsFollowC) {
+  const char* text = R"(
+enum e1 { A = 1 << 4, B = A | 3, C, D = ~0 + 10, E = (unsigned char)300, F = -1 < 0u,
+          G = sizeof(int[3]) % 5, H = 0x10 >> 2 && 0 || 7 };
+typedef int pthread_like[sizeof(long)==8?14:9];
+typedef unsigned long sigset_like[128/sizeof(long)];
+typedef char hex_wraps[(0xFFFFFFFF + 1) == 0];
+typedef char decimal_widens[(4294967295 + 1) == 4294967296];
+typedef char short_circuit[1 || 1/0];
+typedef char untaken[0 ? 1/0 : 2];
+typedef char unevaluated[sizeof(1/0)];
+typedef char cast_to_bool[(_Bool)256 + 1];
+typedef char enum_bound[C - A];
+)";
+  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  const auto* e1 = named_type(types, "e1");
+  ASSERT_NE(e1, nullptr);
+  const std::vector<std::int64_t> expected = {16, 19, 20, 9, 44, 0, 2, 1};  // GCC's values
+  ASSERT_EQ(e1->enumerators.size(), expected.size());
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(e1->enumerators[i].value, expected[i]) << e1->enumerators[i].name;
+  }
+  const auto count_of = [&](const char* name) -> std::uint64_t {
+    const auto* typedef_type = named_type(types, name);
+    if (typedef_type == nullptr) {
+      ADD_FAILURE() << name << " is missing";
+      return 0;
+    }
+    const auto* array = type_by_id(types, typedef_type->target);
+    if (array == nullptr || array->kind != donkey::TypeKind::Array) {
+      ADD_FAILURE() << name << " is not an array";
+      return 0;
+    }
+    return array->count;
+  };
+  EXPECT_EQ(count_of("pthread_like"), 14U);
+  EXPECT_EQ(count_of("sigset_like"), 16U);
+  EXPECT_EQ(count_of("hex_wraps"), 1U);
+  EXPECT_EQ(count_of("decimal_widens"), 1U);
+  EXPECT_EQ(count_of("short_circuit"), 1U);
+  EXPECT_EQ(count_of("untaken"), 2U);
+  EXPECT_EQ(count_of("unevaluated"), 4U);
+  EXPECT_EQ(count_of("cast_to_bool"), 2U);
+  EXPECT_EQ(count_of("enum_bound"), 4U);
+
+  // With a 4-byte long, `sizeof(long)==8?14:9` is 9.
+  donkey::CDeclarationOptions ilp32;
+  ilp32.pointer_size = 4;
+  ilp32.long_size = 4;
+  const auto narrow = donkey::parse_c_declarations(
+      "typedef int pthread_like[sizeof(long)==8?14:9];", donkey::TypeTable{}, ilp32);
+  ASSERT_TRUE(narrow.has_value()) << narrow.diagnostic().message;
+  const auto* narrow_typedef = named_type(narrow.value(), "pthread_like");
+  ASSERT_NE(narrow_typedef, nullptr);
+  const auto* narrow_array = type_by_id(narrow.value(), narrow_typedef->target);
+  ASSERT_NE(narrow_array, nullptr);
+  EXPECT_EQ(narrow_array->count, 9U);
+}
+
+// A parameter list is a scope (C11 6.2.1): what it declares is not visible after it, and hides
+// outer names only inside it.
+TEST(Types, PrototypesAreScopes) {
+  std::vector<donkey::CDeclaredName> names;
+  const auto parsed = donkey::parse_c_declarations(
+      "enum { N = 2 };\n"
+      "void f(enum { N = 3 } x, char (*unused));\n",
+      donkey::TypeTable{}, {}, &names);
+  // The parenthesised declarator is refused; the scope is checked without it below.
+  ASSERT_FALSE(parsed.has_value());
+
+  const auto scoped = donkey::parse_c_declarations(
+      "enum { N = 2 };\n"
+      "void f(enum { N = 3 } x, char y[N]);\n"
+      "typedef char after[N];\n"
+      "int32_t g(struct hidden *h);\n"
+      "struct hidden { int32_t x; };\n",
+      donkey::TypeTable{}, {}, &names);
+  ASSERT_TRUE(scoped.has_value()) << scoped.diagnostic().message;
+  const auto& types = scoped.value();
+  // The file-scope N is 2 again after f's prototype.
+  const auto* after = named_type(types, "after");
+  ASSERT_NE(after, nullptr);
+  const auto* after_array = type_by_id(types, after->target);
+  ASSERT_NE(after_array, nullptr);
+  EXPECT_EQ(after_array->count, 2U);
+  // `struct hidden` in g's prototype is its own, incomplete type, not the later definition.
+  const auto* g = named_type(types, "g");
+  ASSERT_NE(g, nullptr);
+  ASSERT_EQ(g->fields.size(), 1U);
+  const auto* pointer = type_by_id(types, g->fields[0].type);
+  ASSERT_NE(pointer, nullptr);
+  const auto* pointee = type_by_id(types, pointer->target);
+  ASSERT_NE(pointee, nullptr);
+  EXPECT_TRUE(pointee->fields.empty());
+  const donkey::TypeDefinition* defined = nullptr;
+  for (const donkey::TypeDefinition& type : types) {
+    if (type.name == "hidden" && !type.fields.empty()) {
+      defined = &type;
+    }
+  }
+  ASSERT_NE(defined, nullptr);
+  EXPECT_NE(defined->id, pointee->id);
+  // Names declared inside a prototype are not listed; the file-scope ones are, once each.
+  std::vector<std::string> listed;
+  for (const donkey::CDeclaredName& name : names) {
+    listed.push_back(name.name);
+    EXPECT_FALSE(name.completes) << name.name;
+  }
+  EXPECT_EQ(listed, (std::vector<std::string>{"N", "f", "after", "g", "hidden"}));
+
+  expect_located_error("enum { N = 1 }; enum { N = 2 };", "cdecl.redefinition",
+                       "line 1, column 24: ");
+  expect_located_error("typedef int N; enum { N };", "cdecl.redefinition", "line 1, column 23: ");
+  expect_located_error("enum { N }; typedef int N;", "cdecl.redefinition", "line 1, column 25: ");
+  expect_located_error("struct b; void h(struct b { int x; } *p);", "cdecl.prototype_tag",
+                       "line 1, column 25: ");
+}
+
+TEST(Types, ACastKeepsItsTypeUntilAnOperatorPromotesIt) {
+  const auto parsed = donkey::parse_c_declarations(
+      "typedef char plain[sizeof((unsigned char)1)];\n"
+      "typedef char promoted[sizeof(+(unsigned char)1)];\n"
+      "typedef char boolean[sizeof((_Bool)5)];\n"
+      "typedef char wide[sizeof((short)1 + (short)1)];\n"
+      "typedef char narrowed[(unsigned char)-1];\n",
+      donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto count = [&](const char* name) -> std::uint64_t {
+    const auto* typedef_type = named_type(parsed.value(), name);
+    const auto* array =
+        typedef_type == nullptr ? nullptr : type_by_id(parsed.value(), typedef_type->target);
+    return array == nullptr ? 0 : array->count;
+  };
+  EXPECT_EQ(count("plain"), 1U);
+  EXPECT_EQ(count("promoted"), 4U);
+  EXPECT_EQ(count("boolean"), 1U);
+  EXPECT_EQ(count("wide"), 4U);
+  EXPECT_EQ(count("narrowed"), 255U);
+}
+
 TEST(Types, ParserErrorsAreLocated) {
   expect_located_error("struct s { int x }", "cdecl.unexpected_token", "line 1, column 18: ");
   expect_located_error("typedef int T;\n  #define X 1\n", "cdecl.preprocessor",
@@ -1485,8 +1863,26 @@ TEST(Types, ParserErrorsAreLocated) {
   expect_located_error("foo x;", "cdecl.unknown_type", "line 1, column 1: ");
   expect_located_error("struct s { int a[]; };", "cdecl.array_size_required",
                        "line 1, column 17: ");
-  expect_located_error("struct s { int a : 3; };", "cdecl.bitfield_unsupported",
-                       "line 1, column 18: ");
+  expect_located_error("struct s { int a : 0; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { int a : 33; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { int a : -1; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { float f : 3; };", "cdecl.bitfield_type", "line 1, column 18: ");
+  expect_located_error("typedef int a[1/0];", "cdecl.division_by_zero", "line 1, column 16: ");
+  expect_located_error("typedef int a[1%0];", "cdecl.division_by_zero", "line 1, column 16: ");
+  expect_located_error("typedef int a[x];", "cdecl.not_constant", "line 1, column 15: ");
+  expect_located_error("typedef int a[-1];", "cdecl.array_size_required", "line 1, column 15: ");
+  expect_located_error("typedef int a[1 << 40];", "cdecl.bad_shift", "line 1, column 17: ");
+  expect_located_error("typedef int a[1 << -1];", "cdecl.bad_shift", "line 1, column 17: ");
+  expect_located_error("enum e { A = 2147483647 + 1 };", "cdecl.constant_overflow",
+                       "line 1, column 25: ");
+  expect_located_error("enum e { A = -(-2147483647 - 1) };", "cdecl.constant_overflow",
+                       "line 1, column 14: ");
+  expect_located_error("typedef int a[(-2147483647 - 1) / -1];", "cdecl.constant_overflow",
+                       "line 1, column 33: ");
+  expect_located_error("typedef int a[sizeof(struct nope)];", "cdecl.incomplete_type",
+                       "line 1, column 22: ");
+  expect_located_error("typedef int a[(int *)1];", "cdecl.not_integer", "line 1, column 16: ");
+  expect_located_error("typedef int a[1uu];", "cdecl.bad_number", "line 1, column 15: ");
   expect_located_error("struct s { int a; }; struct s { int b; };", "cdecl.redefinition",
                        "line 1, column 29: ");
   expect_located_error("struct s {", "cdecl.unexpected_token", "line 1, column 11: ");
@@ -1498,6 +1894,32 @@ TEST(Types, ParserErrorsAreLocated) {
                        "line 1, column 16: ");
   expect_located_error(std::string("typedef int ") + std::string(65, '*') + "p;", "cdecl.nesting",
                        "line 1, column 77: ");
+  // Expression nesting is bounded for the whole parse, also through structs inside `sizeof`.
+  std::string nested_sizeof = "typedef char t[";
+  for (int i = 0; i < 40; ++i) {
+    nested_sizeof += "sizeof(struct { char a[";
+  }
+  nested_sizeof += "1";
+  for (int i = 0; i < 40; ++i) {
+    nested_sizeof += "]; })";
+  }
+  nested_sizeof += "];";
+  const auto nested = donkey::parse_c_declarations(nested_sizeof, donkey::TypeTable{});
+  ASSERT_FALSE(nested.has_value());
+  EXPECT_EQ(nested.diagnostic().code, "cdecl.nesting");
+  expect_located_error(
+      "typedef char t[" + std::string(100, '(') + "1" + std::string(100, ')') + "];",
+      "cdecl.nesting", "line 1, column ");
+  std::string minuses;
+  for (int i = 0; i < 100; ++i) {
+    minuses += "- ";
+  }
+  expect_located_error("typedef char t[" + minuses + "1];", "cdecl.nesting", "line 1, column ");
+  // `++` and `--` are C operators the subset does not have, not two signs.
+  expect_located_error("typedef char t[1++1];", "cdecl.unexpected_token", "line 1, column 17: ");
+  expect_located_error("typedef char t[1--1];", "cdecl.unexpected_token", "line 1, column 17: ");
+  expect_located_error("typedef _Bool flag; struct s { flag f : 2; };", "cdecl.bitfield_width",
+                       "line 1, column 41: ");
   // An array of arrays whose total size does not fit in 64 bits is refused by the
   // type store's whole-table check.
   expect_located_error("typedef long long huge[9223372036854775807][4];", "cdecl.invalid_type", "");
@@ -1940,10 +2362,11 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
-    // Version 8's column goes too, so the file is what version 6 wrote.
+    // Version 8's and 9's columns go too, so the file is what version 6 wrote.
     ASSERT_EQ(sqlite3_exec(raw,
                            "DROP TABLE local_names; DROP TABLE type_libraries; ALTER TABLE "
-                           "type_applications DROP COLUMN source; PRAGMA user_version=6",
+                           "type_applications DROP COLUMN source; ALTER TABLE type_fields DROP "
+                           "COLUMN padding; PRAGMA user_version=6",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
@@ -2080,10 +2503,10 @@ TEST(Project, ReplacesEveryLocalNameAtOnceAndKeepsThePreviousSetWhenRefused) {
   EXPECT_TRUE(cleared.value().empty());
 }
 
-// G22-T3: schema v8 records the source of each type application. A v7 project opens, and its
+// G22-T3: schema v9 records the source of each type application. A v8 project opens, and its
 // applications are the user's; a library application does not replace a user one, and a user
 // application replaces a library one.
-TEST(Types, MigratesFromSchemaV7) {
+TEST(Types, MigratesFromSchemaV8) {
   TempPath temp("types-v7");
   const std::string path = temp.str();
   auto loaded = load_elf();
@@ -2113,12 +2536,12 @@ TEST(Types, MigratesFromSchemaV7) {
                     .has_value());
   }
   {
-    // Back to v7: the table without its `source` column.
+    // Back to v8: the table without its `source` column.
     sqlite3* db = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(db,
                            "ALTER TABLE type_applications DROP COLUMN source; "
-                           "DROP TABLE type_libraries; PRAGMA user_version=7;",
+                           "DROP TABLE type_libraries; PRAGMA user_version=8;",
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(db);

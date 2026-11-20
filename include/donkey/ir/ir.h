@@ -336,6 +336,11 @@ void run_ir_passes(IrFunction& function, const PassOptions& options);
 /// a precise message; never throws.
 [[nodiscard]] Result<bool> verify_ir(const IrFunction& function);
 
+/// True for `r ^ r` and `r - r` of one register at one width (`xor eax, eax`, `sub rax, rax`): the
+/// result is 0 whatever the register holds, so the statement reads no value of it. A check of
+/// which values a statement depends on (parameters, a register clobbered by a call) skips it.
+[[nodiscard]] bool is_zeroing_idiom(const IrStatement& statement) noexcept;
+
 struct PseudocodeLine {
   std::string text;
   std::uint64_t source_address = 0;
