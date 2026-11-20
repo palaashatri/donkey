@@ -1,6 +1,7 @@
 #include "commands.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cinttypes>
 #include <cstddef>
@@ -1853,10 +1854,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     if (!libraries) {
       return fail(libraries.diagnostic());
     }
-    std::string library_names;
+    // Each prototype names the library that brought it (its type's `library`).
+    std::map<std::int64_t, std::string> library_names;
     for (const donkey::TypeLibraryRecord& library : libraries.value()) {
-      library_names +=
-          (library_names.empty() ? "" : ", ") + library.library + " " + library.library_version;
+      library_names[library.id] = library.library + " " + library.library_version;
     }
     for (const donkey::TypeApplication& application : applications.value()) {
       const donkey::TypeDefinition* type = table.value().find(application.type_id);
@@ -1864,9 +1865,11 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
           application.source != donkey::TypeProvenance::Library || type == nullptr) {
         continue;
       }
+      const auto library = library_names.find(type->library);
       library_prototype_notes[application.address] =
-          "library prototype (" + library_names +
-          "): " + donkey::c_declaration(table.value(), application.type_id, type->name);
+          (library == library_names.end() ? std::string("library prototype")
+                                          : "library prototype (" + library->second + ")") +
+          ": " + donkey::c_declaration(table.value(), application.type_id, type->name);
     }
   }
 
@@ -2020,13 +2023,25 @@ Result<donkey::LoadedBinary> load_project_image(const Project& project, std::int
     if (image.id != image_id) {
       continue;
     }
-    auto loaded = donkey::load_binary(image.path);
+    // The architecture the project recorded is asked for: a universal Mach-O otherwise loads its
+    // default slice, which the whole-file hash does not tell apart.
+    LoadOptions options;
+    if (const auto architecture = parse_architecture(image.architecture)) {
+      options.preferred_architecture = *architecture;
+    }
+    auto loaded = donkey::load_binary(image.path, options);
     if (!loaded) {
       return loaded.diagnostic();
     }
     if (loaded.value().image.sha256 != image.sha256) {
       return Diagnostic::make(Status::InvalidInput, "project.image_changed",
                               image.path + " no longer matches the hash the project recorded");
+    }
+    const std::string architecture = architecture_name(loaded.value().image.architecture);
+    if (architecture != image.architecture) {
+      return Diagnostic::make(Status::InvalidInput, "project.image_changed",
+                              image.path + " loads as " + architecture +
+                                  ", and the project recorded " + image.architecture);
     }
     if (record != nullptr) {
       *record = image;
@@ -2064,30 +2079,27 @@ int command_project_type_library_apply(const std::string& database, std::string_
   if (!loaded) {
     return fail(loaded.diagnostic());
   }
-  // The project's library prototypes are one set, whichever library brought each: every library
-  // must be for the image's architecture, or none applies.
-  const std::string architecture = architecture_name(loaded.value().image.architecture);
-  for (const donkey::TypeLibraryRecord& library : libraries.value()) {
-    if (library.architecture != architecture) {
-      return fail(Diagnostic::make(Status::InvalidInput, "project.type_library_architecture",
-                                   "the type library " + library.library + " " +
-                                       library.library_version + " is for " + library.architecture +
-                                       ", the image is " + architecture));
-    }
+  const BinaryImage& image = loaded.value().image;
+  if (image.format != BinaryFormat::Elf && image.format != BinaryFormat::Pe) {
+    // Mach-O stubs are not bound to their imports by the analysis yet: nothing could apply.
+    return fail(Diagnostic::make(Status::Unsupported, "project.type_library_format",
+                                 std::string("applying a type library to a ") +
+                                     format_name(image.format) +
+                                     " image is not supported: its import stubs are not bound to "
+                                     "the libraries that define them"));
   }
-  auto analysis = analyze(loaded.value().image, loaded.value().data);
+  const donkey::ImageAbi abi =
+      donkey::image_abi(format_name(image.format), architecture_name(image.architecture));
+  auto analysis = analyze(image, loaded.value().data, analysis_options());
   if (!analysis) {
     return fail(analysis.diagnostic());
   }
-  std::vector<donkey::ImportSite> sites;
-  for (const Function& function : analysis.value().functions) {
-    if (!function.import_name.empty()) {
-      sites.push_back(donkey::ImportSite{function.import_name, function.address});
-    }
-  }
-  auto applied =
-      donkey::apply_library_prototypes(project.value(), static_cast<std::int64_t>(image_id), sites,
-                                       loaded.value().image.format == BinaryFormat::MachO);
+  // Where each import binds, by the loader's own search (--sysroot, --library-path, --program).
+  const std::vector<donkey::ImportSite> sites =
+      donkey::import_sites(image, loaded.value().data, analysis.value(), library_search());
+  auto applied = donkey::apply_library_prototypes(project.value(),
+                                                  static_cast<std::int64_t>(image_id), sites, abi);
+  const bool partial = analysis.value().partial;
   if (!applied) {
     return fail(applied.diagnostic());
   }
@@ -2107,12 +2119,17 @@ int command_project_type_library_apply(const std::string& database, std::string_
     out += "  \"database\": " + quote(database) + ",\n";
     out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
     out += "  \"applied\": " + std::to_string(count) + ",\n";
+    // A partial analysis may have stopped before an import stub: the list may not be every import.
+    out += std::string("  \"analysis_partial\": ") + (partial ? "true" : "false") + ",\n";
     out += "  \"imports\": [";
     for (std::size_t i = 0; i < applied.value().size(); ++i) {
       const donkey::LibraryPrototypeApplication& entry = applied.value()[i];
       out += i == 0 ? "\n" : ",\n";
       out +=
           "    {\"import\": " + quote(entry.import) + ", \"address\": " + quote(hex(entry.address));
+      if (!entry.library.empty()) {
+        out += ", \"library\": " + quote(entry.library);
+      }
       if (entry.prototype.valid()) {
         out += ", \"prototype\": " +
                quote(donkey::c_declaration(table.value(), entry.prototype,
@@ -2139,6 +2156,10 @@ int command_project_type_library_apply(const std::string& database, std::string_
                     entry.reason.c_str());
       }
     }
+    if (partial) {
+      std::printf(
+          "note: the image was only partly analysed, so some import stubs may be missing\n");
+    }
   }
   return kExitOk;
 }
@@ -2158,6 +2179,18 @@ int command_project_type_applications(const std::string& database, std::string_v
   auto table = project.value().types();
   if (!table) {
     return fail(table.diagnostic());
+  }
+  // An image the project does not have is an error, not an image without applications.
+  auto images = project.value().images();
+  if (!images) {
+    return fail(images.diagnostic());
+  }
+  if (std::none_of(images.value().begin(), images.value().end(), [&](const ProjectImage& image) {
+        return image.id == static_cast<std::int64_t>(image_id);
+      })) {
+    return fail(
+        Diagnostic::make(Status::InvalidInput, "project.image_missing",
+                         "no image with id " + std::to_string(image_id) + " in the project"));
   }
   auto applications = project.value().type_applications(static_cast<std::int64_t>(image_id));
   if (!applications) {
@@ -2237,7 +2270,33 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     if (!known) {
       return fail(known.diagnostic());
     }
-    auto declared = donkey::parse_c_declarations(text, known.value());
+    // Layouts that depend on the target (bit-fields, long double) follow the project's images when
+    // they all follow one ABI; otherwise they are not known, and the parser refuses them.
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
+    }
+    donkey::CDeclarationOptions parse_options;
+    std::optional<donkey::ImageAbi> project_abi;
+    bool one_abi = !images.value().empty();
+    for (const ProjectImage& image : images.value()) {
+      const donkey::ImageAbi abi = donkey::image_abi(image.format, image.architecture);
+      if (abi.abi.empty() ||
+          (project_abi && (project_abi->abi != abi.abi || project_abi->platform != abi.platform))) {
+        one_abi = false;
+        break;
+      }
+      project_abi = abi;
+    }
+    if (one_abi && project_abi) {
+      // ELF names no platform; Linux and FreeBSD share these layouts. Plain char is unsigned only
+      // on AArch64 outside Apple's platforms.
+      const std::string platform = project_abi->platform.empty() ? "linux" : project_abi->platform;
+      parse_options = donkey::declaration_options(
+          project_abi->abi, platform,
+          project_abi->architecture != "aarch64" || platform == "macos");
+    }
+    auto declared = donkey::parse_c_declarations(text, known.value(), parse_options);
     if (!declared) {
       return fail(declared.diagnostic());
     }
@@ -2408,7 +2467,16 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
           out += "    {\"library\": " + quote(record.library) +
                  ", \"library_version\": " + quote(record.library_version) +
                  ", \"architecture\": " + quote(record.architecture) +
-                 ", \"body_sha256\": " + quote(record.body_sha256) +
+                 ", \"platform\": " + quote(record.platform) + ", \"abi\": " + quote(record.abi) +
+                 ", \"data_model\": " + quote(record.data_model) + ", \"provides\": [" +
+                 [&] {
+                   std::string list;
+                   for (const std::string& file : record.provides) {
+                     list += (list.empty() ? "" : ", ") + quote(file);
+                   }
+                   return list;
+                 }() +
+                 "], \"body_sha256\": " + quote(record.body_sha256) +
                  ", \"added_types\": " + std::to_string(record.added_types) +
                  ", \"collisions\": " + std::to_string(record.collisions) + "}";
         }
@@ -2441,44 +2509,37 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     if (!project) {
       return fail(project.diagnostic());
     }
-    auto loaded = project.value().type_libraries();
-    if (!loaded) {
-      return fail(loaded.diagnostic());
-    }
-    for (const donkey::TypeLibraryRecord& record : loaded.value()) {
-      if (record.library == library.value().library &&
-          record.library_version == library.value().library_version &&
-          record.architecture == library.value().architecture) {
-        return fail(Diagnostic{Status::InvalidInput, "project.type_library_loaded",
-                               "this type library is already loaded into the project",
-                               std::nullopt});
-      }
-    }
-    auto known = project.value().types();
-    if (!known) {
-      return fail(known.diagnostic());
-    }
-    auto merged = donkey::merge_type_library(known.value(), library.value());
-    if (!merged) {
-      return fail(merged.diagnostic());
-    }
-    auto saved = project.value().replace_types(merged.value().table);
-    if (!saved) {
-      return fail(saved.diagnostic());
-    }
     donkey::TypeLibraryRecord record;
     record.library = library.value().library;
     record.library_version = library.value().library_version;
     record.architecture = library.value().architecture;
+    record.platform = library.value().platform;
+    record.abi = library.value().abi;
+    record.data_model = library.value().data_model;
+    record.provides = library.value().provides;
     record.body_sha256 = library.value().body_sha256;
-    record.added_types = merged.value().added;
-    record.collisions = merged.value().collisions.size();
-    auto recorded = project.value().add_type_library(record);
+    // The merge reads the stored types inside the load's write transaction, so a load running at
+    // the same time cannot merge from the same types; the types and the record land together.
+    std::optional<donkey::TypeLibraryMerge> merge;
+    auto recorded = project.value().load_type_library(
+        record,
+        [&](const donkey::TypeTable& stored,
+            std::int64_t library_id) -> Result<donkey::TypeLibraryLoad> {
+          auto merged = donkey::merge_type_library(stored, library.value(), library_id);
+          if (!merged) {
+            return merged.diagnostic();
+          }
+          merge = std::move(merged.value());
+          return donkey::TypeLibraryLoad{merge->table, merge->added, merge->collisions.size()};
+        });
     if (!recorded) {
       return fail(recorded.diagnostic());
     }
+    record.added_types = merge->added;
+    record.collisions = merge->collisions.size();
+    const donkey::TypeLibraryMerge& merged = *merge;
     std::size_t differing = 0;
-    for (const donkey::TypeLibraryCollision& collision : merged.value().collisions) {
+    for (const donkey::TypeLibraryCollision& collision : merged.collisions) {
       differing += collision.differs ? 1 : 0;
     }
     if (json) {
@@ -2491,7 +2552,7 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
       out += "  \"library_version\": " + quote(record.library_version) + ",\n";
       out += "  \"added_types\": " + std::to_string(record.added_types) + ",\n";
       out += "  \"collisions\": [";
-      const auto& collisions = merged.value().collisions;
+      const auto& collisions = merged.collisions;
       for (std::size_t i = 0; i < collisions.size(); ++i) {
         out += i == 0 ? "\n" : ",\n";
         out += "    {\"name\": " + quote(collisions[i].name) +
@@ -2504,8 +2565,8 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     } else {
       std::printf("Loaded %s %s: %llu types added, %zu names kept from the project (%zu differ)\n",
                   record.library.c_str(), record.library_version.c_str(),
-                  static_cast<unsigned long long>(record.added_types),
-                  merged.value().collisions.size(), differing);
+                  static_cast<unsigned long long>(record.added_types), merged.collisions.size(),
+                  differing);
     }
     return kExitOk;
   }
@@ -2703,6 +2764,8 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
       options.preprocessor = value;
     } else if (arg == "--created") {
       options.created = value;
+    } else if (arg == "--provides") {
+      options.provides.push_back(value);
     } else if (arg == "--source-file") {
       const std::size_t space = value.rfind(' ');
       if (space == std::string::npos) {
@@ -2723,17 +2786,23 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   if (input.empty() || out.empty()) {
     return usage_error("typelib make needs a preprocessed C file and --out FILE");
   }
-  constexpr std::uintmax_t kMaxInputBytes = std::uintmax_t{16} << 20;
-  std::error_code size_error;
-  const std::uintmax_t size = std::filesystem::file_size(input, size_error);
-  if (size_error || size > kMaxInputBytes) {
-    return usage_error("cannot read the preprocessed C file (missing, or over 16 MiB)");
-  }
+  constexpr std::size_t kMaxInputBytes = std::size_t{16} << 20;
   std::ifstream file(input, std::ios::binary);
-  std::string text(static_cast<std::size_t>(size), '\0');
-  file.read(text.data(), static_cast<std::streamsize>(text.size()));
-  // A short read (the file shrank, or a read error) would make a library of a prefix: refused.
-  if (!file || static_cast<std::uintmax_t>(file.gcount()) != size) {
+  if (!file) {
+    return usage_error("cannot read the preprocessed C file");
+  }
+  // Read to the end, one byte past the bound: a file that grows while it is read is still read in
+  // full or refused, never cut to a prefix.
+  std::string text;
+  std::array<char, 65536> chunk{};
+  while (file) {
+    file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    text.append(chunk.data(), static_cast<std::size_t>(file.gcount()));
+    if (text.size() > kMaxInputBytes) {
+      return usage_error("the preprocessed C file is over 16 MiB");
+    }
+  }
+  if (!file.eof()) {
     return fail(Diagnostic{Status::InvalidInput, "typelib_make.read",
                            "cannot read the whole preprocessed C file", std::nullopt});
   }
@@ -2741,13 +2810,28 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   if (!made) {
     return fail(made.diagnostic());
   }
-  std::ofstream written(out, std::ios::binary | std::ios::trunc);
-  written << made.value().text;
-  // Closing flushes the buffer: a failed write shows here, before success is reported.
-  written.close();
-  if (!written) {
+  // Written beside the destination and renamed over it, so a failed write leaves the old library
+  // as it was.
+  const std::string temporary = out + ".tmp";
+  {
+    std::ofstream written(temporary, std::ios::binary | std::ios::trunc);
+    written << made.value().text;
+    // Closing flushes the buffer: a failed write shows here, before success is reported.
+    written.close();
+    if (!written) {
+      std::error_code ignored;
+      std::filesystem::remove(temporary, ignored);
+      return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
+                             "cannot write the library file", std::nullopt});
+    }
+  }
+  std::error_code renamed;
+  std::filesystem::rename(temporary, out, renamed);
+  if (renamed) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
     return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
-                           "cannot write the library file", std::nullopt});
+                           "cannot replace the library file: " + renamed.message(), std::nullopt});
   }
   std::printf("wrote %s: %zu declarations kept, %zu skipped\n", out.c_str(), made.value().kept,
               made.value().skipped.size());

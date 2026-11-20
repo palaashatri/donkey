@@ -55,6 +55,7 @@ env -u CPATH -u C_INCLUDE_PATH -u CPLUS_INCLUDE_PATH -u OBJC_INCLUDE_PATH \
   --command "sh tools/typelib/make-musl.sh" \
   --preprocessor "gcc $(gcc -dumpfullversion) $flags (CPATH, C_INCLUDE_PATH and the like unset)" \
   --created "$created" \
+  --provides ld-musl-x86_64.so.1 --provides libc.musl-x86_64.so.1 \
   --macro _GNU_SOURCE=1 \
   --note "source_sha256 is the SHA-256 of the whole preprocessed text; each source_file hash covers one top-level musl header, not the headers it includes" \
   --note "musl include/* is public domain with a permission grant; the package licence is MIT" \

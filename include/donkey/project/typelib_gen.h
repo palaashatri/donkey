@@ -40,7 +40,8 @@ struct TypeLibraryMakeOptions {
   std::string licence_sha256;
   std::string generator_command;
   std::string preprocessor;
-  std::string created;  ///< YYYY-MM-DD
+  std::string created;                ///< YYYY-MM-DD
+  std::vector<std::string> provides;  ///< `provides` records: the library files described
   std::vector<TypeLibrarySourceFile> source_files;
   std::vector<TypeLibraryMacro> macros;
   std::vector<std::string> notes;
@@ -59,8 +60,10 @@ inline constexpr std::string_view kTypeLibraryGenerator = "donkey-cli typelib ma
 /// The top-level declarations of preprocessed C text, in order: each ends at a `;` outside braces
 /// and parentheses, or is a function definition (a body in braces after a parameter list). Each is
 /// returned on one line, with the tokens that do not change a type removed: `restrict` and its
-/// spellings, `__extension__`, `__inline`, `_Noreturn`, `__attribute__((...))`, `__asm__(...)`,
-/// and `#` lines the preprocessor kept. Exposed for the tests.
+/// spellings, `__extension__`, `__inline`, `_Noreturn`, an `__attribute__((...))` that changes
+/// neither a type nor its layout, and `#` lines the preprocessor kept. An attribute that may change
+/// the type and an assembler label (written `__asm__("name")`) are kept, so make_type_library
+/// skips that declaration. Exposed for the tests.
 [[nodiscard]] std::vector<std::string> split_c_declarations(std::string_view preprocessed);
 
 /// Makes a library from `preprocessed`. Refusals: `typelib_make.options` (an option the format

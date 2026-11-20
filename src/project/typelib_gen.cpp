@@ -52,8 +52,10 @@ bool opens_literal(char c) {
   return c == '\'' || c == '"';
 }
 
-/// An assembler label (`__asm__("name")`) renames the symbol and never the type: removed.
-bool dropped_asm(std::string_view word) {
+/// An assembler label (`__asm__("name")`) gives the declaration another symbol name. The format
+/// has no place for it, so it is kept (as `__asm__("name")`) and make_type_library skips the
+/// declaration: a prototype kept without it would match an import of the wrong name.
+bool asm_label(std::string_view word) {
   return word == "__asm__" || word == "__asm" || word == "asm";
 }
 
@@ -197,9 +199,19 @@ std::string normalised(std::string_view text) {
         space = true;
         continue;
       }
-      if (dropped_asm(word)) {
-        i = skip_group(text, next);
-        space = true;
+      if (asm_label(word)) {
+        const std::size_t end = skip_group(text, next);
+        if (space && !out.empty()) {
+          out.push_back(' ');
+        }
+        space = false;
+        out.append("__asm__");
+        for (std::size_t k = next; k < end; ++k) {
+          if (std::isspace(static_cast<unsigned char>(text[k])) == 0) {
+            out.push_back(text[k]);
+          }
+        }
+        i = end;
         continue;
       }
       if (attribute_word(word)) {
@@ -495,11 +507,10 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
             "' may change the layout of the declarations after it, which the generator does not "
             "model");
   }
-  CDeclarationOptions parse_options;
+  CDeclarationOptions parse_options =
+      declaration_options(options.abi, options.platform, options.char_is_signed);
   parse_options.pointer_size = options.pointer_size;
   parse_options.long_size = options.long_size;
-  parse_options.char_is_signed = options.char_is_signed;
-  parse_options.bit_fields = bit_field_layout(options.abi, options.platform);
 
   TypeLibraryMakeResult made;
   std::set<std::string> tags;
@@ -526,6 +537,17 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
           {name,
            "an attribute that may change the type is not modelled: " +
                declaration.substr(attribute, std::min<std::size_t>(group_end - attribute, 80))});
+      continue;
+    }
+    if (const std::size_t label = declaration.find("__asm__"); label != std::string::npos) {
+      const std::size_t open = declaration.find('(', label);
+      const std::size_t group_end =
+          skip_group(declaration, open == std::string::npos ? declaration.size() : open);
+      made.skipped.push_back(
+          {name,
+           "an assembler label gives it another symbol name, which the format cannot "
+           "record: " +
+               declaration.substr(label, std::min<std::size_t>(group_end - label, 80))});
       continue;
     }
     // The kept text and this declaration parse together, from an empty table, as the reader parses
@@ -605,8 +627,8 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
                                              "no declaration of the input was kept");
   }
   // The header holds one line per record: stay well inside the reader's line bound.
-  const std::size_t records = options.source_files.size() + options.macros.size() +
-                              made.skipped.size() + options.notes.size();
+  const std::size_t records = options.provides.size() + options.source_files.size() +
+                              options.macros.size() + made.skipped.size() + options.notes.size();
   if (records + 32 > kMaxTypeLibraryHeaderLines) {
     return make_error<TypeLibraryMakeResult>(
         Status::ResourceLimit, "typelib_make.too_many_skipped",
@@ -642,6 +664,9 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   key("created", options.created);
   key("body_sha256", hex_digest(body));
   key("declarations", std::to_string(declared.value().size()));
+  for (const std::string& provider : options.provides) {
+    text += "provides: " + provider + "\n";
+  }
   for (const TypeLibrarySourceFile& file : options.source_files) {
     text += "source_file: " + file.path + " " + file.sha256 + "\n";
   }

@@ -123,3 +123,23 @@ The search cases have their own oracle, glibc's loader with `LD_DEBUG=libs` on t
 
 `steal_consumer` and the `libsteal.so.1` builds link glibc's startup objects and libgcc pieces, as
 any GCC-built program does (see `../stubs/PROVENANCE.md`).
+
+## musl (G22-T3)
+
+`musl/stubs_musl_x86_64` is `../stubs/stubs.c` linked against musl with the `musl-tools` 1.2.4-2
+package of Ubuntu 24.04 (its `musl-gcc` wraps GCC 13.3.0): DT_NEEDED `libc.so`, interpreter
+`/lib/ld-musl-x86_64.so.1`. It links musl's startup objects (`crt1.o`, `crti.o`, `crtn.o`, MIT). In
+`musl/sysroot-x86_64`, `lib/ld-musl-x86_64.so.1` is not musl: it is `src/fakelibc.c` built without a
+SONAME or symbol versions, as musl's loader has neither, and is never run. Run from this directory:
+
+    mkdir -p musl/sysroot-x86_64/lib
+    gcc -O1 -fPIC -shared -nostdlib -fno-builtin -s -Wl,--build-id=none \
+        -o musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 src/fakelibc.c
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -o musl/stubs_musl_x86_64 ../stubs/stubs.c
+
+Built twice; the bytes are the same.
+
+| File | SHA-256 |
+|---|---|
+| `musl/stubs_musl_x86_64` | `157e0a93172dedb76c522ebda4832b0db19427db9183fe2e59a9b370ec698ce5` |
+| `musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1` | `6011cd5ecaaf9449a9a4427bfc26bbebfebef0cf206f217777349603f7f3c6b9` |

@@ -1,5 +1,6 @@
 #include "donkey/project/project.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
@@ -346,8 +347,20 @@ CREATE TABLE IF NOT EXISTS type_libraries (
   body_sha256 TEXT NOT NULL,
   added_types INTEGER NOT NULL CHECK (added_types >= 0),
   collisions INTEGER NOT NULL CHECK (collisions >= 0),
+  platform TEXT NOT NULL,
+  abi TEXT NOT NULL,
+  data_model TEXT NOT NULL,
+  provides TEXT NOT NULL,
   UNIQUE (library, library_version, architecture)
 );
+ALTER TABLE types ADD COLUMN complete INTEGER NOT NULL DEFAULT 1 CHECK (complete IN (0, 1));
+ALTER TABLE types ADD COLUMN typedef_named INTEGER NOT NULL DEFAULT 0
+  CHECK (typedef_named IN (0, 1));
+ALTER TABLE types ADD COLUMN library INTEGER NOT NULL DEFAULT 0;
+-- A struct or union stored before v9 with no size and no members may have been only declared:
+-- it is taken as not complete, so nothing measures it.
+UPDATE types SET complete = 0 WHERE kind IN (5, 6) AND size = 0
+  AND NOT EXISTS (SELECT 1 FROM type_fields WHERE type_fields.type_id = types.id);
 PRAGMA user_version=9;
 )sql";
 
@@ -748,11 +761,18 @@ Result<Project> Project::open(const std::string& path) {
     }
     if (schema == 8) {
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
+      if (rc_begin != SQLITE_OK) {
+        // Nothing has run yet: without the transaction the repair could be skipped while a later
+        // statement still commits, leaving a v9 file without the repaired columns.
+        return make_error<Project>(
+            Status::InternalError, "project.migration_failed",
+            "could not begin a schema migration: " + std::string(sqlite3_errmsg(db)));
+      }
       // Version 5 gained the types table's count_known and alignment columns after some files
       // had been written with it, so such a file reaches here without them. They are added with
       // the values every type had before the change: a known count and the natural alignment.
       int rc_repair = SQLITE_OK;
-      if (rc_begin == SQLITE_OK && !table_has_column(db, "types", "count_known")) {
+      if (!table_has_column(db, "types", "count_known")) {
         rc_repair = sqlite3_exec(db, kRepairV5TypeColumns, nullptr, nullptr, nullptr);
       }
       if (rc_repair == SQLITE_OK && !table_has_column(db, "type_applications", "source")) {
@@ -1321,7 +1341,7 @@ Result<TypeTable> Project::types() const {
   sqlite3* db = impl_->db;
   Statement rows(db,
                  "SELECT id, kind, name, provenance, size, is_signed, count, target, variadic, "
-                 "count_known, alignment, local "
+                 "count_known, alignment, local, complete, typedef_named, library "
                  "FROM types ORDER BY id");
   if (!rows.ok()) {
     return make_error<TypeTable>(Status::InternalError, "project.query_failed",
@@ -1348,6 +1368,9 @@ Result<TypeTable> Project::types() const {
     definition.count_known = rows.integer(9) != 0;
     definition.alignment = static_cast<std::uint64_t>(rows.integer(10));
     definition.local = rows.integer(11) != 0;
+    definition.complete = rows.integer(12) != 0;
+    definition.typedef_named = rows.integer(13) != 0;
+    definition.library = rows.integer(14);
     definitions.push_back(std::move(definition));
   }
   if (!rows.done()) {
@@ -1394,10 +1417,11 @@ Result<TypeTable> Project::types() const {
   return table;
 }
 
-Result<void> Project::replace_types(const TypeTable& table) {
-  if (!is_open()) {
-    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
-  }
+namespace {
+
+/// Checks `table` and writes it over the stored types, inside a transaction the caller holds.
+/// Types that are no longer in the table go, with their members and applications.
+Result<void> write_type_rows(sqlite3* db, const TypeTable& table) {
   if (auto valid = table.validate(); !valid) {
     return make_void_error(valid.diagnostic().status, valid.diagnostic().code,
                            valid.diagnostic().message);
@@ -1411,13 +1435,7 @@ Result<void> Project::replace_types(const TypeTable& table) {
                              "a type's id or size does not fit the storage integer range");
     }
   }
-  sqlite3* db = impl_->db;
-  if (!execute(db, "BEGIN IMMEDIATE")) {
-    return make_void_error(Status::InternalError, "project.transaction_failed",
-                           storage_error(db, "project.transaction_failed", "begin types").message);
-  }
   auto fail = [&](std::string code, const std::string& context) {
-    execute(db, "ROLLBACK");
     return make_void_error(Status::InternalError, std::move(code),
                            storage_error(db, code, context).message);
   };
@@ -1449,14 +1467,16 @@ Result<void> Project::replace_types(const TypeTable& table) {
     {
       Statement upsert(db,
                        "INSERT INTO types(id, kind, name, provenance, size, is_signed, count, "
-                       "target, variadic, count_known, alignment, local) "
-                       "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) "
+                       "target, variadic, count_known, alignment, local, complete, typedef_named, "
+                       "library) "
+                       "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) "
                        "ON CONFLICT(id) DO UPDATE SET kind = excluded.kind, name = excluded.name, "
                        "provenance = excluded.provenance, size = excluded.size, "
                        "is_signed = excluded.is_signed, count = excluded.count, "
                        "target = excluded.target, variadic = excluded.variadic, "
                        "count_known = excluded.count_known, alignment = excluded.alignment, "
-                       "local = excluded.local");
+                       "local = excluded.local, complete = excluded.complete, "
+                       "typedef_named = excluded.typedef_named, library = excluded.library");
       upsert.bind(1, static_cast<std::int64_t>(definition.id.value()));
       upsert.bind(2, static_cast<std::int64_t>(definition.kind));
       upsert.bind(3, definition.name);
@@ -1469,6 +1489,9 @@ Result<void> Project::replace_types(const TypeTable& table) {
       upsert.bind(10, static_cast<std::int64_t>(definition.count_known ? 1 : 0));
       upsert.bind(11, static_cast<std::int64_t>(definition.alignment));
       upsert.bind(12, static_cast<std::int64_t>(definition.local ? 1 : 0));
+      upsert.bind(13, static_cast<std::int64_t>(definition.complete ? 1 : 0));
+      upsert.bind(14, static_cast<std::int64_t>(definition.typedef_named ? 1 : 0));
+      upsert.bind(15, definition.library);
       if (!upsert.execute_statement()) {
         return fail("project.type_write_failed", "write a type");
       }
@@ -1516,8 +1539,28 @@ Result<void> Project::replace_types(const TypeTable& table) {
       }
     }
   }
+  return Result<void>();
+}
+
+}  // namespace
+
+Result<void> Project::replace_types(const TypeTable& table) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(Status::InternalError, "project.transaction_failed",
+                           storage_error(db, "project.transaction_failed", "begin types").message);
+  }
+  if (auto written = write_type_rows(db, table); !written) {
+    execute(db, "ROLLBACK");
+    return written;
+  }
   if (!execute(db, "COMMIT")) {
-    return fail("project.transaction_failed", "commit types");
+    const Diagnostic failed = storage_error(db, "project.transaction_failed", "commit types");
+    execute(db, "ROLLBACK");
+    return make_void_error(Status::InternalError, "project.transaction_failed", failed.message);
   }
   return Result<void>();
 }
@@ -1624,9 +1667,17 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
     current.bind(1, image_id);
     current.bind(2, static_cast<std::int64_t>(address));
     current.bind(3, static_cast<std::int64_t>(kind));
-    if (current.ok() && current.step() &&
-        current.integer(0) != static_cast<std::int64_t>(TypeProvenance::Library)) {
-      return Result<void>();
+    if (!current.ok()) {
+      return make_void_error(Status::InternalError, "project.query_failed",
+                             "read the existing type application");
+    }
+    if (current.step()) {
+      if (current.integer(0) != static_cast<std::int64_t>(TypeProvenance::Library)) {
+        return Result<void>();  // kept: another source's application
+      }
+    } else if (!current.done()) {
+      return make_void_error(Status::InternalError, "project.query_failed",
+                             "read the existing type application");
     }
   }
   Statement insert(db,
@@ -2219,8 +2270,8 @@ Result<std::vector<TypeLibraryRecord>> Project::type_libraries() const {
   }
   sqlite3* db = impl_->db;
   Statement rows(db,
-                 "SELECT library, library_version, architecture, body_sha256, added_types, "
-                 "collisions FROM type_libraries ORDER BY id");
+                 "SELECT id, library, library_version, architecture, platform, abi, data_model, "
+                 "provides, body_sha256, added_types, collisions FROM type_libraries ORDER BY id");
   if (!rows.ok()) {
     return make_error<std::vector<TypeLibraryRecord>>(
         Status::InternalError, "project.query_failed",
@@ -2229,12 +2280,24 @@ Result<std::vector<TypeLibraryRecord>> Project::type_libraries() const {
   std::vector<TypeLibraryRecord> out;
   while (rows.step()) {
     TypeLibraryRecord record;
-    record.library = rows.text(0);
-    record.library_version = rows.text(1);
-    record.architecture = rows.text(2);
-    record.body_sha256 = rows.text(3);
-    record.added_types = static_cast<std::uint64_t>(rows.integer(4));
-    record.collisions = static_cast<std::uint64_t>(rows.integer(5));
+    record.id = rows.integer(0);
+    record.library = rows.text(1);
+    record.library_version = rows.text(2);
+    record.architecture = rows.text(3);
+    record.platform = rows.text(4);
+    record.abi = rows.text(5);
+    record.data_model = rows.text(6);
+    const std::string provides = rows.text(7);
+    for (std::size_t at = 0; at < provides.size();) {
+      const std::size_t end = std::min(provides.find('\n', at), provides.size());
+      if (end > at) {
+        record.provides.push_back(provides.substr(at, end - at));
+      }
+      at = end + 1;
+    }
+    record.body_sha256 = rows.text(8);
+    record.added_types = static_cast<std::uint64_t>(rows.integer(9));
+    record.collisions = static_cast<std::uint64_t>(rows.integer(10));
     out.push_back(std::move(record));
   }
   if (!rows.done()) {
@@ -2245,34 +2308,94 @@ Result<std::vector<TypeLibraryRecord>> Project::type_libraries() const {
   return out;
 }
 
-Result<void> Project::add_type_library(const TypeLibraryRecord& record) {
+Result<std::int64_t> Project::load_type_library(
+    const TypeLibraryRecord& record,
+    const std::function<Result<TypeLibraryLoad>(const TypeTable& types, std::int64_t library_id)>&
+        merge) {
   if (!is_open()) {
-    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+    return make_error<std::int64_t>(Status::InvalidInput, "project.not_open",
+                                    "no project database is open");
   }
-  if (!fits_storage(record.added_types) || !fits_storage(record.collisions)) {
-    return make_void_error(Status::InvalidInput, "project.value_out_of_range",
-                           "a type library count does not fit the storage integer range");
+  for (const std::string& provider : record.provides) {
+    if (provider.empty() || provider.find('\n') != std::string::npos) {
+      return make_error<std::int64_t>(Status::InvalidInput, "project.type_library_failed",
+                                      "a provided library name is empty or has a line break");
+    }
   }
   sqlite3* db = impl_->db;
-  Statement insert(db,
-                   "INSERT INTO type_libraries(library, library_version, architecture, "
-                   "body_sha256, added_types, collisions) VALUES(?1, ?2, ?3, ?4, ?5, ?6)");
-  insert.bind(1, record.library);
-  insert.bind(2, record.library_version);
-  insert.bind(3, record.architecture);
-  insert.bind(4, record.body_sha256);
-  insert.bind(5, static_cast<std::int64_t>(record.added_types));
-  insert.bind(6, static_cast<std::int64_t>(record.collisions));
-  if (!insert.execute_statement()) {
-    if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
-      return make_void_error(Status::InvalidInput, "project.type_library_loaded",
-                             "this type library is already loaded into the project");
-    }
-    return make_void_error(
-        Status::InternalError, "project.type_library_failed",
-        storage_error(db, "project.type_library_failed", "record a type library").message);
+  // The write lock is taken before anything is read: the stored types the merge starts from are
+  // the ones the write replaces.
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_error<std::int64_t>(
+        Status::InternalError, "project.transaction_failed",
+        storage_error(db, "project.transaction_failed", "begin a type library load").message);
   }
-  return Result<void>();
+  const auto rollback = [&](Diagnostic diagnostic) {
+    execute(db, "ROLLBACK");
+    return Result<std::int64_t>(std::move(diagnostic));
+  };
+  const auto storage = [&](const char* code, const char* context) {
+    return rollback(Diagnostic{Status::InternalError, code,
+                               storage_error(db, code, context).message, std::nullopt});
+  };
+  std::string provides;
+  for (const std::string& provider : record.provides) {
+    provides += (provides.empty() ? "" : "\n") + provider;
+  }
+  std::int64_t id = 0;
+  {
+    Statement insert(db,
+                     "INSERT INTO type_libraries(library, library_version, architecture, platform, "
+                     "abi, data_model, provides, body_sha256, added_types, collisions) "
+                     "VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, 0)");
+    insert.bind(1, record.library);
+    insert.bind(2, record.library_version);
+    insert.bind(3, record.architecture);
+    insert.bind(4, record.platform);
+    insert.bind(5, record.abi);
+    insert.bind(6, record.data_model);
+    insert.bind(7, provides);
+    insert.bind(8, record.body_sha256);
+    if (!insert.execute_statement()) {
+      if (sqlite3_extended_errcode(db) == SQLITE_CONSTRAINT_UNIQUE) {
+        return rollback(Diagnostic{Status::InvalidInput, "project.type_library_loaded",
+                                   "this type library is already loaded into the project",
+                                   std::nullopt});
+      }
+      return storage("project.type_library_failed", "record a type library");
+    }
+    id = sqlite3_last_insert_rowid(db);
+  }
+  auto stored = types();
+  if (!stored) {
+    return rollback(stored.diagnostic());
+  }
+  auto merged = merge(stored.value(), id);
+  if (!merged) {
+    return rollback(merged.diagnostic());
+  }
+  if (!fits_storage(merged.value().added_types) || !fits_storage(merged.value().collisions)) {
+    return rollback(Diagnostic{Status::InvalidInput, "project.value_out_of_range",
+                               "a type library count does not fit the storage integer range",
+                               std::nullopt});
+  }
+  if (auto written = write_type_rows(db, merged.value().table); !written) {
+    return rollback(written.diagnostic());
+  }
+  {
+    Statement counts(db,
+                     "UPDATE type_libraries SET added_types = ?1, collisions = ?2 WHERE id = ?3");
+    counts.bind(1, static_cast<std::int64_t>(merged.value().added_types));
+    counts.bind(2, static_cast<std::int64_t>(merged.value().collisions));
+    counts.bind(3, id);
+    if (!counts.execute_statement()) {
+      return storage("project.type_library_failed", "record a type library's counts");
+    }
+  }
+  if (!execute(db, "COMMIT")) {
+    return storage("project.transaction_failed", "commit a type library load");
+  }
+  return id;
 }
 
 }  // namespace donkey

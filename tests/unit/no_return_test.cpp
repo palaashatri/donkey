@@ -1707,3 +1707,70 @@ TEST(ElfLoadScope, ProgramHeadersWithoutPtDynamicNeedNothing) {
   EXPECT_TRUE(names.needed.empty());
   EXPECT_TRUE(names.complete);
 }
+
+namespace {
+
+/// A program linked against musl (tests/fixtures/loadscope/musl): DT_NEEDED `libc.so`, interpreter
+/// /lib/ld-musl-x86_64.so.1, in a sysroot whose loader is a stand-in C library.
+donkey::LoadedBinary musl_program() {
+  auto loaded = donkey::load_binary(fixture("loadscope", "musl/stubs_musl_x86_64"));
+  EXPECT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  return std::move(loaded.value());
+}
+
+}  // namespace
+
+// musl's loader is the C library: a reserved name (`libc.so`) is the interpreter itself, found
+// under the sysroot without the glibc search (no ld.so.cache, no default glibc directories).
+TEST(ElfLoadScope, MuslGivesTheCLibraryNamesToItsLoader) {
+  const donkey::LoadedBinary program = musl_program();
+  EXPECT_EQ(donkey::read_library_names(program.image, program.data).interpreter,
+            "/lib/ld-musl-x86_64.so.1");
+  donkey::ElfLibrarySearch search;
+  search.sysroot = fixture("loadscope", "musl/sysroot-x86_64");
+  const donkey::ElfLoadScope scope =
+      donkey::ElfLoadScope::build(program.image, program.data, search);
+  ASSERT_EQ(scope.libraries().size(), 2U);
+  EXPECT_EQ(scope.libraries()[1].name, "libc.so");
+  EXPECT_NE(scope.libraries()[1].path.find("/lib/ld-musl-x86_64.so.1"), std::string::npos);
+  const donkey::ElfBinding puts = scope.lookup("puts", "", false);
+  EXPECT_EQ(puts.outcome, donkey::ElfBinding::Outcome::Bound);
+  EXPECT_EQ(puts.library, 1U);
+  // A name the stand-in does not define is not defined anywhere.
+  EXPECT_EQ(scope.lookup("strerror_r", "", false).outcome, donkey::ElfBinding::Outcome::NotDefined);
+  // A versioned reference under musl is not modelled.
+  EXPECT_EQ(scope.lookup("puts", "GLIBC_2.2.5", false).outcome,
+            donkey::ElfBinding::Outcome::Unknown);
+}
+
+// Without the loader in the sysroot, nothing binds: the C library is not searched for elsewhere.
+TEST(ElfLoadScope, MuslWithoutItsLoaderBindsNothing) {
+  const donkey::LoadedBinary program = musl_program();
+  donkey::ElfLibrarySearch search;
+  search.sysroot = fixture("loadscope", "sysroot-x86_64");  // a glibc sysroot: no ld-musl
+  const donkey::ElfLoadScope scope =
+      donkey::ElfLoadScope::build(program.image, program.data, search);
+  const donkey::ElfBinding puts = scope.lookup("puts", "", false);
+  EXPECT_EQ(puts.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(puts.reason.find("ld-musl-x86_64.so.1 was not found"), std::string::npos)
+      << puts.reason;
+}
+
+// The no-return binding follows: abort binds to musl's loader, a runtime library.
+TEST(NoReturn, AMuslProgramsAbortBindsToTheLoader) {
+  const Analyzed analyzed = analyze_fixture("musl/stubs_musl_x86_64", "loadscope");
+  // fixture_libraries chose the glibc sysroot; analyze again with the musl one.
+  AnalysisOptions options;
+  options.library_search.sysroot = fixture("loadscope", "musl/sysroot-x86_64");
+  auto analysis = donkey::analyze(analyzed.binary.image, analyzed.binary.data, options);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  bool abort_marked = false;
+  for (const donkey::Function& function : analysis.value().functions) {
+    if (function.import_name == "abort") {
+      abort_marked = function.no_return;
+      EXPECT_NE(function.no_return_reason.find("bound:libc.so"), std::string::npos)
+          << function.no_return_reason;
+    }
+  }
+  EXPECT_TRUE(abort_marked);
+}

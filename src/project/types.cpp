@@ -102,6 +102,27 @@ bool sum_overflows(std::uint64_t a, std::uint64_t b) {
   return a > std::numeric_limits<std::uint64_t>::max() - b;
 }
 
+/// Whether `id` names an integer or enum type, through typedefs: the only types a bit-field holds.
+bool integer_container(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
+  for (int depth = 0; depth <= kMaxNesting; ++depth) {
+    const auto found = types.find(id);
+    if (found == types.end()) {
+      return false;
+    }
+    switch (found->second.kind) {
+      case TypeKind::Integer:
+      case TypeKind::Enum:
+        return true;
+      case TypeKind::Typedef:
+        id = found->second.target;
+        continue;
+      default:
+        return false;
+    }
+  }
+  return false;
+}
+
 Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId id, int depth) {
   if (!id.valid()) {
     return Layout{};
@@ -215,6 +236,10 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
                 "type.named_padding",
                 name + " has a padding bit-field with the name '" + field.name + "'");
           }
+          if (!integer_container(types, field.type)) {
+            return fail<Layout>("type.bad_bit_field",
+                                name + " has an unnamed bit-field whose type is not an integer");
+          }
           auto container = layout_of(types, field.type, depth + 1);
           if (!container) {
             return container;
@@ -270,6 +295,10 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
         const Layout& layout = member.value();
         std::uint64_t member_end = 0;
         if (field.bit_size != 0) {
+          if (!integer_container(types, field.type)) {
+            return fail<Layout>("type.bad_bit_field", name + " has a bit-field '" + field.name +
+                                                          "' whose type is not an integer");
+          }
           const std::uint64_t container_bits = layout.size * 8;
           if (field.bit_size > 64 || field.bit_offset > 7 ||
               static_cast<std::uint64_t>(field.bit_offset) + field.bit_size > container_bits) {
@@ -467,22 +496,32 @@ bool TypeTable::remove(TypeId id) {
 
 namespace {
 
+/// `budget` is shared by the whole declaration: each type printed spends one, so a callback whose
+/// parameters are callbacks cannot grow the text exponentially. When it runs out, `...` stands for
+/// the rest.
+/// Types one printed declaration may spell out (c_declaration_at's budget).
+constexpr std::size_t kMaxDeclarationTypes = 4096;
+
 std::string c_declaration_at(const TypeTable& table, TypeId id, const std::string& declarator,
-                             unsigned depth) {
+                             unsigned depth, std::size_t& budget) {
   const auto with = [&](std::string base) {
     return declarator.empty() ? base : base + " " + declarator;
   };
   if (!id.valid()) {
     return with("void");
   }
-  if (depth >= 32) {
+  if (depth >= 32 || budget == 0) {
     return with("...");
   }
+  --budget;
   const TypeDefinition* type = table.find(id);
   if (type == nullptr) {
     return with("?");
   }
   const auto tagged = [&](const char* keyword) {
+    if (type->typedef_named && !type->name.empty()) {
+      return with(type->name);  // `typedef struct { ... } item;` is `item`, not `struct item`
+    }
     return with(std::string(keyword) + " " + (type->name.empty() ? "<anonymous>" : type->name));
   };
   switch (type->kind) {
@@ -502,21 +541,22 @@ std::string c_declaration_at(const TypeTable& table, TypeId id, const std::strin
       const bool wraps = target != nullptr &&
                          (target->kind == TypeKind::Array || target->kind == TypeKind::Function);
       const std::string inner = "*" + declarator;
-      return c_declaration_at(table, type->target, wraps ? "(" + inner + ")" : inner, depth + 1);
+      return c_declaration_at(table, type->target, wraps ? "(" + inner + ")" : inner, depth + 1,
+                              budget);
     }
     case TypeKind::Array:
       return c_declaration_at(
           table, type->target,
           declarator + "[" + (type->count_known ? std::to_string(type->count) : std::string()) +
               "]",
-          depth + 1);
+          depth + 1, budget);
     case TypeKind::Function: {
       std::string parameters;
       for (const TypeField& field : type->fields) {
         if (!parameters.empty()) {
           parameters += ", ";
         }
-        parameters += c_declaration_at(table, field.type, field.name, depth + 1);
+        parameters += c_declaration_at(table, field.type, field.name, depth + 1, budget);
       }
       if (type->variadic) {
         parameters += parameters.empty() ? "..." : ", ...";
@@ -524,7 +564,8 @@ std::string c_declaration_at(const TypeTable& table, TypeId id, const std::strin
       if (parameters.empty()) {
         parameters = "void";
       }
-      return c_declaration_at(table, type->target, declarator + "(" + parameters + ")", depth + 1);
+      return c_declaration_at(table, type->target, declarator + "(" + parameters + ")", depth + 1,
+                              budget);
     }
   }
   return with("?");
@@ -533,7 +574,8 @@ std::string c_declaration_at(const TypeTable& table, TypeId id, const std::strin
 }  // namespace
 
 std::string c_declaration(const TypeTable& table, TypeId id, const std::string& declarator) {
-  return c_declaration_at(table, id, declarator, 0);
+  std::size_t budget = kMaxDeclarationTypes;
+  return c_declaration_at(table, id, declarator, 0, budget);
 }
 
 const TypeDefinition* TypeTable::find(TypeId id) const {

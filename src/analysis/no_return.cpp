@@ -106,8 +106,10 @@ bool ends_with(std::string_view text, std::string_view suffix) {
 bool elf_library_provides(std::string_view file, Provider provider) {
   switch (provider) {
     case Provider::C:
+      // `libc.so` is musl's own name for itself (a glibc program never needs it: glibc's libc.so
+      // is a linker script).
       return file == "libc.so.6" || file == "libc.so.7" || file == "libpthread.so.0" ||
-             (starts_with(file, "libc.musl-") && ends_with(file, ".so.1")) ||
+             file == "libc.so" || (starts_with(file, "libc.musl-") && ends_with(file, ".so.1")) ||
              (starts_with(file, "ld-musl-") && ends_with(file, ".so.1"));
     case Provider::Cxx:
       return file == "libstdc++.so.6" || file == "libc++.so.1" || file == "libc++abi.so.1" ||

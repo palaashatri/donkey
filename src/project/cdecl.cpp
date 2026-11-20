@@ -443,6 +443,10 @@ class Parser {
       if (definition.name.empty()) {
         continue;
       }
+      if (definition.typedef_named) {
+        typedef_names_.emplace(definition.name, definition.id);  // an ordinary name, not a tag
+        continue;
+      }
       switch (definition.kind) {
         case TypeKind::Struct:
           struct_tags_.emplace(definition.name, definition.id);
@@ -455,6 +459,9 @@ class Parser {
           break;
         case TypeKind::Typedef:
           typedef_names_.emplace(definition.name, definition.id);
+          break;
+        case TypeKind::Function:
+          function_names_.insert(definition.name);
           break;
         case TypeKind::Integer:
         case TypeKind::Float:
@@ -473,6 +480,13 @@ class Parser {
     while (!at_end()) {
       if (auto declared = parse_external_declaration(); !declared) {
         return propagate<std::vector<TypeDefinition>>(declared);
+      }
+    }
+    // A tag declared and never defined stays without a size, also for a later parse.
+    for (TypeDefinition& definition : out_) {
+      if ((definition.kind == TypeKind::Struct || definition.kind == TypeKind::Union) &&
+          incomplete_.count(definition.id) != 0) {
+        definition.complete = false;
       }
     }
     return out_;
@@ -560,7 +574,8 @@ class Parser {
     switch (definition->kind) {
       case TypeKind::Struct:
       case TypeKind::Union:
-        return incomplete_.count(id) == 0;
+        // A tag only declared, here or in an earlier parse, has no size.
+        return incomplete_.count(id) == 0 && definition->complete;
       case TypeKind::Array:
       case TypeKind::Typedef:
         return is_complete(definition->target, depth + 1);
@@ -605,6 +620,31 @@ class Parser {
   }
 
   /// Whether the current prototype bound this tag (false at file scope).
+  /// The kind of another tag of this name that is visible here, or null. Struct, union and enum
+  /// tags share one name space (C11 6.2.3), so `struct T` where `union T` is visible is refused,
+  /// in a prototype as at file scope.
+  [[nodiscard]] const char* clashing_tag(const std::map<std::string, TypeId>& own,
+                                         const std::string& name) const {
+    const std::pair<const std::map<std::string, TypeId>*, const char*> kinds[] = {
+        {&struct_tags_, "struct"}, {&union_tags_, "union"}, {&enum_tags_, "enum"}};
+    for (const auto& [tags, kind] : kinds) {
+      if (tags != &own && tags->count(name) != 0) {
+        return kind;
+      }
+    }
+    return nullptr;
+  }
+  template <typename T>
+  [[nodiscard]] std::optional<Result<T>> tag_clash(const std::map<std::string, TypeId>& own,
+                                                   const std::string& name, std::uint32_t line,
+                                                   std::uint32_t column) const {
+    if (const char* kind = clashing_tag(own, name)) {
+      return located<T>(line, column, "cdecl.tag_kind",
+                        "'" + name + "' is already a " + kind +
+                            " tag here; struct, union and enum tags share one name space");
+    }
+    return std::nullopt;
+  }
   [[nodiscard]] bool bound_in_this_prototype(const std::map<std::string, TypeId>& tags,
                                              const std::string& name) const {
     return std::any_of(tag_undo_.begin(), tag_undo_.end(), [&](const TagBinding& binding) {
@@ -854,8 +894,14 @@ class Parser {
         return located<DeclSpec>(line, column, "cdecl.bad_specifiers",
                                  "'double' takes only 'long' as well");
       }
-      spec.type = longs == 1 ? scalar("long double", TypeKind::Float, 16, false)
-                             : scalar("double", TypeKind::Float, 8, false);
+      if (longs == 1 && options_.long_double_size == 0) {
+        return located<DeclSpec>(line, column, "cdecl.long_double",
+                                 "the size of 'long double' depends on the target, which is not "
+                                 "known here");
+      }
+      spec.type = longs == 1
+                      ? scalar("long double", TypeKind::Float, options_.long_double_size, false)
+                      : scalar("double", TypeKind::Float, 8, false);
       return spec;
     }
     if (is_char && (shorts > 0 || longs > 0 || is_int)) {
@@ -908,6 +954,11 @@ class Parser {
     const bool defines = at_symbol("{");
 
     if (keyword == "enum") {
+      if (!tag.empty()) {
+        if (auto clash = tag_clash<TagRef>(enum_tags_, tag, line, column)) {
+          return *clash;
+        }
+      }
       if (defines) {
         auto id = parse_enum_body(tag, line, column);
         if (!id) {
@@ -927,6 +978,11 @@ class Parser {
 
     const bool is_union = keyword == "union";
     auto& tags = is_union ? union_tags_ : struct_tags_;
+    if (!tag.empty()) {
+      if (auto clash = tag_clash<TagRef>(tags, tag, line, column)) {
+        return *clash;
+      }
+    }
     if (defines) {
       if (nesting_ >= kMaxCDeclarationNesting) {
         return located<TagRef>(line, column, "cdecl.nesting",
@@ -1059,7 +1115,7 @@ class Parser {
         const auto layout = measure(member.type);
         const std::string described =
             member.name.empty() ? "an unnamed bit-field" : "member '" + member.name + "'";
-        if (!layout) {
+        if (!layout || !is_complete(member.type)) {
           return located<TypeId>(member.line, member.column, "cdecl.incomplete_type",
                                  described + " has a type whose size is not known");
         }
@@ -1597,7 +1653,7 @@ class Parser {
           return propagate<Constant>(close);
         }
         const auto layout = measure(type.value());
-        if (!layout) {
+        if (!layout || !is_complete(type.value())) {
           return located<Constant>(type_at.line, type_at.column, "cdecl.incomplete_type",
                                    "sizeof needs a type whose size is known");
         }
@@ -1691,8 +1747,18 @@ class Parser {
         return located<Constant>(token.line, token.column, "cdecl.not_constant",
                                  "'" + token.text + "' is not an integer constant");
       }
+      const std::int64_t value = constant->second.value;
+      if (value < std::numeric_limits<std::int32_t>::min() ||
+          value > std::numeric_limits<std::int32_t>::max()) {
+        // Only a constant from the project (a PDB or DWARF enum) can be this wide; one parsed from
+        // C text is checked to fit int. It is not narrowed.
+        return located<Constant>(token.line, token.column, "cdecl.enum_range",
+                                 "'" + token.text + "' is " + std::to_string(value) +
+                                     ", outside the range of int that an enumeration constant "
+                                     "has here");
+      }
       advance();
-      return Constant{static_cast<std::uint64_t>(constant->second.value) & mask_of(4), 4, true};
+      return Constant{static_cast<std::uint64_t>(value) & mask_of(4), 4, true};
     }
     return unexpected<Constant>("an integer constant expression");
   }
@@ -1935,6 +2001,10 @@ class Parser {
           return located<void>(declared.line, declared.column, "cdecl.redefinition",
                                "'" + declared.name + "' is already an enumeration constant");
         }
+        if (function_names_.count(declared.name) != 0) {
+          return located<void>(declared.line, declared.column, "cdecl.type_and_function",
+                               "'" + declared.name + "' is already a function");
+        }
         if (spec.value().anonymous.valid() && declared.type == spec.value().anonymous) {
           // `typedef struct { ... } name;`: the untagged type takes the typedef's name.
           TypeDefinition named;
@@ -1942,6 +2012,7 @@ class Parser {
             named = *anonymous;
           }
           named.name = declared.name;
+          named.typedef_named = true;
           replace(named);
           typedef_names_.emplace(declared.name, declared.type);
           note(declared.name, CNameSpace::Ordinary, TypeKind::Typedef);
@@ -1956,10 +2027,12 @@ class Parser {
         }
       } else if (declared.is_function) {
         if (enum_constants_.count(declared.name) != 0 || typedef_names_.count(declared.name) != 0) {
+          // One code in both orders (a typedef after a function is refused the same way).
           return located<void>(
-              declared.line, declared.column, "cdecl.redefinition",
+              declared.line, declared.column, "cdecl.type_and_function",
               "'" + declared.name + "' is already a typedef or an enumeration constant");
         }
+        function_names_.insert(declared.name);
         // A prototype: the function type takes the function's name.
         TypeDefinition named;
         if (const TypeDefinition* function = working_.find(declared.type)) {
@@ -2003,6 +2076,8 @@ class Parser {
     int scope = 0;
   };
   std::map<std::string, EnumConstant> enum_constants_;
+  /// Functions declared at file scope, here or in the known table.
+  std::set<std::string> function_names_;
   /// Prototypes being parsed, innermost last (a prototype is a scope, C11 6.2.1).
   int prototype_scope_ = 0;
   /// A binding made inside a prototype, undone at its closing parenthesis.
@@ -2050,6 +2125,11 @@ Result<std::vector<TypeDefinition>> parse_c_declarations(std::string_view text,
   if (options.long_size != 4 && options.long_size != 8) {
     return make_error<std::vector<TypeDefinition>>(Status::InvalidInput, "cdecl.bad_options",
                                                    "the long size must be 4 or 8 bytes");
+  }
+  if (options.long_double_size != 0 && options.long_double_size != 8 &&
+      options.long_double_size != 16) {
+    return make_error<std::vector<TypeDefinition>>(Status::InvalidInput, "cdecl.bad_options",
+                                                   "the long double size must be 0, 8 or 16 bytes");
   }
   auto tokens = tokenize(text);
   if (!tokens) {

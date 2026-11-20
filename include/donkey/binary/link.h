@@ -47,6 +47,8 @@ struct ElfLibraryNames {
   /// The image has a dynamic table (PT_DYNAMIC, or a `.dynamic` section when it has no program
   /// headers).
   bool dynamic = false;
+  /// The program interpreter PT_INTERP names (the dynamic loader the kernel starts), or empty.
+  std::string interpreter;
   /// False when part of the dynamic table could not be read (the table is cut short, a name lies
   /// outside the string table, or the program headers are unreadable): a library or search
   /// directory may be missing from the lists above.

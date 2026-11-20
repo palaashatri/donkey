@@ -180,7 +180,7 @@ P0 is the most important, P3 the least.
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
-| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives each import stub of the image the library's prototype as a `library` application, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). Calls do not take their arguments from it yet (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs: 807 of 2,725 stubs of the seven audit binaries get a prototype; T4 TODO) |
+| G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). Calls do not take their arguments from it yet (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 TODO) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF) and PE x64 `.pdata` RUNTIME_FUNCTION entries are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 to T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
@@ -2305,22 +2305,60 @@ sources only, a preprocessor at build time). What was built and measured:
   1.2.4): int puts(char *)` to the stub's own pseudocode.
 - Sites are the functions the analysis names by an import (G24-T4): PLT stubs and PE thunks. A GOT or IAT call
   with no stub has no function to carry a prototype, so it gets none here; T4 types the call itself.
-- Measured on the seven binaries of `docs/AUDIT.md` (glibc programs, with the musl library): 807 of 2,725 import
-  stubs get a prototype (ls 77/108, bash 176/227, git 154/247, python3.12 306/502, libsqlite3 36/50, openssl
-  58/1,577 whose imports are mostly libssl and libcrypto, libc 0/14); 791 before the generator's review fixes
-  (#70) completed forward-declared structs and kept 47 more declarations. The rest have no musl declaration
-  (`__cxa_finalize`, `__stack_chk_fail`, glibc extensions, other libraries).
+- Measured (after the review below) on six programs of Alpine Linux 3.18, whose C library is musl 1.2.4-r3,
+  with their libraries extracted from the Alpine packages as the sysroot: 727 of 2,428 import stubs get a
+  prototype (busybox 1.36.1-r7 313/377, sqlite3 3.41.2-r4 88/105, git 2.40.4-r0 190/241, python3.11 3.11.12-r1
+  0/5 whose imports are libpython's, openssl 3.1.8-r0 68/1,562 whose imports are mostly libssl and libcrypto,
+  curl 8.12.1-r0 68/138). Every other stub is `no prototype`: no musl declaration (`__stack_chk_fail`,
+  `__cxa_finalize`) or another library's function. On the seven glibc binaries of `docs/AUDIT.md` none is
+  applied: their imports bind to `libc.so.6`, which the musl library does not describe. (Before the review the
+  apply step matched names only and gave those glibc binaries 807 of 2,725 musl prototypes; musl's and glibc's
+  prototypes differ for some names, `strerror_r` among them, so that count was not evidence.)
 - Tests: `TypeLib.AppliesALibraryPrototypeToAnImportedName`, `TypeLib.AUserPrototypeWinsOverTheLibraryInBothOrders`,
   `TypeLibApply.*` (merge, collisions, `VersionedNameMatchesTheUnversionedLibraryName`, `AmbiguousVersionsApplyNothing`,
   `OrdinalImportIsNotMatched`, `OnlyLibraryFunctionTypesArePrototypes`), `Types.CDeclarationPrintsCDeclarators`,
   `Types.MigratesFromSchemaV8`, and the CLI chain `cli.project_type_library_apply*`,
   `cli.project_type_applications_show_the_source`, `cli.decompile_notes_a_library_prototype`.
-- Checks recorded, not done: Donkey's ELF loader names an import without its version, so the two-version case is
-  tested on names only; the image's stubs never reach it yet (the G24-T3 version reader can supply versions once it
-  is on `main`). No PE fixture has an ordinal import, and the Mach-O underscore rule is tested on names only, not on
-  a Mach-O fixture (the stubs fixtures are ELF and PE). The musl library is applied to glibc programs: the libc
-  prototypes agree, but a struct a pointer argument names (`FILE`) has musl's layout, not glibc's, and nothing
-  reads through it yet.
+- Checks recorded, not done: no PE fixture has an ordinal import. Mach-O images are refused: the analysis does
+  not bind their stubs to their imports.
+
+**T3 review (2026-11-20, CodeRabbit on bef6007, 32 findings).** The apply step matched an import to a library
+prototype by name alone, so the musl library gave glibc programs musl's prototypes. It now applies a prototype only
+where the import is shown to bind to a file the library describes:
+- Format: a repeated `provides: <file>` record (a SONAME, or a file name), first among the records; the musl
+  library provides `ld-musl-x86_64.so.1` and `libc.musl-x86_64.so.1` (regenerated; its body is unchanged).
+- Binding: `import_sites` binds each reference of each stub (its versions read from the dynamic symbols, not the
+  stub's name) with the G24-T3 load scope, which now follows musl's loader for a program whose interpreter is
+  `ld-musl-<arch>.so.1` (the C library's names are the loader; musl's search path; no cache, no preload; versioned
+  references Unknown). On PE, the import's DLL. Mach-O is refused (`project.type_library_format`).
+- Fit: each library records its platform, ABI, data model and `provides` (schema v9's `type_libraries`), each type
+  the library that brought it (`types.library`); a prototype applies only for its own library's ABI
+  (`library_misfit`), and `decompile --project` names that library, not every loaded one.
+- Load: `Project::load_type_library` takes the write lock, refuses a duplicate, reads the types, merges and writes
+  the types and the record in one transaction, so two loads cannot merge from one snapshot and a failed load
+  leaves nothing. The merge skips prototype-local tags, treats a typedef-named record as an ordinary name, and
+  compares collisions through the types they refer to.
+- Also: the CLI reloads a project image with its recorded architecture and checks it; reports
+  `analysis_partial`; refuses an image the project does not have; `set_type_application` fails on a read error
+  instead of replacing another source's row. The parser keeps a declared-only tag incomplete across parses (no
+  `sizeof` of it), sizes `long double` by the ABI (refused when unknown), refuses an enumeration constant from the
+  project outside `int`, refuses a struct and a union (or enum) of one tag, and gives a typedef and a function of
+  one name `cdecl.type_and_function` in both orders; parse options default to no bit-field rules, and
+  `project type add` takes them from the project's images when they share one ABI. The type store refuses a
+  bit-field of a non-integer type; a printed declaration spends a shared budget. The generator skips a declaration
+  with an assembler label, reads its input to the end, and writes beside the output and renames.
+- Tests added: `ElfLoadScope.Musl*`, `NoReturn.AMuslProgramsAbortBindsToTheLoader`, `TypeLib.ALibraryDoesNotApplyToAnotherCLibrary`,
+  `TypeLib.AnUnshownProviderAppliesNothing`, `TypeLib.AppliesAWin64LibraryToPeImportThunks`,
+  `TypeLib.ALoadStoresItsTypesAndRecordTogether`, `TypeLib.ReadsProvidesRecords`, `TypeLib.DeclarationOptionsFollowTheAbi`,
+  `TypeLibApply.CollisionsCompareTargetsAndMemberTypes`, `TypeLibApply.PrototypeTagsDoNotCollide`,
+  `TypeLibApply.ATypedefNamedRecordIsAnOrdinaryName`, `TypeLibApply.TheMatcherNeedsLibraryProvenance`,
+  `TypeLibMake.AnAssemblerLabelIsSkipped`, `Types.ATagOnlyDeclaredStaysIncompleteAcrossParses`,
+  `Types.LongDoubleFollowsTheTarget`, `Types.AWideEnumConstantIsNotNarrowed`, `Types.TagsOfDifferentKindsShareOneNameSpace`,
+  `Types.ABitFieldNeedsAnIntegerType`, `Types.APrintedDeclarationIsBounded`, and the CLI tests
+  `cli.project_type_library_apply_refuses_another_c_library`, `..._refuses_mach_o`,
+  `cli.project_type_applications_refuses_a_missing_image`, `cli.project_type_add_*_bit_fields_*`. The fixture
+  `tests/fixtures/loadscope/musl` (a program linked with musl-gcc, and a stand-in loader) is described in its
+  PROVENANCE.
 - Not done here: a per-user library directory (the caller passes the path), the desktop app, and typed call
   arguments (T4, after G21).
 

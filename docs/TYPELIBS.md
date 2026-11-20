@@ -1,13 +1,15 @@
 # Type library format (G22-T1)
 
 A type library is a text file of C declarations for one platform and ABI, with the provenance of
-its source. The reader is `read_type_library` in `include/donkey/project/typelib.h`; the file is
-read, not applied: no code gets a type from a library yet (G22-T3 does that).
+its source, and the names of the library files whose definitions it describes (`provides`). The
+reader is `read_type_library` in `include/donkey/project/typelib.h`; applying a library to a
+project's import stubs is described under "Applying a library (G22-T3)".
 
 **Status.** The reader and its format exist and are tested (`TypeLib.*` in
 `tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). One library is bundled:
 `typelibs/musl-1.2.4-x86_64-linux.dtl`, generated from the musl 1.2.4 headers (G22-T2, see
-"Generating a library" below). A library's types do not appear in the decompiler yet (G22-T3);
+"Generating a library" below). Its prototypes are applied to the import stubs of programs whose
+imports bind to musl (G22-T3); calls do not take their arguments from them yet (G22-T4).
 `donkey-cli typelib show` reads one and summarises it.
 
 ## Generating a library
@@ -19,7 +21,7 @@ read, not applied: no code gets a type from a library yet (G22-T3 does that).
   `--data-model` (`LP64` or `LLP64`; it sets `long_size`), `--char-signed` (`true` or `false`).
 - Provenance: `--source`, `--source-sha256`, `--licence`, `--licence-file`, `--licence-sha256`,
   `--command` (the `generator_command` record), `--preprocessor`, `--created` (`YYYY-MM-DD`).
-- Repeated records: `--source-file 'PATH SHA256'`, `--macro NAME=VALUE`, `--note TEXT`.
+- Repeated records: `--provides FILE` (a library file the declarations describe: its SONAME, or its file name when it has none), `--source-file 'PATH SHA256'`, `--macro NAME=VALUE`, `--note TEXT`. The library is written to a temporary file beside `--out` and renamed over it, so a failed run leaves the old file.
 
 The generator writes the other header values itself: `pointer_size` (8), `generator`,
 `body_sha256`, `declarations` and one `skipped` record per declaration it did not keep. For example,
@@ -94,8 +96,11 @@ one, and typedef and function names share the other. One spelling may be both a 
 ordinary name (`struct stat` and the function `stat`, or `typedef struct point point`). Within one
 name space a name is declared once: a typedef and a function with one name is
 `typelib.type_and_function`, and any other repeat (two prototypes, or a struct and an enum with one
-tag) is `typelib.duplicate_name`. `typedef struct { ... } item;` declares the ordinary name `item`
-(the untagged struct takes the typedef's name), so a function `item` collides with it. The parser
+tag) is `typelib.duplicate_name`; the parser itself refuses a typedef and a function with one name,
+in either order, and a struct and a union with one tag, and the reader keeps these codes.
+`typedef struct { ... } item;` declares the ordinary name `item` (the untagged struct takes the
+typedef's name, is marked `typedef_named` and prints as `item`), so a function `item` collides
+with it. The parser
 reports each name it declares with its name space (`CDeclaredName` in `cdecl.h`), and the check uses
 that list. Scalar, pointer and array types are not declarations and are not checked.
 
@@ -113,15 +118,38 @@ of `typelib.h`.
 
 ## Applying a library (G22-T3)
 
-`donkey-cli project type library add <db> <library.dtl>` merges a library's types into a project (a
-name the project already has keeps the project's type and is counted as a collision) and records
-the library. `project type library apply <db> <image-id>` matches each import stub of the image to
-a library prototype by name (an ELF version suffix and one Mach-O underscore are removed first; an
-`ordinal_N` import and a name seen with two versions are not matched) and stores it as a prototype
-application with source `library`. A user, DWARF or PDB prototype at the same address is kept; a
-later user edit replaces a library one. Every library of the project must be for the image's
-architecture. `project type applications <db> <image-id>` lists the applications with their source,
-and `decompile --project` notes the prototype on the stub.
+`donkey-cli project type library add <db> <library.dtl>` merges a library's types into a project
+and records the library, in one write transaction: a file-scope name the project already has (a
+tag, or a typedef or function name; a tag declared inside a prototype is neither) keeps the
+project's type and is counted as a collision, which `differs` when the two definitions do not
+match through the types they refer to. Each added type records the library that brought it.
+
+`project type library apply <db> <image-id>` gives an import stub of the image a library prototype
+only when all of these hold:
+
+- the stub's import is matched by name (an `ordinal_N` import is not, and neither is a name the
+  image imports with two different symbol versions, read from the dynamic symbols);
+- the library that brought the prototype is for the image's architecture, ABI and data model
+  (an ELF x86-64 image is `sysv` `LP64`, a PE x64 image `win64` `LLP64` on `windows`);
+- every reference of the import is shown to bind to a file the library `provides`. On ELF the
+  dynamic loader's search and lookup decide (`ElfLoadScope`, glibc's rules, or musl's for a program
+  whose interpreter is musl's loader), under `--sysroot`, `--library-path` and `--program`; on PE,
+  the DLL the import names. A glibc program's `puts` binds to `libc.so.6`, which the musl library
+  does not describe, so it gets nothing: the two C libraries do not share every prototype
+  (`strerror_r`).
+
+It is stored as a prototype application with source `library`. A user, DWARF or PDB prototype at
+the same address is kept; a later user edit replaces a library one. Each stub that gets nothing is
+listed with the reason, and `analysis_partial` says when the analysis stopped early, so the list
+may not be every import. Mach-O images are refused (`project.type_library_format`): the analysis
+does not bind their stubs to their imports yet. `project type applications <db> <image-id>` lists
+the applications with their source (an image the project does not have is
+`project.image_missing`), and `decompile --project` notes the prototype, with the library that
+brought it, on the stub.
+
+`project type add` lays out bit-fields and `long double` by the project's images: when they all
+follow one ABI, its rules; otherwise neither is known, and the parser refuses them
+(`cdecl.bitfield_abi`, `cdecl.long_double`) rather than guess.
 
 ## Where libraries live
 

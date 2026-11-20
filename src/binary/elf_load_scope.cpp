@@ -235,6 +235,39 @@ struct SearchStep {
   std::string reason;
 };
 
+/// musl's dynamic loader: the interpreter path names `ld-musl-<arch>.so.1`.
+bool is_musl_interpreter(const std::string& interpreter) {
+  const std::string base = interpreter.substr(interpreter.find_last_of('/') + 1);
+  return base.rfind("ld-musl-", 0) == 0 && base.size() > 13 &&
+         base.compare(base.size() - 5, 5, ".so.1") == 0;
+}
+
+/// A name musl's loader gives itself instead of searching for it (`reserved` in its dynlink.c):
+/// `lib` followed by `c`, `pthread`, `rt`, `m`, `dl`, `util` or `xnet`, then a dot.
+bool musl_reserved_name(const std::string& name) {
+  if (name.rfind("lib", 0) != 0) {
+    return false;
+  }
+  for (const char* reserved : {"c.", "pthread.", "rt.", "m.", "dl.", "util.", "xnet."}) {
+    if (name.compare(3, std::char_traits<char>::length(reserved), reserved) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The architecture part of musl's path file name (`/etc/ld-musl-x86_64.path`).
+std::string musl_arch(Architecture architecture) {
+  switch (architecture) {
+    case Architecture::X86_64:
+      return "x86_64";
+    case Architecture::AArch64:
+      return "aarch64";
+    default:
+      return {};
+  }
+}
+
 bool identifier_char(char c) {
   return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_';
 }
@@ -675,6 +708,7 @@ struct ElfLoadScope::Impl {
   bool executable_dynamic = true;     // false: the executable defines nothing for others
   std::size_t image_index = 0;        // where the image the scope was built for is
   bool image_first = false;           // DT_SYMBOLIC: the image is looked up before the scope
+  bool musl = false;                  // musl's loader: its search and its lookup rules
   // What a walk leaves for a later one (a shared library's local scope): every name, soname and
   // file it loaded, the executable's DT_RPATH (empty when it has DT_RUNPATH) with its $ORIGIN, and
   // whether another object has a DT_RPATH it could pass on to a library it loads.
@@ -690,7 +724,8 @@ struct ElfLoadScope::Inherited {
   std::set<std::string> loaded;   // names, sonames and files already loaded
   std::string executable_rpath;
   LoaderPath executable_origin;
-  bool unknown_rpath = false;  // the object that calls dlopen may pass on a DT_RPATH
+  bool unknown_rpath = false;    // the object that calls dlopen may pass on a DT_RPATH
+  std::string musl_interpreter;  // the program runs under musl's loader, at this path
 };
 
 ElfLoadScope::ElfLoadScope() : impl_(std::make_unique<Impl>()) {}
@@ -838,6 +873,9 @@ ElfLoadScope ElfLoadScope::build(const BinaryImage& image, std::span<const std::
   inherited.executable_rpath = global.impl_->executable_rpath;
   inherited.executable_origin = global.impl_->executable_origin;
   inherited.unknown_rpath = global.impl_->other_rpath;
+  if (global.impl_->musl) {
+    inherited.musl_interpreter = read_library_names(*program, program_data).interpreter;
+  }
   if (inherited.max_libraries == 0) {
     // The program's scope took the whole limit: the library itself is past it. It stays in the
     // scope by name, unread, so a lookup that reaches it is not known rather than bound to it.
@@ -892,6 +930,14 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     return scope;
   }
   const ElfLibraryNames own = read_library_names(image, data);
+  // musl's loader (the interpreter the program names, or the one the program of a library's
+  // local scope names) searches and binds by its own rules, not glibc's.
+  const std::string musl_interpreter =
+      inherited != nullptr
+          ? inherited->musl_interpreter
+          : (is_musl_interpreter(own.interpreter) ? own.interpreter : std::string());
+  const bool musl = !musl_interpreter.empty();
+  impl.musl = musl;
   impl.executable_dynamic = own.dynamic || !own.complete;
   impl.libraries.push_back(self);
   impl.loaded.push_back(read_definitions(image, data, own));
@@ -930,7 +976,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
   }
 
   LoaderCache cache;
-  if (search.system_directories) {
+  if (search.system_directories && !musl) {
     const Resolved where = resolve(LoaderPath{false, "/etc/ld.so.cache"}, sysroot);
     if (where.state == Resolved::State::Unknown) {
       cache.state = LoaderCache::State::Refused;
@@ -953,7 +999,43 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     }
   }
   std::vector<std::string> defaults;
-  if (search.system_directories) {
+  // musl reads its search path from /etc/ld-musl-<arch>.path (directories separated by `:` or a
+  // line end), and searches /lib, /usr/local/lib and /usr/lib when there is no such file.
+  std::optional<std::string> musl_path_problem;
+  if (search.system_directories && musl) {
+    const std::string arch = musl_arch(image.architecture);
+    const Resolved where =
+        arch.empty() ? Resolved{}
+                     : resolve(LoaderPath{false, "/etc/ld-musl-" + arch + ".path"}, sysroot);
+    if (arch.empty()) {
+      musl_path_problem = "musl's search path for this architecture is not modelled";
+    } else if (where.state == Resolved::State::Unknown) {
+      musl_path_problem = where.reason;
+    } else if (where.state == Resolved::State::Found) {
+      FileBytes file = read_file(where.host, kMaxPreloadBytes);
+      if (file.state != FileBytes::State::Read) {
+        musl_path_problem = where.host.generic_string() + " could not be read";
+      } else {
+        std::string entry;
+        for (const std::byte b : file.bytes) {
+          const char c = static_cast<char>(b);
+          if (c == ':' || c == '\n') {
+            if (!entry.empty()) {
+              defaults.push_back(entry);
+            }
+            entry.clear();
+          } else {
+            entry += c;
+          }
+        }
+        if (!entry.empty()) {
+          defaults.push_back(entry);
+        }
+      }
+    } else {
+      defaults = {"/lib", "/usr/local/lib", "/usr/lib"};
+    }
+  } else if (search.system_directories) {
     const std::string triplet = multiarch_triplet(image.architecture);
     if (!triplet.empty()) {
       defaults.push_back("/lib/" + triplet);
@@ -982,7 +1064,8 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       out.reason = where.reason;
       return out;
     }
-    if (std::string why = hardware_override(directory, name, sysroot); !why.empty()) {
+    if (std::string why = musl ? std::string() : hardware_override(directory, name, sysroot);
+        !why.empty()) {
       out.state = Probe::State::Unknown;
       out.reason = std::move(why);
       return out;
@@ -1008,6 +1091,29 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
   const auto find = [&](const std::string& raw_name, std::size_t requester) -> Search {
     Search out;
     const ElfLibraryNames& asking = names_of[requester];
+    if (musl && raw_name.find('/') == std::string::npos && musl_reserved_name(raw_name)) {
+      // musl gives the C library's names to itself: the loader is the C library.
+      const LoaderPath file{false, musl_interpreter};
+      const Resolved where = resolve(file, sysroot);
+      if (where.state == Resolved::State::Missing) {
+        out.state = Probe::State::Unknown;
+        out.reason = "musl's loader " + musl_interpreter + " was not found";
+        return out;
+      }
+      if (where.state == Resolved::State::Unknown) {
+        out.state = Probe::State::Unknown;
+        out.reason = where.reason;
+        return out;
+      }
+      Probe found = probe(where.host, image);
+      out.state = found.state == Probe::State::Skipped ? Probe::State::Unknown : found.state;
+      out.reason = found.state == Probe::State::Skipped
+                       ? musl_interpreter + " is not a library of the image's machine"
+                       : std::move(found.reason);
+      out.library = std::move(found.library);
+      out.location = file;
+      return out;
+    }
     if (raw_name.find('/') != std::string::npos || raw_name.find('$') != std::string::npos) {
       // A path (after its tokens expand) is opened as it is, without a search.
       std::string why;
@@ -1037,6 +1143,11 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     }
     const std::string& name = raw_name;
     std::vector<SearchStep> steps;
+    const auto add_entries_musl = [&](std::size_t object) {
+      // musl takes an object's DT_RUNPATH when it has one, else its DT_RPATH.
+      const ElfLibraryNames& of = names_of[object];
+      return of.has_runpath ? of.runpath : of.rpath;
+    };
     const auto add_entries = [&](const std::string& list, std::size_t object) {
       for (const std::string& entry : split_search_path(list)) {
         SearchStep step;
@@ -1051,7 +1162,36 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
         steps.push_back(std::move(step));
       }
     };
-    if (!asking.has_runpath) {
+    if (musl) {
+      // musl: LD_LIBRARY_PATH (`paths`), the search path of the requester and of each object that
+      // loaded it, then its path file or default directories. No cache, no hardware directories,
+      // and DF_1_NODEFLIB is not read.
+      for (const std::string& directory : search.paths) {
+        SearchStep step;
+        step.directory = LoaderPath{true, directory};
+        steps.push_back(std::move(step));
+      }
+      for (std::size_t object = requester; object != kNoLoader; object = loader_of[object]) {
+        add_entries(add_entries_musl(object), object);
+      }
+      if (inherited != nullptr) {
+        SearchStep step;
+        step.kind = SearchStep::Kind::Unknowable;
+        step.reason = "musl's search for a library loaded with dlopen is not modelled";
+        steps.push_back(std::move(step));
+      }
+      if (musl_path_problem) {
+        SearchStep step;
+        step.kind = SearchStep::Kind::Unknowable;
+        step.reason = *musl_path_problem;
+        steps.push_back(std::move(step));
+      }
+      for (const std::string& directory : defaults) {
+        SearchStep step;
+        step.directory = LoaderPath{false, directory};
+        steps.push_back(std::move(step));
+      }
+    } else if (!asking.has_runpath) {
       // DT_RPATH of the requester, then of each object that loaded it, up to the executable. An
       // object with DT_RUNPATH has no DT_RPATH for the loader.
       for (std::size_t object = requester; object != kNoLoader; object = loader_of[object]) {
@@ -1086,15 +1226,17 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
         }
       }
     }
-    for (const std::string& directory : search.paths) {
-      SearchStep step;
-      step.directory = LoaderPath{true, directory};
-      steps.push_back(std::move(step));
-    }
-    add_entries(asking.runpath, requester);
-    if (!asking.nodeflib) {
-      steps.push_back(SearchStep{SearchStep::Kind::Cache, {}, {}});
-      steps.push_back(SearchStep{SearchStep::Kind::Defaults, {}, {}});
+    if (!musl) {
+      for (const std::string& directory : search.paths) {
+        SearchStep step;
+        step.directory = LoaderPath{true, directory};
+        steps.push_back(std::move(step));
+      }
+      add_entries(asking.runpath, requester);
+      if (!asking.nodeflib) {
+        steps.push_back(SearchStep{SearchStep::Kind::Cache, {}, {}});
+        steps.push_back(SearchStep{SearchStep::Kind::Defaults, {}, {}});
+      }
     }
     for (const SearchStep& step : steps) {
       switch (step.kind) {
@@ -1214,8 +1356,9 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     }
     queue.push_back(std::move(pending));
   };
-  if (search.system_directories && preload) {
-    // ld.so.preload: names separated by white space or `:`, `#` to the end of a line a comment.
+  if (search.system_directories && preload && !musl) {
+    // ld.so.preload (glibc's; musl's loader does not read it): names separated by white space or
+    // `:`, `#` to the end of a line a comment.
     const Resolved where = resolve(LoaderPath{false, "/etc/ld.so.preload"}, sysroot);
     std::optional<std::string> problem;
     if (where.state == Resolved::State::Unknown) {
@@ -1294,7 +1437,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       seen.insert(identity);
       names = read_library_names(found.library->image, found.library->data);
       library.soname = names.soname;
-      if (!names.soname.empty()) {
+      if (!names.soname.empty() && !musl) {  // musl matches a needed name to loaded names only
         seen.insert(names.soname);
       }
       loaded = read_definitions(found.library->image, found.library->data, names);
@@ -1344,6 +1487,15 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
 ElfBinding ElfLoadScope::lookup(const std::string& name, const std::string& version,
                                 bool hidden_need) const {
   ElfBinding out;
+  if (impl_->musl && !version.empty()) {
+    // musl's loader does not match symbol versions the way glibc does; a versioned reference
+    // under it is not modelled.
+    out.outcome = ElfBinding::Outcome::Unknown;
+    out.reason = name + "@" + version +
+                 ": musl's loader does not bind versioned references as "
+                 "glibc does, and its rules are not modelled";
+    return out;
+  }
   // DT_SYMBOLIC: the image itself first, then the scope in order (where it is not looked up again).
   std::vector<std::size_t> order;
   if (impl_->image_first && impl_->image_index < impl_->libraries.size()) {
@@ -1369,6 +1521,12 @@ ElfBinding ElfLoadScope::lookup(const std::string& name, const std::string& vers
     const auto found = loaded.definitions.find(name);
     if (found == loaded.definitions.end()) {
       continue;
+    }
+    if (impl_->musl && loaded.has_versym) {
+      out.outcome = ElfBinding::Outcome::Unknown;
+      out.reason = impl_->libraries[index].path +
+                   " has symbol versions, whose use by musl's loader is not modelled";
+      return out;
     }
     bool accepted = false;
     std::size_t visible_versioned = 0;

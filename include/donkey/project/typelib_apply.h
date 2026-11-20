@@ -1,15 +1,20 @@
 #pragma once
 
-// Applying a type library (G22-T3, first part): merging its types into a project's type table, and
-// matching the image's imported names to its function prototypes. Nothing here reads a binary or
-// writes a project: the caller passes the names and stores the result.
+// Applying a type library (G22-T3): merging its types into a project's type table, finding where
+// each import of an image binds, and giving an import the library's prototype only when the
+// import is shown to bind to a library file the type library describes (its `provides` records),
+// for the ABI the image's code follows.
 
 #include <cstdint>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
 
+#include "donkey/analysis/analysis.h"
+#include "donkey/binary/elf_load_scope.h"
+#include "donkey/binary/image.h"
 #include "donkey/core/result.h"
 #include "donkey/project/project.h"
 #include "donkey/project/typelib.h"
@@ -21,9 +26,10 @@ namespace donkey {
 struct TypeLibraryCollision {
   std::string name;
   TypeId existing{};
-  /// True when the two definitions differ in kind or layout (size, fields, target): the existing
-  /// one is kept, and the library's is dropped, so a library layout never replaces a user, DWARF or
-  /// PDB layout.
+  /// True when the two definitions differ in kind or layout: size, members' names, offsets and
+  /// types, the target, the parameters, compared through the types they refer to (not by id, as a
+  /// library type and an equal project type have different ids). The existing one is kept, and the
+  /// library's is dropped, so a library layout never replaces a user, DWARF or PDB layout.
   bool differs = false;
 };
 
@@ -32,54 +38,97 @@ struct TypeLibraryMerge {
   TypeTable table;
   /// Every named library type, by name space and name, to the id it has in `table`: its new id, or
   /// the existing type's id on a collision. Tags (struct, union, enum) and ordinary names (typedef,
-  /// function) are kept apart, as in C.
+  /// function, a record named by a typedef) are kept apart, as in C. A tag declared inside a
+  /// prototype is in neither: it is not a file-scope name.
   std::map<std::string, TypeId> tags;
   std::map<std::string, TypeId> ordinary;
   std::vector<TypeLibraryCollision> collisions;
   std::size_t added = 0;
 };
 
-/// Merges the library's types into `existing`. A library type whose name an existing type has in
-/// the same name space is not added: references to it are moved to the existing type, and the
-/// collision is listed (`differs` when the definitions do not match). Every other type is added
-/// with a fresh id and provenance Library. The result is validated as a whole; an invalid table is
-/// refused (`typelib_apply.invalid`) and `existing` is unchanged.
+/// Merges the library's types into `existing`. A library type whose name an existing file-scope
+/// type has in the same name space is not added: references to it are moved to the existing type,
+/// and the collision is listed (`differs` when the definitions do not match). Every other type is
+/// added with a fresh id, provenance Library and `library` set to `library_id`. The result is
+/// validated as a whole; an invalid table is refused (`typelib_apply.invalid`) and `existing` is
+/// unchanged.
 [[nodiscard]] Result<TypeLibraryMerge> merge_type_library(const TypeTable& existing,
-                                                          const TypeLibrary& library);
+                                                          const TypeLibrary& library,
+                                                          std::int64_t library_id = 0);
 
 /// The name an import is matched by: an ELF version suffix (`@VERSION` or `@@VERSION`) is removed,
 /// and so is one leading underscore on Mach-O (`mach_o`).
 [[nodiscard]] std::string import_match_name(std::string_view name, bool mach_o = false);
 
+/// The ABI an image's code follows, in a type library's terms (typelib.h). `abi` is empty when no
+/// library can describe the image (another format or architecture).
+struct ImageAbi {
+  std::string platform;  ///< `windows` (PE), `macos` (Mach-O); empty for ELF (Linux or FreeBSD)
+  std::string architecture;
+  std::string abi;         ///< sysv, aapcs64 or win64
+  std::string data_model;  ///< LP64 or LLP64
+};
+
+/// The ABI of an image of `format` and `architecture`, spelled as format_name and
+/// architecture_name spell them (`ELF`, `x86_64`).
+[[nodiscard]] ImageAbi image_abi(std::string_view format, std::string_view architecture);
+
+/// Why a loaded library does not describe code of `image`, or empty when it does: the
+/// architecture, ABI and data model must be the image's, and so must the platform where the image
+/// shows one.
+[[nodiscard]] std::string library_misfit(const TypeLibraryRecord& library, const ImageAbi& image);
+
+/// An import as the analysis found it: the stub or thunk that calls it, its name, and where each
+/// of its references binds.
+struct ImportSite {
+  std::string name;
+  std::uint64_t address = 0;
+  /// Each version the image imports the name with (`GLIBC_2.2.5`, or empty for an unversioned
+  /// reference), from the dynamic symbols, not from `name`.
+  std::vector<std::string> versions;
+  /// The library each reference binds to: its SONAME, or its file name when it has none (ELF); the
+  /// DLL the import names (PE). Filled only when every reference is shown to bind.
+  std::vector<std::string> providers;
+  /// Why the provider is not shown, when it is not (a library of the load scope that could not be
+  /// read, a name that binds nowhere, a format whose stubs are not bound).
+  std::string unbound;
+};
+
+/// The import stubs and thunks of an analysed image, each with where its references bind: on ELF
+/// by the dynamic loader's own search and lookup (ElfLoadScope, glibc's or musl's), on PE by the
+/// DLL each import names. Mach-O and other formats give no providers (`unbound` says why).
+[[nodiscard]] std::vector<ImportSite> import_sites(const BinaryImage& image,
+                                                   std::span<const std::byte> data,
+                                                   const AnalysisResult& analysis,
+                                                   const ElfLibrarySearch& search = {});
+
 /// One import matched to a prototype, or not.
 struct ImportPrototype {
   std::string import;  ///< as the image names it
   TypeId prototype{};  ///< the function type, or 0 when none applies
-  /// Empty when matched; otherwise why not: `no prototype`, `ordinal import`, or `ambiguous` (one
-  /// stripped name came with two different versions, so which prototype applies is not known).
+  /// Empty when matched; otherwise why not: `no prototype`, `ordinal import`, or `ambiguous` (the
+  /// name is imported with two different versions, and a library has one prototype per name).
   std::string reason;
 };
 
-/// Matches each import to a function prototype of the merge, by its match name. An ordinal import
-/// (`ordinal_N`, PE) is never matched. When two imports have one match name with different
-/// versions (`memcpy@GLIBC_2.2.5` and `memcpy@GLIBC_2.14`), both are `ambiguous`: a library has one
-/// prototype per name and cannot tell the versions apart.
+/// Matches each site to a library function prototype of the merge, by its match name. Only a
+/// function type with provenance Library matches: a user, DWARF or PDB type that kept a library
+/// name on a collision is not a library prototype. An ordinal import (`ordinal_N`, PE) is never
+/// matched.
 [[nodiscard]] std::vector<ImportPrototype> match_import_prototypes(
-    const std::vector<std::string>& imports, const TypeLibraryMerge& merge, bool mach_o = false);
-
-/// An import as the analysis found it: the stub or thunk that calls it, and the import's name.
-struct ImportSite {
-  std::string name;
-  std::uint64_t address = 0;
-};
+    const std::vector<ImportSite>& sites, const TypeLibraryMerge& merge);
 
 /// What `apply_library_prototypes` did at one import site.
 struct LibraryPrototypeApplication {
   std::string import;
   std::uint64_t address = 0;
   TypeId prototype{};  ///< the applied function type; 0 when nothing was applied
-  /// Empty when applied; otherwise why not: the `match_import_prototypes` reasons, or `kept: user`
-  /// (`kept: dwarf`, ...) when the address already has a prototype of another source.
+  /// The library that brought the prototype (`name version`), when one matched.
+  std::string library;
+  /// Empty when applied; otherwise why not: the `match_import_prototypes` reasons, the library not
+  /// fitting the image's ABI, the provider not shown (`provider not shown: ...`), a provider the
+  /// library does not describe (`bound to ...`), or `kept: user` (`kept: dwarf`, ...) when the
+  /// address already has a prototype of another source.
   std::string reason;
 };
 
@@ -88,12 +137,13 @@ struct LibraryPrototypeApplication {
 /// not library prototypes, even when they share a name.
 [[nodiscard]] TypeLibraryMerge library_prototypes(const TypeTable& table);
 
-/// Applies the library prototypes of the project's type table to the import sites of one image,
-/// as FunctionPrototype applications with source Library. A site whose address already has an
-/// application of another source keeps it. The caller checks that the libraries fit the image
-/// (architecture); nothing here reads the binary.
+/// Applies the library prototypes of the project's type table to the import sites of one image, as
+/// FunctionPrototype applications with source Library: a site gets its prototype only when the
+/// library that brought it fits `image` (library_misfit) and every reference of the site binds to
+/// a file the library `provides`. A site whose address already has an application of another
+/// source keeps it.
 [[nodiscard]] Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
     Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
-    bool mach_o = false);
+    const ImageAbi& image);
 
 }  // namespace donkey
