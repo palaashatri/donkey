@@ -17,8 +17,8 @@ generator: donkey-cli typelib make 1
 generator_command: sh tools/typelib/make-musl.sh
 preprocessor: gcc 13.3.0 -E -P -nostdinc -isystem /usr/include/x86_64-linux-musl -D_GNU_SOURCE (CPATH, C_INCLUDE_PATH and the like unset)
 created: 2026-11-18
-body_sha256: 296452123617c4ababd666a4c057c9f00b70716267d627c48a293db3be829c29
-declarations: 2852
+body_sha256: f9dcaa928ee52509aec16208dd9e11a34822d2e44870f8dcd3b99ef698d77b64
+declarations: 3289
 source_file: aio.h fdb50a494eb52d43b674f8debe75d72224bc022d52dfbc53fc519895305ab1ee
 source_file: alloca.h 8768404d7cf4af5fb135b1a2ca91765bd2be311ac072e0ec8b68f5cb3e6e0f3e
 source_file: ar.h a32ed9d5a0e19c2d40781a05e4a0ef094d24b69a5752dc3849b92e4502481bd4
@@ -110,9 +110,6 @@ source_file: wchar.h 18c5adbb8fe770aeccc0a1721b03352c6a07fb8ea373a6fcdfe88be76ca
 source_file: wctype.h cfb9a3d564aad013b7bb8d326fd9b01263c87ff73fb69c823e7695b4989fc2e9
 source_file: wordexp.h f72323c01c310d9a7aabb4ea62e6a20d3f2be8a390173796c100dd85e2915855
 macro: _GNU_SOURCE=
-skipped: timespec: cdecl.bad_character line 1, column 141: the character '!' is not part of the C subset
-skipped: sigset_t: cdecl.bad_character line 1, column 53: the character '/' is not part of the C subset
-skipped: pthread_attr_t: cdecl.bad_character line 1, column 49: the character '?' is not part of the C subset
 skipped: REG_R8: declares no type, typedef or function
 skipped: REG_R9: declares no type, typedef or function
 skipped: REG_R10: declares no type, typedef or function
@@ -136,32 +133,13 @@ skipped: REG_ERR: declares no type, typedef or function
 skipped: REG_TRAPNO: declares no type, typedef or function
 skipped: REG_OLDMASK: declares no type, typedef or function
 skipped: REG_CR2: declares no type, typedef or function
-skipped: ucontext_t: cdecl.unknown_type line 1, column 119: 'sigset_t' is not a type
-skipped: siginfo_t: cdecl.unexpected_token line 1, column 74: expected ']', found '-'
 skipped: sigaction: cdecl.parenthesized_declarator line 1, column 33: a parenthesised declarator, as in a function pointer, is not supported
-skipped: sigevent: cdecl.unexpected_token line 1, column 102: expected ']', found '-'
-skipped: sigemptyset: cdecl.unknown_type line 1, column 17: 'sigset_t' is not a type
-skipped: sigfillset: cdecl.unknown_type line 1, column 16: 'sigset_t' is not a type
-skipped: sigaddset: cdecl.unknown_type line 1, column 15: 'sigset_t' is not a type
-skipped: sigdelset: cdecl.unknown_type line 1, column 15: 'sigset_t' is not a type
-skipped: sigismember: cdecl.unknown_type line 1, column 23: 'sigset_t' is not a type
-skipped: sigprocmask: cdecl.unknown_type line 1, column 28: 'sigset_t' is not a type
-skipped: sigsuspend: cdecl.unknown_type line 1, column 22: 'sigset_t' is not a type
-skipped: sigpending: cdecl.unknown_type line 1, column 16: 'sigset_t' is not a type
-skipped: sigwait: cdecl.unknown_type line 1, column 19: 'sigset_t' is not a type
-skipped: sigwaitinfo: cdecl.unknown_type line 1, column 23: 'sigset_t' is not a type
-skipped: sigtimedwait: cdecl.unknown_type line 1, column 24: 'sigset_t' is not a type
-skipped: pthread_sigmask: cdecl.unknown_type line 1, column 32: 'sigset_t' is not a type
-skipped: psiginfo: cdecl.unknown_type line 1, column 21: 'siginfo_t' is not a type
+skipped: sigevent: cdecl.parenthesized_declarator line 1, column 187: a parenthesised declarator, as in a function pointer, is not supported
 skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
 skipped: sig_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
 skipped: sighandler_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
 skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
-skipped: sigisemptyset: cdecl.unknown_type line 1, column 25: 'sigset_t' is not a type
-skipped: sigorset: cdecl.unknown_type line 1, column 15: 'sigset_t' is not a type
-skipped: sigandset: cdecl.unknown_type line 1, column 15: 'sigset_t' is not a type
 skipped: void: cdecl.parenthesized_declarator line 1, column 6: a parenthesised declarator, as in a function pointer, is not supported
-skipped: itimerspec: cdecl.incomplete_type line 1, column 37: member 'it_interval' has a type whose size is not known
 skipped: tzname: cdecl.variable line 1, column 14: 'tzname' declares a variable; only types and function prototypes are in this subset
 skipped: daylight: cdecl.variable line 1, column 12: 'daylight' declares a variable; only types and function prototypes are in this subset
 skipped: timezone: cdecl.variable line 1, column 13: 'timezone' declares a variable; only types and function prototypes are in this subset
@@ -238,8 +216,6 @@ skipped: crealf: cdecl.unexpected_token line 1, column 20: expected ')', found '
 skipped: creall: cdecl.unexpected_token line 1, column 32: expected ')', found '_Complex'
 skipped: __isspace: a function definition (only declarations are kept)
 skipped: scandir: cdecl.parenthesized_declarator line 1, column 50: a parenthesised declarator, as in a function pointer, is not supported
-skipped: Elf32_Ehdr: cdecl.unexpected_token line 1, column 40: expected an array size, found '('
-skipped: Elf64_Ehdr: cdecl.unexpected_token line 1, column 40: expected an array size, found '('
 skipped: Val_GNU_MIPS_ABI_FP_MAX: declares no type, typedef or function
 skipped: __bswap16: a function definition (only declarations are kept)
 skipped: __bswap32: a function definition (only declarations are kept)
@@ -251,38 +227,19 @@ skipped: verr: cdecl.unknown_type line 1, column 30: 'va_list' is not a type
 skipped: verrx: cdecl.unknown_type line 1, column 31: 'va_list' is not a type
 skipped: program_invocation_short_name: cdecl.variable line 1, column 14: 'program_invocation_short_name' declares a variable; only types and function prototypes are in this subset
 skipped: file_handle: cdecl.array_size_required line 1, column 84: an array needs a size, except the outermost dimension of a parameter
-skipped: fenv_t: cdecl.bitfield_unsupported line 1, column 251: bit-fields are not supported
-skipped: fegetenv: cdecl.unknown_type line 1, column 14: 'fenv_t' is not a type
-skipped: feholdexcept: cdecl.unknown_type line 1, column 18: 'fenv_t' is not a type
-skipped: fesetenv: cdecl.unknown_type line 1, column 20: 'fenv_t' is not a type
-skipped: feupdateenv: cdecl.unknown_type line 1, column 23: 'fenv_t' is not a type
-skipped: pthread_mutex_t: cdecl.bad_character line 1, column 49: the character '?' is not part of the C subset
-skipped: pthread_cond_t: cdecl.bad_character line 1, column 86: the character '/' is not part of the C subset
-skipped: pthread_rwlock_t: cdecl.bad_character line 1, column 49: the character '?' is not part of the C subset
-skipped: pthread_barrier_t: cdecl.bad_character line 1, column 49: the character '?' is not part of the C subset
-skipped: fd_set: cdecl.bad_character line 1, column 46: the character '/' is not part of the C subset
-skipped: select: cdecl.unknown_type line 1, column 18: 'fd_set' is not a type
-skipped: pselect: cdecl.unknown_type line 1, column 19: 'fd_set' is not a type
 skipped: fts_compar: cdecl.parenthesized_declarator line 1, column 197: a parenthesised declarator, as in a function pointer, is not supported
 skipped: fts_children: cdecl.unknown_type line 1, column 22: 'FTS' is not a type
 skipped: fts_close: cdecl.unknown_type line 1, column 15: 'FTS' is not a type
 skipped: fts_open: cdecl.unknown_type line 1, column 1: 'FTS' is not a type
 skipped: fts_read: cdecl.unknown_type line 1, column 18: 'FTS' is not a type
 skipped: fts_set: cdecl.unknown_type line 1, column 13: 'FTS' is not a type
-skipped: stat: cdecl.incomplete_type line 1, column 214: member 'st_atim' has a type whose size is not known
-skipped: futimens: cdecl.incomplete_type line 1, column 41: an array needs an element type with a known size
-skipped: utimensat: cdecl.incomplete_type line 1, column 56: an array needs an element type with a known size
 skipped: ftw: cdecl.parenthesized_declarator line 1, column 27: a parenthesised declarator, as in a function pointer, is not supported
 skipped: nftw: cdecl.parenthesized_declarator line 1, column 28: a parenthesised declarator, as in a function pointer, is not supported
 skipped: optarg: cdecl.variable line 1, column 14: 'optarg' declares a variable; only types and function prototypes are in this subset
 skipped: optind: cdecl.variable line 1, column 12: 'optind' declares a variable; only types and function prototypes are in this subset
 skipped: glob: cdecl.parenthesized_declarator line 1, column 33: a parenthesised declarator, as in a function pointer, is not supported
 skipped: timespec: declares no type, typedef or function
-skipped: sockaddr_storage: cdecl.unexpected_token line 1, column 71: expected ']', found '-'
 skipped: in6addr_any: cdecl.variable line 1, column 30: 'in6addr_any' declares a variable; only types and function prototypes are in this subset
-skipped: group_req: cdecl.incomplete_type line 1, column 67: member 'gr_group' has a type whose size is not known
-skipped: group_source_req: cdecl.incomplete_type line 1, column 75: member 'gsr_group' has a type whose size is not known
-skipped: group_filter: cdecl.incomplete_type line 1, column 70: member 'gf_group' has a type whose size is not known
 skipped: dl_iterate_phdr: cdecl.parenthesized_declarator line 1, column 25: a parenthesised declarator, as in a function pointer, is not supported
 skipped: __FLOAT_BITS: a function definition (only declarations are kept)
 skipped: __DOUBLE_BITS: a function definition (only declarations are kept)
@@ -304,80 +261,23 @@ skipped: __isgreaterequall: a function definition (only declarations are kept)
 skipped: signgam: cdecl.variable line 1, column 12: 'signgam' declares a variable; only types and function prototypes are in this subset
 skipped: basename: declared again (the first declaration is kept)
 skipped: sigevent: declares no type, typedef or function
-skipped: ppoll: cdecl.unknown_type line 1, column 67: 'sigset_t' is not a type
 skipped: clone: cdecl.parenthesized_declarator line 1, column 16: a parenthesised declarator, as in a function pointer, is not supported
 skipped: memcpy: declared again (the first declaration is kept)
 skipped: memcmp: declared again (the first declaration is kept)
 skipped: memset: declared again (the first declaration is kept)
 skipped: calloc: declared again (the first declaration is kept)
 skipped: free: declared again (the first declaration is kept)
-skipped: cpu_set_t: cdecl.bad_character line 1, column 52: the character '/' is not part of the C subset
-skipped: __sched_cpucount: cdecl.unknown_type line 1, column 36: 'cpu_set_t' is not a type
-skipped: sched_getaffinity: cdecl.unknown_type line 1, column 38: 'cpu_set_t' is not a type
-skipped: sched_setaffinity: cdecl.unknown_type line 1, column 44: 'cpu_set_t' is not a type
 skipped: __CPU_AND_S: a function definition (only declarations are kept)
 skipped: __CPU_OR_S: a function definition (only declarations are kept)
 skipped: __CPU_XOR_S: a function definition (only declarations are kept)
-skipped: pthread_create: cdecl.unknown_type line 1, column 39: 'pthread_attr_t' is not a type
+skipped: pthread_create: cdecl.parenthesized_declarator line 1, column 63: a parenthesised declarator, as in a function pointer, is not supported
 skipped: pthread_once: cdecl.parenthesized_declarator line 1, column 41: a parenthesised declarator, as in a function pointer, is not supported
-skipped: pthread_mutex_init: cdecl.unknown_type line 1, column 24: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_lock: cdecl.unknown_type line 1, column 24: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_unlock: cdecl.unknown_type line 1, column 26: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_trylock: cdecl.unknown_type line 1, column 27: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_timedlock: cdecl.unknown_type line 1, column 29: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_destroy: cdecl.unknown_type line 1, column 27: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_consistent: cdecl.unknown_type line 1, column 30: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_getprioceiling: cdecl.unknown_type line 1, column 40: 'pthread_mutex_t' is not a type
-skipped: pthread_mutex_setprioceiling: cdecl.unknown_type line 1, column 34: 'pthread_mutex_t' is not a type
-skipped: pthread_cond_init: cdecl.unknown_type line 1, column 23: 'pthread_cond_t' is not a type
-skipped: pthread_cond_destroy: cdecl.unknown_type line 1, column 26: 'pthread_cond_t' is not a type
-skipped: pthread_cond_wait: cdecl.unknown_type line 1, column 23: 'pthread_cond_t' is not a type
-skipped: pthread_cond_timedwait: cdecl.unknown_type line 1, column 28: 'pthread_cond_t' is not a type
-skipped: pthread_cond_broadcast: cdecl.unknown_type line 1, column 28: 'pthread_cond_t' is not a type
-skipped: pthread_cond_signal: cdecl.unknown_type line 1, column 25: 'pthread_cond_t' is not a type
-skipped: pthread_rwlock_init: cdecl.unknown_type line 1, column 25: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_destroy: cdecl.unknown_type line 1, column 28: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_rdlock: cdecl.unknown_type line 1, column 27: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_tryrdlock: cdecl.unknown_type line 1, column 30: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_timedrdlock: cdecl.unknown_type line 1, column 32: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_wrlock: cdecl.unknown_type line 1, column 27: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_trywrlock: cdecl.unknown_type line 1, column 30: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_timedwrlock: cdecl.unknown_type line 1, column 32: 'pthread_rwlock_t' is not a type
-skipped: pthread_rwlock_unlock: cdecl.unknown_type line 1, column 27: 'pthread_rwlock_t' is not a type
-skipped: pthread_barrier_init: cdecl.unknown_type line 1, column 26: 'pthread_barrier_t' is not a type
-skipped: pthread_barrier_destroy: cdecl.unknown_type line 1, column 29: 'pthread_barrier_t' is not a type
-skipped: pthread_barrier_wait: cdecl.unknown_type line 1, column 26: 'pthread_barrier_t' is not a type
 skipped: pthread_key_create: cdecl.parenthesized_declarator line 1, column 46: a parenthesised declarator, as in a function pointer, is not supported
-skipped: pthread_attr_init: cdecl.unknown_type line 1, column 23: 'pthread_attr_t' is not a type
-skipped: pthread_attr_destroy: cdecl.unknown_type line 1, column 26: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getguardsize: cdecl.unknown_type line 1, column 37: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setguardsize: cdecl.unknown_type line 1, column 31: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getstacksize: cdecl.unknown_type line 1, column 37: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setstacksize: cdecl.unknown_type line 1, column 31: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getdetachstate: cdecl.unknown_type line 1, column 39: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setdetachstate: cdecl.unknown_type line 1, column 33: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getstack: cdecl.unknown_type line 1, column 33: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setstack: cdecl.unknown_type line 1, column 27: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getscope: cdecl.unknown_type line 1, column 33: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setscope: cdecl.unknown_type line 1, column 27: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getschedpolicy: cdecl.unknown_type line 1, column 39: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setschedpolicy: cdecl.unknown_type line 1, column 33: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getschedparam: cdecl.unknown_type line 1, column 38: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setschedparam: cdecl.unknown_type line 1, column 32: 'pthread_attr_t' is not a type
-skipped: pthread_attr_getinheritsched: cdecl.unknown_type line 1, column 40: 'pthread_attr_t' is not a type
-skipped: pthread_attr_setinheritsched: cdecl.unknown_type line 1, column 34: 'pthread_attr_t' is not a type
 skipped: pthread_atfork: cdecl.parenthesized_declarator line 1, column 25: a parenthesised declarator, as in a function pointer, is not supported
 skipped: __ptcb: cdecl.parenthesized_declarator line 1, column 22: a parenthesised declarator, as in a function pointer, is not supported
 skipped: _pthread_cleanup_push: cdecl.parenthesized_declarator line 1, column 50: a parenthesised declarator, as in a function pointer, is not supported
-skipped: pthread_getattr_np: cdecl.unknown_type line 1, column 35: 'pthread_attr_t' is not a type
-skipped: pthread_getattr_default_np: cdecl.unknown_type line 1, column 32: 'pthread_attr_t' is not a type
-skipped: pthread_setattr_default_np: cdecl.unknown_type line 1, column 38: 'pthread_attr_t' is not a type
-skipped: ns_msg: cdecl.unexpected_token line 1, column 91: expected an array size, found 'ns_s_max'
+skipped: cpu_set_t: declares no type, typedef or function
 skipped: _ns_flagdata: cdecl.array_size_required line 1, column 46: an array needs a size, except the outermost dimension of a parameter
-skipped: ns_initparse: cdecl.unknown_type line 1, column 46: 'ns_msg' is not a type
-skipped: ns_parserr: cdecl.unknown_type line 1, column 16: 'ns_msg' is not a type
-skipped: HEADER: cdecl.bitfield_unsupported line 1, column 30: bit-fields are not supported
-skipped: res_state: cdecl.unexpected_token line 1, column 159: expected ']', found '+'
 skipped: lsearch: cdecl.parenthesized_declarator line 1, column 59: a parenthesised declarator, as in a function pointer, is not supported
 skipped: lfind: cdecl.parenthesized_declarator line 1, column 63: a parenthesised declarator, as in a function pointer, is not supported
 skipped: tdelete: cdecl.parenthesized_declarator line 1, column 41: a parenthesised declarator, as in a function pointer, is not supported
@@ -385,42 +285,7 @@ skipped: tfind: cdecl.parenthesized_declarator line 1, column 45: a parenthesise
 skipped: tsearch: cdecl.parenthesized_declarator line 1, column 42: a parenthesised declarator, as in a function pointer, is not supported
 skipped: twalk: cdecl.parenthesized_declarator line 1, column 31: a parenthesised declarator, as in a function pointer, is not supported
 skipped: tdestroy: cdecl.parenthesized_declarator line 1, column 28: a parenthesised declarator, as in a function pointer, is not supported
-skipped: sem_t: cdecl.bad_character line 1, column 51: the character '/' is not part of the C subset
-skipped: sem_close: cdecl.unknown_type line 1, column 15: 'sem_t' is not a type
-skipped: sem_destroy: cdecl.unknown_type line 1, column 17: 'sem_t' is not a type
-skipped: sem_getvalue: cdecl.unknown_type line 1, column 18: 'sem_t' is not a type
-skipped: sem_init: cdecl.unknown_type line 1, column 14: 'sem_t' is not a type
-skipped: sem_open: cdecl.unknown_type line 1, column 1: 'sem_t' is not a type
-skipped: sem_post: cdecl.unknown_type line 1, column 14: 'sem_t' is not a type
-skipped: sem_timedwait: cdecl.unknown_type line 1, column 19: 'sem_t' is not a type
-skipped: sem_trywait: cdecl.unknown_type line 1, column 17: 'sem_t' is not a type
-skipped: sem_wait: cdecl.unknown_type line 1, column 14: 'sem_t' is not a type
-skipped: jmp_buf: cdecl.bad_character line 1, column 90: the character '/' is not part of the C subset
-skipped: sigjmp_buf: cdecl.unknown_type line 1, column 9: 'jmp_buf' is not a type
-skipped: sigsetjmp: cdecl.unknown_type line 1, column 16: 'sigjmp_buf' is not a type
-skipped: siglongjmp: cdecl.unknown_type line 1, column 18: 'sigjmp_buf' is not a type
-skipped: _setjmp: cdecl.unknown_type line 1, column 14: 'jmp_buf' is not a type
-skipped: _longjmp: cdecl.unknown_type line 1, column 16: 'jmp_buf' is not a type
-skipped: setjmp: cdecl.unknown_type line 1, column 13: 'jmp_buf' is not a type
-skipped: longjmp: cdecl.unknown_type line 1, column 15: 'jmp_buf' is not a type
 skipped: sched_param: declares no type, typedef or function
-skipped: posix_spawnattr_t: cdecl.unknown_type line 1, column 45: 'sigset_t' is not a type
-skipped: posix_spawn: cdecl.unknown_type line 1, column 82: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnp: cdecl.unknown_type line 1, column 83: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_init: cdecl.unknown_type line 1, column 26: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_destroy: cdecl.unknown_type line 1, column 29: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setflags: cdecl.unknown_type line 1, column 30: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getflags: cdecl.unknown_type line 1, column 36: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setpgroup: cdecl.unknown_type line 1, column 31: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getpgroup: cdecl.unknown_type line 1, column 37: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setsigmask: cdecl.unknown_type line 1, column 32: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getsigmask: cdecl.unknown_type line 1, column 38: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setsigdefault: cdecl.unknown_type line 1, column 35: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getsigdefault: cdecl.unknown_type line 1, column 41: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setschedparam: cdecl.unknown_type line 1, column 35: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getschedparam: cdecl.unknown_type line 1, column 41: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_setschedpolicy: cdecl.unknown_type line 1, column 36: 'posix_spawnattr_t' is not a type
-skipped: posix_spawnattr_getschedpolicy: cdecl.unknown_type line 1, column 42: 'posix_spawnattr_t' is not a type
 skipped: __isoc_va_list: cdecl.unknown_type line 1, column 9: '__builtin_va_list' is not a type
 skipped: stdin: cdecl.variable line 1, column 20: 'stdin' declares a variable; only types and function prototypes are in this subset
 skipped: stdout: cdecl.variable line 1, column 20: 'stdout' declares a variable; only types and function prototypes are in this subset
@@ -452,30 +317,16 @@ skipped: valloc: declared again (the first declaration is kept)
 skipped: memalign: declared again (the first declaration is kept)
 skipped: qsort_r: cdecl.parenthesized_declarator line 1, column 43: a parenthesised declarator, as in a function pointer, is not supported
 skipped: __locale_struct: declares no type, typedef or function
-skipped: str_mlist: cdecl.unexpected_token line 1, column 34: expected ']', found '+'
 skipped: ioctl: declared again (the first declaration is kept)
 skipped: vsyslog: cdecl.unknown_type line 1, column 34: 'va_list' is not a type
 skipped: thrd_start_t: cdecl.parenthesized_declarator line 1, column 13: a parenthesised declarator, as in a function pointer, is not supported
 skipped: tss_dtor_t: cdecl.parenthesized_declarator line 1, column 14: a parenthesised declarator, as in a function pointer, is not supported
-skipped: mtx_t: cdecl.bad_character line 1, column 49: the character '?' is not part of the C subset
-skipped: cnd_t: cdecl.bad_character line 1, column 86: the character '/' is not part of the C subset
 skipped: thrd_timedout: declares no type, typedef or function
 skipped: mtx_timed: declares no type, typedef or function
 skipped: thrd_create: cdecl.unknown_type line 1, column 27: 'thrd_start_t' is not a type
 skipped: call_once: cdecl.parenthesized_declarator line 1, column 34: a parenthesised declarator, as in a function pointer, is not supported
-skipped: mtx_init: cdecl.unknown_type line 1, column 14: 'mtx_t' is not a type
-skipped: mtx_destroy: cdecl.unknown_type line 1, column 18: 'mtx_t' is not a type
-skipped: mtx_lock: cdecl.unknown_type line 1, column 14: 'mtx_t' is not a type
-skipped: mtx_timedlock: cdecl.unknown_type line 1, column 19: 'mtx_t' is not a type
-skipped: mtx_trylock: cdecl.unknown_type line 1, column 17: 'mtx_t' is not a type
-skipped: mtx_unlock: cdecl.unknown_type line 1, column 16: 'mtx_t' is not a type
-skipped: cnd_init: cdecl.unknown_type line 1, column 14: 'cnd_t' is not a type
-skipped: cnd_destroy: cdecl.unknown_type line 1, column 18: 'cnd_t' is not a type
-skipped: cnd_broadcast: cdecl.unknown_type line 1, column 19: 'cnd_t' is not a type
-skipped: cnd_signal: cdecl.unknown_type line 1, column 16: 'cnd_t' is not a type
-skipped: cnd_timedwait: cdecl.unknown_type line 1, column 19: 'cnd_t' is not a type
-skipped: cnd_wait: cdecl.unknown_type line 1, column 14: 'cnd_t' is not a type
 skipped: tss_create: cdecl.unknown_type line 1, column 25: 'tss_dtor_t' is not a type
+skipped: ucontext: declares no type, typedef or function
 skipped: makecontext: cdecl.parenthesized_declarator line 1, column 42: a parenthesised declarator, as in a function pointer, is not supported
 skipped: ctermid: declared again (the first declaration is kept)
 skipped: getopt: declared again (the first declaration is kept)
@@ -514,22 +365,40 @@ note: musl include/* is public domain with a permission grant; the package licen
 typedef unsigned long size_t;
 typedef long time_t;
 typedef long clock_t;
+struct timespec { time_t tv_sec; int :8*(sizeof(time_t)-sizeof(long))*(1234==4321); long tv_nsec; int :8*(sizeof(time_t)-sizeof(long))*(1234!=4321); };
 typedef int pid_t;
 typedef unsigned uid_t;
 typedef struct __pthread * pthread_t;
+typedef struct __sigset_t { unsigned long __bits[128/sizeof(long)]; } sigset_t;
+typedef struct { union { int __i[sizeof(long)==8?14:9]; volatile int __vi[sizeof(long)==8?14:9]; unsigned long __s[sizeof(long)==8?7:9]; } __u; } pthread_attr_t;
 typedef struct sigaltstack stack_t;
 typedef long long greg_t, gregset_t[23];
 typedef struct _fpstate { unsigned short cwd, swd, ftw, fop; unsigned long long rip, rdp; unsigned mxcsr, mxcr_mask; struct { unsigned short significand[4], exponent, padding[3]; } _st[8]; struct { unsigned element[4]; } _xmm[16]; unsigned padding[24]; } *fpregset_t;
 struct sigcontext { unsigned long r8, r9, r10, r11, r12, r13, r14, r15; unsigned long rdi, rsi, rbp, rbx, rdx, rax, rcx, rsp, rip, eflags; unsigned short cs, gs, fs, __pad0; unsigned long err, trapno, oldmask, cr2; struct _fpstate *fpstate; unsigned long __reserved1[8]; };
 typedef struct { gregset_t gregs; fpregset_t fpregs; unsigned long long __reserved1[8]; } mcontext_t;
 struct sigaltstack { void *ss_sp; int ss_flags; size_t ss_size; };
+typedef struct ucontext { unsigned long uc_flags; struct ucontext *uc_link; stack_t uc_stack; mcontext_t uc_mcontext; sigset_t uc_sigmask; unsigned long __fpregs_mem[64]; } ucontext_t;
 union sigval { int sival_int; void *sival_ptr; };
+typedef struct { int si_signo, si_errno, si_code; union { char __pad[128 - 2*sizeof(int) - sizeof(long)]; struct { union { struct { pid_t si_pid; uid_t si_uid; } __piduid; struct { int si_timerid; int si_overrun; } __timer; } __first; union { union sigval si_value; struct { int si_status; clock_t si_utime, si_stime; } __sigchld; } __second; } __si_common; struct { void *si_addr; short si_addr_lsb; union { struct { void *si_lower; void *si_upper; } __addr_bnd; unsigned si_pkey; } __first; } __sigfault; struct { long si_band; int si_fd; } __sigpoll; struct { void *si_call_addr; int si_syscall; unsigned si_arch; } __sigsys; } __si_fields; } siginfo_t;
 int __libc_current_sigrtmin(void);
 int __libc_current_sigrtmax(void);
 int kill(pid_t, int);
+int sigemptyset(sigset_t *);
+int sigfillset(sigset_t *);
+int sigaddset(sigset_t *, int);
+int sigdelset(sigset_t *, int);
+int sigismember(const sigset_t *, int);
+int sigprocmask(int, const sigset_t *, sigset_t *);
+int sigsuspend(const sigset_t *);
 int sigaction(int, const struct sigaction *, struct sigaction *);
+int sigpending(sigset_t *);
+int sigwait(const sigset_t *, int *);
+int sigwaitinfo(const sigset_t *, siginfo_t *);
+int sigtimedwait(const sigset_t *, siginfo_t *, const struct timespec *);
 int sigqueue(pid_t, int, union sigval);
+int pthread_sigmask(int, const sigset_t *, sigset_t *);
 int pthread_kill(pthread_t, int);
+void psiginfo(const siginfo_t *, const char *);
 void psignal(int, const char *);
 int killpg(pid_t, int);
 int sigaltstack(const stack_t *, stack_t *);
@@ -538,6 +407,9 @@ int sigignore(int);
 int siginterrupt(int, int);
 int sigpause(int);
 int sigrelse(int);
+int sigisemptyset(const sigset_t *);
+int sigorset (sigset_t *, const sigset_t *, const sigset_t *);
+int sigandset(sigset_t *, const sigset_t *, const sigset_t *);
 typedef int sig_atomic_t;
 int raise(int);
 typedef void * timer_t;
@@ -560,6 +432,7 @@ struct tm *localtime_r (const time_t *, struct tm *);
 char *asctime_r (const struct tm *, char *);
 char *ctime_r (const time_t *, char *);
 void tzset (void);
+struct itimerspec { struct timespec it_interval; struct timespec it_value; };
 int nanosleep (const struct timespec *, struct timespec *);
 int clock_getres (clockid_t, struct timespec *);
 int clock_gettime (clockid_t, struct timespec *);
@@ -687,6 +560,8 @@ typedef uint16_t Elf32_Section;
 typedef uint16_t Elf64_Section;
 typedef Elf32_Half Elf32_Versym;
 typedef Elf64_Half Elf64_Versym;
+typedef struct { unsigned char e_ident[(16)]; Elf32_Half e_type; Elf32_Half e_machine; Elf32_Word e_version; Elf32_Addr e_entry; Elf32_Off e_phoff; Elf32_Off e_shoff; Elf32_Word e_flags; Elf32_Half e_ehsize; Elf32_Half e_phentsize; Elf32_Half e_phnum; Elf32_Half e_shentsize; Elf32_Half e_shnum; Elf32_Half e_shstrndx; } Elf32_Ehdr;
+typedef struct { unsigned char e_ident[(16)]; Elf64_Half e_type; Elf64_Half e_machine; Elf64_Word e_version; Elf64_Addr e_entry; Elf64_Off e_phoff; Elf64_Off e_shoff; Elf64_Word e_flags; Elf64_Half e_ehsize; Elf64_Half e_phentsize; Elf64_Half e_phnum; Elf64_Half e_shentsize; Elf64_Half e_shnum; Elf64_Half e_shstrndx; } Elf64_Ehdr;
 typedef struct { Elf32_Word sh_name; Elf32_Word sh_type; Elf32_Word sh_flags; Elf32_Addr sh_addr; Elf32_Off sh_offset; Elf32_Word sh_size; Elf32_Word sh_link; Elf32_Word sh_info; Elf32_Word sh_addralign; Elf32_Word sh_entsize; } Elf32_Shdr;
 typedef struct { Elf64_Word sh_name; Elf64_Word sh_type; Elf64_Xword sh_flags; Elf64_Addr sh_addr; Elf64_Off sh_offset; Elf64_Xword sh_size; Elf64_Word sh_link; Elf64_Word sh_info; Elf64_Xword sh_addralign; Elf64_Xword sh_entsize; } Elf64_Shdr;
 typedef struct { Elf32_Word ch_type; Elf32_Word ch_size; Elf32_Word ch_addralign; } Elf32_Chdr;
@@ -750,6 +625,7 @@ ssize_t vmsplice(int, const struct iovec *, size_t, unsigned);
 ssize_t splice(int, off_t *, int, off_t *, size_t, unsigned);
 ssize_t tee(int, int, size_t, unsigned);
 typedef unsigned short fexcept_t;
+typedef struct { unsigned short __control_word; unsigned short __unused1; unsigned short __status_word; unsigned short __unused2; unsigned short __tags; unsigned short __unused3; unsigned int __eip; unsigned short __cs_selector; unsigned int __opcode:11; unsigned int __unused4:5; unsigned int __data_offset; unsigned short __data_selector; unsigned short __unused5; unsigned int __mxcsr; } fenv_t;
 int feclearexcept(int);
 int fegetexceptflag(fexcept_t *, int);
 int feraiseexcept(int);
@@ -757,6 +633,10 @@ int fesetexceptflag(const fexcept_t *, int);
 int fetestexcept(int);
 int fegetround(void);
 int fesetround(int);
+int fegetenv(fenv_t *);
+int feholdexcept(fenv_t *);
+int fesetenv(const fenv_t *);
+int feupdateenv(const fenv_t *);
 int __flt_rounds(void);
 int fmtmsg(long, const char *, int, const char *, const char *, const char *);
 int fnmatch(const char *, const char *, int);
@@ -780,6 +660,10 @@ typedef struct { unsigned __attr; } pthread_mutexattr_t;
 typedef struct { unsigned __attr; } pthread_condattr_t;
 typedef struct { unsigned __attr; } pthread_barrierattr_t;
 typedef struct { unsigned __attr[2]; } pthread_rwlockattr_t;
+typedef struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } pthread_mutex_t;
+typedef struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } pthread_cond_t;
+typedef struct { union { int __i[sizeof(long)==8?14:8]; volatile int __vi[sizeof(long)==8?14:8]; void *__p[sizeof(long)==8?7:8]; } __u; } pthread_rwlock_t;
+typedef struct { union { int __i[sizeof(long)==8?8:5]; volatile int __vi[sizeof(long)==8?8:5]; void *__p[sizeof(long)==8?4:5]; } __u; } pthread_barrier_t;
 typedef unsigned char u_int8_t;
 typedef unsigned short u_int16_t;
 typedef unsigned u_int32_t;
@@ -792,7 +676,11 @@ typedef long long quad_t;
 typedef unsigned long long u_quad_t;
 struct timeval { time_t tv_sec; suseconds_t tv_usec; };
 typedef unsigned long fd_mask;
+typedef struct { unsigned long fds_bits[1024 / 8 / sizeof(long)]; } fd_set;
+int select (int, fd_set *, fd_set *, fd_set *, struct timeval *);
+int pselect (int, fd_set *, fd_set *, fd_set *, const struct timespec *, const sigset_t *);
 typedef struct _ftsent { struct _ftsent *fts_cycle; struct _ftsent *fts_parent; struct _ftsent *fts_link; int64_t fts_number; void *fts_pointer; char *fts_accpath; char *fts_path; int fts_errno; int fts_symfd; unsigned int fts_pathlen; unsigned int fts_namelen; ino_t fts_ino; dev_t fts_dev; nlink_t fts_nlink; int fts_level; unsigned short fts_info; unsigned short fts_flags; unsigned short fts_instr; struct stat *fts_statp; char fts_name[1]; } FTSENT;
+struct stat { dev_t st_dev; ino_t st_ino; nlink_t st_nlink; mode_t st_mode; uid_t st_uid; gid_t st_gid; unsigned int __pad0; dev_t st_rdev; off_t st_size; blksize_t st_blksize; blkcnt_t st_blocks; struct timespec st_atim; struct timespec st_mtim; struct timespec st_ctim; long __unused[3]; };
 int stat(const char *, struct stat *);
 int fstat(int, struct stat *);
 int lstat(const char *, struct stat *);
@@ -807,6 +695,8 @@ int mkdirat(int, const char *, mode_t);
 int mkfifoat(int, const char *, mode_t);
 int mknod(const char *, mode_t, dev_t);
 int mknodat(int, const char *, mode_t, dev_t);
+int futimens(int, const struct timespec [2]);
+int utimensat(int, const char *, const struct timespec [2], int);
 int lchmod(const char *, mode_t);
 struct FTW { int base; int level; };
 int getopt(int, char * const [], const char *);
@@ -851,6 +741,7 @@ int sendmmsg (int, struct mmsghdr *, unsigned int, unsigned int);
 int recvmmsg (int, struct mmsghdr *, unsigned int, unsigned int, struct timespec *);
 struct linger { int l_onoff; int l_linger; };
 struct sockaddr { sa_family_t sa_family; char sa_data[14]; };
+struct sockaddr_storage { sa_family_t ss_family; char __ss_padding[128-sizeof(long)-sizeof(sa_family_t)]; unsigned long __ss_align; };
 int socket (int, int, int);
 int socketpair (int, int, int, int [2]);
 int shutdown (int, int);
@@ -886,6 +777,9 @@ struct ip_mreq { struct in_addr imr_multiaddr; struct in_addr imr_interface; };
 struct ip_mreqn { struct in_addr imr_multiaddr; struct in_addr imr_address; int imr_ifindex; };
 struct ip_mreq_source { struct in_addr imr_multiaddr; struct in_addr imr_interface; struct in_addr imr_sourceaddr; };
 struct ip_msfilter { struct in_addr imsf_multiaddr; struct in_addr imsf_interface; uint32_t imsf_fmode; uint32_t imsf_numsrc; struct in_addr imsf_slist[1]; };
+struct group_req { uint32_t gr_interface; struct sockaddr_storage gr_group; };
+struct group_source_req { uint32_t gsr_interface; struct sockaddr_storage gsr_group; struct sockaddr_storage gsr_source; };
+struct group_filter { uint32_t gf_interface; struct sockaddr_storage gf_group; uint32_t gf_fmode; uint32_t gf_numsrc; struct sockaddr_storage gf_slist[1]; };
 struct in_pktinfo { int ipi_ifindex; struct in_addr ipi_spec_dst; struct in_addr ipi_addr; };
 struct in6_pktinfo { struct in6_addr ipi6_addr; unsigned ipi6_ifindex; };
 struct ip6_mtuinfo { struct sockaddr_in6 ip6m_addr; uint32_t ip6m_mtu; };
@@ -1276,6 +1170,7 @@ int getservbyname_r(const char *, const char *, struct servent *, char *, size_t
 typedef unsigned long nfds_t;
 struct pollfd { int fd; short events; short revents; };
 int poll (struct pollfd *, nfds_t, int);
+int ppoll(struct pollfd *, nfds_t, const struct timespec *, const sigset_t *);
 struct sched_param { int sched_priority; int __reserved1; struct { time_t __reserved1; long __reserved2; } __reserved2[2]; int __reserved3; };
 int sched_get_priority_max(int);
 int sched_get_priority_min(int);
@@ -1287,7 +1182,11 @@ int sched_setscheduler(pid_t, int, const struct sched_param *);
 int sched_yield(void);
 int unshare(int);
 int setns(int, int);
+typedef struct cpu_set_t { unsigned long __bits[128/sizeof(long)]; } cpu_set_t;
+int __sched_cpucount(size_t, const cpu_set_t *);
 int sched_getcpu(void);
+int sched_getaffinity(pid_t, size_t, cpu_set_t *);
+int sched_setaffinity(pid_t, size_t, const cpu_set_t *);
 int pthread_detach(pthread_t);
 void pthread_exit(void *);
 int pthread_join(pthread_t, void **);
@@ -1300,14 +1199,59 @@ int pthread_cancel(pthread_t);
 int pthread_getschedparam(pthread_t, int *, struct sched_param *);
 int pthread_setschedparam(pthread_t, int, const struct sched_param *);
 int pthread_setschedprio(pthread_t, int);
+int pthread_mutex_init(pthread_mutex_t *, const pthread_mutexattr_t *);
+int pthread_mutex_lock(pthread_mutex_t *);
+int pthread_mutex_unlock(pthread_mutex_t *);
+int pthread_mutex_trylock(pthread_mutex_t *);
+int pthread_mutex_timedlock(pthread_mutex_t *, const struct timespec *);
+int pthread_mutex_destroy(pthread_mutex_t *);
+int pthread_mutex_consistent(pthread_mutex_t *);
+int pthread_mutex_getprioceiling(const pthread_mutex_t *, int *);
+int pthread_mutex_setprioceiling(pthread_mutex_t *, int, int *);
+int pthread_cond_init(pthread_cond_t *, const pthread_condattr_t *);
+int pthread_cond_destroy(pthread_cond_t *);
+int pthread_cond_wait(pthread_cond_t *, pthread_mutex_t *);
+int pthread_cond_timedwait(pthread_cond_t *, pthread_mutex_t *, const struct timespec *);
+int pthread_cond_broadcast(pthread_cond_t *);
+int pthread_cond_signal(pthread_cond_t *);
+int pthread_rwlock_init(pthread_rwlock_t *, const pthread_rwlockattr_t *);
+int pthread_rwlock_destroy(pthread_rwlock_t *);
+int pthread_rwlock_rdlock(pthread_rwlock_t *);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *);
+int pthread_rwlock_timedrdlock(pthread_rwlock_t *, const struct timespec *);
+int pthread_rwlock_wrlock(pthread_rwlock_t *);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *);
+int pthread_rwlock_timedwrlock(pthread_rwlock_t *, const struct timespec *);
+int pthread_rwlock_unlock(pthread_rwlock_t *);
 int pthread_spin_init(pthread_spinlock_t *, int);
 int pthread_spin_destroy(pthread_spinlock_t *);
 int pthread_spin_lock(pthread_spinlock_t *);
 int pthread_spin_trylock(pthread_spinlock_t *);
 int pthread_spin_unlock(pthread_spinlock_t *);
+int pthread_barrier_init(pthread_barrier_t *, const pthread_barrierattr_t *, unsigned);
+int pthread_barrier_destroy(pthread_barrier_t *);
+int pthread_barrier_wait(pthread_barrier_t *);
 int pthread_key_delete(pthread_key_t);
 void *pthread_getspecific(pthread_key_t);
 int pthread_setspecific(pthread_key_t, const void *);
+int pthread_attr_init(pthread_attr_t *);
+int pthread_attr_destroy(pthread_attr_t *);
+int pthread_attr_getguardsize(const pthread_attr_t *, size_t *);
+int pthread_attr_setguardsize(pthread_attr_t *, size_t);
+int pthread_attr_getstacksize(const pthread_attr_t *, size_t *);
+int pthread_attr_setstacksize(pthread_attr_t *, size_t);
+int pthread_attr_getdetachstate(const pthread_attr_t *, int *);
+int pthread_attr_setdetachstate(pthread_attr_t *, int);
+int pthread_attr_getstack(const pthread_attr_t *, void **, size_t *);
+int pthread_attr_setstack(pthread_attr_t *, void *, size_t);
+int pthread_attr_getscope(const pthread_attr_t *, int *);
+int pthread_attr_setscope(pthread_attr_t *, int);
+int pthread_attr_getschedpolicy(const pthread_attr_t *, int *);
+int pthread_attr_setschedpolicy(pthread_attr_t *, int);
+int pthread_attr_getschedparam(const pthread_attr_t *, struct sched_param *);
+int pthread_attr_setschedparam(pthread_attr_t *, const struct sched_param *);
+int pthread_attr_getinheritsched(const pthread_attr_t *, int *);
+int pthread_attr_setinheritsched(pthread_attr_t *, int);
 int pthread_mutexattr_destroy(pthread_mutexattr_t *);
 int pthread_mutexattr_getprioceiling(const pthread_mutexattr_t *, int *);
 int pthread_mutexattr_getprotocol(const pthread_mutexattr_t *, int *);
@@ -1338,11 +1282,13 @@ int pthread_getconcurrency(void);
 int pthread_setconcurrency(int);
 int pthread_getcpuclockid(pthread_t, clockid_t *);
 void _pthread_cleanup_pop(struct __ptcb *, int);
-struct cpu_set_t;
 int pthread_getaffinity_np(pthread_t, size_t, struct cpu_set_t *);
 int pthread_setaffinity_np(pthread_t, size_t, const struct cpu_set_t *);
+int pthread_getattr_np(pthread_t, pthread_attr_t *);
 int pthread_setname_np(pthread_t, const char *);
 int pthread_getname_np(pthread_t, char *, size_t);
+int pthread_getattr_default_np(pthread_attr_t *);
+int pthread_setattr_default_np(const pthread_attr_t *);
 int pthread_tryjoin_np(pthread_t, void **);
 int pthread_timedjoin_np(pthread_t, void **, const struct timespec *);
 struct winsize { unsigned short ws_row, ws_col, ws_xpixel, ws_ypixel; };
@@ -1388,6 +1334,7 @@ size_t regerror(int, const regex_t *, char *, size_t);
 typedef struct { long long __ll; long double __ld; } max_align_t;
 typedef long ptrdiff_t;
 typedef enum __ns_sect { ns_s_qd = 0, ns_s_zn = 0, ns_s_an = 1, ns_s_pr = 1, ns_s_ns = 2, ns_s_ud = 2, ns_s_ar = 3, ns_s_max = 4 } ns_sect;
+typedef struct __ns_msg { const unsigned char *_msg, *_eom; uint16_t _id, _flags, _counts[ns_s_max]; const unsigned char *_sections[ns_s_max]; ns_sect _sect; int _rrnum; const unsigned char *_msg_ptr; } ns_msg;
 struct _ns_flagdata { int mask, shift; };
 typedef struct __ns_rr { char name[1025]; uint16_t type; uint16_t rr_class; uint32_t ttl; uint16_t rdlength; const unsigned char *rdata; } ns_rr;
 typedef enum __ns_flag { ns_f_qr, ns_f_opcode, ns_f_aa, ns_f_tc, ns_f_rd, ns_f_ra, ns_f_z, ns_f_ad, ns_f_cd, ns_f_rcode, ns_f_max } ns_flag;
@@ -1406,8 +1353,12 @@ unsigned ns_get16(const unsigned char *);
 unsigned long ns_get32(const unsigned char *);
 void ns_put16(unsigned, unsigned char *);
 void ns_put32(unsigned long, unsigned char *);
+int ns_initparse(const unsigned char *, int, ns_msg *);
+int ns_parserr(ns_msg *, ns_sect, int, ns_rr *);
 int ns_skiprr(const unsigned char *, const unsigned char *, ns_sect, int);
 int ns_name_uncompress(const unsigned char *, const unsigned char *, const unsigned char *, char *, size_t);
+typedef struct { unsigned id :16; unsigned rd :1; unsigned tc :1; unsigned aa :1; unsigned opcode :4; unsigned qr :1; unsigned rcode :4; unsigned cd: 1; unsigned ad: 1; unsigned unused :1; unsigned ra :1; unsigned qdcount :16; unsigned ancount :16; unsigned nscount :16; unsigned arcount :16; } HEADER;
+typedef struct __res_state { int retrans; int retry; unsigned long options; int nscount; struct sockaddr_in nsaddr_list[3]; unsigned short id; char *dnsrch[6 +1]; char defdname[256]; unsigned long pfcode; unsigned ndots:4; unsigned nsort:4; unsigned ipv6_unavail:1; unsigned unused:23; struct { struct in_addr addr; uint32_t mask; } sort_list[10]; void *qhook; void *rhook; int res_h_errno; int _vcsock; unsigned _flags; union { char pad[52]; struct { uint16_t nscount; uint16_t nsmap[3]; int nssocks[3]; uint16_t nscount6; uint16_t nsinit; struct sockaddr_in6 *nsaddrs[3]; unsigned int _initstamp[2]; } _ext; } _u; } *res_state;
 struct res_sym { int number; char *name; char *humanname; };
 struct __res_state *__res_state(void);
 int res_init(void);
@@ -1432,8 +1383,26 @@ int hsearch_r(ENTRY, ACTION, ENTRY **, struct hsearch_data *);
 void insque(void *, void *);
 void remque(void *);
 struct qelem { struct qelem *q_forw, *q_back; char q_data[1]; };
+typedef struct { volatile int __val[4*sizeof(long)/sizeof(int)]; } sem_t;
+int sem_close(sem_t *);
+int sem_destroy(sem_t *);
+int sem_getvalue(sem_t *, int *);
+int sem_init(sem_t *, int, unsigned);
+sem_t *sem_open(const char *, int, ...);
+int sem_post(sem_t *);
+int sem_timedwait(sem_t *, const struct timespec *);
+int sem_trywait(sem_t *);
 int sem_unlink(const char *);
+int sem_wait(sem_t *);
 typedef unsigned long __jmp_buf[8];
+typedef struct __jmp_buf_tag { __jmp_buf __jb; unsigned long __fl; unsigned long __ss[128/sizeof(long)]; } jmp_buf[1];
+typedef jmp_buf sigjmp_buf;
+int sigsetjmp (sigjmp_buf, int);
+void siglongjmp (sigjmp_buf, int);
+int _setjmp (jmp_buf);
+void _longjmp (jmp_buf, int);
+int setjmp (jmp_buf);
+void longjmp (jmp_buf, int);
 struct spwd { char *sp_namp; char *sp_pwdp; long sp_lstchg; long sp_min; long sp_max; long sp_warn; long sp_inact; long sp_expire; unsigned long sp_flag; };
 void setspent(void);
 void endspent(void);
@@ -1445,7 +1414,24 @@ struct spwd *getspnam(const char *);
 int getspnam_r(const char *, struct spwd *, char *, size_t, struct spwd **);
 int lckpwdf(void);
 int ulckpwdf(void);
+typedef struct { int __flags; pid_t __pgrp; sigset_t __def, __mask; int __prio, __pol; void *__fn; char __pad[64-sizeof(void *)]; } posix_spawnattr_t;
 typedef struct { int __pad0[2]; void *__actions; int __pad[16]; } posix_spawn_file_actions_t;
+int posix_spawn(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const *, char *const *);
+int posix_spawnp(pid_t *, const char *, const posix_spawn_file_actions_t *, const posix_spawnattr_t *, char *const *, char *const *);
+int posix_spawnattr_init(posix_spawnattr_t *);
+int posix_spawnattr_destroy(posix_spawnattr_t *);
+int posix_spawnattr_setflags(posix_spawnattr_t *, short);
+int posix_spawnattr_getflags(const posix_spawnattr_t *, short *);
+int posix_spawnattr_setpgroup(posix_spawnattr_t *, pid_t);
+int posix_spawnattr_getpgroup(const posix_spawnattr_t *, pid_t *);
+int posix_spawnattr_setsigmask(posix_spawnattr_t *, const sigset_t *);
+int posix_spawnattr_getsigmask(const posix_spawnattr_t *, sigset_t *);
+int posix_spawnattr_setsigdefault(posix_spawnattr_t *, const sigset_t *);
+int posix_spawnattr_getsigdefault(const posix_spawnattr_t *, sigset_t *);
+int posix_spawnattr_setschedparam(posix_spawnattr_t *, const struct sched_param *);
+int posix_spawnattr_getschedparam(const posix_spawnattr_t *, struct sched_param *);
+int posix_spawnattr_setschedpolicy(posix_spawnattr_t *, int);
+int posix_spawnattr_getschedpolicy(const posix_spawnattr_t *, int *);
 int posix_spawn_file_actions_init(posix_spawn_file_actions_t *);
 int posix_spawn_file_actions_destroy(posix_spawn_file_actions_t *);
 int posix_spawn_file_actions_addopen(posix_spawn_file_actions_t *, int, const char *, int, mode_t);
@@ -1630,6 +1616,7 @@ struct strpeek { struct strbuf ctlbuf; struct strbuf databuf; unsigned flags; };
 struct strfdinsert { struct strbuf ctlbuf; struct strbuf databuf; unsigned flags; int fildes; int offset; };
 struct strioctl { int ic_cmd; int ic_timout; int ic_len; char *ic_dp; };
 struct strrecvfd { int fd; int uid; int gid; char __fill[8]; };
+struct str_mlist { char l_name[8 + 1]; };
 struct str_list { int sl_nmods; struct str_mlist *sl_modlist; };
 int isastream(int);
 void closelog (void);
@@ -1639,6 +1626,8 @@ void syslog (int, const char *, ...);
 typedef struct __pthread *thrd_t;
 typedef int once_flag;
 typedef unsigned tss_t;
+typedef struct { union { int __i[sizeof(long)==8?10:6]; volatile int __vi[sizeof(long)==8?10:6]; volatile void *volatile __p[sizeof(long)==8?5:6]; } __u; } mtx_t;
+typedef struct { union { int __i[12]; volatile int __vi[12]; void *__p[12*sizeof(int)/sizeof(void*)]; } __u; } cnd_t;
 void thrd_exit(int);
 int thrd_detach(thrd_t);
 int thrd_join(thrd_t, int *);
@@ -1646,6 +1635,18 @@ int thrd_sleep(const struct timespec *, struct timespec *);
 void thrd_yield(void);
 thrd_t thrd_current(void);
 int thrd_equal(thrd_t, thrd_t);
+int mtx_init(mtx_t *, int);
+void mtx_destroy(mtx_t *);
+int mtx_lock(mtx_t *);
+int mtx_timedlock(mtx_t *, const struct timespec *);
+int mtx_trylock(mtx_t *);
+int mtx_unlock(mtx_t *);
+int cnd_init(cnd_t *);
+void cnd_destroy(cnd_t *);
+int cnd_broadcast(cnd_t *);
+int cnd_signal(cnd_t *);
+int cnd_timedwait(cnd_t *, mtx_t *, const struct timespec *);
+int cnd_wait(cnd_t *, mtx_t *);
 void tss_delete(tss_t);
 int tss_set(tss_t, void *);
 void *tss_get(tss_t);
@@ -1656,7 +1657,6 @@ size_t c16rtomb(char *, char16_t, mbstate_t *);
 size_t mbrtoc16(char16_t *, const char *, size_t, mbstate_t *);
 size_t c32rtomb(char *, char32_t, mbstate_t *);
 size_t mbrtoc32(char32_t *, const char *, size_t, mbstate_t *);
-struct ucontext;
 int getcontext(struct ucontext *);
 int setcontext(const struct ucontext *);
 int swapcontext(struct ucontext *, const struct ucontext *);

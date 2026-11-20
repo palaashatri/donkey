@@ -1,9 +1,11 @@
 #pragma once
 
 // A bounded parser for a subset of C declarations (G05-T2): struct, union, enum,
-// typedef, pointers, arrays, function prototypes and the fixed-width integer names.
+// typedef, pointers, arrays, bit-fields, function prototypes and the fixed-width integer
+// names. Array sizes, enumerator values and bit-field widths are integer constant
+// expressions (literals, enumeration constants, sizeof, integer casts and the C operators).
 // It turns the declarations into type definitions for the type store; it does not run
-// a preprocessor, evaluate expressions other than integer literals, or accept C++.
+// a preprocessor or accept C++.
 
 #include <cstddef>
 #include <cstdint>

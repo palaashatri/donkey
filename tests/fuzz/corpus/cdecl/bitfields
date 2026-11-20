@@ -1,0 +1,1 @@
+struct t { long a:40; int :0; unsigned b:3; char c[sizeof(long)==8?14:9]; };

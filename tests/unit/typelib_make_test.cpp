@@ -3,6 +3,7 @@
 
 #include <gtest/gtest.h>
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -200,21 +201,65 @@ TEST(TypeLibMake, ShippedMuslLibraryLoads) {
   ASSERT_EQ(sigaltstack->fields.size(), 3U);
   EXPECT_EQ(sigaltstack->fields[2].name, "ss_size");
   EXPECT_EQ(sigaltstack->size, 24U);
-  // struct stat is not: its timespec members pad with bit-fields whose widths are constant
-  // expressions (`int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`), outside the C subset. It
-  // is listed as skipped with that reason, and the library has only the incomplete tag that
-  // `struct stat *` makes, never a struct with no fields presented as complete.
-  bool stat_listed = false;
-  for (const donkey::TypeLibrarySkipped& skipped : library.value().skipped) {
-    stat_listed = stat_listed ||
-                  (skipped.name == "stat" && skipped.reason.find("st_atim") != std::string::npos);
+  // Layouts that need bit-fields and constant expressions: musl's timespec pads with
+  // `int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);`, and sigset_t, pthread_attr_t, fd_set and
+  // the rest size their arrays with `sizeof`. The sizes, alignments and offsets are GCC's for the
+  // same musl-dev 1.2.4-2 headers on x86-64.
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& type : library.value().types) {
+    table.put(type);
   }
-  EXPECT_TRUE(stat_listed);
-  // pthread_attr_t's layout uses `sizeof` in an array bound, which the parser does not evaluate:
-  // it and the functions that name it are listed as skipped, not dropped.
+  // A name may be a typedef or, for `typedef struct { ... } name;`, the struct itself.
+  const auto type_or_typedef = [&](const std::string& name) -> const donkey::TypeDefinition* {
+    for (const donkey::TypeDefinition& type : library.value().types) {
+      if (type.name == name &&
+          (type.kind == donkey::TypeKind::Typedef || type.kind == donkey::TypeKind::Struct ||
+           type.kind == donkey::TypeKind::Union)) {
+        return &type;
+      }
+    }
+    return nullptr;
+  };
+  struct Expected {
+    const char* name;
+    std::uint64_t size;
+    std::uint64_t alignment;
+  };
+  for (const Expected& expected :
+       {Expected{"stat", 144, 8}, Expected{"timespec", 16, 8}, Expected{"itimerspec", 32, 8},
+        Expected{"sigset_t", 128, 8}, Expected{"pthread_attr_t", 56, 8},
+        Expected{"pthread_mutex_t", 40, 8}, Expected{"fd_set", 128, 8}, Expected{"fenv_t", 32, 4},
+        Expected{"cpu_set_t", 128, 8}, Expected{"jmp_buf", 200, 8}, Expected{"sem_t", 32, 4}}) {
+    SCOPED_TRACE(expected.name);
+    const auto* type = type_or_typedef(expected.name);
+    if (type == nullptr) {
+      ADD_FAILURE() << "missing";
+      continue;
+    }
+    const auto size = table.size_of(type->id);
+    const auto alignment = table.alignment_of(type->id);
+    if (!size || !alignment) {
+      ADD_FAILURE() << "no layout";
+      continue;
+    }
+    EXPECT_EQ(size.value(), expected.size);
+    EXPECT_EQ(alignment.value(), expected.alignment);
+  }
+  const auto* stat = type_named(library.value(), "stat", donkey::TypeKind::Struct);
+  ASSERT_NE(stat, nullptr);
+  std::map<std::string, std::uint64_t> offsets;
+  for (const donkey::TypeField& field : stat->fields) {
+    offsets[field.name] = field.offset;
+  }
+  EXPECT_EQ(offsets["st_size"], 48U);
+  EXPECT_EQ(offsets["st_atim"], 72U);
+  EXPECT_EQ(offsets["st_ctim"], 104U);
+  // pthread_create takes a function pointer, a parenthesised declarator the subset does not
+  // parse: it is listed as skipped, not dropped.
   bool listed = false;
   for (const donkey::TypeLibrarySkipped& skipped : library.value().skipped) {
-    listed = listed || skipped.name == "pthread_create";
+    listed = listed || (skipped.name == "pthread_create" &&
+                        skipped.reason.find("cdecl.parenthesized_declarator") != std::string::npos);
   }
   EXPECT_TRUE(listed);
 }

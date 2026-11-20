@@ -1476,6 +1476,140 @@ void reset(void);
   EXPECT_FALSE(plain_char->is_signed);
 }
 
+namespace {
+
+struct ExpectedBits {
+  const char* name;
+  std::uint64_t offset;
+  std::uint8_t bit_offset;
+  std::uint8_t bit_size;
+};
+
+void expect_layout(const std::vector<donkey::TypeDefinition>& types, const char* tag,
+                   std::uint64_t size, std::uint64_t alignment,
+                   std::initializer_list<ExpectedBits> fields) {
+  SCOPED_TRACE(tag);
+  const auto* type = named_type(types, tag);
+  ASSERT_NE(type, nullptr);
+  EXPECT_EQ(type->size, size);
+  donkey::TypeTable table;
+  for (const donkey::TypeDefinition& definition : types) {
+    table.put(definition);
+  }
+  const auto aligned = table.alignment_of(type->id);
+  ASSERT_TRUE(aligned.has_value());
+  EXPECT_EQ(aligned.value(), alignment);
+  ASSERT_EQ(type->fields.size(), fields.size());
+  std::size_t index = 0;
+  for (const ExpectedBits& expected : fields) {
+    SCOPED_TRACE(expected.name);
+    const donkey::TypeField& field = type->fields[index++];
+    EXPECT_EQ(field.name, expected.name);
+    EXPECT_EQ(field.offset, expected.offset);
+    EXPECT_EQ(field.bit_offset, expected.bit_offset);
+    EXPECT_EQ(field.bit_size, expected.bit_size);
+  }
+}
+
+}  // namespace
+
+// The layouts and values are GCC's for x86-64 Linux (`sizeof`, `_Alignof`, `offsetof`, and the
+// bits each bit-field sets), so the parser is checked against the compiler, not against itself.
+TEST(Types, BitFieldsAreLaidOutAsTheCompilerLaysThemOut) {
+  const char* text = R"(
+struct b1 { unsigned a:3; unsigned b:5; unsigned c:24; char d; };
+struct b2 { char a; int b:3; };
+struct b3 { char a; int :0; char b; };
+struct b4 { char a; int b:30; int c:3; };
+struct b5 { long a:40; long b:30; };
+typedef long time_t;
+struct timespec { time_t tv_sec; int :8*(sizeof(time_t)-sizeof(long))*(1234==4321);
+  long tv_nsec; int :8*(sizeof(time_t)-sizeof(long))*(1234!=4321); };
+struct b6 { char a; int :3; char b; };
+union u1 { int a:3; char b; };
+struct b7 { _Bool f:1; unsigned char g:7; unsigned short h:9; };
+)";
+  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  expect_layout(types, "b1", 8, 4,
+                {{"a", 0, 0, 3}, {"b", 0, 3, 5}, {"c", 1, 0, 24}, {"d", 4, 0, 0}});
+  expect_layout(types, "b2", 4, 4, {{"a", 0, 0, 0}, {"b", 1, 0, 3}});
+  // A zero-width bit-field moves the next member to an int boundary, but does not align the
+  // struct.
+  expect_layout(types, "b3", 5, 1, {{"a", 0, 0, 0}, {"b", 4, 0, 0}});
+  // A bit-field that would cross a unit of its type starts the next unit.
+  expect_layout(types, "b4", 12, 4, {{"a", 0, 0, 0}, {"b", 4, 0, 30}, {"c", 8, 0, 3}});
+  expect_layout(types, "b5", 16, 8, {{"a", 0, 0, 40}, {"b", 8, 0, 30}});
+  // musl's padding for a 32-bit `long`: both widths are zero on LP64.
+  expect_layout(types, "timespec", 16, 8, {{"tv_sec", 0, 0, 0}, {"tv_nsec", 8, 0, 0}});
+  // An unnamed bit-field pads, but its type does not align the struct.
+  expect_layout(types, "b6", 3, 1, {{"a", 0, 0, 0}, {"b", 2, 0, 0}});
+  expect_layout(types, "u1", 4, 4, {{"a", 0, 0, 3}, {"b", 0, 0, 0}});
+  expect_layout(types, "b7", 4, 2, {{"f", 0, 0, 1}, {"g", 0, 1, 7}, {"h", 2, 0, 9}});
+}
+
+TEST(Types, ConstantExpressionsFollowC) {
+  const char* text = R"(
+enum e1 { A = 1 << 4, B = A | 3, C, D = ~0 + 10, E = (unsigned char)300, F = -1 < 0u,
+          G = sizeof(int[3]) % 5, H = 0x10 >> 2 && 0 || 7 };
+typedef int pthread_like[sizeof(long)==8?14:9];
+typedef unsigned long sigset_like[128/sizeof(long)];
+typedef char hex_wraps[(0xFFFFFFFF + 1) == 0];
+typedef char decimal_widens[(4294967295 + 1) == 4294967296];
+typedef char short_circuit[1 || 1/0];
+typedef char untaken[0 ? 1/0 : 2];
+typedef char unevaluated[sizeof(1/0)];
+typedef char cast_to_bool[(_Bool)256 + 1];
+typedef char enum_bound[C - A];
+)";
+  const auto parsed = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
+  const auto& types = parsed.value();
+  const auto* e1 = named_type(types, "e1");
+  ASSERT_NE(e1, nullptr);
+  const std::vector<std::int64_t> expected = {16, 19, 20, 9, 44, 0, 2, 1};  // GCC's values
+  ASSERT_EQ(e1->enumerators.size(), expected.size());
+  for (std::size_t i = 0; i < expected.size(); ++i) {
+    EXPECT_EQ(e1->enumerators[i].value, expected[i]) << e1->enumerators[i].name;
+  }
+  const auto count_of = [&](const char* name) -> std::uint64_t {
+    const auto* typedef_type = named_type(types, name);
+    if (typedef_type == nullptr) {
+      ADD_FAILURE() << name << " is missing";
+      return 0;
+    }
+    const auto* array = type_by_id(types, typedef_type->target);
+    if (array == nullptr || array->kind != donkey::TypeKind::Array) {
+      ADD_FAILURE() << name << " is not an array";
+      return 0;
+    }
+    return array->count;
+  };
+  EXPECT_EQ(count_of("pthread_like"), 14U);
+  EXPECT_EQ(count_of("sigset_like"), 16U);
+  EXPECT_EQ(count_of("hex_wraps"), 1U);
+  EXPECT_EQ(count_of("decimal_widens"), 1U);
+  EXPECT_EQ(count_of("short_circuit"), 1U);
+  EXPECT_EQ(count_of("untaken"), 2U);
+  EXPECT_EQ(count_of("unevaluated"), 4U);
+  EXPECT_EQ(count_of("cast_to_bool"), 2U);
+  EXPECT_EQ(count_of("enum_bound"), 4U);
+
+  // With a 4-byte long, `sizeof(long)==8?14:9` is 9.
+  donkey::CDeclarationOptions ilp32;
+  ilp32.pointer_size = 4;
+  ilp32.long_size = 4;
+  const auto narrow = donkey::parse_c_declarations(
+      "typedef int pthread_like[sizeof(long)==8?14:9];", donkey::TypeTable{}, ilp32);
+  ASSERT_TRUE(narrow.has_value()) << narrow.diagnostic().message;
+  const auto* narrow_typedef = named_type(narrow.value(), "pthread_like");
+  ASSERT_NE(narrow_typedef, nullptr);
+  const auto* narrow_array = type_by_id(narrow.value(), narrow_typedef->target);
+  ASSERT_NE(narrow_array, nullptr);
+  EXPECT_EQ(narrow_array->count, 9U);
+}
+
 TEST(Types, ParserErrorsAreLocated) {
   expect_located_error("struct s { int x }", "cdecl.unexpected_token", "line 1, column 18: ");
   expect_located_error("typedef int T;\n  #define X 1\n", "cdecl.preprocessor",
@@ -1485,8 +1619,26 @@ TEST(Types, ParserErrorsAreLocated) {
   expect_located_error("foo x;", "cdecl.unknown_type", "line 1, column 1: ");
   expect_located_error("struct s { int a[]; };", "cdecl.array_size_required",
                        "line 1, column 17: ");
-  expect_located_error("struct s { int a : 3; };", "cdecl.bitfield_unsupported",
-                       "line 1, column 18: ");
+  expect_located_error("struct s { int a : 0; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { int a : 33; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { int a : -1; };", "cdecl.bitfield_width", "line 1, column 20: ");
+  expect_located_error("struct s { float f : 3; };", "cdecl.bitfield_type", "line 1, column 18: ");
+  expect_located_error("typedef int a[1/0];", "cdecl.division_by_zero", "line 1, column 16: ");
+  expect_located_error("typedef int a[1%0];", "cdecl.division_by_zero", "line 1, column 16: ");
+  expect_located_error("typedef int a[x];", "cdecl.not_constant", "line 1, column 15: ");
+  expect_located_error("typedef int a[-1];", "cdecl.array_size_required", "line 1, column 15: ");
+  expect_located_error("typedef int a[1 << 40];", "cdecl.bad_shift", "line 1, column 17: ");
+  expect_located_error("typedef int a[1 << -1];", "cdecl.bad_shift", "line 1, column 17: ");
+  expect_located_error("enum e { A = 2147483647 + 1 };", "cdecl.constant_overflow",
+                       "line 1, column 25: ");
+  expect_located_error("enum e { A = -(-2147483647 - 1) };", "cdecl.constant_overflow",
+                       "line 1, column 14: ");
+  expect_located_error("typedef int a[(-2147483647 - 1) / -1];", "cdecl.constant_overflow",
+                       "line 1, column 33: ");
+  expect_located_error("typedef int a[sizeof(struct nope)];", "cdecl.incomplete_type",
+                       "line 1, column 22: ");
+  expect_located_error("typedef int a[(int *)1];", "cdecl.not_integer", "line 1, column 16: ");
+  expect_located_error("typedef int a[1uu];", "cdecl.bad_number", "line 1, column 15: ");
   expect_located_error("struct s { int a; }; struct s { int b; };", "cdecl.redefinition",
                        "line 1, column 29: ");
   expect_located_error("struct s {", "cdecl.unexpected_token", "line 1, column 11: ");
@@ -1498,6 +1650,24 @@ TEST(Types, ParserErrorsAreLocated) {
                        "line 1, column 16: ");
   expect_located_error(std::string("typedef int ") + std::string(65, '*') + "p;", "cdecl.nesting",
                        "line 1, column 77: ");
+  // Expression nesting is bounded for the whole parse, also through structs inside `sizeof`.
+  std::string nested_sizeof = "typedef char t[";
+  for (int i = 0; i < 40; ++i) {
+    nested_sizeof += "sizeof(struct { char a[";
+  }
+  nested_sizeof += "1";
+  for (int i = 0; i < 40; ++i) {
+    nested_sizeof += "]; })";
+  }
+  nested_sizeof += "];";
+  const auto nested = donkey::parse_c_declarations(nested_sizeof, donkey::TypeTable{});
+  ASSERT_FALSE(nested.has_value());
+  EXPECT_EQ(nested.diagnostic().code, "cdecl.nesting");
+  expect_located_error(
+      "typedef char t[" + std::string(100, '(') + "1" + std::string(100, ')') + "];",
+      "cdecl.nesting", "line 1, column ");
+  expect_located_error("typedef char t[" + std::string(100, '-') + "1];", "cdecl.nesting",
+                       "line 1, column ");
   // An array of arrays whose total size does not fit in 64 bits is refused by the
   // type store's whole-table check.
   expect_located_error("typedef long long huge[9223372036854775807][4];", "cdecl.invalid_type", "");
