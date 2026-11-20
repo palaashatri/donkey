@@ -177,10 +177,28 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
     case TypeKind::Struct:
     case TypeKind::Union: {
       const bool is_union = definition.kind == TypeKind::Union;
-      if (definition.fields.empty() && (definition.size == 0 || definition.size == 1)) {
+      if (definition.fields.empty() && definition.alignment == 0 &&
+          (definition.size == 0 || definition.size == 1)) {
         // No members: an empty C struct has size 0, and an empty C++ class has the ABI's
         // minimum of one byte. Either is accepted as declared.
         return Layout{definition.size, 1};
+      }
+      if (definition.fields.empty()) {
+        // An empty record with its own alignment: a power of two, and a size of 0 (C) or of its
+        // one byte padded to that alignment (C++).
+        const std::uint64_t aligned = definition.alignment;
+        if (aligned == 0 || (aligned & (aligned - 1)) != 0) {
+          return fail<Layout>(
+              "type.bad_alignment",
+              name + " is aligned to " + std::to_string(aligned) + ", not a power of two");
+        }
+        if (definition.size != 0 && definition.size != aligned) {
+          return fail<Layout>("type.size_mismatch",
+                              name + " is " + std::to_string(definition.size) +
+                                  " bytes; an empty record aligned to " + std::to_string(aligned) +
+                                  " is 0 or " + std::to_string(aligned));
+        }
+        return Layout{definition.size, aligned};
       }
       std::uint64_t alignment = 1;
       std::uint64_t end = 0;

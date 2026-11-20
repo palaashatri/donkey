@@ -654,8 +654,10 @@ TEST(TypeLib, KnownTypedefsDoNotChangeTheLibrarysTypes) {
 TEST(TypeLib, RefusesATypedefOfAnUntaggedStructAndAFunctionWithOneName) {
   // `typedef struct { ... } item;` declares the ordinary name `item` (the struct takes the
   // typedef's name), so a function `item` collides with it, in either order.
+  // The parser refuses a prototype named after an earlier typedef itself; a typedef after the
+  // prototype is the reader's check.
   expect_refused(valid_file("typedef struct { int32_t x; } item;\nint32_t item(void);\n"),
-                 "typelib.type_and_function");
+                 "cdecl.redefinition");
   expect_refused(valid_file("int32_t item(void);\ntypedef struct { int32_t x; } item;\n"),
                  "typelib.type_and_function");
   // A tagged struct and a function with one name stay apart (`struct stat` and `stat`).
