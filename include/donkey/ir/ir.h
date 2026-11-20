@@ -214,6 +214,11 @@ struct IrStatement {
   /// Complete and makes no calls, so these are every register it can change; a caller-saved
   /// register outside this set keeps its value across the call (the clobber check uses this).
   std::vector<std::string> call_writes;
+  /// Only for Call (G21-T7): the C library function the call runs, when its target is an import
+  /// shown to bind to the C library and the function has an executable model
+  /// (donkey/ir/libc_models.h). The arguments then come from the function's C prototype (not an
+  /// inference), the result is `dest`, and the call may change every caller-saved register.
+  std::string call_model;
 };
 
 struct IrBlock {
@@ -326,6 +331,11 @@ void run_ir_passes(IrFunction& function, const PassOptions& options);
 /// within each block, and required block terminators. Returns InvalidData with
 /// a precise message; never throws.
 [[nodiscard]] Result<bool> verify_ir(const IrFunction& function);
+
+/// True for `r ^ r` and `r - r` of one register at one width (`xor eax, eax`, `sub rax, rax`): the
+/// result is 0 whatever the register holds, so the statement reads no value of it. A check of
+/// which values a statement depends on (parameters, a register clobbered by a call) skips it.
+[[nodiscard]] bool is_zeroing_idiom(const IrStatement& statement) noexcept;
 
 struct PseudocodeLine {
   std::string text;

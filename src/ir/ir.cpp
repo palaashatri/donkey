@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "donkey/ir/abi.h"
+#include "donkey/ir/libc_models.h"
 #include "ir_internal.h"
 #include "optimize.h"
 #include "registers.h"
@@ -1253,8 +1254,18 @@ Result<bool> verify_ir(const IrFunction& function) {
             return fail("ir.malformed_call", "a call's result must be a register");
           }
           // Arguments come from a known signature only (G21-T2): an unknown one has none.
-          if (!statement.call_arguments.empty() && !statement.signature_inferred) {
+          if (!statement.call_arguments.empty() && !statement.signature_inferred &&
+              statement.call_model.empty()) {
             return fail("ir.call_signature", "call arguments need a signature");
+          }
+          if (!statement.call_model.empty()) {
+            const LibcModel* model = find_libc_model(statement.call_model);
+            if (model == nullptr || statement.signature_inferred ||
+                statement.call_arguments.size() != model->arguments.size()) {
+              return fail("ir.call_signature",
+                          "a modelled call names a C function with a model and passes its "
+                          "arguments");
+            }
           }
           for (const IrOperand& argument : statement.call_arguments) {
             if ((argument.kind != IrOperandKind::Register &&
@@ -1941,6 +1952,13 @@ void run_ir_passes(IrFunction& function, const PassOptions& options) {
   if (options.after_pass) {
     options.after_pass("arrange_loop_tests", function);
   }
+}
+
+bool is_zeroing_idiom(const IrStatement& statement) noexcept {
+  return (statement.op == IrOp::Xor || statement.op == IrOp::Sub) &&
+         statement.a.kind == IrOperandKind::Register &&
+         statement.b.kind == IrOperandKind::Register && !statement.a.reg.empty() &&
+         statement.a.reg == statement.b.reg && statement.a.width == statement.b.width;
 }
 
 }  // namespace donkey

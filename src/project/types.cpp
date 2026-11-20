@@ -177,10 +177,28 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
     case TypeKind::Struct:
     case TypeKind::Union: {
       const bool is_union = definition.kind == TypeKind::Union;
-      if (definition.fields.empty() && (definition.size == 0 || definition.size == 1)) {
+      if (definition.fields.empty() && definition.alignment == 0 &&
+          (definition.size == 0 || definition.size == 1)) {
         // No members: an empty C struct has size 0, and an empty C++ class has the ABI's
         // minimum of one byte. Either is accepted as declared.
         return Layout{definition.size, 1};
+      }
+      if (definition.fields.empty()) {
+        // An empty record with its own alignment: a power of two, and a size of 0 (C) or of its
+        // one byte padded to that alignment (C++).
+        const std::uint64_t aligned = definition.alignment;
+        if (aligned == 0 || (aligned & (aligned - 1)) != 0) {
+          return fail<Layout>(
+              "type.bad_alignment",
+              name + " is aligned to " + std::to_string(aligned) + ", not a power of two");
+        }
+        if (definition.size != 0 && definition.size != aligned) {
+          return fail<Layout>("type.size_mismatch",
+                              name + " is " + std::to_string(definition.size) +
+                                  " bytes; an empty record aligned to " + std::to_string(aligned) +
+                                  " is 0 or " + std::to_string(aligned));
+        }
+        return Layout{definition.size, aligned};
       }
       std::uint64_t alignment = 1;
       std::uint64_t end = 0;
@@ -188,6 +206,35 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
         if (!field.type.valid()) {
           return fail<Layout>("type.void_member",
                               name + " has a member '" + field.name + "' of type void");
+        }
+        if (field.padding) {
+          // An unnamed bit-field: it ends where its bits end (a zero-width one at `offset`), and
+          // it does not align the record.
+          if (!field.name.empty()) {
+            return fail<Layout>(
+                "type.named_padding",
+                name + " has a padding bit-field with the name '" + field.name + "'");
+          }
+          auto container = layout_of(types, field.type, depth + 1);
+          if (!container) {
+            return container;
+          }
+          const std::uint64_t container_bits = container.value().size * 8;
+          if (field.bit_size > 64 || field.bit_offset > 7 ||
+              (field.bit_size == 0 && field.bit_offset != 0) ||
+              static_cast<std::uint64_t>(field.bit_offset) + field.bit_size > container_bits ||
+              (is_union && field.offset != 0)) {
+            return fail<Layout>("type.bad_bit_field",
+                                name + " has an unnamed bit-field that does not fit its type");
+          }
+          const std::uint64_t bytes =
+              (static_cast<std::uint64_t>(field.bit_offset) + field.bit_size + 7) / 8;
+          if (sum_overflows(field.offset, bytes)) {
+            return fail<Layout>("type.member_overflow",
+                                name + " has an unnamed bit-field whose offset wraps past 64 bits");
+          }
+          end = std::max(end, field.offset + bytes);
+          continue;
         }
         // A flexible array member: the last member of a struct, of an array of unknown bound. It
         // adds no size of its own, but its element sets the alignment, and it sits at an aligned
@@ -256,6 +303,17 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
         }
         end = std::max(end, member_end);
         alignment = std::max(alignment, layout.alignment);
+      }
+      if (definition.alignment != 0) {
+        // The ABI aligns the record more than its members (AAPCS64 unnamed bit-fields).
+        if ((definition.alignment & (definition.alignment - 1)) != 0 ||
+            definition.alignment < alignment) {
+          return fail<Layout>("type.bad_alignment",
+                              name + " is aligned to " + std::to_string(definition.alignment) +
+                                  ", not a power of two at least its members' alignment " +
+                                  std::to_string(alignment));
+        }
+        alignment = definition.alignment;
       }
       if (sum_overflows(end, alignment - 1)) {
         return fail<Layout>("type.member_overflow", name + " is too large to round up");
