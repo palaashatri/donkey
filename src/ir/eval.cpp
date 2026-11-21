@@ -1027,10 +1027,12 @@ class Machine {
               }
               args.push_back(*v);
             }
-            const std::uint64_t sp = read_register("rsp", 8);
             IrEvalOptions nested = options_;
             nested.call_depth = options_.call_depth + 1;
-            nested.call_stack_pointer = sp - 8;  // the return address the callee's entry expects
+            // x86-64's call pushes the return address the callee's entry expects; AArch64's bl
+            // leaves it in x30, so the callee starts on the caller's sp.
+            nested.call_stack_pointer =
+                aarch64_ ? read_register("sp", 8) : read_register("rsp", 8) - 8;
             // The callee runs on what is left of this evaluation's step budget, and its steps
             // count as this evaluation's.
             nested.max_steps = options_.max_steps - steps;

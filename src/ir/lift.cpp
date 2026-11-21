@@ -25,13 +25,13 @@ namespace {
 /// The x86-64 register families a call may change (System V's caller-saved set, which holds every
 /// Win64 caller-saved register too).
 const std::set<std::string>& caller_saved_families() {
-  static const std::set<std::string> families = [] {
-    std::set<std::string> out = {"rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"};
-    for (int n = 0; n < 16; ++n) {
-      out.insert("xmm" + std::to_string(n));
-    }
-    return out;
-  }();
+  static const std::set<std::string> families = internal::sysv_caller_saved_families();
+  return families;
+}
+
+/// The AAPCS64 caller-saved families (G21 for AArch64): x0-x18, x30, v0-v7 and v16-v31.
+const std::set<std::string>& aapcs64_caller_saved() {
+  static const std::set<std::string> families = internal::aapcs64_caller_saved_families();
   return families;
 }
 
@@ -86,13 +86,17 @@ std::string hex_address(std::uint64_t value) {
 }
 
 // Whether a callee's code may read an argument passed on the stack (the seventh and later integer
-// arguments, at entry rsp + 8 and up). The check runs a dataflow over the callee's IR (the lift
-// without passes): every register is tracked as an offset from the entry rsp when it holds a stack
-// address, and an access, a lea or a stack address passed to a call at offset 8 or more is taken as
-// an incoming argument. Whatever cannot be followed (a stack address of unknown offset, or a stack
-// address stored into a register the tracking does not model) is taken as an incoming argument too,
-// so the caller is never resolved on a guess. Returns true when the callee may read one.
-bool reads_incoming_stack_argument(const IrFunction& function) {
+// arguments, at entry rsp + 8 and up on x86-64; the ninth and later, at entry sp and up on
+// AArch64, which puts no return address on the stack). `stack_pointer` is the stack pointer's
+// family and `first_argument` the offset of the first stack argument from its entry value. The
+// check runs a dataflow over the callee's IR (the lift without passes): every register is tracked
+// as an offset from the entry rsp when it holds a stack address, and an access, a lea or a stack
+// address passed to a call at offset 8 or more is taken as an incoming argument. Whatever cannot be
+// followed (a stack address of unknown offset, or a stack address stored into a register the
+// tracking does not model) is taken as an incoming argument too, so the caller is never resolved on
+// a guess. Returns true when the callee may read one.
+bool reads_incoming_stack_argument(const IrFunction& function, const std::string& stack_pointer,
+                                   std::int64_t first_argument) {
   // A register family's value: absent (not a stack address), a known offset from the entry rsp, or
   // nullopt (a stack address of unknown offset).
   using StackValues = std::map<std::string, std::optional<std::int64_t>>;
@@ -101,7 +105,7 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
     return false;
   }
   std::vector<std::optional<StackValues>> entry(count);
-  entry[0] = StackValues{{"rsp", 0}};
+  entry[0] = StackValues{{stack_pointer, 0}};
   bool refused = false;
 
   auto join = [](const StackValues& a, const StackValues& b) {
@@ -156,8 +160,8 @@ bool reads_incoming_stack_argument(const IrFunction& function) {
     const auto displacement = static_cast<std::int64_t>(operand.constant);
     const std::int64_t first = *found->second + displacement;
     const std::int64_t size = access ? (operand.width == 0 ? 8 : operand.width) : 1;
-    if (first + size > 8) {
-      refused = true;  // an incoming stack argument (entry rsp + 8 and up)
+    if (first + size > first_argument) {
+      refused = true;  // an incoming stack argument (entry rsp + 8, or entry sp, and up)
     }
   };
 
@@ -618,9 +622,17 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
   if (!lifted || lifted.value().partial || lifted.value().return_floating_point) {
     return negative;
   }
+  // The integer arguments must be the ABI's first argument registers, in order: rdi, rsi, rdx, rcx,
+  // r8 and r9 under System V; x0 to x7 (read as x<n> or w<n>) under AAPCS64.
+  const bool aarch64 = image.architecture == Architecture::AArch64;
   static const std::array<std::string, 6> kSysV = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
   for (std::size_t i = 0; i < lifted.value().parameters.size(); ++i) {
-    if (i >= kSysV.size() || lifted.value().parameters[i].abi_register != kSysV[i]) {
+    const IrParameter& parameter = lifted.value().parameters[i];
+    const bool in_order =
+        aarch64 ? i < 8 && !parameter.floating_point &&
+                      internal::register_family(parameter.abi_register) == "x" + std::to_string(i)
+                : i < kSysV.size() && parameter.abi_register == kSysV[i];
+    if (!in_order) {
       return negative;
     }
   }
@@ -639,7 +651,14 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
     return negative;
   }
   // A callee that reads a stack-passed argument has more parameters than the registers show.
-  if (reads_incoming_stack_argument(raw.value())) {
+  if (aarch64 ? reads_incoming_stack_argument(raw.value(), "sp", 0)
+              : reads_incoming_stack_argument(raw.value(), "rsp", 8)) {
+    return negative;
+  }
+  // A caller keeps its callee-saved registers and its stack pointer across the call, and the call
+  // returns to it: the callee's own code must show that (the frame check), not the ABI's promise.
+  if (internal::check_frame(raw.value(), image.architecture, internal::FrameContract::Callee)
+          .has_value()) {
     return negative;
   }
   CallSummaryCache::Impl::Entry result;
@@ -744,6 +763,57 @@ Answer answer_for(const BinaryImage& image, const AnalysisResult& analysis, std:
   CallSummaryCache::Impl::Entry& stored = cache.entries[target];
   stored = std::move(computed);
   return answer_from(stored, budget);
+}
+
+/// The summary of the callee of a direct call to a function of this image (G21-T2), when the
+/// call resolves: the callee is Positive at the budget the calling function's lift is asked with
+/// one less. The call's answer is recorded on the calling function's frame. x86-64 and AArch64.
+std::optional<KnownCallee> known_callee_of(const BinaryImage& image, const AnalysisResult& analysis,
+                                           const LiftOptions& options,
+                                           const Instruction& instruction) {
+  if ((image.architecture != Architecture::X86_64 && image.architecture != Architecture::AArch64) ||
+      !options.resolve_calls || !options.call_summaries || !instruction.direct_target.has_value()) {
+    return std::nullopt;
+  }
+  CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
+  if (cache.path.empty()) {
+    return std::nullopt;
+  }
+  const std::size_t caller = cache.path.size() - 1;
+  const std::uint64_t budget = cache.path[caller].budget - 1;
+  const Answer answer =
+      answer_for(image, analysis, instruction.direct_target.value(), budget, options);
+  // The query may have reallocated the path, so the caller's frame is found by index again.
+  if (answer.verdict == Verdict::Negative) {
+    cache.path[caller].saw_negative = true;
+  } else if (answer.verdict == Verdict::Cut) {
+    cache.path[caller].saw_cut = true;
+  }
+  if (answer.verdict != Verdict::Positive) {
+    return std::nullopt;
+  }
+  return *answer.summary;
+}
+
+/// Gives a call statement the callee's signature: the arguments are the caller's registers at the
+/// call, in the callee's ABI order, and the result is the whole of `result_register` (rax, or x0).
+/// Reads after the call are checked by check_call_clobbers, not assumed here.
+void apply_known_callee(IrStatement& statement, const KnownCallee& callee,
+                        const char* result_register) {
+  for (const IrParameter& parameter : callee.parameters) {
+    statement.call_arguments.push_back(IrOperand::register_ref(
+        parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
+  }
+  if (callee.return_width > 0) {
+    // After the call, the caller's result register is the callee's: all 64 bits, whatever width
+    // the callee's return value has. The inferred width (from the callee's last write in block
+    // order) can be narrower than what a path leaves in rax (`mov eax, 0x100; mov al, 1` leaves
+    // 0x101 with a width of 1), so a write of that width would keep stale bits of the caller's
+    // register above it.
+    statement.dest = IrOperand::register_ref(result_register, 8);
+  }
+  statement.signature_inferred = true;
+  statement.call_writes = callee.writes;
 }
 
 struct Lifter {
@@ -2213,52 +2283,13 @@ struct Lifter {
     push(block, std::move(increment));
   }
 
-  /// The summary of the callee of a direct call to a function of this image (G21-T2), when the
-  /// call resolves: the callee is Positive at the budget the calling function's lift is asked with
-  /// one less. The call's answer is recorded on the calling function's frame.
+  /// The summary of the callee of a direct call (G21-T2), when the call resolves (known_callee_of).
   std::optional<KnownCallee> known_callee(const Instruction& instruction) const {
-    if (image.architecture != Architecture::X86_64 || !options.resolve_calls ||
-        !options.call_summaries || !instruction.direct_target.has_value()) {
-      return std::nullopt;
-    }
-    CallSummaryCache::Impl& cache = CallSummaryAccess::impl(*options.call_summaries);
-    if (cache.path.empty()) {
-      return std::nullopt;
-    }
-    const std::size_t caller = cache.path.size() - 1;
-    const std::uint64_t budget = cache.path[caller].budget - 1;
-    const Answer answer =
-        answer_for(image, analysis, instruction.direct_target.value(), budget, options);
-    // The query may have reallocated the path, so the caller's frame is found by index again.
-    if (answer.verdict == Verdict::Negative) {
-      cache.path[caller].saw_negative = true;
-    } else if (answer.verdict == Verdict::Cut) {
-      cache.path[caller].saw_cut = true;
-    }
-    if (answer.verdict != Verdict::Positive) {
-      return std::nullopt;
-    }
-    return *answer.summary;
+    return known_callee_of(image, analysis, options, instruction);
   }
 
-  /// Gives a call statement the callee's signature: the arguments are the caller's registers at the
-  /// call, in the callee's ABI order, and the result is the whole of rax. Reads after the call are
-  /// checked by check_call_clobbers, not assumed here.
   static void resolve_call_statement(IrStatement& statement, const KnownCallee& callee) {
-    for (const IrParameter& parameter : callee.parameters) {
-      statement.call_arguments.push_back(IrOperand::register_ref(
-          parameter.abi_register, parameter.width == 0 ? 8 : parameter.width));
-    }
-    if (callee.return_width > 0) {
-      // After the call, the caller's rax is the callee's rax: all 64 bits, whatever width the
-      // callee's return value has. The inferred width (from the callee's last write in block
-      // order) can be narrower than what a path leaves in rax (`mov eax, 0x100; mov al, 1` leaves
-      // 0x101 with a width of 1), so a write of that width would keep stale bits of the caller's
-      // rax above it.
-      statement.dest = IrOperand::register_ref("rax", 8);
-    }
-    statement.signature_inferred = true;
-    statement.call_writes = callee.writes;
+    apply_known_callee(statement, callee, "rax");
   }
 
   /// The model of the C function a call target runs (G21-T7): the target is an import stub or a
@@ -2886,11 +2917,12 @@ void collect_reads(const IrStatement& statement, std::vector<std::string>& out) 
 }
 
 /// Checks that no caller-saved register is read after a call without a definition since that call
-/// (G21-T1). A call clobbers them; the one register a call defines is its result. The check is a
-/// forward dataflow over the blocks (a register is clobbered on a path if some path reaches the
-/// read clobbered). A read of a clobbered register makes the function partial, with a note naming
-/// the register. A function without calls is unchanged.
-void check_call_clobbers_impl(IrFunction& function) {
+/// (G21-T1), with the caller-saved set of the architecture (System V, or AAPCS64, where a `bl`
+/// also writes x30). A call clobbers them; the one register a call defines is its result. The check
+/// is a forward dataflow over the blocks (a register is clobbered on a path if some path reaches
+/// the read clobbered). A read of a clobbered register makes the function partial, with a note
+/// naming the register. A function without calls is unchanged.
+void check_call_clobbers_impl(IrFunction& function, Architecture architecture) {
   const std::size_t count = function.blocks.size();
   bool has_call = false;
   for (const IrBlock& block : function.blocks) {
@@ -2946,7 +2978,9 @@ void check_call_clobbers_impl(IrFunction& function) {
         // A call clobbers the caller-saved families. A resolved call (its callee's IR is known and
         // complete) clobbers only the caller-saved families that callee writes; an unknown call
         // clobbers all of them. Then the call defines its result.
-        const std::set<std::string>& kCallerSaved = caller_saved_families();
+        const bool aarch64 = architecture == Architecture::AArch64;
+        const std::set<std::string>& kCallerSaved =
+            aarch64 ? aapcs64_caller_saved() : caller_saved_families();
         if (statement.signature_inferred) {
           for (const std::string& family : statement.call_writes) {
             if (kCallerSaved.count(family) != 0) {
@@ -2955,6 +2989,9 @@ void check_call_clobbers_impl(IrFunction& function) {
           }
         } else {
           state.insert(kCallerSaved.begin(), kCallerSaved.end());
+        }
+        if (aarch64) {
+          state.insert("x30");  // bl writes the return address, whatever the callee does
         }
         if (statement.dest.kind == IrOperandKind::Register) {
           state.erase(internal::register_family(statement.dest.reg));
@@ -3026,8 +3063,20 @@ bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
   return true;
 }
 
-void check_call_clobbers(IrFunction& function) {
-  check_call_clobbers_impl(function);
+void check_call_clobbers(IrFunction& function, Architecture architecture) {
+  check_call_clobbers_impl(function, architecture);
+}
+
+bool resolve_known_call(const BinaryImage& image, const AnalysisResult& analysis,
+                        const LiftOptions& options, const Instruction& instruction,
+                        IrStatement& statement) {
+  const auto callee = known_callee_of(image, analysis, options, instruction);
+  if (!callee) {
+    return false;
+  }
+  apply_known_callee(statement, *callee,
+                     image.architecture == Architecture::AArch64 ? "x0" : "rax");
+  return true;
 }
 
 Result<bool> keep_reachable_blocks(IrFunction& function, const AnalysisResult& analysis,
@@ -3051,9 +3100,18 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
       }
       resolve_return_registers(lifted.value(), ReturnRegisters{"x0", "v0", true});
       internal::canonicalise_registers(lifted.value(), image.architecture);
+      // `ret` jumps to x30: a return that may see another value does not return to the caller,
+      // which the IR's Return assumes (a function that calls must restore the x30 its bl wrote).
+      if (const auto broken = internal::check_frame(lifted.value(), image.architecture,
+                                                    internal::FrameContract::Own)) {
+        lifted.value().partial = true;
+        lifted.value().notes.push_back(*broken);
+      }
       if (options.run_passes) {
         run_ir_passes(lifted.value(), PassOptions{image.architecture, image.format, {}});
         mark_mixed_parameters(lifted.value());
+        // After the passes, as on x86-64: copy propagation changes which registers are read.
+        internal::check_call_clobbers(lifted.value(), image.architecture);
       }
     }
     return lifted;

@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T1 DONE: `tools/r1` fetches, checks and builds the 26 R1 binaries reproducibly; T2 DONE: `donkey-r1 measure` counts every R1 function (at `3530b46`: x86-64 1,269 of 8,406 Complete, AArch64 839 of 7,450; 0 Unsupported or InvalidIR; every Partial function of an unstripped build names a reason, one of the stripped static musl build does not) and the stripped starts (14,816 of 14,887); earlier, a fixed sample: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. T3: `tools/r1/baseline.json`, `donkey-r1 check` and `baseline`, and the `r1` CI job, which fails when a ratcheted count gets worse than the base commit's baseline and builds the base CLI to measure the same bytes when they changed (`R1Ratchet.*`); done when the job is green on `main`. Not done: the T4 execution of R1, and the T4 CTest step of the `r1` job) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O) and AArch64, a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer, reads no stack argument and passes the frame check (its own code restores the stack pointer, the callee-saved registers and, on AArch64, x30, and computes with no caller register but its arguments) prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV and AAPCS64 clobber models, with the callee write set for a resolved call (and x30, which `bl` writes); the frame check of each callee; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels, on x86-64 System V and AArch64 (AArch64 on R1: 839 to 1,086 of 7,450 Complete; every `c_call_*` corpus function verified at -O0, -O2 and -O3 under GCC 13.3 on AArch64); AArch64 calls of imports stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries the Mach-O `LC_FUNCTION_STARTS` table and the Mach-O compact unwind entries (`__unwind_info`) are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, compact unwind encodings and ARM64 unwind data are not interpreted | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 DONE: `LC_FUNCTION_STARTS` and `__unwind_info` read and fuzzed (fuzz_function_starts, fuzz_unwind_info); T4, T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table and compact unwind entries, and the ELF initialisation and termination functions (`DT_INIT`, `DT_FINI`, the init, fini and preinit arrays, `.init` and `.fini`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three and, for ELF, its initialisation and termination functions; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
@@ -2179,6 +2179,95 @@ certain (`signature_inferred`). A wrong signature must fail the oracle, not prin
 the oracle must run each call-heavy function with several inputs. The clobber model must not let
 a value that a call changed be printed as the old one. Do not widen the subset by guessing at
 callee-saved registers. Mutual recursion stops at depth 1 in the lifter, so the cost is bounded.
+
+#### G21-T1/T2 for AAPCS64: AArch64 calls (written 2026-11-21, before the code)
+
+**Measured first.** The census (above) puts 2,471 AArch64 functions Partial only because of calls. That
+count misses the functions whose second note, "the returned register is not determined by the definitions
+that reach the return; x0 is assumed", comes from the call. An unresolved call defines no x0, so a function
+that returns what it calls has both notes. 1,965 AArch64 functions of the unstripped builds have exactly
+those two reasons. Neither count says how many can become Complete: a call resolves only when its callee
+is Complete. An estimate over five of the six AArch64 builds puts a ceiling on that. It took the CLI's JSON
+and `objdump`'s `bl` targets and ran a fixpoint over the call graph, with the callee Complete and at most
+eight levels below the caller. Callers left with no other reason:
+
+| Calls that resolve | AArch64 functions that become Complete (ceiling) |
+|---|---|
+| same-image only | 222 |
+| same-image, the ten C library models, and the no-return calls | 351 |
+| as above, and functions without a returned value (`void`) | 435 |
+
+The rest stay Partial because a callee is Partial for a reason of its own. Same-image calls come first: the
+C library models and no-return calls reuse their machinery (G21-T7 and G21-T5 for AArch64, next).
+
+**What changes.**
+
+1. *Call summaries for AArch64* (`src/ir/lift.cpp`). `known_callee` accepts AArch64 images.
+   `compute_summary` takes the AAPCS64 integer argument order (`x0`-`x7`, a parameter read as `w<n>` or
+   `x<n>`) where it takes System V's on x86-64. A callee with a floating-point parameter or result stays
+   unresolved, as on x86-64. `reads_incoming_stack_argument` is given the stack pointer and the offset of
+   the first stack argument of each architecture: `rsp + 8` on x86-64, `sp + 0` on AArch64 (no return
+   address on the stack).
+2. *Lifter* (`src/ir/lift_aarch64.cpp`). A `bl` to a function whose summary resolves becomes a call with
+   the callee's arguments, its result in all of `x0`, `signature_inferred` and the callee's write set,
+   through the same `resolve_call_statement` (it takes the result register). A `b` to such a function (a
+   tail call) is a call followed by a return of `x0`, as on x86-64. Every other call is unchanged.
+3. *Clobber check for AAPCS64.* `check_call_clobbers` runs on AArch64 with the AAPCS64 caller-saved set:
+   `x0`-`x18`, `x30` and `v0`-`v7`, `v16`-`v31`. A resolved call clobbers the caller-saved registers its
+   callee writes, and always `x30`, which `bl` writes with the return address. An unresolved call clobbers
+   all of them. NZCV is already unknown after a call (`flags_exact`).
+4. *Frame check (new, both architectures).* Until now a summary has trusted the callee to keep the
+   registers the ABI says it keeps. A summary is only sound when the callee's own code shows it:
+   - every callee-saved register it writes is back to its entry value at every return (`x19`-`x29`, and
+     `v8`-`v15` for their low 64 bits, on AArch64; `rbx`, `rbp`, `r12`-`r15` on x86-64 System V);
+   - the stack pointer is back to its entry value;
+   - on AArch64, `x30` is back to its entry value, because `ret` jumps to it;
+   - on x86-64, no store writes the return address at entry `rsp`.
+
+   The check is a forward dataflow over the callee's IR without passes. Each register holds its entry
+   value, an entry stack address plus a known offset, or unknown. Each stack slot stored at a known offset
+   holds the value stored. It is joined at block starts and iterated to a fixpoint. A store at an unknown
+   stack offset forgets every slot. A store through a pointer that is not stack-derived is assumed not to
+   write the callee's own save area below the entry stack pointer, which only a write through a dangling
+   or overflowing pointer could do. This assumption is the check's one premise, and it is written in the
+   code. A callee that fails is unresolved, and so are its callers' calls to it.
+
+   The same check of `x30` applies to every AArch64 function's own returns: a function whose returns do
+   not all see the entry `x30` is Partial. A function that calls must save and restore it, and only
+   resolved calls let such a function be Complete at all.
+5. *Interpreter* (`src/ir/eval.cpp`). A nested call on AArch64 runs the callee with the caller's `sp`
+   (a `bl` pushes nothing), not `rsp - 8`.
+
+**Oracle.** The call-heavy corpus functions (`c_call_*`) run on AArch64 hosts and under `qemu-aarch64`
+(GCC 13.3, cross-compiled). On AArch64, the corpus test then expects them Complete and verified where the
+callee chain lifts, as it does for System V. CI runs it natively on the `ubuntu-24.04-arm` and `macos-15`
+runners.
+
+**Tests (names to add).**
+- `Ir.AnAArch64CallToACompleteCalleeCarriesItsArguments`: from bytes, a `bl` to a two-argument callee.
+- `Ir.AnAArch64TailCallToACompleteCalleeReturnsItsResult`.
+- `Ir.AnAArch64CallClobbersX30`: a read of `x30` after a resolved call is Partial.
+- `Ir.ACalleeThatDoesNotRestoreACalleeSavedRegisterStaysUnresolved`: on x86-64 and on AArch64.
+- `Ir.ACalleeThatLeavesTheStackUnbalancedStaysUnresolved`.
+- `Ir.AnAArch64FunctionThatReturnsWithAnotherX30IsPartial`.
+- `IrEval.AnAArch64NestedCallRunsOnTheCallersStack`.
+- `DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode`: with the AArch64 expectation for
+  `c_call_nested`.
+
+**Done when.**
+- The tests pass.
+- Every corpus result that is Complete agrees with the compiled code on x86-64 and under `qemu-aarch64`.
+- R1 is measured before and after, and the AArch64 rise is in the PR. The R1 ratchet passes. The only
+  allowed exception is an x86-64 drop that the frame check explains, where the baseline is re-recorded and
+  the functions named.
+
+**Pitfalls.**
+- `bl` writes `x30` whatever the callee does.
+- `w<n>` writes zero the upper half of `x<n>`.
+- A veneer or PLT stub between caller and callee uses `x16` and `x17`. It is not a function that lifts
+  Complete, so the call stays unresolved.
+- The upper 64 bits of `v8`-`v15` are caller-saved. A 128-bit read of them after a call is not lifted
+  today (SIMD is Unsupported), and must be treated as clobbered once it is.
 
 #### G21-T7 C library calls with executable models (written and done 2026-11-18)
 

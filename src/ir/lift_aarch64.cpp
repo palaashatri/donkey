@@ -2169,8 +2169,18 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           call.a = instruction.direct_target.has_value()
                        ? IrOperand::constant_value(instruction.direct_target.value(), kPointerWidth)
                        : IrOperand::constant_value(0, kPointerWidth);
-          lifter.push(out_block, std::move(call));
-          lifter.mark_partial("jump leaves the function; treated as a tail call");
+          // A tail call to a function of the image whose summary resolves: the callee runs with
+          // this function's argument registers and its result is what this function returns.
+          if (instruction.direct_target.has_value() &&
+              resolve_known_call(image, analysis, options, instruction, call)) {
+            lifter.push(out_block, std::move(call));
+            lifter.note(
+                "a jump to a known function is lifted as a call with its inferred arguments and "
+                "result, followed by a return");
+          } else {
+            lifter.push(out_block, std::move(call));
+            lifter.mark_partial("jump leaves the function; treated as a tail call");
+          }
           // A tail call to a function that does not return (G24-T3): nothing comes back.
           if (!end_block_at_no_return_call(analysis, out_block, kPointerWidth)) {
             IrStatement tail;
@@ -2204,10 +2214,16 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         } else {
           statement.a = IrOperand::constant_value(0, kPointerWidth);
         }
+        lifter.flags_exact = false;  // the callee may change NZCV
+        // A call to a function of the image whose summary resolves (G21-T2 for AAPCS64): the
+        // callee's arguments in x0-x7, its result in x0, and the clobber check after the passes.
+        if (resolve_known_call(image, analysis, options, instruction, statement)) {
+          lifter.push(out_block, std::move(statement));
+          continue;
+        }
         lifter.push(out_block, std::move(statement));
         // The callee's effects on registers, memory and NZCV are not modelled.
         lifter.mark_partial("outgoing call arguments and return values follow no modelled ABI");
-        lifter.flags_exact = false;  // the callee may change NZCV
         continue;
       }
 

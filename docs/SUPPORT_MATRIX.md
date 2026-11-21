@@ -135,7 +135,8 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   structure is checked edge by edge against the IR before it is shown (no candidate was refused on the
   sample). The gotos are the open part: most go to a block that is already printed (shared joins and
   short-circuit conditions; `docs/AUDIT.md`, W1 and W1b).
-- Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
+- Not done: AArch64 calls of imports (Partial; no C library model applies on AArch64 yet); calls to other images;
+  Windows x64 calls with arguments; .xdata and ARM64
   unwind; structured output without gotos for the 913 functions that G04-T5 prints with gotos.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
@@ -212,7 +213,8 @@ builds, at -O0 and -O2, for x86-64 and AArch64, plus a static `lua` linked with 
 as a stripped copy. Every function was decompiled, not a sample, with `tools/r1/decompile.cmake`
 (`donkey-cli decompile --json --no-pseudocode`), and counted with `donkey-r1 measure` (G20-T2). The decompiler
 was that of `main` at `3530b46` (after the init and fini seeds of G24 and the Mach-O header fix); the change that
-adds the measurement adds JSON fields only.
+adds the measurement adds JSON fields only. The AArch64 counts and the table below are measured again with AArch64
+call resolution (G21-T1/T2 for AAPCS64); the x86-64 counts and the starts did not change.
 
 These are counted results, not verified ones: a Complete function here has not been executed. The execution
 comparison on R1 is G20-T4.
@@ -233,7 +235,8 @@ and pull request. It fails when any of these gets worse than the base commit's b
 Unstripped builds, totals:
 
 - x86-64: 1,269 of 8,406 functions are Complete (15.1%).
-- AArch64: 839 of 7,450 functions are Complete (11.3%).
+- AArch64: 1,086 of 7,450 functions are Complete (14.6%). It was 839 (11.3%) before AArch64 calls to
+  same-image callees resolved (G21-T1/T2 for AAPCS64, measured on `main` at `c655bdf` with that change).
 - No function is Unsupported or InvalidIR, and no run failed.
 - Every Partial function of an unstripped build names at least one reason. One Partial function of the stripped
   static musl build names none.
@@ -255,28 +258,28 @@ Stripped builds, against the function symbols of their unstripped twins (`STT_FU
 | `libz-x86_64-glibc-O0.so.stripped` | 206 | 58 | 148 | 0 | 0 | 157 of 158 (1 missed; 49 stubs, 0 extra) |
 | `libz-x86_64-glibc-O2.so` | 185 | 40 | 145 | 0 | 0 |  |
 | `libz-x86_64-glibc-O2.so.stripped` | 184 | 40 | 144 | 0 | 0 | 135 of 136 (1 missed; 49 stubs, 0 extra) |
-| `libz-aarch64-glibc-O0.so` | 208 | 36 | 172 | 0 | 0 |  |
-| `libz-aarch64-glibc-O0.so.stripped` | 208 | 36 | 172 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
-| `libz-aarch64-glibc-O2.so` | 186 | 27 | 159 | 0 | 0 |  |
-| `libz-aarch64-glibc-O2.so.stripped` | 186 | 27 | 159 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O0.so` | 208 | 58 | 150 | 0 | 0 |  |
+| `libz-aarch64-glibc-O0.so.stripped` | 208 | 58 | 150 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O2.so` | 186 | 31 | 155 | 0 | 0 |  |
+| `libz-aarch64-glibc-O2.so.stripped` | 186 | 31 | 155 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
 | `lua-x86_64-glibc-O0` | 1178 | 174 | 1004 | 0 | 0 |  |
 | `lua-x86_64-glibc-O0.stripped` | 1177 | 174 | 1003 | 0 | 0 | 1086 of 1087 (1 missed; 91 stubs, 0 extra) |
 | `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
 | `lua-x86_64-glibc-O2.stripped` | 793 | 77 | 716 | 0 | 0 | 703 of 704 (1 missed; 90 stubs, 0 extra) |
-| `lua-aarch64-glibc-O0` | 1180 | 110 | 1070 | 0 | 0 |  |
-| `lua-aarch64-glibc-O0.stripped` | 1180 | 110 | 1070 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
-| `lua-aarch64-glibc-O2` | 790 | 49 | 741 | 0 | 0 |  |
-| `lua-aarch64-glibc-O2.stripped` | 790 | 49 | 741 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0` | 1180 | 177 | 1003 | 0 | 0 |  |
+| `lua-aarch64-glibc-O0.stripped` | 1180 | 177 | 1003 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O2` | 790 | 58 | 732 | 0 | 0 |  |
+| `lua-aarch64-glibc-O2.stripped` | 790 | 58 | 732 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
 | `lua-static-musl-x86_64-musl-O2` | 988 | 125 | 863 | 0 | 0 |  |
 | `lua-static-musl-x86_64-musl-O2.stripped` | 923 | 113 | 810 | 0 | 1 | 920 of 985 (65 missed; 0 stubs, 3 extra) |
 | `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
 | `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 584 | 2482 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
 | `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
 | `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 211 | 1775 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O0` | 3097 | 448 | 2649 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 448 | 2649 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O2` | 1989 | 169 | 1820 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 169 | 1820 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0` | 3097 | 583 | 2514 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 583 | 2514 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2` | 1989 | 179 | 1810 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 179 | 1810 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
 
 The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
 note that is not one every function carries; when the lifter gave none, it is the first instruction that was
