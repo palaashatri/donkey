@@ -13,6 +13,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <set>
 #include <span>
 #include <string>
 #include <unordered_map>
@@ -147,6 +148,9 @@ struct AnalysisRequest {
   std::size_t max_items = 1000;
   /// Whole-binary decompile output is capped at this many functions; --max-functions raises it.
   std::size_t max_functions = kDefaultMaxDecompiledFunctions;
+  /// decompile --json --no-pseudocode: each function's status, notes and structure without its
+  /// text and source map (G20-T2: the R1 measurement reads only those).
+  bool no_pseudocode = false;
   std::vector<std::uint64_t> function_starts;
   /// A project whose saved local names are applied to the decompiled output (G12-T3).
   std::string project_path;
@@ -883,7 +887,7 @@ void print_usage(std::FILE* out) {
       "  donkey-cli debuginfo <binary> [--json] [--max-items N] [--debug-file PATH]\n"
       "  donkey-cli cfg <binary> [--json] [--function A] [--max-instructions N]\n"
       "  donkey-cli decompile <binary> [--json] [--function A] [--max-instructions N] "
-      "[--max-functions N] [--project DB]\n"
+      "[--max-functions N] [--project DB] [--no-pseudocode]\n"
       "  donkey-cli xrefs <binary> [--json] [--address A]\n"
       "  donkey-cli sig make <object.o|archive.a> --lib NAME --version V --license L --out FILE"
       " [--json]\n"
@@ -1783,6 +1787,8 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         return usage_error("--project needs a database path");
       }
       request.project_path = std::string(value);
+    } else if (argument == "--no-pseudocode") {
+      request.no_pseudocode = true;
     } else if (try_parse_load_flag(arguments, i, request.load_options, flag_error)) {
       if (flag_error != nullptr) {
         return usage_error(flag_error);
@@ -1797,6 +1803,9 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   }
   if (request.path.empty()) {
     return usage_error("decompile needs a file path");
+  }
+  if (request.no_pseudocode && !request.json) {
+    return usage_error("--no-pseudocode needs --json");
   }
 
   LoadedBinary loaded;
@@ -1992,12 +2001,36 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         continue;
       }
       const Pseudocode& pc = pseudo_res.value();
+      // The lifter's notes, in order: why a function is Partial, and what its result assumes.
+      std::string notes = "[";
+      for (std::size_t n = 0; n < lifted.value().notes.size(); ++n) {
+        notes += (n == 0 ? "" : ", ") + quote(lifted.value().notes[n]);
+      }
+      notes += "]";
+      // The text of each distinct Unsupported statement ("rol rdx, cl", "syscall"): an
+      // instruction that is not lifted makes the function Partial without a note of its own.
+      std::string unsupported = "[";
+      std::set<std::string> unsupported_seen;
+      for (const IrBlock& block : lifted.value().blocks) {
+        for (const IrStatement& statement : block.statements) {
+          if (statement.op == IrOp::Unsupported && unsupported_seen.insert(statement.text).second) {
+            unsupported += (unsupported_seen.size() == 1 ? "" : ", ") + quote(statement.text);
+          }
+        }
+      }
+      unsupported += "]";
       out += "    {\"address\": " + quote(hex(function->address)) +
              ", \"name\": " + quote(display_name(function->name)) +
              ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
              ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
-             ", \"structure\": " + structure_json(lifted.value()) +
-             ", \"pseudocode\": " + quote(pc.full_text) + ", \"source_map\": [";
+             ", \"structure\": " + structure_json(lifted.value()) + ", \"notes\": " + notes +
+             ", \"unsupported\": " + unsupported;
+      if (request.no_pseudocode) {
+        out += "}";
+        ++written;
+        continue;
+      }
+      out += ", \"pseudocode\": " + quote(pc.full_text) + ", \"source_map\": [";
       for (std::size_t li = 0; li < pc.lines.size(); ++li) {
         out += li == 0 ? "\n" : ",\n";
         out +=

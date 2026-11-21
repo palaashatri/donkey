@@ -57,6 +57,22 @@ The work directory holds:
 - `out/`: the binaries and their `.stripped` copies;
 - `binaries.json`.
 
+Then decompile and measure every binary (G20-T2). `donkey-r1` is built with the tests
+(`DONKEY_BUILD_R1_TOOL`):
+
+```bash
+cmake -DR1_WORK=/path/to/work -DDONKEY_CLI=build/release-headless/apps/donkey-cli/donkey-cli -DOUT=/path/to/decompiled -P tools/r1/decompile.cmake
+```
+
+```bash
+build/release-headless/donkey-r1 measure /path/to/work /path/to/decompiled r1-result.json r1-table.md
+```
+
+`decompile.cmake` runs one `donkey-cli decompile --json --no-pseudocode` per binary, under a time limit.
+`donkey-r1 measure` counts, for each binary, the functions by status and the reasons of the Partial ones.
+For a stripped binary it also compares the starts found with the function symbols of its unstripped twin:
+matched, missed, import stubs, and extra. Its exit status is 2 when any binary has no usable output.
+
 `binaries.json` records the provenance of each binary that `docs/DESIGN.md` §11.5 asks for:
 
 - the file name, the build, and the source with its version, licence and archive SHA-256;
