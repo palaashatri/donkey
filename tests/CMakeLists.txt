@@ -167,6 +167,7 @@ add_executable(donkey_unit_tests
   unit/eh_frame_test.cpp
   unit/pdata_test.cpp
   unit/function_starts_test.cpp
+  unit/unwind_info_test.cpp
   unit/init_fini_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
@@ -1412,6 +1413,12 @@ set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
 
 # G23-T3: a stripped Mach-O keeps its LC_FUNCTION_STARTS table; the functions it lists are found
 # and marked (tests/fixtures/function_starts, PROVENANCE.md there).
+# G23-T3: a stripped Mach-O linked without LC_FUNCTION_STARTS gets the starts of its compact
+# unwind entries, marked as unwind starts (tests/fixtures/unwind_info, PROVENANCE.md there).
+add_test(NAME cli.functions_marks_unwind_info
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unwind_info/unwind_x86_64 --json)
+set_tests_properties(cli.functions_marks_unwind_info PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"address\": \"0x1000003a0\"[^}]*\"from_unwind\": true")
 add_test(NAME cli.functions_marks_function_starts
          COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/function_starts/starts_x86_64 --json)
 set_tests_properties(cli.functions_marks_function_starts PROPERTIES
