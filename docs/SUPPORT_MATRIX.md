@@ -187,6 +187,11 @@ was that of `main` at `2270daa`; the change that adds the measurement adds JSON 
 These are counted results, not verified ones: a Complete function here has not been executed. The execution
 comparison on R1 is G20-T4.
 
+The counts are ratcheted (G20-T3). `tools/r1/baseline.json` records, for each binary, Complete, Unsupported,
+InvalidIR, errors and the missed starts of the stripped copies. The `r1` CI job measures R1 again on every push
+and pull request. It fails when any of these gets worse than the base commit's baseline (`R1Ratchet.*`, and
+`tools/r1/ci-check.sh` on both of its paths, run locally).
+
 Unstripped builds, totals:
 
 - x86-64: 1,268 of 8,405 functions are Complete (15.1%).
