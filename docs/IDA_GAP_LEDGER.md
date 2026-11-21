@@ -181,8 +181,8 @@ P0 is the most important, P3 the least.
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
-| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries and the Mach-O `LC_FUNCTION_STARTS` table are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, Mach-O `__unwind_info` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 PARTIAL: `LC_FUNCTION_STARTS` read and fuzzed (fuzz_function_starts), `__unwind_info` TODO; T4, T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table; a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries the Mach-O `LC_FUNCTION_STARTS` table and the Mach-O compact unwind entries (`__unwind_info`) are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, compact unwind encodings and ARM64 unwind data are not interpreted | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 DONE: `LC_FUNCTION_STARTS` and `__unwind_info` read and fuzzed (fuzz_function_starts, fuzz_unwind_info); T4, T5 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table and compact unwind entries; a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -2592,6 +2592,60 @@ of 4 after, every start equal to `llvm-objdump --macho --function-starts`; on `t
 `FunctionStarts.LoaderRefusesATableOutsideTheFile`, `Analysis.MachOFunctionStartsSeedAStrippedBinary`,
 `cli.functions_marks_function_starts`. Not checked: a 32-bit ARM image (the Thumb bit is cleared by
 the rule, on synthetic bytes only) and an Apple-linked binary (the fixtures are LLD's).
+
+**T3 report, part 2 (2026-11-21).** `__TEXT,__unwind_info` was done as planned, with one correction to the
+plan: the linker folds a run of adjacent functions that share an encoding into one entry, so an entry's function
+is always a start, but not every start has an entry. Compact unwind is therefore a subset of
+`LC_FUNCTION_STARTS`, not the same list.
+
+The reader is `read_unwind_info` (`src/binary/unwind_info.cpp`). It reads the header, the common encodings, the
+first-level index with its final sentinel, and regular (kind 2) and compressed (kind 3) second-level pages. Every
+array, page and entry is checked against the section before it is read. A structural fault refuses the whole
+section with a stable code, and the analysis is then Partial with that diagnostic. The faults are:
+
+- `unwind_info.bad_header`: a wrong version, or a header too short;
+- `unwind_info.outside_section`: data that lies outside the section;
+- `unwind_info.bad_index`: no final sentinel, offsets that decrease, a page missing, or a range that wraps;
+- `unwind_info.bad_page`: an unknown page kind, or an entry outside its index range;
+- `unwind_info.bad_encoding_index`: an encoding index that names nothing;
+- `unwind_info.unsorted`: entries out of order;
+- `unwind_info.too_many`: more than 2^20 entries.
+
+Each entry's start becomes a seed with the `from_unwind` provenance, as `.eh_frame` and `.pdata` starts do. The
+encodings are kept and not interpreted.
+
+Measured on new fixtures (`tests/fixtures/unwind_info`, x86-64 and arm64, clang 18 and `ld64.lld` 18, linked with
+`-no_function_starts` and stripped):
+
+- Before, Donkey found 3 of the 6 functions, the ones reached by a call or as the entry. After, it finds 6 of 6,
+  and every entry and encoding equals `llvm-objdump --macho --unwind-info`.
+- On the `LC_FUNCTION_STARTS` fixtures, the one entry of each image (all four functions there share an encoding)
+  is one of the table's starts.
+- `fuzz_unwind_info` ran for 60 s, 12.7 million runs, clean.
+
+Tests:
+
+- `UnwindInfo.MatchTheOracle`
+- `UnwindInfo.EntriesAreASubsetOfTheFunctionStarts`
+- `UnwindInfo.AnImageWithoutTheSectionHasNoEntries`
+- `UnwindInfo.ReadsRegularAndCompressedPages`
+- `UnwindInfo.AnIndexWithOnlyTheSentinelHasNoEntries`
+- `UnwindInfo.RefusesBrokenSections`
+- `UnwindInfo.RefusesAWrappingRange`
+- `UnwindInfo.AnIsolatedLoadGivesTheSameEntries`
+- `UnwindInfo.AgreesWithFunctionStarts`
+- `Analysis.MachOUnwindInfoSeedsAStrippedBinary`
+- `cli.functions_marks_unwind_info`
+
+Not checked:
+
+- A regular page in a linked image. LLD writes compressed pages only, so the regular form is tested on synthetic
+  bytes.
+- An Apple-linked binary.
+- The DWARF-mode encodings' `__eh_frame` FDEs. The Mach-O `__eh_frame` is not read yet.
+
+Found on the way, and not fixed here: the stripped Mach-O fixtures list a function at the image base
+(0x100000000), the Mach-O header, both before and after this change.
 
 ### G24 Analysis of stripped binaries (P0)
 

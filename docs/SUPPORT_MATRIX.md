@@ -18,7 +18,17 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   stripped image, marked `from_function_starts` (`FunctionStarts.*`, 5 tests, both stripped fixtures
   match `llvm-objdump --macho --function-starts`; `Analysis.MachOFunctionStartsSeedAStrippedBinary`,
   `cli.functions_marks_function_starts`). Fuzzed (`fuzz_function_starts`, 60 s, 10.4 million runs,
-  clean; `tests/fuzz/corpus/function_starts`). `__unwind_info` is not read yet.
+  clean; `tests/fuzz/corpus/function_starts`).
+- Mach-O compact unwind, `__TEXT,__unwind_info` version 1 (G23-T3): regular and compressed
+  second-level pages are read, and each entry's function seeds a function in a stripped image,
+  marked `from_unwind` (`UnwindInfo.*`, 9 tests). Both stripped fixtures, linked without
+  `LC_FUNCTION_STARTS`, match `llvm-objdump --macho --unwind-info` entry by entry and encoding by
+  encoding. On the `LC_FUNCTION_STARTS` fixtures every entry is one of the table's starts.
+  `Analysis.MachOUnwindInfoSeedsAStrippedBinary` and `cli.functions_marks_unwind_info` cover the
+  analysis. Fuzzed (`fuzz_unwind_info`, 60 s, 12.7 million runs, clean;
+  `tests/fuzz/corpus/unwind_info`). The linker folds adjacent functions with one encoding into one
+  entry, so compact unwind names a subset of the starts. The encodings are kept and not
+  interpreted, and the LSDA and personality arrays are bounds-checked and not read.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into
