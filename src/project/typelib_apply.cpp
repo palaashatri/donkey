@@ -66,6 +66,7 @@ class ShapeComparer {
   /// 128 levels are then at most 20 KiB in a release build and 180 KiB in the worst ASan build,
   /// with room for the caller's frames inside the smallest default stack of a thread Donkey runs on
   /// (512 KiB, macOS secondary threads; the CLI merges on its main thread, 8 MiB).
+  /// tools/ci/comparison-stack.sh measures it again in CI with each host's compiler.
   static constexpr std::size_t kMaxDepth = 128;
 
   bool same(TypeId a, TypeId b) {
