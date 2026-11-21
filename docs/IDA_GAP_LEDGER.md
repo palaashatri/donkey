@@ -178,11 +178,11 @@ P0 is the most important, P3 the least.
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
-| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
+| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
-| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries and the Mach-O `LC_FUNCTION_STARTS` table are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, Mach-O `__unwind_info` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 PARTIAL: `LC_FUNCTION_STARTS` read and fuzzed (fuzz_function_starts), `__unwind_info` TODO; T4, T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table; a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
+| G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries the Mach-O `LC_FUNCTION_STARTS` table and the Mach-O compact unwind entries (`__unwind_info`) are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, compact unwind encodings and ARM64 unwind data are not interpreted | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 DONE: `LC_FUNCTION_STARTS` and `__unwind_info` read and fuzzed (fuzz_function_starts, fuzz_unwind_info); T4, T5 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table and compact unwind entries, and the ELF initialisation and termination functions (`DT_INIT`, `DT_FINI`, the init, fini and preinit arrays, `.init` and `.fini`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three and, for ELF, its initialisation and termination functions; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -1772,6 +1772,195 @@ verified function disagrees with the compiled code.
 budget (sample large programs, and say that you sampled). A function that is
 Complete but not executed is not verified: report the two counts separately.
 
+#### G20-T0 task-level plan (written 2026-11-21, before any G20-T1 code)
+
+**Spike, measured on `main` at `3263c84`.** The proposed sources were fetched and built on Ubuntu 24.04 x86-64
+with GCC 13.3.0 and the distribution defaults (PIE, `-fstack-protector-strong`, `-fcf-protection`), with the cross
+GCC 13.2.0 for AArch64, and with `musl-gcc` from musl 1.2.4 (Ubuntu `musl-tools` 1.2.4-2). A Release
+`donkey-cli decompile <binary> --json --max-functions 1000000` then ran on each, one process per binary. The spike
+is not the T2 result; T2 measures again, in CI, from the manifest.
+
+| Binary (x86-64, unstripped) | Functions | Complete | Partial | Other | Time |
+|---|---|---|---|---|---|
+| zlib 1.3.1 `libz.so`, -O0 | 207 | 58 | 149 | 0 | 0.8 s |
+| zlib 1.3.1 `libz.so`, -O2 | 185 | 40 | 145 | 0 | 0.6 s |
+| Lua 5.4.7 `lua`, -O0 | 1,178 | 174 | 1,004 | 0 | 1.6 s |
+| Lua 5.4.7 `lua`, -O2 | 794 | 77 | 717 | 0 | 1.5 s |
+| Lua 5.4.7 `lua`, -O2, static with musl | 987 | 124 | 863 | 0 | 2.3 s |
+| SQLite 3.46.1 `sqlite3` shell, -O0 | 3,067 | 584 | 2,483 | 0 | 9.9 s |
+| SQLite 3.46.1 `sqlite3` shell, -O2 | 1,987 | 211 | 1,776 | 0 | 18.2 s |
+
+The x86-64 total is 1,268 Complete functions out of 8,405 (15.1%). No function was Unsupported or InvalidIR, and
+none crashed. The AArch64 builds of Lua and SQLite at -O0 and -O2 decompile in 1 to 11 s each: Lua -O2 has 49
+Complete functions out of 790, and SQLite -O2 has 169 out of 1,989.
+
+The stripped copies (`strip`) of the x86-64 -O2 builds give these function counts, against the `t`/`T` symbols
+of the unstripped symbol table:
+
+| Build | Functions found | Symbols |
+|---|---|---|
+| Lua | 789 | 704 |
+| SQLite | 1,982 | 1,897 |
+| zlib | 180 | 136 |
+| static musl Lua | 920 | 994 |
+
+The static musl build is the one with fewer functions than symbols: musl's assembly functions have no
+`.eh_frame` entry. The whole of R1 runs well inside the CI budget, so T2 decompiles every function and samples
+nothing.
+
+The first specific note of each Partial function, across the seven x86-64 builds (7,137 Partial functions), leaving
+out the two notes every x86-64 function carries ("integer subset; locals are not recovered" and "signature inferred
+from System V ABI register use"):
+
+| Partial functions | First specific note | Gap |
+|---|---|---|
+| 4,235 | outgoing call arguments and return values follow no modelled ABI | G21 |
+| 1,646 | fs- or gs-relative memory (thread-local storage) is not modelled | new: the stack protector's `%fs:0x28` canary |
+| 979 | jump leaves the function; treated as a tail call | G21, G24 |
+| 144 | the returned register is not determined by the definitions that reach the return | G21 |
+| 62 | floating-point results assume the MXCSR rounding mode | G01 |
+| 54 | others: flags not modelled (21), `rax` and `xmm0` both written (12), tail jumps (11), and 10 more | G02, G21 |
+| 17 | no note other than the two generic ones | none: a Partial result must name its reason, so T2 lists these and each is fixed or explained |
+
+The stack-protector row is a finding of the spike. A function built with `-fstack-protector-strong` reads the
+canary through `%fs`. T2 keeps the distribution defaults, because real programs are built with them. Whether the
+canary load and check become a modelled idiom is a G21 question, not decided here.
+
+**R1.** The manifest `tools/r1/r1.json` lists each source and each build. A source entry has the name, the
+version, the URL, its SHA-256, the licence, the source files and the flags.
+
+The four sources are redistributable but are not redistributed: the build fetches them, and nothing built is
+committed.
+
+| Source | Licence | URL | SHA-256 |
+|---|---|---|---|
+| zlib 1.3.1 | zlib | `https://zlib.net/fossils/zlib-1.3.1.tar.gz` | `9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23` |
+| Lua 5.4.7 | MIT | `https://www.lua.org/ftp/lua-5.4.7.tar.gz` | `9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30` |
+| SQLite 3.46.1 amalgamation, the version `cmake/DonkeyStorageDependencies.cmake` already pins | public domain | `https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip` | `77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784` |
+| musl 1.2.4, as `musl-gcc` links it | MIT | Ubuntu package `musl-tools` 1.2.4-2, not a download | the package version is recorded and checked |
+
+The builds:
+
+- `libz.so`, `lua` and `sqlite3` at -O0 and -O2, for x86-64 and for AArch64 (the cross compiler).
+- `lua` at -O2 linked statically with musl, for x86-64 only. `musl-tools` has no AArch64 cross form; the output
+  says so.
+- Each build is kept unstripped and as a `strip` copy.
+
+That makes 26 binaries. The provenance that `docs/DESIGN.md` §11.5 requires is written to the measurement output
+for every binary: the source, licence, compiler and version, flags, level, architecture and the binary's SHA-256.
+
+**Tasks and files.** The tools are a CMake script and a C++20 program, so no Python runtime is needed, in line with
+`docs/DESIGN.md` §1, item 4.
+
+- **T1 [ground truth]** `tools/r1/r1.json`, `tools/r1/build.cmake` (run with `cmake -P`) and `tools/r1/README.md`.
+  - `build.cmake` downloads each source into a cache directory with `file(DOWNLOAD ... EXPECTED_HASH SHA256=...)`,
+    so a hash mismatch stops it before anything is unpacked.
+  - Before extracting, it lists the archive with `file(ARCHIVE_EXTRACT ... LIST_ONLY)` and refuses any member
+    with an absolute path or a `..` component.
+  - It compiles with the manifest's flags and `-ffile-prefix-map`, and writes `binaries.json`.
+  - For every binary, `binaries.json` records the provenance above and the identity of the compiler that built
+    that binary. The identity is the first line of that compiler's `--version` (`gcc`, or
+    `aarch64-linux-gnu-gcc` for AArch64) and its package version (`gcc-13`, `gcc-aarch64-linux-gnu`,
+    `musl-tools`). A change to either compiler is therefore seen on the binaries it built.
+  - The ground truth for the stripped builds is the defined function symbols, with sizes, of the unstripped twin:
+    every `SymbolKind::Function`. The ELF reader maps both `STT_FUNC` and `STT_GNU_IFUNC` to that kind
+    (`src/binary/elf.cpp`). Both are counted as starts, because an IFUNC symbol's value is the start of its
+    resolver, which is code.
+  - The T2 tool reads these symbols through Donkey's own ELF reader (`donkey::load_binary`,
+    `BinaryImage::symbols`). The CLI has no symbol-listing command, and none is needed.
+  - Tests:
+    - `cmake/checks/r1_build_refusals.cmake` runs `build.cmake` on two inputs: a source whose hash does not match,
+      and a committed 1 KiB tar fixture with a `../escape` member (`tests/fixtures/r1/`, with provenance). It
+      checks that both are refused.
+    - `R1.ManifestSchema` (in `tests/unit/r1_test.cpp`) refuses unknown keys and a missing hash.
+    - `R1.SymbolsMatchReadelf` compares, on one corpus library, the starts and sizes read through Donkey with the
+      `FUNC` and `IFUNC` rows of `readelf -sW`. The library is built with one IFUNC, so both types are covered.
+- **T2.** `tools/r1/r1_tool.cpp` (the C++20 program `donkey-r1`, built when `DONKEY_BUILD_R1_TOOL=ON`; its logic
+  lives in a small library tested by `tests/unit/r1_test.cpp`), plus one change to the CLI.
+  - The CLI change: `decompile --json` gains a `"notes"` array on each function, holding the lifter's notes in
+    order. This only adds a field, so `kJsonSchemaVersion` stays 1. A CLI test checks the field on
+    `${DONKEY_MUSL_PROGRAM}`, and the measurement does not scrape `// note:` comment lines.
+  - The CI job runs `donkey-cli decompile --json --max-functions 1000000` on every binary, one process per binary
+    under `timeout`.
+  - `donkey-r1 measure` reads those outputs with `donkey::parse_json`, with limits raised to the size of the
+    largest output. For each function it records the status: Complete, Partial, Unsupported, InvalidIR, or error.
+    An error means the process failed, timed out or wrote unreadable output, and is recorded for the whole binary.
+  - `measure` accepts output that has no `notes` array, such as the output of a CLI built before T2. Then it
+    reports no reasons. The ratchet counts (Complete, Unsupported, InvalidIR, error and missed starts) never
+    depend on notes, so a base CLI from before T2 can still be compared (see T3).
+  - For each Partial function it records the first specific note and every note.
+  - For each stripped binary it records the starts found, against the unstripped symbol starts: matched, missed
+    and extra. That is G24's measure on R1.
+  - It writes `r1-result.json` and a Markdown table, both uploaded as a CI artifact. The table of the 20 most
+    frequent first notes goes into `docs/SUPPORT_MATRIX.md`, with the commit it was measured at.
+- **T3.** The ratchet: `tools/r1/baseline.json` and `donkey-r1 check`.
+  - The baseline holds counts for each binary (program, architecture, level, stripped or not): Complete,
+    Unsupported, InvalidIR, error and missed starts. Each entry also records the identity of the compiler that
+    built that binary and the binary's SHA-256. The hash covers every build input at once: the source, the flags,
+    the manifest and the compiler.
+  - The check always compares against the baseline as it is at the base commit
+    (`git show <base>:tools/r1/baseline.json`), never against the file in the PR. A PR that edits the baseline
+    therefore cannot lower the bar it is checked against. When the PR also changes `baseline.json`, the check
+    verifies that the new file equals the counts the head measured.
+  - The check fails when, for any binary, Complete drops, or Unsupported, InvalidIR, error or missed starts rise.
+  - A count that improves passes and is printed. The PR that improves it runs `donkey-r1 check --update` and
+    commits the new baseline.
+  - If a binary's SHA-256 differs from its entry in the base baseline, the stored counts describe other bytes, so
+    a comparison has to be made on the same bytes. That happens after a runner image update (a new compiler), or
+    in a PR that changes a source version, a flag or the manifest. The job builds
+    `donkey-cli` from the base commit (the PR's base SHA, or the previous commit on a push to `main`) and
+    measures the same freshly built R1 binaries with it. It then checks the head against that base under the
+    rules above.
+    - A drop still fails.
+    - A pass prints that the baseline is out of date, as a warning annotation. The next PR re-records the
+      baseline with `--update`, and says that it does.
+    - A change to the corpus or the compiler therefore cannot hide a regression. Such a change makes the job
+      longer by one more CLI build.
+  - The CI job is a new `r1` job in `.github/workflows/ci.yml` on `ubuntu-24.04`, with `gcc-aarch64-linux-gnu`
+    and `musl-tools` installed. It builds the Release headless CLI and `donkey-r1`, then runs these steps in
+    order:
+    1. fetch and build R1;
+    2. the T4 CTest, with `DONKEY_R1_DIR` set and `DONKEY_R1_REQUIRED=1`, so a skip fails in this job;
+    3. decompile;
+    4. measure;
+    5. check.
+  - A download is retried. A download that keeps failing is reported as a fetch failure, never as a ratchet
+    result.
+  - The budget: about 2 minutes to build the sources and, from the spike, about 2 minutes to decompile all 26
+    binaries.
+- **T4 [oracle]** `tools/r1/pure.json` and an executed comparison, `R1Oracle.PureFunctionsAgree`.
+  - `pure.json` lists the R1 functions that can be called in isolation. Their arguments are integers or pointers
+    to buffers the caller provides; they keep no global state, and every call they make can be modelled by the
+    interpreter.
+  - The candidates are the `libz.so` exports `adler32`, `adler32_z`, `crc32`, `crc32_z`, `adler32_combine`,
+    `crc32_combine` and `zlibCompileFlags`. Lua's `lctype` helpers are macros, and its `lobject` functions are
+    `LUAI_FUNC` (hidden visibility on ELF), so neither can be reached through `dlopen`, and Lua has no candidates.
+  - A function joins the list only after its name is shown in `nm -D --defined-only` of the built library. The
+    test checks this again and fails on a name that is not exported.
+  - Each listed function runs natively through `dlopen` and through `donkey/ir/eval.h` on the same inputs, as
+    the corpus does in `tests/unit/decompiler_corpus_test.cpp`.
+  - Outside the `r1` job the test is skipped, with the reason given, when R1 has not been built. Inside the job
+    it must run.
+  - It reports verified Complete and unverified Complete separately.
+
+**Done when.**
+
+- T1 to T3 are merged, and the `r1` job is green on `main` with the baseline committed.
+- The reason table is in `docs/SUPPORT_MATRIX.md`.
+- The plans of G21, G01, G08 and G04 state how their order was checked against that table.
+- The scorecard threshold for row 6 stays proposed until the owner fixes it after the first T2 baseline
+  (`docs/PARITY.md` section 5).
+
+**Pitfalls.**
+
+- Never commit a downloaded or built file, and never skip a hash check, retries included.
+- Never lower a baseline count to make CI pass. A drop is either a regression to fix, or a soundness fix whose PR
+  says why the count fell. Only the second may lower the baseline, and its PR says so.
+- The missed starts of a static musl build come from hand-written assembly with no unwind entries. They are a
+  property of the binary, not noise, and stay in the count.
+- The same source at the same level with the same compiler must give the same bytes. `binaries.json` records each
+  SHA-256, so that two CI runs can be compared.
+
 ### G21 Call sites and calling conventions (P0)
 
 **Why.** Both reference tools print `r = f(a, b);`. Donkey prints
@@ -2593,6 +2782,60 @@ of 4 after, every start equal to `llvm-objdump --macho --function-starts`; on `t
 `cli.functions_marks_function_starts`. Not checked: a 32-bit ARM image (the Thumb bit is cleared by
 the rule, on synthetic bytes only) and an Apple-linked binary (the fixtures are LLD's).
 
+**T3 report, part 2 (2026-11-21).** `__TEXT,__unwind_info` was done as planned, with one correction to the
+plan: the linker folds a run of adjacent functions that share an encoding into one entry, so an entry's function
+is always a start, but not every start has an entry. Compact unwind is therefore a subset of
+`LC_FUNCTION_STARTS`, not the same list.
+
+The reader is `read_unwind_info` (`src/binary/unwind_info.cpp`). It reads the header, the common encodings, the
+first-level index with its final sentinel, and regular (kind 2) and compressed (kind 3) second-level pages. Every
+array, page and entry is checked against the section before it is read. A structural fault refuses the whole
+section with a stable code, and the analysis is then Partial with that diagnostic. The faults are:
+
+- `unwind_info.bad_header`: a wrong version, or a header too short;
+- `unwind_info.outside_section`: data that lies outside the section;
+- `unwind_info.bad_index`: no final sentinel, offsets that decrease, a page missing, or a range that wraps;
+- `unwind_info.bad_page`: an unknown page kind, or an entry outside its index range;
+- `unwind_info.bad_encoding_index`: an encoding index that names nothing;
+- `unwind_info.unsorted`: entries out of order;
+- `unwind_info.too_many`: more than 2^20 entries.
+
+Each entry's start becomes a seed with the `from_unwind` provenance, except an entry whose encoding has `UNWIND_IS_NOT_FUNCTION_START`, which marks a range inside a function, as `.eh_frame` and `.pdata` starts do. The
+encodings are kept and not interpreted.
+
+Measured on new fixtures (`tests/fixtures/unwind_info`, x86-64 and arm64, clang 18 and `ld64.lld` 18, linked with
+`-no_function_starts` and stripped):
+
+- Before, Donkey found 3 of the 6 functions, the ones reached by a call or as the entry. After, it finds 6 of 6,
+  and every entry and encoding equals `llvm-objdump --macho --unwind-info`.
+- On the `LC_FUNCTION_STARTS` fixtures, the one entry of each image (all four functions there share an encoding)
+  is one of the table's starts.
+- `fuzz_unwind_info` ran for 60 s, 12.7 million runs, clean.
+
+Tests:
+
+- `UnwindInfo.MatchTheOracle`
+- `UnwindInfo.EntriesAreASubsetOfTheFunctionStarts`
+- `UnwindInfo.AnImageWithoutTheSectionHasNoEntries`
+- `UnwindInfo.ReadsRegularAndCompressedPages`
+- `UnwindInfo.AnIndexWithOnlyTheSentinelHasNoEntries`
+- `UnwindInfo.RefusesBrokenSections`
+- `UnwindInfo.RefusesAWrappingRange`
+- `UnwindInfo.AnIsolatedLoadGivesTheSameEntries`
+- `UnwindInfo.AgreesWithFunctionStarts`
+- `Analysis.MachOUnwindInfoSeedsAStrippedBinary`
+- `cli.functions_marks_unwind_info`
+
+Not checked:
+
+- A regular page in a linked image. LLD writes compressed pages only, so the regular form is tested on synthetic
+  bytes.
+- An Apple-linked binary.
+- The DWARF-mode encodings' `__eh_frame` FDEs. The Mach-O `__eh_frame` is not read yet.
+
+Found on the way, and not fixed here: the stripped Mach-O fixtures list a function at the image base
+(0x100000000), the Mach-O header, both before and after this change.
+
 ### G24 Analysis of stripped binaries (P0)
 
 **Why.** Finding the functions of a stripped binary is the core of both
@@ -2644,6 +2887,37 @@ An image without sections (an ELF with its section headers removed, a raw image)
 A Mach-O relocatable object (`MH_OBJECT`) keeps its sections at the addresses written, so its `__text` starts at
 address 0: an executable section at address 0 is still code (ELF's address-0 sections are the non-allocated ones,
 never executable). The tests are `Analysis.TheMachOHeaderIsNotAFunction` and `Analysis.AMachOObjectKeepsItsFunctions`.
+
+**Initialisation and termination functions (2026-11-21).** G20-T2's R1 measurement found 109 missed starts in the
+stripped builds. In every glibc build they were the C runtime's `_init`, `_fini`, `frame_dummy`,
+`register_tm_clones` and `__do_global_dtors_aux`, functions the loader or the runtime calls and no call in the
+image reaches.
+
+`read_init_fini_of_image` (`src/binary/init_fini.cpp`) reads two sources and takes their union:
+
+- `DT_INIT`, `DT_FINI`, and the init, fini and preinit arrays with their `*SZ` sizes;
+- the `.init`, `.fini`, `.init_array`, `.fini_array` and `.preinit_array` sections, which a static image has
+  without a dynamic table.
+
+An array entry takes its `R_*_RELATIVE` addend when a relocation covers it, and otherwise the file's bytes. An
+entry with a symbolic relocation is skipped, and so are 0 and -1. An entry that cannot be read makes the
+analysis Partial. Each start found is seeded and marked `from_init_fini`.
+
+On R1, the missed starts fell from 109 to 71:
+
+- the glibc AArch64 builds now miss none;
+- each glibc x86-64 build still misses `register_tm_clones`, which `frame_dummy` reaches by a tail jump;
+- static musl misses 65 assembly functions.
+
+Unstripped, 2,108 of 15,856 functions are Complete (2,107 of 15,855 before; the one function added is
+Complete). The 3 extra starts of static musl are `_start`, `_init` and `_fini`. musl's assembly gives them
+NOTYPE symbols, so the FUNC-only ground truth does not count them.
+
+Tests: `InitFini.ReadsTagsSectionsAndRelocatedArrays`, `InitFini.AnotherFormatHasNone` and
+`Analysis.ElfInitAndFiniFunctionsAreSeeded`.
+
+Not covered: an image without section headers. Both the dynamic table and the arrays are found through
+sections, not through `PT_DYNAMIC`.
 
 #### G24-T0 task-level plan (written 2026-11-15, before any G24-T3 code)
 

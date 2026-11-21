@@ -85,6 +85,8 @@ add_library(donkey_binary STATIC
   src/binary/dwarf.cpp
   src/binary/eh_frame.cpp
   src/binary/function_starts.cpp
+  src/binary/unwind_info.cpp
+  src/binary/init_fini.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
   src/binary/isolation.cpp
@@ -381,6 +383,11 @@ if(DONKEY_BUILD_FUZZERS)
   target_compile_features(fuzz_function_starts PRIVATE cxx_std_20)
   target_compile_options(fuzz_function_starts PRIVATE ${DONKEY_FUZZ_SANITIZE})
   target_link_options(fuzz_function_starts PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  add_executable(fuzz_unwind_info fuzz/fuzz_unwind_info.cpp)
+  target_link_libraries(fuzz_unwind_info PRIVATE donkey::binary)
+  target_compile_features(fuzz_unwind_info PRIVATE cxx_std_20)
+  target_compile_options(fuzz_unwind_info PRIVATE ${DONKEY_FUZZ_SANITIZE})
+  target_link_options(fuzz_unwind_info PRIVATE ${DONKEY_FUZZ_SANITIZE})
   add_executable(fuzz_elf_versions fuzz/fuzz_elf_versions.cpp)
   target_link_libraries(fuzz_elf_versions PRIVATE donkey::binary)
   target_compile_features(fuzz_elf_versions PRIVATE cxx_std_20)
