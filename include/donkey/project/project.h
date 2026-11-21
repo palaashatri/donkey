@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -16,7 +17,7 @@ namespace donkey {
 
 /// Storage schema version written to `PRAGMA user_version`. It is independent
 /// of the analysis engine version.
-constexpr int kProjectSchemaVersion = 8;
+constexpr int kProjectSchemaVersion = 9;
 
 /// User annotations keyed by image address. They are stored separately from
 /// derived analysis rows so re-importing a binary keeps them.
@@ -94,6 +95,31 @@ struct TypeApplication {
   TypeApplicationKind kind = TypeApplicationKind::FunctionPrototype;
   std::uint64_t address = 0;
   TypeId type_id{};
+  /// Who made the application (G22-T3): the user, DWARF, a PDB, inference, or a type library.
+  TypeProvenance source = TypeProvenance::User;
+};
+
+/// A type library loaded into a project (G22-T3), as `project type library add` records it.
+struct TypeLibraryRecord {
+  std::int64_t id = 0;  ///< the project's id for it; a type's `library` names it
+  std::string library;
+  std::string library_version;
+  std::string architecture;
+  std::string platform;
+  std::string abi;
+  std::string data_model;
+  /// The library files whose definitions it describes (`provides` records, typelib.h).
+  std::vector<std::string> provides;
+  std::string body_sha256;
+  std::uint64_t added_types = 0;  ///< types the merge added
+  std::uint64_t collisions = 0;   ///< library names an existing type already had
+};
+
+/// What loading a type library stores (Project::load_type_library).
+struct TypeLibraryLoad {
+  TypeTable table;  ///< the whole type store after the merge
+  std::uint64_t added_types = 0;
+  std::uint64_t collisions = 0;
 };
 
 struct ProjectImage {
@@ -190,12 +216,43 @@ class Project {
   /// its applications with it.
   [[nodiscard]] Result<void> replace_types(const TypeTable& table);
 
+  /// Runs `work` in one write transaction (BEGIN IMMEDIATE, so the write lock is held from the
+  /// first read): what it reads is what its writes see, whatever another connection does. It
+  /// commits when `work` succeeds and rolls back otherwise. Inside a transaction already open on
+  /// this connection, it runs `work` in that one.
+  [[nodiscard]] Result<void> write_transaction(const std::function<Result<void>()>& work);
+
+  /// Reads the type store, gives it to `update`, and stores what it returns, all in one write
+  /// transaction: an addition made from the types as they are now, not from an earlier read that a
+  /// concurrent library load may have changed. A refusal from `update` changes nothing.
+  [[nodiscard]] Result<void> update_types(
+      const std::function<Result<TypeTable>(const TypeTable& types)>& update);
+
   /// Type applications for one image, ordered by address.
   [[nodiscard]] Result<std::vector<TypeApplication>> type_applications(std::int64_t image_id) const;
 
   /// Apply a type to an address of an image. A type id of zero removes the application.
+  /// A library application (`source` Library) does not replace an application of another source;
+  /// any other source replaces a library one.
+  /// When the write is skipped because a library application meets another source's, `kept` (if
+  /// given) is set to that source; it is left empty when the application was written.
   [[nodiscard]] Result<void> set_type_application(std::int64_t image_id, TypeApplicationKind kind,
-                                                  std::uint64_t address, TypeId type_id);
+                                                  std::uint64_t address, TypeId type_id,
+                                                  TypeProvenance source = TypeProvenance::User,
+                                                  std::optional<TypeProvenance>* kept = nullptr);
+
+  /// The type libraries loaded into the project, in the order they were loaded.
+  [[nodiscard]] Result<std::vector<TypeLibraryRecord>> type_libraries() const;
+
+  /// Loads a type library in one write transaction, so two loads cannot merge from the same stored
+  /// types and a failed load changes nothing. A library with the same name, version and
+  /// architecture is refused (`project.type_library_loaded`). `merge` gets the stored types and the
+  /// id the library's record takes (for the types' `library`), and returns what to store: the
+  /// table and the counts are written with the record, or nothing is. Returns the record's id.
+  [[nodiscard]] Result<std::int64_t> load_type_library(
+      const TypeLibraryRecord& record,
+      const std::function<Result<TypeLibraryLoad>(const TypeTable& types, std::int64_t library_id)>&
+          merge);
 
   /// Runs `PRAGMA integrity_check` and `PRAGMA foreign_key_check`.
   [[nodiscard]] Result<bool> check_integrity() const;
@@ -222,6 +279,10 @@ class Project {
   /// returns true the replacement stops there with no cleanup, as if the
   /// process had died. Pass an empty function to remove it.
   static void set_replace_fault_hook_for_testing(ReplaceFaultHook hook);
+
+  /// Test-only: called with the schema version a migration step read, just before it asks for the
+  /// write lock, so a test can change the file at that moment. Pass an empty function to remove it.
+  static void set_migration_lock_hook_for_testing(std::function<void(int version)> hook);
 
   using RestoreCommitHook =
       std::function<Result<void>(const std::string& temp_path, const std::string& target_path)>;

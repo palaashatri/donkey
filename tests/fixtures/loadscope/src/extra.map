@@ -1,0 +1,4 @@
+EXTRA_1 {
+  global: extra_fn;
+  local: *;
+};

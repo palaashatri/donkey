@@ -171,6 +171,7 @@ void name_import_thunks(AnalysisResult& result, BinaryFormat format) {
     }
     function.import_name = slot->second;
     function.stub_target = slot->second;
+    function.import_slot = slot->first;
     if (!function.from_symbol && function.name == synthetic_function_name(function.address)) {
       function.name = format == BinaryFormat::Elf ? slot->second + "@plt" : slot->second;
     }

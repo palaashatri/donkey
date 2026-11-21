@@ -175,6 +175,7 @@ add_executable(donkey_unit_tests
   unit/json_test.cpp
   unit/typelib_test.cpp
   unit/typelib_make_test.cpp
+  unit/typelib_apply_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp
@@ -692,12 +693,12 @@ add_test(NAME cli.project_save_elf_json
          COMMAND donkey-cli project save ${DONKEY_CLI_PROJECT_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_save_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"integrity\": true.*\"sha256\"")
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"integrity\": true.*\"sha256\"")
 
 add_test(NAME cli.project_info_elf_json
          COMMAND donkey-cli project info ${DONKEY_CLI_PROJECT_DB} --json)
 set_tests_properties(cli.project_info_elf_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 8.*\"integrity\": true.*\"format\": \"ELF\""
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 9.*\"integrity\": true.*\"format\": \"ELF\""
   DEPENDS cli.project_save_elf_json)
 
 if(DONKEY_BUILD_UI AND DONKEY_UI_SMOKE_TEST)
@@ -810,7 +811,7 @@ add_test(NAME cli.project_type_save
          COMMAND donkey-cli project save ${DONKEY_CLI_TYPES_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --clear --json)
 set_tests_properties(cli.project_type_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"integrity\": true"
   DEPENDS cli.project_type_reset)
 
 add_test(NAME cli.project_type_add
@@ -838,6 +839,31 @@ set_tests_properties(cli.project_type_apply_prototype PROPERTIES
   PASS_REGULAR_EXPRESSION "\"applied_as\": \"prototype\""
   DEPENDS cli.project_type_apply_data)
 
+# A type library loaded into the project (G22-T3): its types join the table once, and the
+# project lists it. point and point_sum are the project's own names, not the library's.
+add_test(NAME cli.project_type_library_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPES_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl --json)
+set_tests_properties(cli.project_type_library_add PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"library\": \"musl-libc\".*\"added_types\": [1-9][0-9]*"
+  DEPENDS cli.project_type_apply_prototype)
+add_test(NAME cli.project_type_library_add_again
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPES_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_add_again PROPERTIES
+  PASS_REGULAR_EXPRESSION "project.type_library_loaded"
+  DEPENDS cli.project_type_library_add)
+add_test(NAME cli.project_type_library_list
+         COMMAND donkey-cli project type library list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_library_list PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"libraries\": \\[.*\"library_version\": \"1.2.4\""
+  DEPENDS cli.project_type_library_add)
+add_test(NAME cli.project_type_list_shows_library_types
+         COMMAND donkey-cli project type list ${DONKEY_CLI_TYPES_DB} --json)
+set_tests_properties(cli.project_type_list_shows_library_types PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"name\": \"puts\", \"size\": 0, \"provenance\": \"library\""
+  DEPENDS cli.project_type_library_add)
+
 add_test(NAME cli.project_type_rejects_bad_header
          COMMAND donkey-cli project type add ${DONKEY_CLI_TYPES_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bad.h)
@@ -848,7 +874,7 @@ add_test(NAME cli.project_annotation_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_annotation_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8.*\"image_id\": 1")
+  PASS_REGULAR_EXPRESSION "\"schema\": 9.*\"image_id\": 1")
 
 add_test(NAME cli.project_rename
          COMMAND donkey-cli project rename ${DONKEY_CLI_ANN_DB} 1 0x400100 entry_point)
@@ -899,14 +925,14 @@ add_test(NAME cli.project_backup_save
          COMMAND donkey-cli project save ${DONKEY_CLI_ANN_DB}
                  ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/binaries/tiny-elf-x86_64 --json)
 set_tests_properties(cli.project_backup_save PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"schema\": 8"
+  PASS_REGULAR_EXPRESSION "\"schema\": 9"
   DEPENDS cli.project_annotations_after_clear)
 
 add_test(NAME cli.project_backup_json
          COMMAND donkey-cli project backup ${DONKEY_CLI_ANN_DB} ${DONKEY_CLI_BACKUP_DB} --force
                  --json)
 set_tests_properties(cli.project_backup_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 8.*\"integrity\": true"
+  PASS_REGULAR_EXPRESSION "\"backup\":.*\"project_schema\": 9.*\"integrity\": true"
   DEPENDS cli.project_backup_save)
 
 add_test(NAME cli.project_backup_refuses_overwrite
@@ -923,7 +949,7 @@ set_tests_properties(cli.project_backup_force PROPERTIES
 add_test(NAME cli.project_restore_json
          COMMAND donkey-cli project restore ${DONKEY_CLI_BACKUP_DB} ${DONKEY_CLI_BACKUP_DB} --json)
 set_tests_properties(cli.project_restore_json PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"project_schema\": 8.*\"integrity\": true.*\"images\": 1"
+  PASS_REGULAR_EXPRESSION "\"project_schema\": 9.*\"integrity\": true.*\"images\": 1"
   DEPENDS cli.project_backup_force)
 
 add_test(NAME cli.project_restore_rejects_non_database
@@ -1089,10 +1115,18 @@ set_tests_properties(cli.plugin_run_trusted_non_terminated PROPERTIES
 
 # Every CLI project test reads or writes the same database files; CTest must
 # never run two of them at once (`ctest -j`).
+# The desktop tests open windows and wait for a number of frames. Run beside another window, a
+# covered window gets no frames on macOS and Windows (the compositor stops presenting it); run
+# beside the heaviest tests (the 100 MiB mapped-file test, the decompiler corpus), a software
+# renderer gets too little CPU to draw 20 frames in its timeout (seen on Linux under Xvfb and on
+# Windows). So each desktop test runs alone.
 get_property(_donkey_all_tests DIRECTORY PROPERTY TESTS)
 foreach(_donkey_test IN LISTS _donkey_all_tests)
   if(_donkey_test MATCHES "^cli\\.project_")
     set_property(TEST ${_donkey_test} APPEND PROPERTY RESOURCE_LOCK donkey_cli_project_db)
+  endif()
+  if(_donkey_test MATCHES "^ui\\.")
+    set_property(TEST ${_donkey_test} PROPERTY RUN_SERIAL TRUE)
   endif()
 endforeach()
 
@@ -1184,6 +1218,114 @@ add_test(NAME cli.callgraph_names_import_stubs
          COMMAND donkey-cli callgraph ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64 --json)
 set_tests_properties(cli.callgraph_names_import_stubs PROPERTIES
   PASS_REGULAR_EXPRESSION "\"callee\": \"0x1060\", \"callee_name\": \"abort@plt\"")
+
+# G22-T3: the musl library's prototypes applied to the import stubs of a program linked against
+# musl (abort, puts), which bind to musl's loader in the fixture sysroot; listed with their source,
+# and noted on the stub in the decompiler's output.
+set(DONKEY_CLI_TYPELIB_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-typelib.db")
+set(DONKEY_MUSL_PROGRAM "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/musl/stubs_musl_x86_64")
+set(DONKEY_MUSL_SYSROOT "${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/musl/sysroot-x86_64")
+add_test(NAME cli.project_type_library_apply_setup
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPELIB_DB}
+                 ${DONKEY_CLI_TYPELIB_DB}-shm ${DONKEY_CLI_TYPELIB_DB}-wal)
+set_tests_properties(cli.project_type_library_apply_setup PROPERTIES
+  FIXTURES_SETUP typelib_db_reset)
+add_test(NAME cli.project_type_library_apply_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_DB} ${DONKEY_MUSL_PROGRAM})
+set_tests_properties(cli.project_type_library_apply_save PROPERTIES
+  FIXTURES_REQUIRED typelib_db_reset FIXTURES_SETUP typelib_db_saved)
+add_test(NAME cli.project_type_library_apply_needs_a_library
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;library;apply;${DONKEY_CLI_TYPELIB_DB};1"
+                 "-DEXPECT=project.no_type_library"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
+set_tests_properties(cli.project_type_library_apply_needs_a_library PROPERTIES
+  FIXTURES_REQUIRED typelib_db_saved FIXTURES_SETUP typelib_db_checked)
+add_test(NAME cli.project_type_library_apply_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPELIB_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_apply_add PROPERTIES
+  FIXTURES_REQUIRED "typelib_db_saved;typelib_db_checked" FIXTURES_SETUP typelib_db_loaded)
+add_test(NAME cli.project_type_library_list_shows_the_provider
+         COMMAND donkey-cli project type library list ${DONKEY_CLI_TYPELIB_DB} --json)
+set_tests_properties(cli.project_type_library_list_shows_the_provider PROPERTIES
+  FIXTURES_REQUIRED typelib_db_loaded
+  PASS_REGULAR_EXPRESSION "\"abi\": \"sysv\", \"data_model\": \"LP64\", \"provides\": \\[\"ld-musl-x86_64.so.1\", \"libc.musl-x86_64.so.1\"\\]")
+add_test(NAME cli.project_type_library_apply
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_DB} 1 --json
+                 --sysroot ${DONKEY_MUSL_SYSROOT})
+set_tests_properties(cli.project_type_library_apply PROPERTIES
+  FIXTURES_REQUIRED typelib_db_loaded FIXTURES_SETUP typelib_db_applied
+  PASS_REGULAR_EXPRESSION "\"analysis_partial\": false.*\"import\": \"puts\", \"address\": \"0x1020\", \"library\": \"musl-libc 1.2.4\", \"prototype\": \"int puts\\(char \\*\\)\", \"source\": \"library\".*\"import\": \"abort\", \"address\": \"0x1030\", \"library\": \"musl-libc 1.2.4\", \"prototype\": \"void abort\\(void\\)\".*\"import\": \"__cxa_finalize\", \"address\": \"0x1050\", \"not_applied\": \"no prototype\"")
+add_test(NAME cli.project_type_applications_show_the_source
+         COMMAND donkey-cli project type applications ${DONKEY_CLI_TYPELIB_DB} 1)
+set_tests_properties(cli.project_type_applications_show_the_source PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  PASS_REGULAR_EXPRESSION "0x1020  prototype library  int puts\\(char \\*\\)")
+add_test(NAME cli.project_type_applications_refuses_a_missing_image
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;applications;${DONKEY_CLI_TYPELIB_DB};2"
+                 "-DEXPECT=project.image_missing"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
+set_tests_properties(cli.project_type_applications_refuses_a_missing_image PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied)
+add_test(NAME cli.decompile_notes_a_library_prototype
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM}
+                 --project ${DONKEY_CLI_TYPELIB_DB} --function 0x1020)
+set_tests_properties(cli.decompile_notes_a_library_prototype PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  # It opens the shared project database, so it runs alone with the cli.project_ tests.
+  RESOURCE_LOCK donkey_cli_project_db
+  PASS_REGULAR_EXPRESSION "// note: library prototype \\(musl-libc 1.2.4\\): int puts\\(char \\*\\)")
+
+# The musl library does not apply to a glibc program: its imports bind to libc.so.6 (the fixture
+# sysroot's stand-in), which the library does not describe. Nor to a program of another
+# architecture (stubs_aarch64), nor to a Mach-O image, whose stubs are not bound to their imports.
+set(DONKEY_CLI_TYPELIB_GLIBC_DB "${CMAKE_CURRENT_BINARY_DIR}/cli-project-typelib-glibc.db")
+add_test(NAME cli.project_type_library_glibc_setup
+         COMMAND ${CMAKE_COMMAND} -E rm -f ${DONKEY_CLI_TYPELIB_GLIBC_DB}
+                 ${DONKEY_CLI_TYPELIB_GLIBC_DB}-shm ${DONKEY_CLI_TYPELIB_GLIBC_DB}-wal)
+set_tests_properties(cli.project_type_library_glibc_setup PROPERTIES
+  FIXTURES_SETUP typelib_glibc_reset)
+# Images 1, 2 and 3, saved in that order.
+add_test(NAME cli.project_type_library_glibc_save
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_GLIBC_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_x86_64)
+set_tests_properties(cli.project_type_library_glibc_save PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_reset FIXTURES_SETUP typelib_glibc_saved1)
+add_test(NAME cli.project_type_library_glibc_save_aarch64
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_GLIBC_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_aarch64)
+set_tests_properties(cli.project_type_library_glibc_save_aarch64 PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_saved1 FIXTURES_SETUP typelib_glibc_saved2)
+add_test(NAME cli.project_type_library_glibc_save_mach_o
+         COMMAND donkey-cli project save ${DONKEY_CLI_TYPELIB_GLIBC_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/dsym/dbg)
+set_tests_properties(cli.project_type_library_glibc_save_mach_o PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_saved2 FIXTURES_SETUP typelib_glibc_saved)
+add_test(NAME cli.project_type_library_glibc_add
+         COMMAND donkey-cli project type library add ${DONKEY_CLI_TYPELIB_GLIBC_DB}
+                 ${PROJECT_SOURCE_DIR}/typelibs/musl-1.2.4-x86_64-linux.dtl)
+set_tests_properties(cli.project_type_library_glibc_add PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_saved FIXTURES_SETUP typelib_glibc_loaded)
+add_test(NAME cli.project_type_library_apply_refuses_another_c_library
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_GLIBC_DB} 1 --json
+                 --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
+set_tests_properties(cli.project_type_library_apply_refuses_another_c_library PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_loaded
+  PASS_REGULAR_EXPRESSION "\"applied\": 0,.*\"import\": \"puts\", \"address\": \"0x1070\", \"library\": \"musl-libc 1.2.4\", \"not_applied\": \"bound to libc.so.6, which musl-libc 1.2.4 does not describe\"")
+add_test(NAME cli.project_type_library_apply_refuses_another_architecture
+         COMMAND donkey-cli project type library apply ${DONKEY_CLI_TYPELIB_GLIBC_DB} 2 --json)
+set_tests_properties(cli.project_type_library_apply_refuses_another_architecture PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_loaded
+  PASS_REGULAR_EXPRESSION "\"applied\": 0,.*\"not_applied\": \"musl-libc 1.2.4 is for x86_64 sysv LP64, the image is aarch64 aapcs64 LP64\"")
+add_test(NAME cli.project_type_library_apply_refuses_mach_o
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;library;apply;${DONKEY_CLI_TYPELIB_GLIBC_DB};3"
+                 "-DEXPECT=project.type_library_format.*Mach-O image is not supported"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
+set_tests_properties(cli.project_type_library_apply_refuses_mach_o PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_loaded)
 
 # G24-T3: a call to a bound no-return import ends its path; no `return` follows it, and the
 # function list says why the import does not return.
@@ -1277,3 +1419,21 @@ if(DONKEY_TEST_TIMEOUT_FLOOR GREATER 0)
     endif()
   endforeach()
 endif()
+
+# `project type add` lays out bit-fields by the project's images: one ELF x86-64 image gives the
+# System V rules; images of several ABIs (x86-64, AArch64, Mach-O) give none, so the parser refuses
+# a bit-field rather than guess.
+add_test(NAME cli.project_type_add_lays_out_bit_fields_for_the_image
+         COMMAND donkey-cli project type add ${DONKEY_CLI_TYPELIB_DB}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bitfield.h)
+set_tests_properties(cli.project_type_add_lays_out_bit_fields_for_the_image PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  RESOURCE_LOCK donkey_cli_project_db
+  FAIL_REGULAR_EXPRESSION "cdecl\\.")
+add_test(NAME cli.project_type_add_refuses_bit_fields_without_one_abi
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;project;type;add;${DONKEY_CLI_TYPELIB_GLIBC_DB};${CMAKE_CURRENT_SOURCE_DIR}/fixtures/types/cli-types-bitfield.h"
+                 "-DEXPECT=cdecl.bitfield_abi"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
+set_tests_properties(cli.project_type_add_refuses_bit_fields_without_one_abi PROPERTIES
+  FIXTURES_REQUIRED typelib_glibc_loaded)

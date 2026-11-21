@@ -35,6 +35,11 @@ jobs:
         run: cmake --build --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel
       - name: Test
         run: ctest --preset headless-${{ startsWith(matrix.os, 'macos') && 'macos' || startsWith(matrix.os, 'windows') && 'windows' || 'linux' }} --parallel 4
+      # Stack one level of the type library comparison takes with this host's compiler (AppleClang
+      # on macOS arm64), checked against its depth limit (src/project/typelib_apply.cpp, kMaxDepth).
+      - name: Type comparison stack use
+        if: ${{ !startsWith(matrix.os, 'windows') }}
+        run: sh tools/ci/comparison-stack.sh
       # Measured decompiler corpus outcomes (docs/SUPPORT_MATRIX.md).
       - name: Decompiler corpus results
         if: always()

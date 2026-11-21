@@ -123,3 +123,81 @@ The search cases have their own oracle, glibc's loader with `LD_DEBUG=libs` on t
 
 `steal_consumer` and the `libsteal.so.1` builds link glibc's startup objects and libgcc pieces, as
 any GCC-built program does (see `../stubs/PROVENANCE.md`).
+
+## musl (G22-T3)
+
+`musl/stubs_musl_x86_64` is `../stubs/stubs.c` linked against musl with the `musl-tools` 1.2.4-2
+package of Ubuntu 24.04 (its `musl-gcc` wraps GCC 13.3.0): DT_NEEDED `libc.so`, interpreter
+`/lib/ld-musl-x86_64.so.1`. It links musl's startup objects (`crt1.o`, `crti.o`, `crtn.o`, MIT). In
+`musl/sysroot-x86_64`, `lib/ld-musl-x86_64.so.1` is not musl: it is `src/fakelibc.c` built without a
+SONAME or symbol versions, as musl's loader has neither, and is never run. Run from this directory:
+
+    mkdir -p musl/sysroot-x86_64/lib
+    gcc -O1 -fPIC -shared -nostdlib -fno-builtin -s -Wl,--build-id=none \
+        -o musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 src/fakelibc.c
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -o musl/stubs_musl_x86_64 ../stubs/stubs.c
+
+Built twice; the bytes are the same.
+
+| File | SHA-256 |
+|---|---|
+| `musl/stubs_musl_x86_64` | `157e0a93172dedb76c522ebda4832b0db19427db9183fe2e59a9b370ec698ce5` |
+| `musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1` | `6011cd5ecaaf9449a9a4427bfc26bbebfebef0cf206f217777349603f7f3c6b9` |
+
+## More musl and `libc.so` fixtures (G22-T3 review)
+
+Run from this directory:
+
+    mkdir -p fakename musl/sysroot-x86_64/usr/local/lib musl/sysroot-path/lib musl/sysroot-path/etc \
+        musl/sysroot-path/opt/c musl/sysroot-unreadable/lib musl/sysroot-unreadable/etc/ld-musl-x86_64.path
+    gcc -O1 -fPIC -shared -s -fno-builtin-exit -Wl,-soname,libc.so -Wl,--build-id=none \
+        -o fakename/libc.so src/steal_exit.c
+    gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed \
+        -Wl,--enable-new-dtags,-rpath,'$ORIGIN/fakename' -o fakename_consumer src/steal_consumer.c fakename/libc.so
+    gcc -O1 -fPIC -shared -nostdlib -s -Wl,-soname,libextra.so.1 -Wl,--version-script,src/extra.map \
+        -Wl,--build-id=none -o musl/sysroot-x86_64/usr/local/lib/libextra.so.1 src/extra.c
+    cp musl/sysroot-x86_64/usr/local/lib/libextra.so.1 musl/sysroot-path/opt/c/
+    cp musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 musl/sysroot-path/lib/
+    cp musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1 musl/sysroot-unreadable/lib/
+    printf '/opt/a:/opt/b\n/opt/c\n' > musl/sysroot-path/etc/ld-musl-x86_64.path
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -o musl/extra_consumer \
+        src/extra_consumer.c musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+    musl-gcc -O1 -fPIC -shared -s -Wl,-soname,libplugin.so.1 -Wl,--build-id=none -Wl,--no-as-needed \
+        -o musl/libplugin.so.1 src/plugin.c musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+
+`fakename_consumer` is a glibc program that needs `libc.so` (a library whose `exit` returns, found through
+its RUNPATH) before `libc.so.6`. `musl/sysroot-unreadable/etc/ld-musl-x86_64.path` is a directory, so
+the path file cannot be read. `musl/extra_consumer` and `musl/libplugin.so.1` link musl's startup objects (MIT).
+
+| File | SHA-256 |
+|---|---|
+| `fakename/libc.so` | `0106b01b17f94371ea2772efdc7be1e1b8f27fc7f6cde4c87d13d8c1aa73e732` |
+| `fakename_consumer` | `e0b26996f3244275494113213922045192f7995eeb5962566a3fbefcf1cc2a0a` |
+| `musl/sysroot-x86_64/usr/local/lib/libextra.so.1` | `44a16985bf7aa9f634b22b61a6b6d1e2584192865398a73ec5670735e8fca33b` |
+| `musl/extra_consumer` | `528e120188429dd4b556ed8a3678e806b3821c3ca7e773246e6cd5633121cc63` |
+| `musl/libplugin.so.1` | `ce0ac0233ef6c52a488455683451faac177ba7049d20b693f70b833919a1d967` |
+
+## musl search lists (G22-T3 review)
+
+Two programs whose DT_RUNPATH musl's loader reads in its own way: one split on a line end, one with
+a `$LIB` token (musl then ignores the whole list). `musl/sysroot-x86_64/opt/hook/libextra.so.1` is a
+copy of `musl/sysroot-x86_64/usr/local/lib/libextra.so.1`. Built with the same `musl-tools`
+1.2.4-2 package as above, from this directory:
+
+    mkdir -p musl/sysroot-x86_64/opt/hook
+    cp musl/sysroot-x86_64/usr/local/lib/libextra.so.1 musl/sysroot-x86_64/opt/hook/
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -Wl,--enable-new-dtags \
+        -Wl,-rpath,"$(printf '/opt/none\n/opt/hook')" -o musl/runpath_newline src/extra_consumer.c \
+        musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -Wl,--enable-new-dtags \
+        -Wl,-rpath,'/opt/hook:$LIB' -o musl/runpath_lib_token src/extra_consumer.c \
+        musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+
+Both link musl's startup objects (MIT). The tests that need a relative path-file entry or a loader in
+another directory write their sysroot at run time from these files.
+
+| File | SHA-256 |
+|---|---|
+| `musl/runpath_newline` | `62e1f82263d0835c9dc73e25ea3d6781965b0e6f1c0b4f67c754988f596b7881` |
+| `musl/runpath_lib_token` | `81c7d94f85a55d97e081166cb33e7a53c8c80894638d245a456ba75a4b79a4da` |
+| `musl/sysroot-x86_64/opt/hook/libextra.so.1` | `44a16985bf7aa9f634b22b61a6b6d1e2584192865398a73ec5670735e8fca33b` |

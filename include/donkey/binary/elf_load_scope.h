@@ -36,6 +36,22 @@
 // object that calls dlopen also passes on its DT_RPATH, and it is not known: when a library of the
 // program's scope has a DT_RPATH it could pass on, such a search is Unknown. A library linked with
 // DT_SYMBOLIC (or DF_SYMBOLIC) looks itself up first. The two walks share one kMaxScopeLibraries.
+//
+// A program whose interpreter (PT_INTERP) is musl's loader (`ld-musl-<arch>.so.1`) is walked by
+// musl's rules instead: a needed name of the C library (`libc.`, `libpthread.`, `librt.`, `libm.`,
+// `libdl.`, `libutil.`, `libxnet.` followed by anything) is the loader itself, found at the
+// interpreter's path under the sysroot; other names are searched in `paths`, then the DT_RUNPATH
+// (else DT_RPATH) of the requester and of each object that loaded it, then the directories of
+// etc/ld-musl-<arch>.path beside the loader's own directory (/etc for /lib/ld-musl-x86_64.so.1,
+// /opt/musl/etc for /opt/musl/lib/ld-musl-x86_64.so.1), or /lib, /usr/local/lib and /usr/lib when
+// there is no such file. Search lists split on `:` and line ends, empty entries skipped; $ORIGIN
+// and ${ORIGIN} expand anywhere, and a list with any other `$` is ignored whole; a relative
+// directory, or a needed name with a `/` that is relative, is opened from the target's working
+// directory and is Unknown. A needed name's tokens are not expanded. musl
+// reads no ld.so.cache, ld.so.preload or hardware-capability directory, and matches a needed name
+// to loaded names and files, not to sonames. Its symbol versions are not modelled: a versioned
+// reference, or a library with a version table before the definition, is Unknown. A library's
+// local scope under musl (dlopen) is not modelled either.
 
 #include <cstddef>
 #include <cstdint>
@@ -93,6 +109,9 @@ struct ElfScopeLibrary {
   std::string path;
   std::string soname;
   bool preloaded = false;
+  /// musl's loader, given a C library name (`libc.so`, `libc.musl-x86_64.so.1`) the program needs:
+  /// the scope's own evidence that this object is musl's C library, whatever its names say.
+  bool musl_loader = false;
 };
 
 /// Where a reference binds.

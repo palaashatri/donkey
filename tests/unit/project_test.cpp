@@ -10,6 +10,8 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <set>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -36,6 +38,20 @@
 #include "test_io.h"
 
 namespace {
+
+/// What version 9 added, removed again, so a file reads as version 8 wrote it.
+constexpr const char* kDowngradeV9ToV8 =
+    "ALTER TABLE type_applications DROP COLUMN source; DROP TABLE type_libraries; "
+    "ALTER TABLE types DROP COLUMN complete; ALTER TABLE types DROP COLUMN typedef_named; "
+    "ALTER TABLE types DROP COLUMN library; ";
+
+/// The parser's options for System V x86-64, the target whose layouts these tests check.
+donkey::CDeclarationOptions sysv_options() {
+  donkey::CDeclarationOptions options;
+  options.bit_fields = donkey::CBitFieldLayout::SystemV;
+  options.long_double_size = 16;
+  return options;
+}
 
 using donkey::AnalysisResult;
 using donkey::LoadedBinary;
@@ -1331,7 +1347,7 @@ const donkey::TypeDefinition* type_by_id(const std::vector<donkey::TypeDefinitio
 /// Parses `text` and checks that it is refused with `code`, and that the message
 /// begins with `location` (for example "line 1, column 18: ").
 void expect_located_error(std::string_view text, const char* code, std::string_view location) {
-  const auto result = donkey::parse_c_declarations(text, donkey::TypeTable{});
+  const auto result = donkey::parse_c_declarations(text, donkey::TypeTable{}, sysv_options());
   ASSERT_FALSE(result.has_value()) << text;
   EXPECT_EQ(result.diagnostic().code, code) << text;
   EXPECT_TRUE(std::string_view(result.diagnostic().message).starts_with(location))
@@ -1585,7 +1601,8 @@ struct t3 { char c; long :0; char d; };
 // bit-field sets), so the parser is checked against the compilers, not against itself. An unnamed
 // bit-field is kept as padding, which the type store accounts for.
 TEST(Types, BitFieldsAreLaidOutAsTheCompilerLaysThemOut) {
-  const auto parsed = donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{});
+  const auto parsed =
+      donkey::parse_c_declarations(kBitFieldDeclarations, donkey::TypeTable{}, sysv_options());
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
   const auto& types = parsed.value();
   expect_layout(types, "b1", 8, 4,
@@ -1651,8 +1668,8 @@ TEST(Types, Aapcs64BitFieldsAlignTheRecordToUnnamedBitFields) {
 
 // The type store checks padding fields and a record's own alignment.
 TEST(Types, PaddingFieldsAndRecordAlignmentAreChecked) {
-  const auto parsed =
-      donkey::parse_c_declarations("struct t { char c; int :3; };", donkey::TypeTable{});
+  const auto parsed = donkey::parse_c_declarations("struct t { char c; int :3; };",
+                                                   donkey::TypeTable{}, sysv_options());
   ASSERT_TRUE(parsed.has_value()) << parsed.diagnostic().message;
   donkey::TypeTable table;
   for (const donkey::TypeDefinition& definition : parsed.value()) {
@@ -1746,10 +1763,11 @@ TEST(Types, PaddingAndRecordAlignmentSurviveTheProjectAndItsMigration) {
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
     ASSERT_EQ(sqlite3_exec(raw,
-                           "DELETE FROM type_fields WHERE padding = 1; DELETE FROM types WHERE "
-                           "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE "
-                           "types DROP COLUMN local; PRAGMA "
-                           "user_version=7",
+                           (std::string(kDowngradeV9ToV8) +
+                            "DELETE FROM type_fields WHERE padding = 1; DELETE FROM types WHERE "
+                            "name = 't'; ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE "
+                            "types DROP COLUMN local; PRAGMA user_version=7")
+                               .c_str(),
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
@@ -1778,8 +1796,10 @@ TEST(Types, AMigrationThatCannotBeginChangesNothing) {
   sqlite3* raw = nullptr;
   ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
   ASSERT_EQ(sqlite3_exec(raw,
-                         "ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE types DROP "
-                         "COLUMN local; PRAGMA user_version=7",
+                         (std::string(kDowngradeV9ToV8) +
+                          "ALTER TABLE type_fields DROP COLUMN padding; ALTER TABLE types DROP "
+                          "COLUMN local; PRAGMA user_version=7")
+                             .c_str(),
                          nullptr, nullptr, nullptr),
             SQLITE_OK);
   // Another connection holds the write lock.
@@ -1984,8 +2004,13 @@ TEST(Types, ParameterNamesAndPrototypeConstantsHideOuterNames) {
   expect_located_error("typedef int T; void f(int T, T x);", "cdecl.unknown_type",
                        "line 1, column 30: ");
   expect_located_error("void f(int a, int a);", "cdecl.redefinition", "line 1, column 19: ");
-  expect_located_error("enum { g }; int g(void);", "cdecl.redefinition", "line 1, column 17: ");
-  expect_located_error("typedef int h; int h(void);", "cdecl.redefinition", "line 1, column 20: ");
+  expect_located_error("enum { g }; int g(void);", "cdecl.type_and_function",
+                       "line 1, column 17: ");
+  expect_located_error("typedef int h; int h(void);", "cdecl.type_and_function",
+                       "line 1, column 20: ");
+  // The same in the other order: a typedef after a function of its name.
+  expect_located_error("int h(void); typedef int h;", "cdecl.type_and_function",
+                       "line 1, column 26: ");
   // Outside the list the outer names are back.
   EXPECT_TRUE(donkey::parse_c_declarations("enum { N = 1 }; void f(int N); typedef char a[N];",
                                            donkey::TypeTable{})
@@ -2535,10 +2560,13 @@ TEST(Project, MigratesVersionSixDatabaseToVersionSevenAndKeepsItsAnnotations) {
   {
     sqlite3* raw = nullptr;
     ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &raw, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    // Version 8's and 9's columns go too, so the file is what version 6 wrote.
     ASSERT_EQ(sqlite3_exec(raw,
-                           "DROP TABLE local_names; ALTER TABLE type_fields DROP COLUMN padding; "
-                           "ALTER TABLE types DROP COLUMN local; "
-                           "PRAGMA user_version=6",
+                           (std::string(kDowngradeV9ToV8) +
+                            "DROP TABLE local_names; ALTER TABLE type_fields DROP "
+                            "COLUMN padding; ALTER TABLE types DROP COLUMN local; PRAGMA "
+                            "user_version=6")
+                               .c_str(),
                            nullptr, nullptr, nullptr),
               SQLITE_OK);
     sqlite3_close(raw);
@@ -2673,4 +2701,511 @@ TEST(Project, ReplacesEveryLocalNameAtOnceAndKeepsThePreviousSetWhenRefused) {
   auto cleared = project.value().local_names(image_id);
   ASSERT_TRUE(cleared.has_value());
   EXPECT_TRUE(cleared.value().empty());
+}
+
+// G22-T3: schema v9 records the source of each type application. A v8 project opens, and its
+// applications are the user's; a library application does not replace a user one, and a user
+// application replaces a library one.
+TEST(Types, MigratesFromSchemaV8) {
+  TempPath temp("types-v7");
+  const std::string path = temp.str();
+  auto loaded = load_elf();
+  auto analysis = donkey::analyze(loaded.image, loaded.data);
+  ASSERT_TRUE(analysis.has_value());
+  std::int64_t image_id = 0;
+  donkey::TypeId function_id{};
+  {
+    auto project = Project::create(path);
+    ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+    auto imported = project.value().import(loaded, analysis.value());
+    ASSERT_TRUE(imported.has_value()) << imported.diagnostic().message;
+    image_id = imported.value();
+    donkey::TypeTable table;
+    auto declared = donkey::parse_c_declarations("int f(int);\nint g(int);\n", table);
+    ASSERT_TRUE(declared.has_value());
+    for (const auto& type : declared.value()) {
+      table.put(type);
+      if (type.name == "f") {
+        function_id = type.id;
+      }
+    }
+    ASSERT_TRUE(project.value().replace_types(table).has_value());
+    ASSERT_TRUE(project.value()
+                    .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                          0x1000, function_id)
+                    .has_value());
+  }
+  {
+    // Back to v8: the table without its `source` column.
+    sqlite3* db = nullptr;
+    ASSERT_EQ(sqlite3_open_v2(path.c_str(), &db, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+    ASSERT_EQ(sqlite3_exec(db, (std::string(kDowngradeV9ToV8) + "PRAGMA user_version=8;").c_str(),
+                           nullptr, nullptr, nullptr),
+              SQLITE_OK);
+    sqlite3_close(db);
+  }
+  auto project = Project::open(path);
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  EXPECT_EQ(project.value().schema_version(), donkey::kProjectSchemaVersion);
+  auto applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 1U);
+  EXPECT_EQ(applications.value()[0].source, donkey::TypeProvenance::User);
+  // A library application at the same address leaves the user's in place.
+  auto types = project.value().types();
+  ASSERT_TRUE(types.has_value());
+  donkey::TypeId other{};
+  for (const auto& type : types.value().list()) {
+    if (type.name == "g") {
+      other = type.id;
+    }
+  }
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x1000, other, donkey::TypeProvenance::Library)
+                  .has_value());
+  applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  EXPECT_EQ(applications.value()[0].type_id, function_id);
+  // At a new address the library's applies; then a user edit replaces it.
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x2000, other, donkey::TypeProvenance::Library)
+                  .has_value());
+  applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 2U);
+  EXPECT_EQ(applications.value()[1].address, 0x2000U);
+  EXPECT_EQ(applications.value()[1].type_id, other);
+  EXPECT_EQ(applications.value()[1].source, donkey::TypeProvenance::Library);
+  // The migration made the library registry: it reads, empty.
+  auto registry = project.value().type_libraries();
+  ASSERT_TRUE(registry.has_value()) << registry.diagnostic().message;
+  EXPECT_TRUE(registry.value().empty());
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image_id, donkey::TypeApplicationKind::FunctionPrototype,
+                                        0x2000, function_id)
+                  .has_value());
+  applications = project.value().type_applications(image_id);
+  ASSERT_TRUE(applications.has_value());
+  ASSERT_EQ(applications.value().size(), 2U);
+  EXPECT_EQ(applications.value()[1].type_id, function_id);
+  EXPECT_EQ(applications.value()[1].source, donkey::TypeProvenance::User);
+}
+
+// Version 5 gained two columns of the types table in place, after files had been written with
+// the first form (the committed fixture is one). Opening such a file adds them, and its types read.
+TEST(Types, OpensAVersionFiveFileWrittenBeforeItsTypeColumns) {
+  TempPath path("types-v5-early");
+  std::error_code copy_error;
+  std::filesystem::copy_file(std::string(DONKEY_FIXTURE_DIR) + "/projects/schema-v5.db", path.str(),
+                             std::filesystem::copy_options::overwrite_existing, copy_error);
+  ASSERT_FALSE(copy_error) << copy_error.message();
+  auto project = Project::open(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto types = project.value().types();
+  ASSERT_TRUE(types.has_value()) << types.diagnostic().message;
+  donkey::TypeTable table = types.value();
+  auto declared = donkey::parse_c_declarations("struct pair { int a; short b; };\n", table);
+  ASSERT_TRUE(declared.has_value()) << declared.diagnostic().message;
+  for (const auto& type : declared.value()) {
+    table.put(type);
+  }
+  ASSERT_TRUE(project.value().replace_types(table).has_value());
+  auto reread = project.value().types();
+  ASSERT_TRUE(reread.has_value()) << reread.diagnostic().message;
+  bool found = false;
+  for (const auto& type : reread.value().list()) {
+    found = found || (type.kind == donkey::TypeKind::Struct && type.name == "pair" &&
+                      type.size == 8 && type.count_known && type.alignment == 0);
+  }
+  EXPECT_TRUE(found);
+}
+
+TEST(Types, RecordsALoadedTypeLibraryOnce) {
+  TempPath path("types-libraries");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  auto empty = project.value().type_libraries();
+  ASSERT_TRUE(empty.has_value()) << empty.diagnostic().message;
+  EXPECT_TRUE(empty.value().empty());
+  donkey::TypeLibraryRecord record;
+  record.library = "musl-libc";
+  record.library_version = "1.2.4";
+  record.architecture = "x86_64";
+  record.platform = "linux";
+  record.abi = "sysv";
+  record.data_model = "LP64";
+  record.provides = {"ld-musl-x86_64.so.1"};
+  record.body_sha256 = std::string(64, 'a');
+  // The merge here changes no type; it only reports the counts the record keeps.
+  const auto counts = [](const donkey::TypeTable& types,
+                         std::int64_t) -> donkey::Result<donkey::TypeLibraryLoad> {
+    return donkey::TypeLibraryLoad{types, 10, 2};
+  };
+  ASSERT_TRUE(project.value().load_type_library(record, counts).has_value());
+  const auto again = project.value().load_type_library(record, counts);
+  ASSERT_FALSE(again.has_value());
+  EXPECT_EQ(again.diagnostic().code, "project.type_library_loaded");
+  record.architecture = "aarch64";
+  record.abi = "aapcs64";
+  ASSERT_TRUE(project.value().load_type_library(record, counts).has_value());
+  auto listed = project.value().type_libraries();
+  ASSERT_TRUE(listed.has_value());
+  ASSERT_EQ(listed.value().size(), 2U);
+  EXPECT_EQ(listed.value()[0].architecture, "x86_64");
+  EXPECT_EQ(listed.value()[0].added_types, 10U);
+  EXPECT_EQ(listed.value()[0].collisions, 2U);
+  EXPECT_EQ(listed.value()[1].architecture, "aarch64");
+  EXPECT_EQ(listed.value()[1].abi, "aapcs64");
+  EXPECT_EQ(listed.value()[0].provides, std::vector<std::string>{"ld-musl-x86_64.so.1"});
+}
+
+// Text is stored up to its first NUL, so a record field with one is refused rather than stored as
+// another value (a provider list would lose every name after it).
+TEST(Types, ATypeLibraryFieldWithANulIsRefused) {
+  TempPath path("types-library-nul");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  const auto counts = [](const donkey::TypeTable& types,
+                         std::int64_t) -> donkey::Result<donkey::TypeLibraryLoad> {
+    return donkey::TypeLibraryLoad{types, 0, 0};
+  };
+  donkey::TypeLibraryRecord record;
+  record.library = "lib";
+  record.library_version = "1";
+  record.architecture = "x86_64";
+  record.abi = "sysv";
+  record.data_model = "LP64";
+  record.body_sha256 = std::string(64, 'a');
+  record.provides = {std::string("libc.so\0x", 9), "libm.so"};
+  auto refused = project.value().load_type_library(record, counts);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "project.type_library_failed");
+  record.provides = {"libc.so"};
+  record.library = std::string("lib\0x", 5);
+  refused = project.value().load_type_library(record, counts);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "project.type_library_failed");
+  auto listed = project.value().type_libraries();
+  ASSERT_TRUE(listed.has_value());
+  EXPECT_TRUE(listed.value().empty());
+}
+
+// A tag only declared has no size, also in a later parse: `sizeof`, an array of it and a member
+// of it are refused, while a pointer to it is fine.
+TEST(Types, ATagOnlyDeclaredStaysIncompleteAcrossParses) {
+  donkey::TypeTable table;
+  auto first = donkey::parse_c_declarations("struct opaque;\nstruct opaque *make(void);\n", table);
+  ASSERT_TRUE(first.has_value()) << first.diagnostic().message;
+  for (const auto& type : first.value()) {
+    table.put(type);
+    if (type.kind == donkey::TypeKind::Struct) {
+      EXPECT_FALSE(type.complete);
+    }
+  }
+  for (const char* text :
+       {"typedef char bytes[sizeof(struct opaque) + 1];", "struct holder { struct opaque o; };",
+        "typedef struct opaque many[2];"}) {
+    SCOPED_TRACE(text);
+    const auto refused = donkey::parse_c_declarations(text, table);
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.diagnostic().code, "cdecl.incomplete_type");
+  }
+  EXPECT_TRUE(donkey::parse_c_declarations("void use(struct opaque *p);", table).has_value());
+  // The type store keeps it valid, but gives it no size.
+  EXPECT_TRUE(table.validate().has_value());
+  for (const auto& type : table.list()) {
+    if (type.kind == donkey::TypeKind::Struct && type.name == "opaque") {
+      const auto size = table.size_of(type.id);
+      ASSERT_FALSE(size.has_value());
+      EXPECT_EQ(size.diagnostic().code, "type.incomplete");
+    }
+  }
+  // An empty struct that is defined is complete.
+  auto empty = donkey::parse_c_declarations(
+      "struct none {};\ntypedef char z[sizeof(struct none) + 1];", donkey::TypeTable{});
+  ASSERT_TRUE(empty.has_value()) << empty.diagnostic().message;
+}
+
+// `long double` has the target's size, and is refused when the target is not known.
+TEST(Types, LongDoubleFollowsTheTarget) {
+  const auto unknown = donkey::parse_c_declarations("typedef long double ld;", donkey::TypeTable{});
+  ASSERT_FALSE(unknown.has_value());
+  EXPECT_EQ(unknown.diagnostic().code, "cdecl.long_double");
+  donkey::CDeclarationOptions apple;
+  apple.long_double_size = 8;
+  const auto eight = donkey::parse_c_declarations("typedef char buf[sizeof(long double)];",
+                                                  donkey::TypeTable{}, apple);
+  ASSERT_TRUE(eight.has_value()) << eight.diagnostic().message;
+  bool found = false;
+  for (const auto& type : eight.value()) {
+    if (type.kind == donkey::TypeKind::Array) {
+      EXPECT_EQ(type.count, 8U);
+      found = true;
+    }
+  }
+  EXPECT_TRUE(found);
+}
+
+// An enumeration constant from the project (a PDB enum can hold any 64-bit value) is not
+// narrowed to int: one outside int's range is refused where a constant is needed.
+TEST(Types, AWideEnumConstantIsNotNarrowed) {
+  donkey::TypeTable table;
+  donkey::TypeDefinition wide;
+  wide.id = table.next_id();
+  wide.kind = donkey::TypeKind::Enum;
+  wide.name = "wide";
+  wide.size = 8;
+  wide.provenance = donkey::TypeProvenance::Pdb;
+  wide.enumerators = {{"N", 4294967297LL}, {"SMALL", 3}};
+  table.put(wide);
+  const auto refused = donkey::parse_c_declarations("typedef char a[N];", table);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "cdecl.enum_range");
+  EXPECT_TRUE(donkey::parse_c_declarations("typedef char b[SMALL];", table).has_value());
+}
+
+// Struct, union and enum tags share one name space, in a prototype as at file scope.
+TEST(Types, TagsOfDifferentKindsShareOneNameSpace) {
+  for (const char* text :
+       {"void f(struct T *p, union T *q);", "struct T; union T *p(void);",
+        "struct T { int a; }; enum T { A };", "enum E { X }; struct E *g(void);"}) {
+    SCOPED_TRACE(text);
+    const auto refused = donkey::parse_c_declarations(text, donkey::TypeTable{});
+    ASSERT_FALSE(refused.has_value());
+    EXPECT_EQ(refused.diagnostic().code, "cdecl.tag_kind");
+  }
+  // Two prototypes each declare their own tag.
+  EXPECT_TRUE(
+      donkey::parse_c_declarations("void f(struct T *p);\nvoid g(union T *q);", donkey::TypeTable{})
+          .has_value());
+}
+
+// A bit-field's type is an integer or an enum, through typedefs; the type store refuses another.
+TEST(Types, ABitFieldNeedsAnIntegerType) {
+  donkey::TypeTable table;
+  donkey::TypeDefinition real;
+  real.id = donkey::TypeId{1};
+  real.kind = donkey::TypeKind::Float;
+  real.name = "float";
+  real.size = 4;
+  table.put(real);
+  donkey::TypeDefinition record;
+  record.id = donkey::TypeId{2};
+  record.kind = donkey::TypeKind::Struct;
+  record.name = "s";
+  record.size = 1;
+  donkey::TypeField padding;
+  padding.type = donkey::TypeId{1};
+  padding.bit_size = 1;
+  padding.padding = true;
+  record.fields.push_back(padding);
+  table.put(record);
+  const auto refused = table.validate();
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "type.bad_bit_field");
+}
+
+// One printed declaration spends a shared budget, so a callback whose parameters are callbacks,
+// nested deeply, does not grow the text exponentially: past the budget, `...` stands for the rest.
+TEST(Types, APrintedDeclarationIsBounded) {
+  donkey::TypeTable bare;
+  donkey::TypeDefinition integer;
+  integer.id = donkey::TypeId{1};
+  integer.kind = donkey::TypeKind::Integer;
+  integer.name = "int";
+  integer.size = 4;
+  integer.is_signed = true;
+  bare.put(integer);
+  std::uint64_t next = 2;
+  donkey::TypeId previous{1};
+  for (int level = 0; level < 30; ++level) {
+    donkey::TypeDefinition function;
+    function.id = donkey::TypeId{next++};
+    function.kind = donkey::TypeKind::Function;
+    for (const char* name : {"a", "b"}) {
+      donkey::TypeField parameter;
+      parameter.name = name;
+      parameter.type = previous;
+      function.fields.push_back(parameter);
+    }
+    bare.put(function);
+    donkey::TypeDefinition pointer;
+    pointer.id = donkey::TypeId{next++};
+    pointer.kind = donkey::TypeKind::Pointer;
+    pointer.size = 8;
+    pointer.target = function.id;
+    bare.put(pointer);
+    previous = pointer.id;
+  }
+  const std::string bounded = donkey::c_declaration(bare, previous, "x");
+  EXPECT_LT(bounded.size(), 1U << 20);
+  EXPECT_NE(bounded.find("..."), std::string::npos);
+}
+
+// A library application that meets another source's is kept, and the store says which source it
+// kept, so a caller does not count a write that did not happen.
+TEST(Types, AKeptApplicationIsReportedAsKept) {
+  TempPath path("types-kept");
+  auto loaded = donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/stubs/stubs_x86_64");
+  ASSERT_TRUE(loaded.has_value());
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(analysis.has_value());
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  auto image = project.value().import(loaded.value(), analysis.value());
+  ASSERT_TRUE(image.has_value());
+  donkey::TypeTable table;
+  auto declared = donkey::parse_c_declarations("int f(int);\nint g(int);\n", table);
+  ASSERT_TRUE(declared.has_value());
+  donkey::TypeId f{};
+  donkey::TypeId g{};
+  for (const auto& type : declared.value()) {
+    table.put(type);
+    f = type.name == "f" ? type.id : f;
+    g = type.name == "g" ? type.id : g;
+  }
+  ASSERT_TRUE(project.value().replace_types(table).has_value());
+  std::optional<donkey::TypeProvenance> kept;
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, f,
+                                        donkey::TypeProvenance::Library, &kept)
+                  .has_value());
+  EXPECT_FALSE(kept.has_value());  // written
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, g)
+                  .has_value());
+  ASSERT_TRUE(project.value()
+                  .set_type_application(image.value(),
+                                        donkey::TypeApplicationKind::FunctionPrototype, 0x1000, f,
+                                        donkey::TypeProvenance::Library, &kept)
+                  .has_value());
+  ASSERT_TRUE(kept.has_value());
+  EXPECT_EQ(*kept, donkey::TypeProvenance::User);
+}
+
+// A load whose merge throws leaves no transaction open: the next load on the same connection works,
+// and nothing of the failed one is stored.
+TEST(Types, ALoadWhoseMergeThrowsLeavesNothing) {
+  TempPath path("types-throw");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  donkey::TypeLibraryRecord record;
+  record.library = "throws";
+  record.library_version = "1";
+  record.architecture = "x86_64";
+  record.platform = "linux";
+  record.abi = "sysv";
+  record.data_model = "LP64";
+  record.body_sha256 = std::string(64, 'c');
+  EXPECT_THROW(
+      {
+        auto ignored = project.value().load_type_library(
+            record,
+            [](const donkey::TypeTable&, std::int64_t) -> donkey::Result<donkey::TypeLibraryLoad> {
+              throw std::runtime_error("merge failed");
+            });
+        (void)ignored;
+      },
+      std::runtime_error);
+  auto none = project.value().type_libraries();
+  ASSERT_TRUE(none.has_value()) << none.diagnostic().message;
+  EXPECT_TRUE(none.value().empty());
+  auto again =
+      project.value().load_type_library(record, [](const donkey::TypeTable& types, std::int64_t) {
+        return donkey::Result<donkey::TypeLibraryLoad>(donkey::TypeLibraryLoad{types, 0, 0});
+      });
+  EXPECT_TRUE(again.has_value()) << again.diagnostic().message;
+}
+
+// `update_types` reads and writes under one lock: what it stores is built from the types as
+// committed, and a refusal stores nothing.
+TEST(Types, UpdateTypesBuildsOnTheStoredTypes) {
+  TempPath path("types-update");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value());
+  const auto add = [](const char* text) {
+    return [text](const donkey::TypeTable& known) -> donkey::Result<donkey::TypeTable> {
+      auto declared = donkey::parse_c_declarations(text, known);
+      if (!declared) {
+        return declared.diagnostic();
+      }
+      donkey::TypeTable table = known;
+      for (const auto& type : declared.value()) {
+        table.put(type);
+      }
+      return table;
+    };
+  };
+  ASSERT_TRUE(project.value().update_types(add("struct a { int x; };")).has_value());
+  ASSERT_TRUE(project.value().update_types(add("struct b { struct a inner; };")).has_value());
+  const auto refused = project.value().update_types(add("struct c { struct missing m; };"));
+  EXPECT_FALSE(refused.has_value());
+  auto stored = project.value().types();
+  ASSERT_TRUE(stored.has_value());
+  std::set<std::string> names;
+  for (const auto& type : stored.value().list()) {
+    if (type.kind == donkey::TypeKind::Struct) {
+      names.insert(type.name);
+    }
+  }
+  EXPECT_EQ(names, (std::set<std::string>{"a", "b"}));
+}
+
+// Two connections open a v8 file at once: the one that waits for the migration lock finds the
+// other's migration done, and opens the file instead of running the step again.
+TEST(Project, AMigrationAnotherConnectionFinishedIsNotRunAgain) {
+  TempPath path("migrate-race");
+  {
+    auto project = Project::create(path.str());
+    ASSERT_TRUE(project.has_value());
+  }
+  sqlite3* other = nullptr;
+  ASSERT_EQ(sqlite3_open_v2(path.str().c_str(), &other, SQLITE_OPEN_READWRITE, nullptr), SQLITE_OK);
+  ASSERT_EQ(sqlite3_exec(other, (std::string(kDowngradeV9ToV8) + "PRAGMA user_version=8;").c_str(),
+                         nullptr, nullptr, nullptr),
+            SQLITE_OK);
+  // Once the opening connection has read version 8 and is about to ask for the migration lock,
+  // the other connection runs version 9 itself, the way the v8 step does, and commits it. The
+  // opener then holds the lock on a file that is already at v9: without its reread under the lock
+  // it would run the step again and fail.
+  int raced = SQLITE_ERROR;
+  bool hooked = false;
+  Project::set_migration_lock_hook_for_testing([&](int version) {
+    if (version != 8 || hooked) {
+      return;
+    }
+    hooked = true;
+    raced =
+        sqlite3_exec(other,
+                     "BEGIN IMMEDIATE; "
+                     "ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0 "
+                     "CHECK (source BETWEEN 0 AND 4); "
+                     "CREATE TABLE type_libraries (id INTEGER PRIMARY KEY, library TEXT NOT "
+                     "NULL, library_version TEXT NOT NULL, architecture TEXT NOT NULL, "
+                     "body_sha256 TEXT NOT NULL, added_types INTEGER NOT NULL, collisions "
+                     "INTEGER NOT NULL, platform TEXT NOT NULL, abi TEXT NOT NULL, data_model "
+                     "TEXT NOT NULL, provides TEXT NOT NULL, UNIQUE (library, "
+                     "library_version, architecture)); "
+                     "ALTER TABLE types ADD COLUMN complete INTEGER NOT NULL DEFAULT 1; "
+                     "ALTER TABLE types ADD COLUMN typedef_named INTEGER NOT NULL DEFAULT 0; "
+                     "ALTER TABLE types ADD COLUMN library INTEGER NOT NULL DEFAULT 0; "
+                     "PRAGMA user_version=9; COMMIT",
+                     nullptr, nullptr, nullptr);
+    if (raced != SQLITE_OK) {
+      sqlite3_exec(other, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+  });
+  std::optional<donkey::Result<Project>> opened;
+  opened.emplace(Project::open(path.str()));
+  Project::set_migration_lock_hook_for_testing({});
+  sqlite3_close(other);
+  ASSERT_EQ(raced, SQLITE_OK);
+  ASSERT_TRUE(hooked);
+  ASSERT_TRUE(opened.has_value());
+  ASSERT_TRUE(opened->has_value()) << opened->diagnostic().message;
+  EXPECT_EQ(opened->value().schema_version(), donkey::kProjectSchemaVersion);
 }

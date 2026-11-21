@@ -2,3 +2,6 @@
 # must not change on checkout (core.autocrlf on Windows would turn LF into CRLF).
 *.dtl -text
 tests/fuzz/corpus/typelib/** -text
+# musl's loader splits its path file on `:` and LF only, so a CR from checkout would change the
+# directories the fixture names.
+tests/fixtures/loadscope/** -text
