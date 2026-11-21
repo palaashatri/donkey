@@ -13,6 +13,7 @@
 #include "donkey/analysis/analysis.h"
 #include "donkey/binary/function_starts.h"
 #include "donkey/binary/image.h"
+#include "donkey/binary/isolation.h"
 
 namespace {
 
@@ -65,6 +66,21 @@ TEST(FunctionStarts, DecodesDeltasAndStopsAtZero) {
   auto thumb = donkey::read_function_starts(bytes({0x81, 0x02, 0x04, 0x00}), 0x1000, 0x1000, true);
   ASSERT_TRUE(thumb.has_value());
   EXPECT_EQ(thumb.value(), (std::vector<std::uint64_t>{0x1100, 0x1104}));
+}
+
+// The range is half open: a start at the end of __TEXT is outside it, and an address that would
+// wrap past the top of the address space is refused, not taken modulo 2^64.
+TEST(FunctionStarts, RefusesTheEndOfTextAndAWrappingAddress) {
+  auto at_end = donkey::read_function_starts(bytes({0x10, 0x00}), 0x1000, 0x10, false);
+  ASSERT_FALSE(at_end.has_value());
+  EXPECT_EQ(at_end.diagnostic().code, "function_starts.outside_text");
+  auto last = donkey::read_function_starts(bytes({0x0f, 0x00}), 0x1000, 0x10, false);
+  ASSERT_TRUE(last.has_value()) << last.diagnostic().message;
+  EXPECT_EQ(last.value(), (std::vector<std::uint64_t>{0x100f}));
+  auto wraps =
+      donkey::read_function_starts(bytes({0x10, 0x00}), 0xfffffffffffffff8ULL, 0x20, false);
+  ASSERT_FALSE(wraps.has_value());
+  EXPECT_EQ(wraps.diagnostic().code, "function_starts.outside_text");
 }
 
 TEST(FunctionStarts, RefusesBrokenTables) {
@@ -215,6 +231,28 @@ TEST(FunctionStarts, AFatSliceGivesTheSameStartsAsTheThinFile) {
   auto fat_starts = donkey::read_function_starts_of_image(image.value(), fat);
   ASSERT_TRUE(fat_starts.has_value()) << fat_starts.diagnostic().message;
   EXPECT_EQ(fat_starts.value(), thin_starts.value());
+}
+
+// An isolated load gives the parent the table's place in the file, as a direct load does.
+TEST(FunctionStarts, AnIsolatedLoadGivesTheSameStarts) {
+  if (!donkey::process_isolation_available()) {
+    GTEST_SKIP() << "OS process isolation not supported on this platform";
+  }
+  auto direct = donkey::load_binary(fixture("starts_x86_64"));
+  ASSERT_TRUE(direct.has_value()) << direct.diagnostic().message;
+  auto isolated = donkey::load_binary_isolated(fixture("starts_x86_64"));
+  ASSERT_TRUE(isolated.has_value()) << isolated.diagnostic().message;
+  EXPECT_EQ(isolated.value().image.function_starts_offset,
+            direct.value().image.function_starts_offset);
+  EXPECT_EQ(isolated.value().image.function_starts_size, direct.value().image.function_starts_size);
+  auto direct_starts =
+      donkey::read_function_starts_of_image(direct.value().image, direct.value().data);
+  auto isolated_starts =
+      donkey::read_function_starts_of_image(isolated.value().image, isolated.value().data);
+  ASSERT_TRUE(direct_starts.has_value());
+  ASSERT_TRUE(isolated_starts.has_value()) << isolated_starts.diagnostic().message;
+  EXPECT_EQ(isolated_starts.value().size(), 4U);
+  EXPECT_EQ(isolated_starts.value(), direct_starts.value());
 }
 
 // Stripped, the image names only its entry point; the table gives the other three functions, each

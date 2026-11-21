@@ -1,5 +1,6 @@
 #include "donkey/binary/function_starts.h"
 
+#include <limits>
 #include <string>
 
 #include "donkey/core/checked.h"
@@ -51,8 +52,12 @@ Result<std::vector<std::uint64_t>> read_function_starts(std::span<const std::byt
     if (delta == 0) {
       break;  // the end of the list; the rest is padding
     }
+    // Each start lies in the half-open range [text_address, text_address + text_size), and the
+    // addition cannot wrap: offset_in_text stays below text_size, and text_address + offset_in_text
+    // + delta is checked against the top of the address space.
     const std::uint64_t offset_in_text = address - text_address;
-    if (delta > text_size || offset_in_text > text_size - delta) {
+    if (delta >= text_size - offset_in_text ||
+        address > std::numeric_limits<std::uint64_t>::max() - delta) {
       return starts_error("function_starts.outside_text",
                           "a function start lies outside the __TEXT segment", begin);
     }

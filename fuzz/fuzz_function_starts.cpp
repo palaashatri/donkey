@@ -36,7 +36,7 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
   }
   std::uint64_t previous = 0;
   for (const std::uint64_t start : result.value()) {
-    if (start < kText || start >= kText + kTextSize + 1 || (thumb && (start & 1U) != 0) ||
+    if (start < kText || start >= kText + kTextSize || (thumb && (start & 1U) != 0) ||
         (previous != 0 && start < previous)) {
       std::abort();
     }
