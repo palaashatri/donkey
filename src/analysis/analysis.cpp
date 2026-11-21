@@ -2,6 +2,7 @@
 
 #include "donkey/analysis/no_return.h"
 #include "donkey/binary/eh_frame.h"
+#include "donkey/binary/function_starts.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
 
@@ -748,6 +749,20 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.partial = true;
     result.diagnostics.push_back(frames.diagnostic());
   }
+  // Mach-O LC_FUNCTION_STARTS (G23-T3): the linker's list of function starts, which a stripped
+  // image keeps. A table that cannot be read leaves starts out, so the result is Partial.
+  std::set<std::uint64_t> table_starts;
+  if (auto listed = read_function_starts_of_image(image, file); listed) {
+    for (const std::uint64_t start : listed.value()) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        table_starts.insert(start);
+      }
+    }
+  } else {
+    result.partial = true;
+    result.diagnostics.push_back(listed.diagnostic());
+  }
   // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
   if (auto pdata = read_pdata_of_image(image, file); pdata) {
     for (const PdataFunction& frame : pdata.value().functions) {
@@ -820,6 +835,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     seed.address = address;
     seed.from_symbol = named.count(address) != 0;
     seed.from_unwind = unwind_starts.count(address) != 0;
+    seed.from_function_starts = table_starts.count(address) != 0;
     if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
       seed.name = symbol->second->name;
       seed.exported = symbol->second->exported;

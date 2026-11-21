@@ -14,6 +14,11 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   x64 `.pdata` entries (`Pdata.*`, 4 tests, the fixture matches `llvm-readobj`). Both fuzzed
   (`fuzz_eh_frame`, `fuzz_pdata`, 60 s each, clean; `tests/fuzz/corpus/eh_frame` and
   `tests/fuzz/corpus/pdata`). Chained `.pdata` entries are skipped and not covered by a fixture.
+- Mach-O `LC_FUNCTION_STARTS` (G23-T3): the linker's table of function starts seeds functions in a
+  stripped image, marked `from_function_starts` (`FunctionStarts.*`, 5 tests, both stripped fixtures
+  match `llvm-objdump --macho --function-starts`; `Analysis.MachOFunctionStartsSeedAStrippedBinary`,
+  `cli.functions_marks_function_starts`). Fuzzed (`fuzz_function_starts`, 60 s, 10.4 million runs,
+  clean; `tests/fuzz/corpus/function_starts`). `__unwind_info` is not read yet.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into
