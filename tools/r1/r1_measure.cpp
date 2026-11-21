@@ -107,6 +107,11 @@ Result<std::vector<Binary>> read_binaries(std::string_view json) {
   return out;
 }
 
+bool is_resource_limit(std::string_view code) {
+  return code == "analysis.instruction_limit" || code == "analysis.block_limit" ||
+         code == "analysis.traversal_limit";
+}
+
 bool is_generic_note(std::string_view note) {
   // The subset note of each architecture, the signature note, and the note that parameter names
   // came from debug information: every function carries them, Complete or not.
@@ -185,6 +190,27 @@ Result<Measure> measure_decompile(std::string_view file, std::string_view json) 
   }
   Measure out;
   out.file = std::string(file);
+  // An analysis that hit a resource limit stopped early: functions may be missing from the list,
+  // so it is not a whole-binary measurement either. Other analysis notes are recorded. Output from
+  // a CLI that predates these fields has neither, and is taken as it is.
+  if (const JsonValue* partial = root.find("analysis_partial");
+      partial != nullptr && partial->is_bool()) {
+    out.analysis_partial = partial->boolean;
+  }
+  if (const JsonValue* codes = root.find("analysis_diagnostics");
+      codes != nullptr && codes->is_array()) {
+    for (const JsonValue& code : codes->items) {
+      if (!code.is_string()) {
+        continue;
+      }
+      if (is_resource_limit(code.text)) {
+        return r1_error("r1.bad_decompile", std::string(file) +
+                                                ": the analysis stopped at a limit (" + code.text +
+                                                "); raise --max-instructions");
+      }
+      out.analysis_notes.push_back(code.text);
+    }
+  }
   for (const JsonValue& function : functions->items) {
     if (!function.is_object()) {
       return r1_error("r1.bad_decompile", std::string(file) + ": a function is not an object");

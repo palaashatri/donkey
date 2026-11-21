@@ -73,7 +73,10 @@ build/release-headless/donkey-r1 measure /path/to/work /path/to/decompiled r1-re
 `decompile.cmake` runs one `donkey-cli decompile --json --no-pseudocode` per binary, under a time limit.
 `donkey-r1 measure` counts, for each binary, the functions by status and the reasons of the Partial ones.
 For a stripped binary it also compares the starts found with the function symbols of its unstripped twin:
-matched, missed, import stubs, and extra. Its exit status is 2 when any binary has no usable output.
+matched, missed, import stubs, and extra. A binary has no usable output when the run failed or timed out,
+when the output was cut by `--max-functions`, or when the analysis stopped at a resource limit
+(`analysis.instruction_limit` and the like), since functions may then be missing. Other analysis
+diagnostics are recorded with the binary. The exit status is 2 when any binary has no usable output.
 
 `binaries.json` records the provenance of each binary that `docs/DESIGN.md` §11.5 asks for:
 

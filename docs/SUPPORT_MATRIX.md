@@ -211,55 +211,64 @@ built by `tools/r1/build.cmake` on Ubuntu 24.04 with GCC 13.3 and the distributi
 builds, at -O0 and -O2, for x86-64 and AArch64, plus a static `lua` linked with musl 1.2.4; each is also kept
 as a stripped copy. Every function was decompiled, not a sample, with `tools/r1/decompile.cmake`
 (`donkey-cli decompile --json --no-pseudocode`), and counted with `donkey-r1 measure` (G20-T2). The decompiler
-was that of `main` at `2270daa`; the change that adds the measurement adds JSON fields only.
+was that of `main` at `3530b46` (after the init and fini seeds of G24 and the Mach-O header fix); the change that
+adds the measurement adds JSON fields only.
 
 These are counted results, not verified ones: a Complete function here has not been executed. The execution
 comparison on R1 is G20-T4.
 
+No run stopped at an analysis limit (`measure` refuses such an output, which may miss functions). The analysis
+of every `libz.so` build and of every AArch64 build is Partial for one reason, `analysis.no_return_unverified`:
+which library an import binds to, and so whether it returns, cannot be shown for a shared library without the
+program that loads it, or for AArch64 without its libraries on this x86-64 host (G24-T3).
+
 Unstripped builds, totals:
 
-- x86-64: 1,268 of 8,405 functions are Complete (15.1%).
+- x86-64: 1,269 of 8,406 functions are Complete (15.1%).
 - AArch64: 839 of 7,450 functions are Complete (11.3%).
 - No function is Unsupported or InvalidIR, and no run failed.
-- Every Partial function names at least one reason.
+- Every Partial function of an unstripped build names at least one reason. One Partial function of the stripped
+  static musl build names none.
 
 Stripped builds, against the function symbols of their unstripped twins (`STT_FUNC` and `STT_GNU_IFUNC`):
 
-- 14,778 of 14,887 starts are found.
-- The 109 missed starts are the C runtime's `_init`, `_fini`, `frame_dummy`, `register_tm_clones` and
-  `__do_global_dtors_aux` in each glibc build, and 67 assembly functions of static musl that have no
-  unwind entry.
+- 14,816 of 14,887 starts are found.
+- The 71 missed starts:
+  - each glibc x86-64 build misses `register_tm_clones`, which `frame_dummy` reaches by a tail jump (6 builds);
+  - the glibc AArch64 builds miss none;
+  - static musl misses 65 assembly functions that have no unwind entry.
 - 966 further starts found are import stubs (`.plt`, `.plt.sec`, `.plt.got`), which have no symbol.
-- 2 extra starts are found, both in static musl.
+- 3 extra starts are found, all in static musl: `_start`, `_init` and `_fini`, whose symbols musl's assembly
+  makes `NOTYPE`, so the `FUNC`-only ground truth does not count them.
 
 | Binary | Functions | Complete | Partial | Unsupported or InvalidIR | Partial, no reason | Starts found (stripped) |
 |---|---|---|---|---|---|---|
 | `libz-x86_64-glibc-O0.so` | 207 | 58 | 149 | 0 | 0 |  |
-| `libz-x86_64-glibc-O0.so.stripped` | 202 | 58 | 144 | 0 | 0 | 153 of 158 (5 missed; 49 stubs, 0 extra) |
+| `libz-x86_64-glibc-O0.so.stripped` | 206 | 58 | 148 | 0 | 0 | 157 of 158 (1 missed; 49 stubs, 0 extra) |
 | `libz-x86_64-glibc-O2.so` | 185 | 40 | 145 | 0 | 0 |  |
-| `libz-x86_64-glibc-O2.so.stripped` | 180 | 40 | 140 | 0 | 0 | 131 of 136 (5 missed; 49 stubs, 0 extra) |
+| `libz-x86_64-glibc-O2.so.stripped` | 184 | 40 | 144 | 0 | 0 | 135 of 136 (1 missed; 49 stubs, 0 extra) |
 | `libz-aarch64-glibc-O0.so` | 208 | 36 | 172 | 0 | 0 |  |
-| `libz-aarch64-glibc-O0.so.stripped` | 206 | 36 | 170 | 0 | 0 | 157 of 159 (2 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O0.so.stripped` | 208 | 36 | 172 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
 | `libz-aarch64-glibc-O2.so` | 186 | 27 | 159 | 0 | 0 |  |
-| `libz-aarch64-glibc-O2.so.stripped` | 184 | 27 | 157 | 0 | 0 | 135 of 137 (2 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O2.so.stripped` | 186 | 27 | 159 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
 | `lua-x86_64-glibc-O0` | 1178 | 174 | 1004 | 0 | 0 |  |
-| `lua-x86_64-glibc-O0.stripped` | 1173 | 174 | 999 | 0 | 0 | 1082 of 1087 (5 missed; 91 stubs, 0 extra) |
+| `lua-x86_64-glibc-O0.stripped` | 1177 | 174 | 1003 | 0 | 0 | 1086 of 1087 (1 missed; 91 stubs, 0 extra) |
 | `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
-| `lua-x86_64-glibc-O2.stripped` | 789 | 77 | 712 | 0 | 0 | 699 of 704 (5 missed; 90 stubs, 0 extra) |
+| `lua-x86_64-glibc-O2.stripped` | 793 | 77 | 716 | 0 | 0 | 703 of 704 (1 missed; 90 stubs, 0 extra) |
 | `lua-aarch64-glibc-O0` | 1180 | 110 | 1070 | 0 | 0 |  |
-| `lua-aarch64-glibc-O0.stripped` | 1178 | 110 | 1068 | 0 | 0 | 1086 of 1088 (2 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0.stripped` | 1180 | 110 | 1070 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
 | `lua-aarch64-glibc-O2` | 790 | 49 | 741 | 0 | 0 |  |
-| `lua-aarch64-glibc-O2.stripped` | 788 | 49 | 739 | 0 | 0 | 697 of 699 (2 missed; 91 stubs, 0 extra) |
-| `lua-static-musl-x86_64-musl-O2` | 987 | 124 | 863 | 0 | 0 |  |
-| `lua-static-musl-x86_64-musl-O2.stripped` | 920 | 112 | 808 | 0 | 1 | 918 of 985 (67 missed; 0 stubs, 2 extra) |
+| `lua-aarch64-glibc-O2.stripped` | 790 | 49 | 741 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
+| `lua-static-musl-x86_64-musl-O2` | 988 | 125 | 863 | 0 | 0 |  |
+| `lua-static-musl-x86_64-musl-O2.stripped` | 923 | 113 | 810 | 0 | 1 | 920 of 985 (65 missed; 0 stubs, 3 extra) |
 | `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
-| `sqlite3-x86_64-glibc-O0.stripped` | 3062 | 584 | 2478 | 0 | 0 | 2970 of 2975 (5 missed; 92 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 584 | 2482 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
 | `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
-| `sqlite3-x86_64-glibc-O2.stripped` | 1982 | 211 | 1771 | 0 | 0 | 1889 of 1894 (5 missed; 93 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 211 | 1775 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
 | `sqlite3-aarch64-glibc-O0` | 3097 | 448 | 2649 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O0.stripped` | 3095 | 448 | 2647 | 0 | 0 | 2985 of 2987 (2 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 448 | 2649 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
 | `sqlite3-aarch64-glibc-O2` | 1989 | 169 | 1820 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O2.stripped` | 1987 | 169 | 1818 | 0 | 0 | 1876 of 1878 (2 missed; 111 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 169 | 1820 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
 
 The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
 note that is not one every function carries; when the lifter gave none, it is the first instruction that was
