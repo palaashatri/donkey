@@ -31,6 +31,23 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   interpreted; an entry with UNWIND_IS_NOT_FUNCTION_START (a range inside a function) is not a
   start. The personality array is bounds-checked and not read; the index's LSDA offsets are not
   read or checked.
+- ELF initialisation and termination functions (G24): `DT_INIT`, `DT_FINI`, the entries of
+  `DT_INIT_ARRAY`, `DT_FINI_ARRAY` and `DT_PREINIT_ARRAY` (and of the matching sections), and the
+  starts of `.init` and `.fini` seed functions, marked `from_init_fini`. An array entry takes its
+  `R_*_RELATIVE` addend when a relocation covers it, and an entry with a symbolic relocation is
+  skipped. An entry seeds a function only when it is neither 0 nor -1 (the placeholders of
+  `.ctors`-style arrays) and lies in executable code. An entry, relocation or tag that cannot be
+  read leaves the analysis Partial (`analysis.init_fini_incomplete`) (`InitFini.*`,
+  `Analysis.ElfInitAndFiniFunctionsAreSeeded`, `Analysis.AnUnnamedConstructorIsSeededFromInitArray`).
+  Tested on 64-bit ELF (x86-64 and AArch64) and on a synthetic 32-bit image; 32-bit ELF programs
+  (i386 `R_386_RELATIVE`, ARM `R_ARM_RELATIVE`) are not tested on real binaries. On the stripped R1 builds,
+  the missed starts fell from 109 to 71:
+  - every start of the glibc AArch64 builds is found;
+  - each glibc x86-64 build still misses `register_tm_clones`, which `frame_dummy` reaches by a tail
+    jump;
+  - static musl still misses 65 assembly functions.
+  The 3 extra starts of static musl are `_start`, `_init` and `_fini`. musl's assembly gives them
+  NOTYPE symbols, which the FUNC-only ground truth does not count.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into

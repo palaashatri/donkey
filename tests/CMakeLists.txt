@@ -168,6 +168,7 @@ add_executable(donkey_unit_tests
   unit/pdata_test.cpp
   unit/function_starts_test.cpp
   unit/unwind_info_test.cpp
+  unit/init_fini_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
