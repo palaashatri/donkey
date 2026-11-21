@@ -1849,58 +1849,86 @@ The builds:
 That makes 26 binaries. The provenance that `docs/DESIGN.md` §11.5 requires is written to the measurement output
 for every binary: the source, licence, compiler and version, flags, level, architecture and the binary's SHA-256.
 
-**Tasks and files.**
+**Tasks and files.** The tools are a CMake script and a C++20 program, so no Python runtime is needed, in line with
+`docs/DESIGN.md` §1, item 4.
 
-- **T1 [ground truth]** `tools/r1/r1.json`, `tools/r1/build.py` (standard library only, run with `python3 -I`)
-  and `tools/r1/README.md`.
-  - `build.py fetch` downloads each source into a cache directory and checks its SHA-256 before unpacking
-    anything. It refuses an archive member with an absolute path or `..`, and has a size limit.
-  - `build.py build` compiles with the manifest's flags and `-ffile-prefix-map`. It writes `binaries.json` with
-    the provenance above and the compiler identity: the first line of `gcc --version` and the `musl-tools`
-    package version.
-  - The ground truth for the stripped builds is the function symbols (`STT_FUNC` with sizes) of the unstripped
-    twin, read by Donkey's own ELF reader through `donkey-cli symbols --json`.
-  - `tools/r1/test_r1.py` runs under CTest, the way `tools/audit/test_import_calls.py` does. It covers a refused
-    hash mismatch, a refused path-traversal member, the manifest schema (unknown keys refused), and the build
-    command made from a manifest entry.
-- **T2.** `tools/r1/measure.py`, and one change to the CLI.
+- **T1 [ground truth]** `tools/r1/r1.json`, `tools/r1/build.cmake` (run with `cmake -P`) and `tools/r1/README.md`.
+  - `build.cmake` downloads each source into a cache directory with `file(DOWNLOAD ... EXPECTED_HASH SHA256=...)`,
+    so a hash mismatch stops it before anything is unpacked.
+  - Before extracting, it lists the archive with `file(ARCHIVE_EXTRACT ... LIST_ONLY)` and refuses any member
+    with an absolute path or a `..` component.
+  - It compiles with the manifest's flags and `-ffile-prefix-map`, and writes `binaries.json`.
+  - For every binary, `binaries.json` records the provenance above and the identity of the compiler that built
+    that binary. The identity is the first line of that compiler's `--version` (`gcc`, or
+    `aarch64-linux-gnu-gcc` for AArch64) and its package version (`gcc-13`, `gcc-aarch64-linux-gnu`,
+    `musl-tools`). A change to either compiler is therefore seen on the binaries it built.
+  - The ground truth for the stripped builds is the function symbols (`STT_FUNC`, with sizes) of the unstripped
+    twin. The T2 tool reads them through Donkey's own ELF reader (`donkey::load_binary`, `BinaryImage::symbols`);
+    the CLI has no symbol-listing command, and none is needed.
+  - Tests:
+    - `cmake/checks/r1_build_refusals.cmake` runs `build.cmake` on two inputs: a source whose hash does not match,
+      and a committed 1 KiB tar fixture with a `../escape` member (`tests/fixtures/r1/`, with provenance). It
+      checks that both are refused.
+    - `R1.ManifestSchema` (in `tests/unit/r1_test.cpp`) refuses unknown keys and a missing hash.
+    - `R1.SymbolsMatchReadelf` compares the symbol starts read from one corpus library with
+      `readelf -sW`.
+- **T2.** `tools/r1/r1_tool.cpp` (the C++20 program `donkey-r1`, built when `DONKEY_BUILD_R1_TOOL=ON`; its logic
+  lives in a small library tested by `tests/unit/r1_test.cpp`), plus one change to the CLI.
   - The CLI change: `decompile --json` gains a `"notes"` array on each function, holding the lifter's notes in
     order. This only adds a field, so `kJsonSchemaVersion` stays 1. A CLI test checks the field on
     `${DONKEY_MUSL_PROGRAM}`, and the measurement does not scrape `// note:` comment lines.
-  - `measure.py` runs `decompile --json --max-functions 1000000` on every binary, one process per binary with a
-    time limit. For each function it records the status: Complete, Partial, Unsupported, InvalidIR, or error. An
-    error means the process failed or timed out, and is recorded for the whole binary.
+  - The CI job runs `donkey-cli decompile --json --max-functions 1000000` on every binary, one process per binary
+    under `timeout`.
+  - `donkey-r1 measure` reads those outputs with `donkey::parse_json`, with limits raised to the size of the
+    largest output. For each function it records the status: Complete, Partial, Unsupported, InvalidIR, or error.
+    An error means the process failed, timed out or wrote unreadable output, and is recorded for the whole binary.
   - For each Partial function it records the first specific note and every note.
   - For each stripped binary it records the starts found, against the unstripped symbol starts: matched, missed
     and extra. That is G24's measure on R1.
   - It writes `r1-result.json` and a Markdown table, both uploaded as a CI artifact. The table of the 20 most
     frequent first notes goes into `docs/SUPPORT_MATRIX.md`, with the commit it was measured at.
-- **T3.** The ratchet: `tools/r1/baseline.json` and `measure.py --check tools/r1/baseline.json`.
+- **T3.** The ratchet: `tools/r1/baseline.json` and `donkey-r1 check`.
   - The baseline holds counts for each binary (program, architecture, level, stripped or not): Complete,
-    Unsupported, InvalidIR, error and missed starts. It also holds the compiler identity they were counted with.
+    Unsupported, InvalidIR, error and missed starts. Each entry also records the identity of the compiler that
+    built that binary.
   - The check fails when, for any binary, Complete drops, or Unsupported, InvalidIR, error or missed starts rise.
-  - A count that improves passes and is printed. The PR that improves it runs `--update` and commits the new
-    baseline.
-  - If the compiler identity differs from the baseline's (a runner image update), the binaries are not the ones
-    the baseline counted. The check then reports every count, compares nothing, and writes a warning annotation;
-    the next PR records the new identity. A runner update cannot turn CI red, and it cannot hide a regression as
-    a pass.
+  - A count that improves passes and is printed. The PR that improves it runs `donkey-r1 check --update` and
+    commits the new baseline.
+  - If a binary's compiler identity differs from its baseline entry (for example after a runner image update),
+    the stored counts describe other bytes, so a comparison has to be made on the same bytes. The job builds
+    `donkey-cli` from the base commit (the PR's base SHA, or the previous commit on a push to `main`) and
+    measures the same freshly built R1 binaries with it. It then checks the head against that base under the
+    rules above.
+    - A drop still fails.
+    - A pass prints that the baseline is out of date, as a warning annotation. The next PR re-records the
+      baseline with `--update`, and says that it does.
+    - A compiler change therefore cannot hide a regression. Any compiler change makes the job longer by one
+      more CLI build.
   - The CI job is a new `r1` job in `.github/workflows/ci.yml` on `ubuntu-24.04`, with `gcc-aarch64-linux-gnu`
-    and `musl-tools` installed. It builds the Release headless CLI, then runs fetch, build, measure and check.
+    and `musl-tools` installed. It builds the Release headless CLI and `donkey-r1`, then runs these steps in
+    order:
+    1. fetch and build R1;
+    2. the T4 CTest, with `DONKEY_R1_DIR` set and `DONKEY_R1_REQUIRED=1`, so a skip fails in this job;
+    3. decompile;
+    4. measure;
+    5. check.
   - A download is retried. A download that keeps failing is reported as a fetch failure, never as a ratchet
     result.
-  - The budget: about 2 minutes to build the sources and, from the spike, about 2 minutes to measure all 26
+  - The budget: about 2 minutes to build the sources and, from the spike, about 2 minutes to decompile all 26
     binaries.
-- **T4 [oracle]** `tools/r1/pure.json` and an executed comparison.
+- **T4 [oracle]** `tools/r1/pure.json` and an executed comparison, `R1Oracle.PureFunctionsAgree`.
   - `pure.json` lists the R1 functions that can be called in isolation. Their arguments are integers or pointers
     to buffers the caller provides; they keep no global state, and every call they make can be modelled by the
     interpreter.
-  - The candidates are the `libz.so` exports `adler32`, `adler32_z`, `crc32`, `crc32_z`, the `*_combine`
-    functions and `zlibCompileFlags`. T1 also builds a `liblua.so`, so that the exported `lctype` and `lobject`
-    helpers can be listed.
+  - The candidates are the `libz.so` exports `adler32`, `adler32_z`, `crc32`, `crc32_z`, `adler32_combine`,
+    `crc32_combine` and `zlibCompileFlags`. Lua's `lctype` helpers are macros, and its `lobject` functions are
+    `LUAI_FUNC` (hidden visibility on ELF), so neither can be reached through `dlopen`, and Lua has no candidates.
+  - A function joins the list only after its name is shown in `nm -D --defined-only` of the built library. The
+    test checks this again and fails on a name that is not exported.
   - Each listed function runs natively through `dlopen` and through `donkey/ir/eval.h` on the same inputs, as
     the corpus does in `tests/unit/decompiler_corpus_test.cpp`.
-  - The comparison is a CTest. It is skipped, with the reason given, when R1 has not been built.
+  - Outside the `r1` job the test is skipped, with the reason given, when R1 has not been built. Inside the job
+    it must run.
   - It reports verified Complete and unverified Complete separately.
 
 **Done when.**
