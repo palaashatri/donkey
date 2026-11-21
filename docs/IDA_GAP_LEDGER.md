@@ -2989,9 +2989,10 @@ address 0: an executable section at address 0 is still code (ELF's address-0 sec
 never executable). The tests are `Analysis.TheMachOHeaderIsNotAFunction` and `Analysis.AMachOObjectKeepsItsFunctions`.
 
 **Initialisation and termination functions (2026-11-21).** G20-T2's R1 measurement found 109 missed starts in the
-stripped builds. In every glibc build they were the C runtime's `_init`, `_fini`, `frame_dummy`,
-`register_tm_clones` and `__do_global_dtors_aux`, functions the loader or the runtime calls and no call in the
-image reaches.
+stripped builds. In each glibc x86-64 build they were five functions of the C runtime: `_init`, `_fini`,
+`frame_dummy`, `register_tm_clones` and `__do_global_dtors_aux`. In each glibc AArch64 build they were only
+`_init` and `_fini`; the other three have unwind entries there. The loader or the runtime calls these functions,
+and no call in the image reaches them.
 
 `read_init_fini_of_image` (`src/binary/init_fini.cpp`) reads two sources and takes their union:
 
