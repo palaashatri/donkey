@@ -309,9 +309,12 @@ not lifted.
 
 `decompile --json` lists each call it left without arguments and a result, with the kind of its target, and
 `donkey-r1 measure` counts them (`R1.CountsUnresolvedCalls`, `cli.decompile_json_lists_unresolved_calls`,
-`cli.decompile_json_lists_aarch64_calls`). The kinds:
+`cli.decompile_json_lists_aarch64_calls`, `cli.decompile_json_lists_aarch64_tail_calls`,
+`Ir.UnresolvedTailCallsAreInTheCallCensus`). A tail call (a jump to another function, conditional or not)
+is a call site too; the jump of an import stub through its own slot is not. The kinds:
 
-- `import`: a direct call of an import stub with no C library model or library prototype;
+- `import`: a direct call of an import stub with no C library model or library prototype (a stub of a
+  function the image defines itself, such as libc's `free@plt`, is `same_image`);
 - `import_slot`: a call through an import's GOT or IAT slot;
 - `same_image`: a direct call of a function of the image whose call summary did not resolve (it is Partial,
   reads a stack argument, is on a cycle, or is deeper than eight levels);
@@ -320,17 +323,17 @@ not lifted.
 - on AArch64, where no call is resolved yet, `aarch64_import` for a call of an import stub and
   `aarch64_other` for any other call.
 
-Measured on `main` at `c655bdf`:
+Measured with this census on `main` at `c655bdf`:
 
 Unresolved calls by kind of target (unstripped binaries):
 
 | Calls | Kind of target |
 |---|---|
-| 35193 | aarch64_other |
-| 30380 | same_image |
-| 4649 | aarch64_import |
-| 3321 | import |
-| 1451 | indirect |
+| 36409 | aarch64_other |
+| 31622 | same_image |
+| 4567 | aarch64_import |
+| 3237 | import |
+| 1765 | indirect |
 | 4 | import_slot |
 | 1 | unknown_target |
 
@@ -338,10 +341,10 @@ Unresolved calls by kind of target (unstripped binaries):
 
 | Functions | Kinds of target |
 |---|---|
-| 1590 | aarch64_other |
-| 786 | aarch64_import+aarch64_other |
+| 1603 | aarch64_other |
+| 781 | aarch64_import+aarch64_other |
 | 491 | same_image |
-| 95 | aarch64_import |
+| 87 | aarch64_import |
 | 36 | indirect |
 | 20 | indirect+same_image |
 | 15 | import |
@@ -367,10 +370,10 @@ The 20 imports those functions call most (a function counted once per import):
 | 11 | `fclose` |
 | 10 | `fflush` |
 | 10 | `strchr` |
-| 9 | `adler32` |
 | 9 | `strerror` |
 | 8 | `fread` |
 | 8 | `getenv` |
+| 7 | `fprintf` |
 
 Most functions that only a call keeps Partial are AArch64 functions (2,471 of 3,044): AArch64 call resolution
 comes first in G21. Among x86-64 functions, a same-image callee that is itself Partial is the common blocker

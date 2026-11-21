@@ -1509,6 +1509,12 @@ add_test(NAME cli.decompile_json_lists_aarch64_calls
                  --json --no-pseudocode --function 0x1000003b4)
 set_tests_properties(cli.decompile_json_lists_aarch64_calls PROPERTIES
   PASS_REGULAR_EXPRESSION "\"unresolved_calls\": \\[\\{\"address\": \"0x1000003e8\", \"kind\": \"aarch64\"\\}\\]")
+# An unresolved tail call (b to an import stub) is a call site of the census too.
+add_test(NAME cli.decompile_json_lists_aarch64_tail_calls
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stubs/stubs_aarch64
+                 --json --no-pseudocode --function 0x674)
+set_tests_properties(cli.decompile_json_lists_aarch64_tail_calls PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"unresolved_calls\": \\[\\{\"address\": \"0x680\", \"kind\": \"aarch64\", \"name\": \"__gmon_start__\"\\}\\]")
 add_test(NAME cli.decompile_no_pseudocode_needs_json
          COMMAND ${CMAKE_COMMAND}
                  "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;decompile;${DONKEY_MUSL_PROGRAM};--no-pseudocode"

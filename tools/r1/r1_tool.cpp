@@ -210,6 +210,9 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
   std::map<std::string, std::size_t> call_only_by_kinds;
   std::map<std::string, std::size_t> call_only_imports;
   std::size_t call_only_partial = 0;
+  // False when some measured unstripped binary came from a CLI without the census: the totals are
+  // then not counts of every binary, so none are published.
+  bool census_complete = true;
   std::size_t errors = 0;
   std::size_t total_functions = 0;
   std::size_t total_complete = 0;
@@ -266,6 +269,7 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       for (const auto& [note, count] : measured.first_notes) {
         first_notes[note] += count;
       }
+      census_complete = census_complete && measured.has_call_census;
       for (const auto& [kind, count] : measured.calls_by_kind) {
         calls_by_kind[kind] += count;
       }
@@ -344,7 +348,8 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       ", \"complete\": " + std::to_string(total_complete) +
       ", \"unexplained_partial\": " + std::to_string(total_unexplained) +
       ", \"first_notes\": " + notes_json(first_notes) + ", \"call_census\": " +
-      census_json(true, calls_by_kind, call_only_partial, call_only_by_kinds, call_only_imports) +
+      census_json(census_complete, calls_by_kind, call_only_partial, call_only_by_kinds,
+                  call_only_imports) +
       "},\n  \"errors\": " + std::to_string(errors) + "\n}\n";
   const std::string table =
       "| Binary | Functions | Complete | Partial | Unsupported or InvalidIR | Partial, no reason | "
@@ -352,7 +357,11 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       rows +
       "\nThe 20 most frequent first notes of Partial functions (unstripped binaries):\n\n"
       "| Partial functions | First specific note |\n|---|---|\n" +
-      top + census_table(calls_by_kind, call_only_partial, call_only_by_kinds, call_only_imports);
+      top +
+      (census_complete
+           ? census_table(calls_by_kind, call_only_partial, call_only_by_kinds, call_only_imports)
+           : std::string("\nNo call census: some unstripped binary was decompiled by a CLI without "
+                         "one.\n"));
   if (!write_file(result_path, result) || !write_file(table_path, table)) {
     std::fprintf(stderr, "donkey-r1: cannot write the result\n");
     return 1;

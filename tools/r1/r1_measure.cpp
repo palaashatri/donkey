@@ -281,6 +281,14 @@ Result<Measure> measure_decompile(std::string_view file, std::string_view json) 
     }
     out.starts.insert(start);
     ++out.functions;
+    // A lifted function of a CLI with the call census lists its unresolved calls, an empty list
+    // when it has none (G21). Unsupported and InvalidIR entries were never lifted and carry none.
+    if (status == "Complete" || status == "Partial") {
+      const JsonValue* calls = function.find("unresolved_calls");
+      if (calls == nullptr || !calls->is_array()) {
+        out.has_call_census = false;
+      }
+    }
     if (status == "Complete") {
       ++out.complete;
     } else if (status == "Unsupported") {

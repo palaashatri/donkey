@@ -218,6 +218,23 @@ TEST(R1, CountsUnresolvedCalls) {
       "b", R"({"functions": [{"address": "0x10", "status": "Partial", "notes": []}]})");
   ASSERT_TRUE(older.has_value());
   EXPECT_FALSE(older.value().has_call_census);
+  // The census is missing whatever the status: a Complete function, or a Partial one without
+  // notes, of an older CLI has no list either.
+  auto complete_only = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
+  ASSERT_TRUE(complete_only.has_value());
+  EXPECT_FALSE(complete_only.value().has_call_census);
+  auto without_notes = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Partial"}]})");
+  ASSERT_TRUE(without_notes.has_value());
+  EXPECT_FALSE(without_notes.value().has_call_census);
+  // An entry that was never lifted carries no list and does not make the census absent.
+  auto unlifted = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Unsupported"},
+                             {"address": "0x20", "status": "Complete", "notes": [],
+                              "unresolved_calls": []}]})");
+  ASSERT_TRUE(unlifted.has_value());
+  EXPECT_TRUE(unlifted.value().has_call_census);
 }
 
 TEST(R1, NormalisesNotes) {

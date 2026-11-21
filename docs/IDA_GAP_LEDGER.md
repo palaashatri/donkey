@@ -2124,7 +2124,7 @@ Before more G21 work, the R1 measurement counts why each call stays without argu
 On the unstripped R1 builds at `c655bdf`, 3,044 Partial functions have an unresolved call as their only
 specific reason:
 
-- 2,471 are AArch64: 1,590 call only same-image functions, 786 also call imports, 95 call only imports.
+- 2,471 are AArch64: 1,603 call only same-image functions, 781 also call imports, 87 call only imports.
   No AArch64 call is resolved, whatever its callee.
 - 491 are x86-64 functions whose only blocker is a same-image callee that did not resolve.
 - 36 call only through a register, 20 through a register and a same-image callee.
