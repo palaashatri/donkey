@@ -182,7 +182,7 @@ P0 is the most important, P3 the least.
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries and the Mach-O `LC_FUNCTION_STARTS` table are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, Mach-O `__unwind_info` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 PARTIAL: `LC_FUNCTION_STARTS` read and fuzzed (fuzz_function_starts), `__unwind_info` TODO; T4, T5 TODO) |
-| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table; a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
+| G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table, and the ELF initialisation and termination functions (`DT_INIT`, `DT_FINI`, the init, fini and preinit arrays, `.init` and `.fini`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
 | G25 | Language runtimes (Go, Rust, Objective-C, Swift) | Runtime metadata and demangling for each | None | P1 | TODO |
 | G26 | Processor strategy | Dozens of processors (Ghidra: through SLEIGH) | Three lifted instruction sets, four more decoded only (G13) | P1 | BLOCKED [owner decision] after the T0 spike |
 | G27 | Emulation | Appcall, emulator plug-ins (Ghidra: p-code emulator) | The IR interpreter runs in tests only | P2 | TODO |
@@ -2823,6 +2823,37 @@ precision of function starts both at least 98%.
 
 **Pitfalls.** Recall bought with false functions is worse than a gap. Measure
 precision in the same run.
+
+**Initialisation and termination functions (2026-11-21).** G20-T2's R1 measurement found 109 missed starts in the
+stripped builds. In every glibc build they were the C runtime's `_init`, `_fini`, `frame_dummy`,
+`register_tm_clones` and `__do_global_dtors_aux`, functions the loader or the runtime calls and no call in the
+image reaches.
+
+`read_init_fini_of_image` (`src/binary/init_fini.cpp`) reads two sources and takes their union:
+
+- `DT_INIT`, `DT_FINI`, and the init, fini and preinit arrays with their `*SZ` sizes;
+- the `.init`, `.fini`, `.init_array`, `.fini_array` and `.preinit_array` sections, which a static image has
+  without a dynamic table.
+
+An array entry takes its `R_*_RELATIVE` addend when a relocation covers it, and otherwise the file's bytes. An
+entry with a symbolic relocation is skipped, and so are 0 and -1. An entry that cannot be read makes the
+analysis Partial. Each start found is seeded and marked `from_init_fini`.
+
+On R1, the missed starts fell from 109 to 71:
+
+- the glibc AArch64 builds now miss none;
+- each glibc x86-64 build still misses `register_tm_clones`, which `frame_dummy` reaches by a tail jump;
+- static musl misses 65 assembly functions.
+
+Unstripped, 2,108 of 15,856 functions are Complete (2,107 of 15,855 before; the one function added is
+Complete). The 3 extra starts of static musl are `_start`, `_init` and `_fini`. musl's assembly gives them
+NOTYPE symbols, so the FUNC-only ground truth does not count them.
+
+Tests: `InitFini.ReadsTagsSectionsAndRelocatedArrays`, `InitFini.AnotherFormatHasNone` and
+`Analysis.ElfInitAndFiniFunctionsAreSeeded`.
+
+Not covered: an image without section headers. Both the dynamic table and the arrays are found through
+sections, not through `PT_DYNAMIC`.
 
 #### G24-T0 task-level plan (written 2026-11-15, before any G24-T3 code)
 

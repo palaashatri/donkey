@@ -85,6 +85,7 @@ add_library(donkey_binary STATIC
   src/binary/dwarf.cpp
   src/binary/eh_frame.cpp
   src/binary/function_starts.cpp
+  src/binary/init_fini.cpp
   src/binary/elf.cpp
   src/binary/image.cpp
   src/binary/isolation.cpp

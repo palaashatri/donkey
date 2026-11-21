@@ -3,6 +3,7 @@
 #include "donkey/analysis/no_return.h"
 #include "donkey/binary/eh_frame.h"
 #include "donkey/binary/function_starts.h"
+#include "donkey/binary/init_fini.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
 
@@ -763,6 +764,28 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.partial = true;
     result.diagnostics.push_back(listed.diagnostic());
   }
+  // ELF initialisation and termination functions (G24): called by the loader or the C runtime,
+  // so no call in the image reaches them (`_init`, `_fini`, `frame_dummy`, ...). An entry that
+  // cannot be read may leave one out, so the result is then Partial.
+  std::set<std::uint64_t> init_fini_starts;
+  {
+    const InitFiniStarts init_fini = read_init_fini_of_image(image, file);
+    for (const std::uint64_t start : init_fini.starts) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        init_fini_starts.insert(start);
+      }
+    }
+    if (init_fini.unreadable > 0) {
+      result.partial = true;
+      result.diagnostics.push_back(Diagnostic::make(
+          Status::Partial, "analysis.init_fini_incomplete",
+          std::to_string(init_fini.unreadable) +
+              " initialisation or termination entries could not be read; the functions they "
+              "name may be missing",
+          std::nullopt));
+    }
+  }
   // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
   if (auto pdata = read_pdata_of_image(image, file); pdata) {
     for (const PdataFunction& frame : pdata.value().functions) {
@@ -836,6 +859,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     seed.from_symbol = named.count(address) != 0;
     seed.from_unwind = unwind_starts.count(address) != 0;
     seed.from_function_starts = table_starts.count(address) != 0;
+    seed.from_init_fini = init_fini_starts.count(address) != 0;
     if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
       seed.name = symbol->second->name;
       seed.exported = symbol->second->exported;

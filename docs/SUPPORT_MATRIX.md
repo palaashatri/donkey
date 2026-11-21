@@ -19,6 +19,18 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   match `llvm-objdump --macho --function-starts`; `Analysis.MachOFunctionStartsSeedAStrippedBinary`,
   `cli.functions_marks_function_starts`). Fuzzed (`fuzz_function_starts`, 60 s, 10.4 million runs,
   clean; `tests/fuzz/corpus/function_starts`). `__unwind_info` is not read yet.
+- ELF initialisation and termination functions (G24): `DT_INIT`, `DT_FINI`, the entries of
+  `DT_INIT_ARRAY`, `DT_FINI_ARRAY` and `DT_PREINIT_ARRAY` (and of the matching sections), and the
+  starts of `.init` and `.fini` seed functions, marked `from_init_fini`. An array entry takes its
+  `R_*_RELATIVE` addend when a relocation covers it, and an entry with a symbolic relocation is
+  skipped (`InitFini.*`, `Analysis.ElfInitAndFiniFunctionsAreSeeded`). On the stripped R1 builds,
+  the missed starts fell from 109 to 71:
+  - every start of the glibc AArch64 builds is found;
+  - each glibc x86-64 build still misses `register_tm_clones`, which `frame_dummy` reaches by a tail
+    jump;
+  - static musl still misses 65 assembly functions.
+  The 3 extra starts of static musl are `_start`, `_init` and `_fini`. musl's assembly gives them
+  NOTYPE symbols, which the FUNC-only ground truth does not count.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into
