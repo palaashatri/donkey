@@ -275,3 +275,23 @@ TEST(Analysis, MachOFunctionStartsSeedAStrippedBinary) {
     }
   }
 }
+
+// The Mach-O header at the start of __TEXT lies in the executable segment but in no section. The
+// exported `__mh_execute_header` symbol names it; it is a header, not a function.
+TEST(Analysis, TheMachOHeaderIsNotAFunction) {
+  for (const std::string& path : {fixture("starts_x86_64"), fixture("starts_arm64"),
+                                  std::string(DONKEY_FIXTURE_DIR) + "/dsym/dbg"}) {
+    auto loaded = donkey::load_binary(path);
+    ASSERT_TRUE(loaded.has_value()) << path;
+    const auto& symbols = loaded.value().image.symbols;
+    const auto header = std::find_if(symbols.begin(), symbols.end(), [](const donkey::Symbol& s) {
+      return s.name == "__mh_execute_header";
+    });
+    ASSERT_NE(header, symbols.end()) << path;
+    auto analysis = donkey::analyze(loaded.value().image, loaded.value().data);
+    ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+    for (const donkey::Function& function : analysis.value().functions) {
+      EXPECT_NE(function.address, header->address) << path << " " << function.name;
+    }
+  }
+}
