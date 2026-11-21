@@ -2392,7 +2392,7 @@ where the import is shown to bind to a file the library describes:
   the table its id is written into. A type library field with a NUL is refused. The migration race test uses a
   hook at the lock request instead of a sleep.
 - PE: a thunk's DLL and ordinal flag come from the IAT slot it jumps through (`Function::import_slot`), not its name.
-- Merge: collision comparison stops at a depth of 256 (`CollisionComparisonDepthIsBounded`). Generator: a tag
+- Merge: collision comparison stops at a depth of 128 (frame sizes measured for GCC and Clang, x86-64 and AArch64) (`CollisionComparisonDepthIsBounded`). Generator: a tag
   named like an assembler-labelled function is kept (`ATagNamedLikeALabelledFunctionIsKept`).
   `expect_refusal.cmake` rejects a crash or timeout.
 - Kept as it is: a v8 struct or union with no size and no members becomes incomplete in v9. v8 stored a

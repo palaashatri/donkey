@@ -58,12 +58,15 @@ class ShapeComparer {
  private:
   static constexpr std::size_t kBudget = 100'000;
   /// How deep one comparison recurses (a chain of pointers, typedefs and members); past it the two
-  /// are not shown to be the same. Each level is one `same` and one `same_definition` frame:
-  /// measured with GCC 13 `-fstack-usage` on x86-64, 176 bytes at -O3, 240 at -O0 and 544 at -O0
-  /// with ASan. 256 levels are then at most 45 KiB in a release build and 139 KiB under ASan,
-  /// inside the smallest default stack of a thread Donkey runs on (512 KiB, macOS secondary
-  /// threads).
-  static constexpr std::size_t kMaxDepth = 256;
+  /// are not shown to be the same. Each level is one `same` and one `same_definition` frame,
+  /// measured with `-fstack-usage` (bytes per level):
+  ///   GCC 13 x86-64:     176 at -O3, 240 at -O0, 544 at -O0 with ASan
+  ///   Clang 18 x86-64:    96 at -O3, 368 at -O0, 1056 at -O0 with ASan
+  ///   Clang 18 AArch64:  160 at -O3, 400 at -O0, 1440 at -O0 with ASan
+  /// 128 levels are then at most 20 KiB in a release build and 180 KiB in the worst ASan build,
+  /// with room for the caller's frames inside the smallest default stack of a thread Donkey runs on
+  /// (512 KiB, macOS secondary threads; the CLI merges on its main thread, 8 MiB).
+  static constexpr std::size_t kMaxDepth = 128;
 
   bool same(TypeId a, TypeId b) {
     if (!a.valid() || !b.valid()) {
