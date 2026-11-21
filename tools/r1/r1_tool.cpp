@@ -59,7 +59,9 @@ bool read_file(const fs::path& path, std::string& out) {
 bool write_file(const fs::path& path, const std::string& text) {
   std::ofstream out(path, std::ios::binary | std::ios::trunc);
   out << text;
-  return static_cast<bool>(out);
+  // Closing flushes the buffer; a write that fails there must fail the run too.
+  out.close();
+  return !out.fail();
 }
 
 std::string quote(const std::string& text) {
@@ -111,6 +113,14 @@ std::string notes_json(const std::map<std::string, std::size_t>& counts) {
     out += (first ? "" : ", ") + std::string("{\"note\": ") + quote(note) +
            ", \"functions\": " + std::to_string(count) + "}";
     first = false;
+  }
+  return out + "]";
+}
+
+std::string string_array(const std::vector<std::string>& items) {
+  std::string out = "[";
+  for (std::size_t i = 0; i < items.size(); ++i) {
+    out += (i == 0 ? "" : ", ") + quote(items[i]);
   }
   return out + "]";
 }
@@ -220,9 +230,22 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
         ", \"unsupported\": " + std::to_string(measured.unsupported) +
         ", \"invalid_ir\": " + std::to_string(measured.invalid_ir) +
         ", \"has_notes\": " + (measured.has_notes ? "true" : "false") +
+        ", \"analysis_partial\": " + (measured.analysis_partial ? "true" : "false") +
+        ", \"analysis_notes\": " + string_array(measured.analysis_notes) +
+        ", \"starts_may_be_missing\": " + (measured.starts_may_be_missing ? "true" : "false") +
         ", \"starts\": " + starts_json + ", \"unexplained_partial\": " + unexplained +
         ", \"first_notes\": " + notes_json(measured.first_notes) +
         ", \"all_notes\": " + notes_json(measured.all_notes) + "}";
+    if (!measured.error && measured.starts_may_be_missing) {
+      std::string codes;
+      for (const std::string& code : measured.analysis_notes) {
+        if (!donkey::r1::leaves_starts_complete(code)) {
+          codes += (codes.empty() ? "" : ", ") + code;
+        }
+      }
+      starts_cell += (starts_cell.empty() ? "" : "; ") + std::string("starts may be missing: ") +
+                     table_cell(codes);
+    }
     rows += "| `" + binary.file + "` | " +
             (measured.error
                  ? "error: " + table_cell(measured.error_reason) + " | | | | | |"

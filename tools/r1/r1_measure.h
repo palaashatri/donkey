@@ -61,11 +61,28 @@ struct Measure {
   bool has_notes = true;
   /// The function starts the decompile run found.
   std::set<std::uint64_t> starts;
+  /// The analysis was Partial, and the codes of its diagnostics (none is a resource limit: such
+  /// an output is refused).
+  bool analysis_partial = false;
+  std::vector<std::string> analysis_notes;
+  /// One of `analysis_notes` may leave function starts out (see `leaves_starts_complete`): the
+  /// counts of this binary may miss functions, and its starts comparison may miss starts.
+  bool starts_may_be_missing = false;
 };
 
 /// Counts one decompile output. A missing `notes` array is accepted (`has_notes` is false); a
-/// malformed document, or one without `functions`, is refused (`r1.bad_decompile`).
+/// malformed document, one without `functions`, one truncated by --max-functions, and one whose
+/// analysis stopped at a resource limit (see `is_resource_limit`) are refused (`r1.bad_decompile`).
 [[nodiscard]] Result<Measure> measure_decompile(std::string_view file, std::string_view json);
+
+/// An analysis diagnostic that means the analysis stopped early, so functions may be missing:
+/// `analysis.instruction_limit`, `analysis.block_limit` and `analysis.traversal_limit`.
+[[nodiscard]] bool is_resource_limit(std::string_view code);
+
+/// True for an analysis diagnostic known to leave function discovery whole
+/// (`analysis.no_return_unverified`). Any other one, such as `analysis.eh_frame_incomplete` or a
+/// reader's refusal of a start table, may leave starts out; an unknown code is taken to.
+[[nodiscard]] bool leaves_starts_complete(std::string_view code);
 
 /// The notes that every function of an architecture carries, and so explain nothing: "x86-64
 /// subset; locals are not recovered" and the like, and "signature inferred from ...".

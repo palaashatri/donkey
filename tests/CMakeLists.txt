@@ -1490,6 +1490,13 @@ add_test(NAME cli.decompile_no_pseudocode
 set_tests_properties(cli.decompile_no_pseudocode PROPERTIES
   PASS_REGULAR_EXPRESSION "\"status\": \"Partial\".*\"notes\": \\[\"[^]]*\\], \"unsupported\": \\[[^]]*\\]}"
   FAIL_REGULAR_EXPRESSION "pseudocode\"|source_map")
+# The analysis's own state is stated: here a run stopped by --max-instructions says so, so a reader
+# (donkey-r1 measure) can tell a function list that may be missing functions.
+add_test(NAME cli.decompile_json_reports_an_analysis_limit
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --no-pseudocode
+                 --max-instructions 4)
+set_tests_properties(cli.decompile_json_reports_an_analysis_limit PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"analysis_partial\": true,[ \n]*\"analysis_diagnostics\": \\[[^]]*\"analysis\\.instruction_limit\"")
 add_test(NAME cli.decompile_no_pseudocode_needs_json
          COMMAND ${CMAKE_COMMAND}
                  "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;decompile;${DONKEY_MUSL_PROGRAM};--no-pseudocode"

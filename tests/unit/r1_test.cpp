@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "donkey/binary/image.h"
 #include "r1_measure.h"
@@ -134,6 +135,48 @@ TEST(R1, RefusesUnusableDecompileOutput) {
     ASSERT_FALSE(measured.has_value()) << bad;
     EXPECT_EQ(measured.diagnostic().code, "r1.bad_decompile") << bad;
   }
+}
+
+// An analysis that stopped at a resource limit may have missed functions: its output is not a
+// whole-binary measurement. Other analysis diagnostics are recorded and the output is counted.
+TEST(R1, RefusesAnAnalysisStoppedAtALimit) {
+  for (const char* code :
+       {"analysis.instruction_limit", "analysis.block_limit", "analysis.traversal_limit"}) {
+    const std::string text =
+        std::string(R"({"analysis_partial": true, "analysis_diagnostics": [")") + code +
+        R"("], "functions": []})";
+    auto measured = donkey::r1::measure_decompile("b", text);
+    ASSERT_FALSE(measured.has_value()) << code;
+    EXPECT_EQ(measured.diagnostic().code, "r1.bad_decompile");
+    EXPECT_NE(measured.diagnostic().message.find(code), std::string::npos);
+  }
+  auto measured = donkey::r1::measure_decompile(
+      "b", R"({"analysis_partial": true, "analysis_diagnostics": ["analysis.eh_frame_incomplete"],
+               "functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
+  ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
+  EXPECT_TRUE(measured.value().analysis_partial);
+  EXPECT_EQ(measured.value().analysis_notes,
+            (std::vector<std::string>{"analysis.eh_frame_incomplete"}));
+  EXPECT_EQ(measured.value().complete, 1U);
+  // An unreadable start table may leave functions out: counted, and marked.
+  EXPECT_TRUE(measured.value().starts_may_be_missing);
+}
+
+// Only the diagnostic known to leave discovery whole is unmarked; an unknown one is marked.
+TEST(R1, MarksAnalysesThatMayMissStarts) {
+  using donkey::r1::leaves_starts_complete;
+  EXPECT_TRUE(leaves_starts_complete("analysis.no_return_unverified"));
+  for (const char* code : {"analysis.eh_frame_incomplete", "analysis.pdata_incomplete",
+                           "analysis.init_fini_incomplete", "analysis.section_out_of_bounds",
+                           "analysis.decode_stopped", "unwind_info.bad_page",
+                           "function_starts.bad_offset", "analysis.something_new"}) {
+    EXPECT_FALSE(leaves_starts_complete(code)) << code;
+  }
+  auto measured = donkey::r1::measure_decompile(
+      "b", R"({"analysis_partial": true, "analysis_diagnostics": ["analysis.no_return_unverified"],
+               "functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
+  ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
+  EXPECT_FALSE(measured.value().starts_may_be_missing);
 }
 
 TEST(R1, NormalisesNotes) {

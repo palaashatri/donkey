@@ -1976,6 +1976,23 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
     out += "  \"shown_functions\": " + std::to_string(shown) + ",\n";
     out += "  \"max_functions\": " + std::to_string(request.max_functions) + ",\n";
     out += std::string("  \"truncated\": ") + (shown < selected.size() ? "true" : "false") + ",\n";
+    // The analysis's own state: a resource limit (`analysis.instruction_limit`, ...) means it
+    // stopped early, so functions may be missing from the list, not only cut by --max-functions.
+    out += std::string("  \"analysis_partial\": ") + (analysis.value().partial ? "true" : "false") +
+           ",\n";
+    {
+      std::set<std::string> codes;
+      for (const Diagnostic& diagnostic : analysis.value().diagnostics) {
+        codes.insert(diagnostic.code);
+      }
+      out += "  \"analysis_diagnostics\": [";
+      bool first_code = true;
+      for (const std::string& code : codes) {
+        out += (first_code ? "" : ", ") + quote(code);
+        first_code = false;
+      }
+      out += "],\n";
+    }
     out += "  \"functions\": [";
     std::size_t written = 0;
     for (const Function* function : selected) {
@@ -1988,7 +2005,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
                ", \"status\": \"Unsupported\", \"code\": " + quote(lifted.diagnostic().code) +
-               ", \"pseudocode\": null}";
+               (request.no_pseudocode ? std::string("}") : std::string(", \"pseudocode\": null}"));
         ++written;
         continue;
       }
@@ -1997,7 +2014,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         out += "    {\"address\": " + quote(hex(function->address)) +
                ", \"name\": " + quote(display_name(function->name)) +
                ", \"status\": \"InvalidIR\", \"code\": " + quote(pseudo_res.diagnostic().code) +
-               ", \"pseudocode\": null}";
+               (request.no_pseudocode ? std::string("}") : std::string(", \"pseudocode\": null}"));
         ++written;
         continue;
       }
