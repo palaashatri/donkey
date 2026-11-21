@@ -93,3 +93,66 @@ jobs:
         run: |
           find include src apps tests -type f \( -name '*.h' -o -name '*.cpp' \) \
             -print0 | xargs -0 clang-format --dry-run --Werror
+
+  # The R1 measurement and its ratchet (G20-T2, T3; tools/r1/README.md): fetch and build the real
+  # programs, decompile and measure every binary, and fail when a ratcheted count gets worse than
+  # tools/r1/baseline.json as it is at the base commit.
+  r1:
+    name: R1 measurement and ratchet
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The base commit's baseline, and its CLI when the bytes changed.
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install CMake, Ninja and the R1 toolchains
+        run: |
+          python -m pip install --upgrade cmake ninja
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross musl-tools
+      - name: Build donkey-cli and donkey-r1 (Release)
+        run: |
+          cmake -S . -B build/r1 -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DDONKEY_BUILD_TESTS=OFF -DDONKEY_BUILD_R1_TOOL=ON
+          cmake --build build/r1 --parallel --target donkey-cli donkey-r1
+      # A download that keeps failing ends here, as a fetch failure, never as a ratchet result.
+      - name: Fetch R1
+        run: cmake -DR1_WORK="$RUNNER_TEMP/r1" -DR1_STEP=fetch -P tools/r1/build.cmake
+      - name: Build R1
+        run: cmake -DR1_WORK="$RUNNER_TEMP/r1" -DR1_STEP=build -P tools/r1/build.cmake
+      - name: Decompile R1
+        run: |
+          cmake -DR1_WORK="$RUNNER_TEMP/r1" -DDONKEY_CLI="$PWD/build/r1/apps/donkey-cli/donkey-cli" \
+            -DOUT="$RUNNER_TEMP/r1-out/decompiled" -P tools/r1/decompile.cmake
+      # Exit status 2 means some binary had an error; the ratchet counts errors, so go on.
+      - name: Measure R1
+        run: |
+          status=0
+          build/r1/donkey-r1 measure "$RUNNER_TEMP/r1" "$RUNNER_TEMP/r1-out/decompiled" \
+            "$RUNNER_TEMP/r1-out/result.json" "$RUNNER_TEMP/r1-out/table.md" || status=$?
+          cat "$RUNNER_TEMP/r1-out/table.md" >> "$GITHUB_STEP_SUMMARY"
+          test "$status" -eq 0 || test "$status" -eq 2
+      - name: Ratchet
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # A new branch's first push has no previous commit: compare with its parent.
+          if [ -z "$BASE" ] || [ "$BASE" = 0000000000000000000000000000000000000000 ] || \
+             ! git cat-file -e "$BASE^{commit}" 2> /dev/null; then
+            BASE=$(git rev-parse HEAD~1)
+          fi
+          echo "r1: the base commit is $BASE"
+          sh tools/r1/ci-check.sh "$BASE" "$RUNNER_TEMP/r1" build/r1 "$RUNNER_TEMP/r1-out"
+      - name: Upload the R1 result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r1-result
+          path: |
+            ${{ runner.temp }}/r1-out/*.json
+            ${{ runner.temp }}/r1-out/*.md
+          if-no-files-found: ignore

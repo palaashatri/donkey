@@ -270,7 +270,7 @@ add_subdirectory(apps/donkey-cli)
 # The R1 measurement (G20-T2): a developer tool, built for the tests and the r1 CI job, never
 # installed or packaged.
 if(DONKEY_BUILD_R1_TOOL)
-  add_library(donkey_r1 STATIC tools/r1/r1_measure.cpp)
+  add_library(donkey_r1 STATIC tools/r1/r1_measure.cpp tools/r1/r1_ratchet.cpp)
   target_include_directories(donkey_r1 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/r1)
   target_link_libraries(donkey_r1 PUBLIC donkey::binary)
   donkey_apply_warnings(donkey_r1)

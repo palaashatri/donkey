@@ -196,7 +196,7 @@ target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donke
 # G20-T2: the R1 measurement library, and a shared library with an IFUNC symbol (ELF hosts with GCC
 # or Clang) whose symbols the R1 ground truth is compared with readelf on.
 if(TARGET donkey_r1)
-  target_sources(donkey_unit_tests PRIVATE unit/r1_test.cpp)
+  target_sources(donkey_unit_tests PRIVATE unit/r1_test.cpp unit/r1_ratchet_test.cpp)
   target_link_libraries(donkey_unit_tests PRIVATE donkey_r1)
   if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     add_library(donkey_r1_ifunc SHARED r1/ifunc_lib.c)

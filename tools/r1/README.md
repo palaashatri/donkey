@@ -29,8 +29,9 @@ The builds use the distribution's default flags (PIE, `-fstack-protector-strong`
 plus `-g` and `-ffile-prefix-map`. With the same compiler, the same inputs give the same bytes in any
 directory. That was checked by building twice in two directories and comparing all 26 SHA-256 values.
 
-On Ubuntu 24.04 the build needs the `gcc`, `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu` and
-`musl-tools` packages.
+On Ubuntu 24.04 the build needs the `gcc`, `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`,
+`libc6-dev-arm64-cross` and `musl-tools` packages. `gcc-aarch64-linux-gnu` only recommends
+`libc6-dev-arm64-cross` (the AArch64 glibc headers), so an install with `--no-install-recommends` must name it.
 
 ## Use
 
@@ -78,6 +79,45 @@ when the output was cut by `--max-functions`, or when the analysis stopped at a 
 (`analysis.instruction_limit` and the like), since functions may then be missing. Other analysis
 diagnostics are recorded with the binary. Each one except `analysis.no_return_unverified` also marks the binary
 `starts_may_be_missing`, and the table says so. The exit status is 2 when any binary has no usable output.
+
+## The ratchet (G20-T3)
+
+`baseline.json` holds, for each of the 26 binaries, the counts that may only get better: Complete,
+Unsupported, InvalidIR, whether the measurement had an error, and, for a stripped binary, the function
+starts it missed. Each entry also records the compiler and the binary's SHA-256, because the counts
+describe those bytes only. The `r1` job of `.github/workflows/ci.yml` runs the whole measurement on
+`ubuntu-24.04` and then `tools/r1/ci-check.sh`, which applies these rules:
+
+- The reference is `baseline.json` as it is at the base commit (the pull request's base, or the
+  previous commit on a push), never the file in the change. A change cannot lower the bar it is
+  checked against.
+- The check fails when, for any binary, Complete drops, or Unsupported, InvalidIR, an error or the
+  missed starts rise. A count that gets better passes and is printed.
+- A change that edits `baseline.json` must make it equal to the counts the job measured. A change
+  that improves a count re-records it:
+
+  ```bash
+  build/release-headless/donkey-r1 baseline r1-result.json tools/r1/baseline.json
+  ```
+
+- A binary whose SHA-256 differs from its baseline entry (a new compiler on the runner, or a change
+  to a source, a flag or the manifest), and a binary the baseline does not list, are compared with
+  the base commit's `donkey-cli`. The script builds it in a worktree and measures the same bytes with
+  it. A drop still fails. A pass warns that the baseline is out of date.
+- A binary in the baseline that is no longer measured fails the check, unless the change
+  re-records the baseline without it.
+
+The check by itself:
+
+```bash
+build/release-headless/donkey-r1 check r1-result.json --baseline <base baseline.json, or none> --head-baseline tools/r1/baseline.json [--base-result base-result.json]
+```
+
+Its exit status is 0 when the check passes and 3 when it fails. It is 4 when a base measurement is
+needed and was not given. With `--baseline none` (a base commit without the file) every binary needs one.
+
+The script runs the base commit's CLI with this checkout's `decompile.cmake`, so the base commit
+must have `--no-pseudocode` (G20-T2). Every commit with a baseline has it.
 
 `binaries.json` records the provenance of each binary that `docs/DESIGN.md` §11.5 asks for:
 

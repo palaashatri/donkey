@@ -1,6 +1,9 @@
-// donkey-r1 (G20-T2): the R1 measurement.
+// donkey-r1 (G20-T2, T3): the R1 measurement and its ratchet.
 //
 //   donkey-r1 measure <work-dir> <decompile-dir> <result.json> <table.md>
+//   donkey-r1 baseline <result.json> <baseline.json>
+//   donkey-r1 check <result.json> --baseline <file|none> [--head-baseline <file>]
+//                   [--base-result <file>]
 //
 // <work-dir> is the R1_WORK of tools/r1/build.cmake: it holds binaries.json and out/. For each
 // binary B listed there, <decompile-dir>/B.json is the output of
@@ -9,9 +12,18 @@
 // the reasons of the Partial ones, and for a stripped binary the starts found against the function
 // symbols of its unstripped twin. The exit status is 0 when every binary was measured, 2 when one
 // or more had an error (both outputs are written either way), and 1 when the tool could not run.
+//
+// `baseline` writes the ratchet's baseline (tools/r1/baseline.json) from a result. `check` checks a
+// result against the baseline of the base commit (`--baseline`; `none` when the base commit has
+// none yet) under the rules of r1_ratchet.h. `--head-baseline` is the baseline file of the change:
+// when it differs from the base commit's, it must equal the counts measured. `--base-result` is
+// the base commit's CLI measured on the same R1 binaries, for the binaries whose bytes the baseline
+// does not describe. The exit status is 0 when the check passes, 3 when it fails, 4 when it needs
+// a base measurement it was not given (and nothing failed), and 1 when it could not run.
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -24,6 +36,7 @@
 
 #include "donkey/binary/image.h"
 #include "r1_measure.h"
+#include "r1_ratchet.h"
 
 namespace {
 
@@ -275,18 +288,195 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
   return errors == 0 ? 0 : 2;
 }
 
+using donkey::r1::Counts;
+
+/// Prints a line, as a GitHub annotation when run in GitHub Actions.
+void report(const char* level, const std::string& text) {
+  if (std::getenv("GITHUB_ACTIONS") != nullptr) {
+    std::printf("::%s::%s\n", level, text.c_str());
+  } else {
+    std::printf("%s: %s\n", level, text.c_str());
+  }
+}
+
+bool read_counts(const fs::path& path, bool baseline, std::vector<Counts>& out) {
+  std::string text;
+  if (!read_file(path, text)) {
+    std::fprintf(stderr, "donkey-r1: cannot read %s\n", path.string().c_str());
+    return false;
+  }
+  auto read = baseline ? donkey::r1::read_baseline(text) : donkey::r1::read_result_counts(text);
+  if (!read) {
+    std::fprintf(stderr, "donkey-r1: %s: %s\n", path.string().c_str(),
+                 read.diagnostic().message.c_str());
+    return false;
+  }
+  out = std::move(read.value());
+  return true;
+}
+
+int write_baseline_file(const fs::path& result_path, const fs::path& baseline_path) {
+  std::vector<Counts> counts;
+  if (!read_counts(result_path, false, counts)) {
+    return 1;
+  }
+  if (!write_file(baseline_path, donkey::r1::write_baseline(counts))) {
+    std::fprintf(stderr, "donkey-r1: cannot write %s\n", baseline_path.string().c_str());
+    return 1;
+  }
+  std::printf("donkey-r1: wrote the baseline of %zu binaries\n", counts.size());
+  return 0;
+}
+
+int check(const fs::path& result_path, const std::string& baseline_arg,
+          const std::string& head_baseline_arg, const std::string& base_result_arg) {
+  std::vector<Counts> head;
+  if (!read_counts(result_path, false, head)) {
+    return 1;
+  }
+  const bool have_baseline = baseline_arg != "none";
+  std::vector<Counts> baseline;
+  if (have_baseline && !read_counts(baseline_arg, true, baseline)) {
+    return 1;
+  }
+  std::vector<Counts> base_measured;
+  if (!base_result_arg.empty() && !read_counts(base_result_arg, false, base_measured)) {
+    return 1;
+  }
+  bool failed = false;
+  donkey::r1::CheckOutcome outcome;
+  // With no base baseline every binary is new to it, so each is compared with the base commit's
+  // CLI on the same bytes (`--base-result`), or the check asks for that measurement.
+  if (!have_baseline) {
+    report("warning",
+           "the base commit has no R1 baseline: binaries are compared with the base CLI");
+  }
+  outcome = donkey::r1::check(baseline, head, base_result_arg.empty() ? nullptr : &base_measured);
+
+  // The change's own baseline: unchanged, or exactly what was measured.
+  bool baseline_rerecorded = false;
+  if (!head_baseline_arg.empty()) {
+    std::vector<Counts> proposed;
+    if (!read_counts(head_baseline_arg, true, proposed)) {
+      return 1;
+    }
+    if (!have_baseline || proposed != baseline) {
+      if (proposed == head) {
+        baseline_rerecorded = true;
+        report("notice",
+               "the change re-records the R1 baseline, and it equals the counts measured");
+      } else {
+        failed = true;
+        report("error",
+               "the change edits tools/r1/baseline.json, but it does not equal the counts "
+               "measured; the measured baseline follows");
+      }
+    }
+  }
+  for (const std::string& file : outcome.removed) {
+    if (baseline_rerecorded) {
+      report("warning", file + ": no longer measured, and the re-recorded baseline drops it");
+    } else {
+      failed = true;
+      report("error", file +
+                          ": in the baseline but no longer measured; a change that drops a binary "
+                          "re-records the baseline");
+    }
+  }
+  for (const std::string& line : outcome.regressions) {
+    report("error", line);
+  }
+  for (const std::string& line : outcome.improvements) {
+    report("notice", line + "; re-record the baseline with donkey-r1 baseline");
+  }
+  if (baseline_rerecorded && !outcome.warnings.empty()) {
+    // The change re-records the baseline, and it equals what was measured: the stale entries are
+    // the ones it replaces.
+    report("notice", std::to_string(outcome.warnings.size()) +
+                         " binaries had no current baseline entry; the change records them");
+  } else {
+    for (const std::string& line : outcome.warnings) {
+      report("warning", line);
+    }
+  }
+  failed = failed || outcome.failed();
+  const bool stale = !outcome.improvements.empty() || !outcome.warnings.empty() ||
+                     !outcome.removed.empty() || !have_baseline;
+  if ((failed || stale) && !baseline_rerecorded) {
+    std::printf("donkey-r1: the baseline of what was measured:\n%s",
+                donkey::r1::write_baseline(head).c_str());
+  }
+  if (failed) {
+    std::printf("donkey-r1: the R1 ratchet failed\n");
+    return 3;
+  }
+  if (!outcome.needs_base.empty()) {
+    if (!base_result_arg.empty()) {
+      for (const std::string& file : outcome.needs_base) {
+        report("error", file + ": the base measurement does not cover these bytes");
+      }
+      return 3;
+    }
+    std::printf("donkey-r1: a base measurement is needed for %zu binaries:\n",
+                outcome.needs_base.size());
+    for (const std::string& file : outcome.needs_base) {
+      std::printf("  %s\n", file.c_str());
+    }
+    return 4;
+  }
+  std::printf("donkey-r1: the R1 ratchet passed (%zu binaries)\n", head.size());
+  return 0;
+}
+
+int usage() {
+  std::fprintf(stderr,
+               "usage: donkey-r1 measure <work-dir> <decompile-dir> <result.json> <table.md>\n"
+               "       donkey-r1 baseline <result.json> <baseline.json>\n"
+               "       donkey-r1 check <result.json> --baseline <file|none> "
+               "[--head-baseline <file>] [--base-result <file>]\n");
+  return 1;
+}
+
+int run(int argc, char** argv) {
+  const std::vector<std::string> args(argv + 1, argv + argc);
+  if (args.size() == 5 && args[0] == "measure") {
+    return measure(args[1], args[2], args[3], args[4]);
+  }
+  if (args.size() == 3 && args[0] == "baseline") {
+    return write_baseline_file(args[1], args[2]);
+  }
+  if (args.size() >= 2 && args[0] == "check") {
+    std::string baseline;
+    std::string head_baseline;
+    std::string base_result;
+    for (std::size_t i = 2; i < args.size(); i += 2) {
+      if (i + 1 >= args.size()) {
+        return usage();
+      }
+      std::string* target = args[i] == "--baseline"        ? &baseline
+                            : args[i] == "--head-baseline" ? &head_baseline
+                            : args[i] == "--base-result"   ? &base_result
+                                                           : nullptr;
+      if (target == nullptr || !target->empty() || args[i + 1].empty()) {
+        return usage();
+      }
+      *target = args[i + 1];
+    }
+    if (baseline.empty()) {
+      return usage();
+    }
+    return check(args[1], baseline, head_baseline, base_result);
+  }
+  return usage();
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc == 6 && std::string(argv[1]) == "measure") {
-    try {
-      return measure(argv[2], argv[3], argv[4], argv[5]);
-    } catch (const std::exception& error) {
-      std::fprintf(stderr, "donkey-r1: %s\n", error.what());
-      return 1;
-    }
+  try {
+    return run(argc, argv);
+  } catch (const std::exception& error) {
+    std::fprintf(stderr, "donkey-r1: %s\n", error.what());
+    return 1;
   }
-  std::fprintf(stderr,
-               "usage: donkey-r1 measure <work-dir> <decompile-dir> <result.json> <table.md>\n");
-  return 1;
 }

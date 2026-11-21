@@ -225,6 +225,11 @@ function discovery whole. `measure` marks a binary whose analysis gave any other
 `.eh_frame`, `.pdata`, start table or init array, for example) as one whose starts may be missing; no R1 binary
 is marked.
 
+The counts are ratcheted (G20-T3). `tools/r1/baseline.json` records, for each binary, Complete, Unsupported,
+InvalidIR, errors and the missed starts of the stripped copies. The `r1` CI job measures R1 again on every push
+and pull request. It fails when any of these gets worse than the base commit's baseline (`R1Ratchet.*`, and
+`tools/r1/ci-check.sh` on both of its paths, run locally).
+
 Unstripped builds, totals:
 
 - x86-64: 1,269 of 8,406 functions are Complete (15.1%).
