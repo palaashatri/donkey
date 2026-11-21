@@ -345,11 +345,13 @@ int check(const fs::path& result_path, const std::string& baseline_arg,
   }
   bool failed = false;
   donkey::r1::CheckOutcome outcome;
-  if (have_baseline) {
-    outcome = donkey::r1::check(baseline, head, base_result_arg.empty() ? nullptr : &base_measured);
-  } else {
-    report("warning", "the base commit has no R1 baseline: nothing to compare with");
+  // With no base baseline every binary is new to it, so each is compared with the base commit's
+  // CLI on the same bytes (`--base-result`), or the check asks for that measurement.
+  if (!have_baseline) {
+    report("warning",
+           "the base commit has no R1 baseline: binaries are compared with the base CLI");
   }
+  outcome = donkey::r1::check(baseline, head, base_result_arg.empty() ? nullptr : &base_measured);
 
   // The change's own baseline: unchanged, or exactly what was measured.
   bool baseline_rerecorded = false;
@@ -387,8 +389,15 @@ int check(const fs::path& result_path, const std::string& baseline_arg,
   for (const std::string& line : outcome.improvements) {
     report("notice", line + "; re-record the baseline with donkey-r1 baseline");
   }
-  for (const std::string& line : outcome.warnings) {
-    report("warning", line);
+  if (baseline_rerecorded && !outcome.warnings.empty()) {
+    // The change re-records the baseline, and it equals what was measured: the stale entries are
+    // the ones it replaces.
+    report("notice", std::to_string(outcome.warnings.size()) +
+                         " binaries had no current baseline entry; the change records them");
+  } else {
+    for (const std::string& line : outcome.warnings) {
+      report("warning", line);
+    }
   }
   failed = failed || outcome.failed();
   const bool stale = !outcome.improvements.empty() || !outcome.warnings.empty() ||

@@ -121,6 +121,10 @@ void compare(const Counts& reference, const Counts& head, const std::string& aga
   // A stripped binary without missed starts has an error, which is counted above.
   if (reference.missed_starts && head.missed_starts) {
     lower_is_better("missed starts", *reference.missed_starts, *head.missed_starts);
+  } else if (reference.missed_starts && !head.error) {
+    // A stripped binary whose starts are no longer compared (its variant changed): the count the
+    // reference held can no longer be checked.
+    out.regressions.push_back(where + ": the missed starts are no longer measured");
   }
 }
 

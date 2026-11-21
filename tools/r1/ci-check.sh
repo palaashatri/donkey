@@ -17,7 +17,13 @@ head_build=$3
 out=$4
 r1="$head_build/donkey-r1"
 
-if git show "$base:tools/r1/baseline.json" > "$out/base-baseline.json" 2> /dev/null; then
+# A base that is not a commit is an error; only a commit without the file has no baseline.
+if ! git cat-file -e "$base^{commit}" 2> /dev/null; then
+  echo "r1: $base is not a commit" >&2
+  exit 1
+fi
+if git cat-file -e "$base:tools/r1/baseline.json" 2> /dev/null; then
+  git show "$base:tools/r1/baseline.json" > "$out/base-baseline.json"
   baseline="$out/base-baseline.json"
 else
   echo "r1: $base has no tools/r1/baseline.json"
@@ -34,6 +40,8 @@ fi
 
 echo "r1: building donkey-cli at the base commit $base to measure the same bytes"
 rm -rf "$out/base-src"
+# A worktree removed by an earlier run is still registered until pruned.
+git worktree prune
 git worktree add --detach "$out/base-src" "$base"
 cmake -S "$out/base-src" -B "$out/base-build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
   -DDONKEY_BUILD_TESTS=OFF -DDONKEY_BUILD_R1_TOOL=OFF

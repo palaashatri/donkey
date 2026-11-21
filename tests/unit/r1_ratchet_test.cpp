@@ -155,6 +155,29 @@ TEST(R1Ratchet, OtherBytesAreComparedWithTheBaseCliOnThoseBytes) {
   }
 }
 
+// A stripped binary measured as unstripped (its variant changed) no longer reports missed starts:
+// the reference's count can no longer be checked, which fails unless the measurement had an error.
+TEST(R1Ratchet, MissedStartsThatAreNoLongerMeasuredFail) {
+  const std::vector<Counts> baseline = {counts("a.stripped", 'a', 10, 3)};
+  std::vector<Counts> head = {counts("a.stripped", 'a', 10)};
+  auto outcome = donkey::r1::check(baseline, head);
+  EXPECT_TRUE(mentions(outcome.regressions, "missed starts are no longer measured"));
+  head[0].error = true;
+  outcome = donkey::r1::check(baseline, head);
+  EXPECT_FALSE(mentions(outcome.regressions, "missed starts are no longer measured"));
+  EXPECT_TRUE(mentions(outcome.regressions, "error"));
+}
+
+// With no base baseline, every binary is compared with the base CLI on the same bytes.
+TEST(R1Ratchet, WithoutABaselineTheBaseCliIsTheReference) {
+  const std::vector<Counts> head = {counts("a", 'a', 9)};
+  EXPECT_EQ(donkey::r1::check({}, head).needs_base, (std::vector<std::string>{"a"}));
+  const std::vector<Counts> same = {counts("a", 'a', 9)};
+  EXPECT_FALSE(donkey::r1::check({}, head, &same).failed());
+  const std::vector<Counts> better = {counts("a", 'a', 10)};
+  EXPECT_TRUE(donkey::r1::check({}, head, &better).failed());
+}
+
 TEST(R1Ratchet, ADroppedBinaryIsListed) {
   const std::vector<Counts> baseline = {counts("a", 'a', 10), counts("gone", 'g', 1)};
   const std::vector<Counts> head = {counts("a", 'a', 10)};

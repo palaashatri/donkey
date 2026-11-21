@@ -114,7 +114,7 @@ build/release-headless/donkey-r1 check r1-result.json --baseline <base baseline.
 ```
 
 Its exit status is 0 when the check passes and 3 when it fails. It is 4 when a base measurement is
-needed and was not given.
+needed and was not given. With `--baseline none` (a base commit without the file) every binary needs one.
 
 The script runs the base commit's CLI with this checkout's `decompile.cmake`, so the base commit
 must have `--no-pseudocode` (G20-T2). Every commit with a baseline has it.
