@@ -1862,16 +1862,19 @@ for every binary: the source, licence, compiler and version, flags, level, archi
     that binary. The identity is the first line of that compiler's `--version` (`gcc`, or
     `aarch64-linux-gnu-gcc` for AArch64) and its package version (`gcc-13`, `gcc-aarch64-linux-gnu`,
     `musl-tools`). A change to either compiler is therefore seen on the binaries it built.
-  - The ground truth for the stripped builds is the function symbols (`STT_FUNC`, with sizes) of the unstripped
-    twin. The T2 tool reads them through Donkey's own ELF reader (`donkey::load_binary`, `BinaryImage::symbols`);
-    the CLI has no symbol-listing command, and none is needed.
+  - The ground truth for the stripped builds is the defined function symbols, with sizes, of the unstripped twin:
+    every `SymbolKind::Function`. The ELF reader maps both `STT_FUNC` and `STT_GNU_IFUNC` to that kind
+    (`src/binary/elf.cpp`). Both are counted as starts, because an IFUNC symbol's value is the start of its
+    resolver, which is code.
+  - The T2 tool reads these symbols through Donkey's own ELF reader (`donkey::load_binary`,
+    `BinaryImage::symbols`). The CLI has no symbol-listing command, and none is needed.
   - Tests:
     - `cmake/checks/r1_build_refusals.cmake` runs `build.cmake` on two inputs: a source whose hash does not match,
       and a committed 1 KiB tar fixture with a `../escape` member (`tests/fixtures/r1/`, with provenance). It
       checks that both are refused.
     - `R1.ManifestSchema` (in `tests/unit/r1_test.cpp`) refuses unknown keys and a missing hash.
-    - `R1.SymbolsMatchReadelf` compares the symbol starts read from one corpus library with
-      `readelf -sW`.
+    - `R1.SymbolsMatchReadelf` compares, on one corpus library, the starts and sizes read through Donkey with the
+      `FUNC` and `IFUNC` rows of `readelf -sW`. The library is built with one IFUNC, so both types are covered.
 - **T2.** `tools/r1/r1_tool.cpp` (the C++20 program `donkey-r1`, built when `DONKEY_BUILD_R1_TOOL=ON`; its logic
   lives in a small library tested by `tests/unit/r1_test.cpp`), plus one change to the CLI.
   - The CLI change: `decompile --json` gains a `"notes"` array on each function, holding the lifter's notes in
@@ -1882,6 +1885,9 @@ for every binary: the source, licence, compiler and version, flags, level, archi
   - `donkey-r1 measure` reads those outputs with `donkey::parse_json`, with limits raised to the size of the
     largest output. For each function it records the status: Complete, Partial, Unsupported, InvalidIR, or error.
     An error means the process failed, timed out or wrote unreadable output, and is recorded for the whole binary.
+  - `measure` accepts output that has no `notes` array, such as the output of a CLI built before T2. Then it
+    reports no reasons. The ratchet counts (Complete, Unsupported, InvalidIR, error and missed starts) never
+    depend on notes, so a base CLI from before T2 can still be compared (see T3).
   - For each Partial function it records the first specific note and every note.
   - For each stripped binary it records the starts found, against the unstripped symbol starts: matched, missed
     and extra. That is G24's measure on R1.
@@ -1890,20 +1896,26 @@ for every binary: the source, licence, compiler and version, flags, level, archi
 - **T3.** The ratchet: `tools/r1/baseline.json` and `donkey-r1 check`.
   - The baseline holds counts for each binary (program, architecture, level, stripped or not): Complete,
     Unsupported, InvalidIR, error and missed starts. Each entry also records the identity of the compiler that
-    built that binary.
+    built that binary and the binary's SHA-256. The hash covers every build input at once: the source, the flags,
+    the manifest and the compiler.
+  - The check always compares against the baseline as it is at the base commit
+    (`git show <base>:tools/r1/baseline.json`), never against the file in the PR. A PR that edits the baseline
+    therefore cannot lower the bar it is checked against. When the PR also changes `baseline.json`, the check
+    verifies that the new file equals the counts the head measured.
   - The check fails when, for any binary, Complete drops, or Unsupported, InvalidIR, error or missed starts rise.
   - A count that improves passes and is printed. The PR that improves it runs `donkey-r1 check --update` and
     commits the new baseline.
-  - If a binary's compiler identity differs from its baseline entry (for example after a runner image update),
-    the stored counts describe other bytes, so a comparison has to be made on the same bytes. The job builds
+  - If a binary's SHA-256 differs from its entry in the base baseline, the stored counts describe other bytes, so
+    a comparison has to be made on the same bytes. That happens after a runner image update (a new compiler), or
+    in a PR that changes a source version, a flag or the manifest. The job builds
     `donkey-cli` from the base commit (the PR's base SHA, or the previous commit on a push to `main`) and
     measures the same freshly built R1 binaries with it. It then checks the head against that base under the
     rules above.
     - A drop still fails.
     - A pass prints that the baseline is out of date, as a warning annotation. The next PR re-records the
       baseline with `--update`, and says that it does.
-    - A compiler change therefore cannot hide a regression. Any compiler change makes the job longer by one
-      more CLI build.
+    - A change to the corpus or the compiler therefore cannot hide a regression. Such a change makes the job
+      longer by one more CLI build.
   - The CI job is a new `r1` job in `.github/workflows/ci.yml` on `ubuntu-24.04`, with `gcc-aarch64-linux-gnu`
     and `musl-tools` installed. It builds the Release headless CLI and `donkey-r1`, then runs these steps in
     order:
