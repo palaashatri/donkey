@@ -175,6 +175,54 @@ std::string normalise_note(std::string_view note) {
   return out;
 }
 
+namespace {
+
+const std::string kUnresolvedCallNote =
+    "outgoing call arguments and return values follow no modelled ABI";
+
+/// The call census of one Partial function (G21): its unresolved calls by kind, and, when the
+/// unresolved-call note is its only specific reason, the kinds and imports that keep it Partial.
+void count_unresolved_calls(const JsonValue& function, const std::set<std::string>& reasons,
+                            Measure& out) {
+  const JsonValue* calls = function.find("unresolved_calls");
+  if (calls == nullptr || !calls->is_array()) {
+    out.has_call_census = false;
+    return;
+  }
+  std::set<std::string> kinds;
+  std::set<std::string> imports;
+  for (const JsonValue& call : calls->items) {
+    if (!call.is_object()) {
+      continue;
+    }
+    std::string kind = string_member(call, "kind");
+    const std::string name = string_member(call, "name");
+    // An AArch64 call is unresolved whatever its target: the import ones are told apart.
+    if (kind == "aarch64") {
+      kind = name.empty() ? "aarch64_other" : "aarch64_import";
+    }
+    ++out.calls_by_kind[kind];
+    kinds.insert(kind);
+    if (!name.empty()) {
+      imports.insert(name);
+    }
+  }
+  if (kinds.empty() || reasons.size() != 1 || !reasons.contains(kUnresolvedCallNote)) {
+    return;
+  }
+  ++out.call_only_partial;
+  std::string key;
+  for (const std::string& kind : kinds) {
+    key += (key.empty() ? "" : "+") + kind;
+  }
+  ++out.call_only_by_kinds[key];
+  for (const std::string& name : imports) {
+    ++out.call_only_imports[name];
+  }
+}
+
+}  // namespace
+
 Result<Measure> measure_decompile(std::string_view file, std::string_view json) {
   auto parsed = parse_json(json, limits_for(json.size()));
   if (!parsed) {
@@ -291,6 +339,7 @@ Result<Measure> measure_decompile(std::string_view file, std::string_view json) 
       if (first) {
         out.unexplained.push_back(Unexplained{address, string_member(function, "name")});
       }
+      count_unresolved_calls(function, seen, out);
     } else {
       return r1_error("r1.bad_decompile",
                       std::string(file) + ": a function has an unknown status '" + status + "'");

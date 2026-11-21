@@ -276,6 +276,34 @@ struct IrPointerStruct {
   bool applied = false;
 };
 
+/// A call the lifter could not give arguments and a result (G21 call census), and why: what kind
+/// of target it has. Measurement only; the call itself stays in the IR as it is.
+struct IrUnresolvedCall {
+  enum class Kind : std::uint8_t {
+    /// A direct call of an import stub (a PLT entry or an import thunk) with no model or prototype.
+    Import,
+    /// A call through an import's GOT or IAT slot (`call *slot`) with no model.
+    ImportSlot,
+    /// A direct call of a function of this image whose summary did not resolve: it is Partial, it
+    /// reads a stack argument, it is on a cycle, or it is deeper than the depth limit.
+    SameImage,
+    /// A direct call of an address that is no function the analysis found.
+    UnknownTarget,
+    /// A call through a register or memory that is no import slot.
+    Indirect,
+    /// An AArch64 call: no AArch64 call is resolved yet.
+    AArch64,
+  };
+  std::uint64_t address = 0;  ///< the call instruction
+  std::uint64_t target = 0;   ///< the called address, or the slot address; 0 when indirect
+  Kind kind = Kind::Indirect;
+  std::string name;  ///< the import's name for Import and ImportSlot; empty otherwise
+};
+
+/// A stable name for a kind: "import", "import_slot", "same_image", "unknown_target", "indirect",
+/// "aarch64".
+[[nodiscard]] const char* unresolved_call_kind_name(IrUnresolvedCall::Kind kind) noexcept;
+
 struct IrFunction {
   std::uint64_t address = 0;
   std::string name;
@@ -300,6 +328,8 @@ struct IrFunction {
   /// an import's own name (`abort`), or a function's symbol or thunk name. A target with no entry
   /// prints as `sub_<hex>`. Display only: the IR and the evaluator use the address.
   std::map<std::uint64_t, std::string> call_names;
+  /// Each call that stayed without arguments and a result, in address order (G21 call census).
+  std::vector<IrUnresolvedCall> unresolved_calls;
 };
 
 /// Infer structure layouts behind pointer parameters: a parameter register

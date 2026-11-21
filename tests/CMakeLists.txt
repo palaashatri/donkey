@@ -1484,11 +1484,11 @@ set_tests_properties(cli.project_type_add_refuses_bit_fields_without_one_abi PRO
 add_test(NAME cli.decompile_json_lists_notes
          COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --function 0x117e)
 set_tests_properties(cli.decompile_json_lists_notes PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"[^\"]+\"[^]]*\\], \"unsupported\": \\[[^]]*\\], \"pseudocode\": \"")
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"[^\"]+\"[^]]*\\], \"unsupported\": \\[[^]]*\\], \"unresolved_calls\": \\[[^]]*\\], \"pseudocode\": \"")
 add_test(NAME cli.decompile_no_pseudocode
          COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --no-pseudocode --function 0x117e)
 set_tests_properties(cli.decompile_no_pseudocode PROPERTIES
-  PASS_REGULAR_EXPRESSION "\"status\": \"Partial\".*\"notes\": \\[\"[^]]*\\], \"unsupported\": \\[[^]]*\\]}"
+  PASS_REGULAR_EXPRESSION "\"status\": \"Partial\".*\"notes\": \\[\"[^]]*\\], \"unsupported\": \\[[^]]*\\], \"unresolved_calls\": \\[[^]]*\\]}"
   FAIL_REGULAR_EXPRESSION "pseudocode\"|source_map")
 # The analysis's own state is stated: here a run stopped by --max-instructions says so, so a reader
 # (donkey-r1 measure) can tell a function list that may be missing functions.
@@ -1497,6 +1497,18 @@ add_test(NAME cli.decompile_json_reports_an_analysis_limit
                  --max-instructions 4)
 set_tests_properties(cli.decompile_json_reports_an_analysis_limit PROPERTIES
   PASS_REGULAR_EXPRESSION "\"analysis_partial\": true,[ \n]*\"analysis_diagnostics\": \\[[^]]*\"analysis\\.instruction_limit\"")
+# G21 call census: each call left without arguments and a result is listed with the kind of its
+# target. In the musl program, main's call of puts (no project, so no prototype) is an import call;
+# in the AArch64 Mach-O fixture every call is an AArch64 call, which nothing resolves yet.
+add_test(NAME cli.decompile_json_lists_unresolved_calls
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --no-pseudocode --function 0x117e)
+set_tests_properties(cli.decompile_json_lists_unresolved_calls PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"unresolved_calls\": \\[\\{\"address\": \"0x1186\", \"kind\": \"import\", \"name\": \"puts\"\\}\\]")
+add_test(NAME cli.decompile_json_lists_aarch64_calls
+         COMMAND donkey-cli decompile ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/unwind_info/unwind_arm64
+                 --json --no-pseudocode --function 0x1000003b4)
+set_tests_properties(cli.decompile_json_lists_aarch64_calls PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"unresolved_calls\": \\[\\{\"address\": \"0x1000003e8\", \"kind\": \"aarch64\"\\}\\]")
 add_test(NAME cli.decompile_no_pseudocode_needs_json
          COMMAND ${CMAKE_COMMAND}
                  "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;decompile;${DONKEY_MUSL_PROGRAM};--no-pseudocode"

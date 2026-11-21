@@ -2204,6 +2204,19 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         } else {
           statement.a = IrOperand::constant_value(0, kPointerWidth);
         }
+        IrUnresolvedCall unresolved;
+        unresolved.address = instruction.address;
+        unresolved.target = instruction.direct_target.value_or(0);
+        unresolved.kind = IrUnresolvedCall::Kind::AArch64;
+        for (const Function& candidate : lifter.analysis.functions) {
+          if (instruction.direct_target.has_value() &&
+              candidate.address == instruction.direct_target.value()) {
+            unresolved.name =
+                !candidate.import_name.empty() ? candidate.import_name : candidate.stub_target;
+            break;
+          }
+        }
+        lifter.out.unresolved_calls.push_back(std::move(unresolved));
         lifter.push(out_block, std::move(statement));
         // The callee's effects on registers, memory and NZCV are not modelled.
         lifter.mark_partial("outgoing call arguments and return values follow no modelled ABI");

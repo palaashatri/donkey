@@ -2416,10 +2416,48 @@ struct Lifter {
       }
       return;
     }
+    out.unresolved_calls.push_back(classify_unresolved_call(instruction, statement.a));
     push(block, std::move(statement));
     // The callee's effects on registers and memory are not modelled, so the
     // function cannot be Complete. The call itself stays in the IR.
     mark_partial("outgoing call arguments and return values follow no modelled ABI");
+  }
+
+  /// What kind of target a call has that stays without arguments and a result (G21 call census).
+  [[nodiscard]] IrUnresolvedCall classify_unresolved_call(const Instruction& instruction,
+                                                          const IrOperand& target) const {
+    IrUnresolvedCall call;
+    call.address = instruction.address;
+    if (instruction.direct_target.has_value()) {
+      call.target = instruction.direct_target.value();
+      call.kind = IrUnresolvedCall::Kind::UnknownTarget;
+      for (const Function& candidate : analysis.functions) {
+        if (candidate.address != call.target) {
+          continue;
+        }
+        if (!candidate.import_name.empty() || !candidate.stub_target.empty()) {
+          call.kind = IrUnresolvedCall::Kind::Import;
+          call.name =
+              !candidate.import_name.empty() ? candidate.import_name : candidate.stub_target;
+        } else {
+          call.kind = IrUnresolvedCall::Kind::SameImage;
+        }
+        break;
+      }
+      return call;
+    }
+    if (target.kind == IrOperandKind::Memory && target.reg.empty() && target.index.empty() &&
+        target.constant != 0) {
+      if (const auto slot = analysis.import_slots.find(target.constant);
+          slot != analysis.import_slots.end()) {
+        call.kind = IrUnresolvedCall::Kind::ImportSlot;
+        call.target = target.constant;
+        call.name = slot->second;
+        return call;
+      }
+    }
+    call.kind = IrUnresolvedCall::Kind::Indirect;
+    return call;
   }
 };
 

@@ -650,6 +650,24 @@ std::string render_condition(const IrFunction& function, const IrStatement& stat
 
 }  // namespace detail
 
+const char* unresolved_call_kind_name(IrUnresolvedCall::Kind kind) noexcept {
+  switch (kind) {
+    case IrUnresolvedCall::Kind::Import:
+      return "import";
+    case IrUnresolvedCall::Kind::ImportSlot:
+      return "import_slot";
+    case IrUnresolvedCall::Kind::SameImage:
+      return "same_image";
+    case IrUnresolvedCall::Kind::UnknownTarget:
+      return "unknown_target";
+    case IrUnresolvedCall::Kind::Indirect:
+      return "indirect";
+    case IrUnresolvedCall::Kind::AArch64:
+      return "aarch64";
+  }
+  return "indirect";
+}
+
 const char* ir_op_name(IrOp op) noexcept {
   switch (op) {
     case IrOp::Nop:
