@@ -654,10 +654,9 @@ TEST(TypeLib, KnownTypedefsDoNotChangeTheLibrarysTypes) {
 TEST(TypeLib, RefusesATypedefOfAnUntaggedStructAndAFunctionWithOneName) {
   // `typedef struct { ... } item;` declares the ordinary name `item` (the struct takes the
   // typedef's name), so a function `item` collides with it, in either order.
-  // The parser refuses a prototype named after an earlier typedef itself; a typedef after the
-  // prototype is the reader's check.
+  // The parser refuses both orders with one code, which the reader keeps as its own.
   expect_refused(valid_file("typedef struct { int32_t x; } item;\nint32_t item(void);\n"),
-                 "cdecl.redefinition");
+                 "typelib.type_and_function");
   expect_refused(valid_file("int32_t item(void);\ntypedef struct { int32_t x; } item;\n"),
                  "typelib.type_and_function");
   // A tagged struct and a function with one name stay apart (`struct stat` and `stat`).
@@ -673,4 +672,49 @@ TEST(TypeLib, PassesTheParsersSizeBoundThrough) {
   Lines header = base_header();
   finalize(header, body);
   expect_refused(assemble(header, body), "cdecl.too_large", donkey::Status::ResourceLimit);
+}
+
+// `provides` records name the library files a library describes; they come first among the
+// repeated records, once each, and are file names only.
+TEST(TypeLib, ReadsProvidesRecords) {
+  Lines header = base_header();
+  header.push_back("provides: libc.so.6");
+  header.push_back("provides: ld-musl-x86_64.so.1");
+  header.push_back("source_file: include/a.h " + std::string(64, 'a'));
+  const auto result = donkey::read_type_library(valid_file(kBody, header));
+  ASSERT_TRUE(result.has_value()) << result.diagnostic().message;
+  EXPECT_EQ(result.value().provides,
+            (std::vector<std::string>{"libc.so.6", "ld-musl-x86_64.so.1"}));
+
+  Lines late = base_header();
+  late.push_back("source_file: include/a.h " + std::string(64, 'a'));
+  late.push_back("provides: libc.so.6");
+  expect_refused(valid_file(kBody, late), "typelib.record_order");
+  for (const char* bad : {"provides: /lib/libc.so.6", "provides: lib c.so", "provides: .."}) {
+    Lines refused = base_header();
+    refused.push_back(bad);
+    expect_refused(valid_file(kBody, refused), "typelib.bad_value");
+  }
+  Lines twice = base_header();
+  twice.push_back("provides: libc.so.6");
+  twice.push_back("provides: libc.so.6");
+  expect_refused(valid_file(kBody, twice), "typelib.bad_value");
+}
+
+// The parser's layout options for each ABI the format names.
+TEST(TypeLib, DeclarationOptionsFollowTheAbi) {
+  const auto sysv = donkey::declaration_options("sysv", "linux", true);
+  EXPECT_EQ(sysv.bit_fields, donkey::CBitFieldLayout::SystemV);
+  EXPECT_EQ(sysv.long_double_size, 16U);
+  EXPECT_EQ(sysv.long_size, 8U);
+  const auto linux_arm = donkey::declaration_options("aapcs64", "linux", false);
+  EXPECT_EQ(linux_arm.bit_fields, donkey::CBitFieldLayout::Aapcs64);
+  EXPECT_EQ(linux_arm.long_double_size, 16U);
+  const auto apple = donkey::declaration_options("aapcs64", "macos", true);
+  EXPECT_EQ(apple.bit_fields, donkey::CBitFieldLayout::Unmodelled);
+  EXPECT_EQ(apple.long_double_size, 8U);
+  const auto win64 = donkey::declaration_options("win64", "windows", true);
+  EXPECT_EQ(win64.bit_fields, donkey::CBitFieldLayout::Unmodelled);
+  EXPECT_EQ(win64.long_double_size, 8U);
+  EXPECT_EQ(win64.long_size, 4U);
 }

@@ -1257,7 +1257,7 @@ Result<bool> verify_ir(const IrFunction& function) {
           }
           // Arguments come from a known signature only (G21-T2): an unknown one has none.
           if (!statement.call_arguments.empty() && !statement.signature_inferred &&
-              statement.signature_source.empty() && statement.call_model.empty()) {
+              statement.call_model.empty() && statement.signature_source.empty()) {
             return fail("ir.call_signature", "call arguments need a signature");
           }
           if (!statement.call_model.empty()) {

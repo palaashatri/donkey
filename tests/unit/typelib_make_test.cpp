@@ -370,3 +370,48 @@ TEST(TypeLibMake, ShippedMuslLibraryLoads) {
   }
   EXPECT_TRUE(listed);
 }
+
+// An assembler label gives a declaration another symbol name. The format cannot record it, so
+// the declaration is skipped rather than kept under the wrong name.
+TEST(TypeLibMake, AnAssemblerLabelIsSkipped) {
+  const auto made = donkey::make_type_library(
+      "int public_api(int) __asm__(\"real_api\");\nint plain(int);\n", test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  EXPECT_EQ(made.value().kept, 1U);
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_EQ(made.value().skipped[0].name, "public_api");
+  EXPECT_NE(made.value().skipped[0].reason.find("__asm__(\"real_api\")"), std::string::npos)
+      << made.value().skipped[0].reason;
+  const std::string& text = made.value().text;
+  EXPECT_EQ(text.find("public_api", text.find("\n\n")), std::string::npos);  // not in the body
+}
+
+// Every declaration of an assembler-labelled name is skipped, in either order: an unlabelled
+// redeclaration would otherwise keep the prototype under the wrong symbol name.
+TEST(TypeLibMake, EveryDeclarationOfALabelledNameIsSkipped) {
+  for (const char* text : {"int f(int) __asm__(\"actual_f\");\nint f(int);\nint g(int);\n",
+                           "int f(int);\nint f(int) __asm__(\"actual_f\");\nint g(int);\n"}) {
+    SCOPED_TRACE(text);
+    const auto made = donkey::make_type_library(text, test_options());
+    ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+    EXPECT_EQ(made.value().kept, 1U);  // g
+    ASSERT_EQ(made.value().skipped.size(), 2U);
+    EXPECT_EQ(made.value().skipped[0].name, "f");
+    EXPECT_EQ(made.value().skipped[1].name, "f");
+  }
+}
+
+// A tag with the name of a relabelled function is another name (glibc's `struct stat` beside
+// `stat() __asm__("stat64")`): the struct and its layout are kept.
+TEST(TypeLibMake, ATagNamedLikeALabelledFunctionIsKept) {
+  const auto made = donkey::make_type_library(
+      "struct stat { long size; };\n"
+      "int stat(const char *, struct stat *) __asm__(\"stat64\");\n",
+      test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_EQ(made.value().skipped[0].name, "stat");
+  EXPECT_NE(made.value().skipped[0].reason.find("__asm__"), std::string::npos)
+      << made.value().skipped[0].reason;
+  EXPECT_NE(made.value().text.find("struct stat {"), std::string::npos) << made.value().text;
+}

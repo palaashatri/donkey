@@ -1,5 +1,6 @@
 #include "donkey/project/typelib.h"
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -47,13 +48,14 @@ enum class Key : std::uint8_t {
   Created,
   BodySha256,
   Declarations,
+  Provides,
   SourceFile,
   Macro,
   Skipped,
   Note,
 };
 
-constexpr std::size_t kKeyCount = 24;
+constexpr std::size_t kKeyCount = 25;
 constexpr std::size_t kSingleKeyCount = 20;
 
 struct KeyInfo {
@@ -82,23 +84,27 @@ constexpr std::array<KeyInfo, kKeyCount> kKeys = {{
     {"created", false},
     {"body_sha256", false},
     {"declarations", false},
+    {"provides", true},
     {"source_file", true},
     {"macro", true},
     {"skipped", true},
     {"note", true},
 }};
 
-/// Order of the repeated records: source_file, macro, skipped, note. A single key has rank 0.
+/// Order of the repeated records: provides, source_file, macro, skipped, note. A single key has
+/// rank 0.
 int record_rank(Key key) {
   switch (key) {
-    case Key::SourceFile:
+    case Key::Provides:
       return 1;
-    case Key::Macro:
+    case Key::SourceFile:
       return 2;
-    case Key::Skipped:
+    case Key::Macro:
       return 3;
-    case Key::Note:
+    case Key::Skipped:
       return 4;
+    case Key::Note:
+      return 5;
     default:
       return 0;
   }
@@ -406,6 +412,17 @@ VoidResult apply_repeated(Header& header, Key key, std::uint64_t line_no, std::s
   };
 
   switch (key) {
+    case Key::Provides: {
+      if (value.find('/') != std::string_view::npos || value.find(' ') != std::string_view::npos ||
+          value == "." || value == "..") {
+        return bad("expected a library's file name, without a directory or a space");
+      }
+      if (std::find(lib.provides.begin(), lib.provides.end(), value) != lib.provides.end()) {
+        return bad("'" + std::string(value) + "' is listed twice");
+      }
+      lib.provides.emplace_back(value);
+      return Result<void>();
+    }
     case Key::SourceFile: {
       const std::size_t space = value.rfind(' ');
       if (space == std::string_view::npos) {
@@ -491,7 +508,7 @@ VoidResult apply_header_line(Header& header, std::uint64_t line_no, std::string_
     return refuse_void(Status::InvalidInput, "typelib.record_order",
                        line_text(line_no) + ": '" + std::string(key_text) +
                            "' is out of order; the header lists every single key, then "
-                           "source_file, macro, skipped and note records, in that order");
+                           "provides, source_file, macro, skipped and note records, in that order");
   }
   header.last_rank = rank;
 
@@ -555,8 +572,11 @@ VoidResult check_abi(const Header& header) {
 /// final whole-set check (`cdecl.invalid_type`) is this reader's `typelib.invalid_types`.
 template <typename T>
 Result<T> passthrough(const Diagnostic& diagnostic, std::uint64_t separator_line) {
-  std::string code =
-      diagnostic.code == "cdecl.invalid_type" ? "typelib.invalid_types" : diagnostic.code;
+  // The parser's own checks of the names a library repeats keep the library's codes.
+  std::string code = diagnostic.code == "cdecl.invalid_type"        ? "typelib.invalid_types"
+                     : diagnostic.code == "cdecl.type_and_function" ? "typelib.type_and_function"
+                     : diagnostic.code == "cdecl.tag_kind"          ? "typelib.duplicate_name"
+                                                                    : diagnostic.code;
   return make_error<T>(diagnostic.status, std::move(code),
                        relocate_message(diagnostic.message, separator_line));
 }
@@ -583,11 +603,9 @@ Result<std::vector<TypeDefinition>> read_body(const Header& header, std::string_
                            ": the C text hashes to " + actual + ", not body_sha256");
   }
 
-  CDeclarationOptions options;
+  CDeclarationOptions options = declaration_options(lib.abi, lib.platform, lib.char_is_signed);
   options.pointer_size = lib.pointer_size;
   options.long_size = lib.long_size;
-  options.char_is_signed = lib.char_is_signed;
-  options.bit_fields = bit_field_layout(lib.abi, lib.platform);
 
   // A library parses on its own, against the built-in names only, so the table it is read into
   // cannot change what its text means (a typedef there could otherwise shadow a built-in name).
@@ -682,6 +700,30 @@ CBitFieldLayout bit_field_layout(std::string_view abi, std::string_view platform
     return CBitFieldLayout::Aapcs64;
   }
   return CBitFieldLayout::Unmodelled;
+}
+
+std::uint64_t long_double_size(std::string_view abi, std::string_view platform) noexcept {
+  if (abi == "sysv") {
+    return 16;
+  }
+  if (abi == "aapcs64") {
+    return platform == "macos" ? 8 : (platform == "linux" || platform == "freebsd") ? 16 : 0;
+  }
+  if (abi == "win64") {
+    return 8;
+  }
+  return 0;
+}
+
+CDeclarationOptions declaration_options(std::string_view abi, std::string_view platform,
+                                        bool char_is_signed) noexcept {
+  CDeclarationOptions options;
+  options.pointer_size = 8;
+  options.long_size = abi == "win64" ? 4 : 8;
+  options.char_is_signed = char_is_signed;
+  options.bit_fields = bit_field_layout(abi, platform);
+  options.long_double_size = long_double_size(abi, platform);
+  return options;
 }
 
 Result<TypeLibrary> read_type_library(std::string_view text, const TypeTable& known) {

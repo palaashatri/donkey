@@ -2261,6 +2261,42 @@ struct Lifter {
     statement.call_writes = callee.writes;
   }
 
+  /// The model of the C function a call target runs (G21-T7): the target is an import stub or a
+  /// GOT or IAT slot (`call *slot`) of an import the analysis shows binds to the C library, and the
+  /// function has a model. x86-64 only: the System V or Win64 argument registers.
+  [[nodiscard]] const LibcModel* modelled_call(const IrOperand& target) const {
+    if (image.architecture != Architecture::X86_64) {
+      return nullptr;
+    }
+    const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
+    const bool slot = target.kind == IrOperandKind::Memory && target.reg.empty() &&
+                      target.index.empty() && target.width == pointer_width;
+    if (!direct && !slot) {
+      return nullptr;
+    }
+    const auto bound = analysis.c_library_imports.find(target.constant);
+    return bound == analysis.c_library_imports.end() ? nullptr
+                                                     : find_libc_model(bound->second.name);
+  }
+
+  /// Gives a call statement the C prototype of `model`: each argument in its register of the
+  /// image's calling convention (an int in the register's low 32 bits), the result in all of rax.
+  void resolve_model_call(IrStatement& statement, const LibcModel& model) const {
+    static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
+    static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
+    static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
+    static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
+    const bool win64 = image.format == BinaryFormat::Pe;
+    for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
+      const bool narrow = model.arguments[i] == LibcArgument::Int;
+      const char* name =
+          win64 ? (narrow ? kWin32[i] : kWin64[i]) : (narrow ? kSysV32[i] : kSysV64[i]);
+      statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
+    }
+    statement.dest = IrOperand::register_ref("rax", 8);
+    statement.call_model = std::string(model.name);
+  }
+
   /// The library prototype of a direct call's target (G22-T4): x86-64 System V only (ELF and
   /// Mach-O; a Windows x64 call passes its arguments in other registers).
   const CallPrototype* library_prototype(const Instruction& instruction) const {
@@ -2340,42 +2376,6 @@ struct Lifter {
       add_read(earlier.b);
       add_read(earlier.c);
     }
-  }
-
-  /// The model of the C function a call target runs (G21-T7): the target is an import stub or a
-  /// GOT or IAT slot (`call *slot`) of an import the analysis shows binds to the C library, and
-  /// the function has a model. x86-64 only: the System V or Win64 argument registers.
-  [[nodiscard]] const LibcModel* modelled_call(const IrOperand& target) const {
-    if (image.architecture != Architecture::X86_64) {
-      return nullptr;
-    }
-    const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
-    const bool slot = target.kind == IrOperandKind::Memory && target.reg.empty() &&
-                      target.index.empty() && target.width == pointer_width;
-    if (!direct && !slot) {
-      return nullptr;
-    }
-    const auto bound = analysis.c_library_imports.find(target.constant);
-    return bound == analysis.c_library_imports.end() ? nullptr
-                                                     : find_libc_model(bound->second.name);
-  }
-
-  /// Gives a call statement the C prototype of `model`: each argument in its register of the
-  /// image's calling convention (an int in the register's low 32 bits), the result in all of rax.
-  void resolve_model_call(IrStatement& statement, const LibcModel& model) const {
-    static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
-    static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
-    static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
-    static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
-    const bool win64 = image.format == BinaryFormat::Pe;
-    for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
-      const bool narrow = model.arguments[i] == LibcArgument::Int;
-      const char* name =
-          win64 ? (narrow ? kWin32[i] : kWin64[i]) : (narrow ? kSysV32[i] : kSysV64[i]);
-      statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
-    }
-    statement.dest = IrOperand::register_ref("rax", 8);
-    statement.call_model = std::string(model.name);
   }
 
   void lift_call(IrBlock& block, const Instruction& instruction) {
@@ -2512,8 +2512,8 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
     // A resolved call (G21) that returns a value defines the integer return register: its result.
     // Any other call, and an unsupported statement, may define either register: unknown.
     if (statement.op == IrOp::Call &&
-        (statement.signature_inferred || !statement.signature_source.empty() ||
-         !statement.call_model.empty()) &&
+        (statement.signature_inferred || !statement.call_model.empty() ||
+         !statement.signature_source.empty()) &&
         statement.dest.kind == IrOperandKind::Register &&
         internal::register_family(statement.dest.reg) == regs.integer_family) {
       ReturnDefinition out;

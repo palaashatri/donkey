@@ -95,6 +95,15 @@ struct TypeDefinition {
   /// and enumeration constants are visible only there (C11 6.2.1), so a later parse does not see
   /// them at file scope. The type itself stays, as the parameter's type.
   bool local = false;
+  /// Structs and unions: false for a tag that is only declared (`struct opaque;`), whose size is
+  /// not known. An object of it, `sizeof` and a member of it are refused.
+  bool complete = true;
+  /// Structs, unions and enums without a tag that take their name from a typedef
+  /// (`typedef struct { int n; } item;`): `name` is then an ordinary name, as a typedef's is, and
+  /// prints without the keyword.
+  bool typedef_named = false;
+  /// The type library (its project record's id) that brought the type (G22-T3); 0 for none.
+  std::int64_t library = 0;
 };
 
 /// A set of types, keyed by id. `validate` checks the whole set; the other
