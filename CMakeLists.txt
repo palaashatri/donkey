@@ -15,6 +15,7 @@ endif()
 option(DONKEY_BUILD_UI "Build the SDL3 + Dear ImGui desktop shell" OFF)
 option(DONKEY_UI_SMOKE_TEST "Register display-dependent UI smoke tests" OFF)
 option(DONKEY_BUILD_TESTS "Build the test suite" ON)
+option(DONKEY_BUILD_R1_TOOL "Build donkey-r1, the R1 measurement tool (G20); not installed" ${DONKEY_BUILD_TESTS})
 option(DONKEY_BUILD_FUZZERS "Build libFuzzer targets (Clang only)" OFF)
 option(DONKEY_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 # Seconds every registered test may run at least (0: each test's own limit). For a host whose
@@ -265,6 +266,18 @@ donkey_apply_warnings(donkey_session)
 # ---------------------------------------------------------------------------
 
 add_subdirectory(apps/donkey-cli)
+
+# The R1 measurement (G20-T2): a developer tool, built for the tests and the r1 CI job, never
+# installed or packaged.
+if(DONKEY_BUILD_R1_TOOL)
+  add_library(donkey_r1 STATIC tools/r1/r1_measure.cpp)
+  target_include_directories(donkey_r1 PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/tools/r1)
+  target_link_libraries(donkey_r1 PUBLIC donkey::binary)
+  donkey_apply_warnings(donkey_r1)
+  add_executable(donkey-r1 tools/r1/r1_tool.cpp)
+  target_link_libraries(donkey-r1 PRIVATE donkey_r1)
+  donkey_apply_warnings(donkey-r1)
+endif()
 
 # ---------------------------------------------------------------------------
 # Desktop shell (SDL3 + Dear ImGui). Never a dependency of the core targets.

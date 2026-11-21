@@ -204,6 +204,102 @@ files, and refuses a file whose SHA-256 has changed.
 | MIPS32 (little- and big-endian) | yes; matches llvm-objdump on both byte orders of the test image (23 instructions each). The CFG keeps each branch's, call's and return's delay slot in its block, and the fall-through starts after it (`DecodeIsa.MipsDelaySlotsStayWithTheirBranchesInTheGraph`). Branch-likely forms (`beql` and kin) run their slot only when taken, which is not modelled: the graph is Partial with `analysis.mips_branch_likely`. microMIPS and MIPS16 images (their e_flags) are refused as Unknown with `elf.mips_isa_extension`; they are not read as MIPS32. 64-bit MIPS is decoded in its 64-bit mode and matches llvm-objdump on the test image (27 instructions, the padding excluded) | yes for the test image, with no unmodelled branch form; not checked against another disassembler's CFG | Unsupported (`lift.unsupported_architecture`) | no | no |
 | PowerPC32 (big- and little-endian) | yes; matches llvm-objdump on both byte orders of the test image (25 instructions each). VLE (variable-length) code is not detected and is read as 32-bit PowerPC. 64-bit PowerPC is decoded in its 64-bit mode and matches llvm-objdump on the test image (31 instructions) | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
 
+## Real programs (R1, G20)
+
+R1 is the reference corpus of real programs (`tools/r1/README.md`): zlib 1.3.1, Lua 5.4.7 and SQLite 3.46.1,
+built by `tools/r1/build.cmake` on Ubuntu 24.04 with GCC 13.3 and the distribution defaults. There are 13
+builds, at -O0 and -O2, for x86-64 and AArch64, plus a static `lua` linked with musl 1.2.4; each is also kept
+as a stripped copy. Every function was decompiled, not a sample, with `tools/r1/decompile.cmake`
+(`donkey-cli decompile --json --no-pseudocode`), and counted with `donkey-r1 measure` (G20-T2). The decompiler
+was that of `main` at `3530b46` (after the init and fini seeds of G24 and the Mach-O header fix); the change that
+adds the measurement adds JSON fields only.
+
+These are counted results, not verified ones: a Complete function here has not been executed. The execution
+comparison on R1 is G20-T4.
+
+No run stopped at an analysis limit (`measure` refuses such an output, which may miss functions). The analysis
+of every `libz.so` build and of every AArch64 build is Partial for one reason, `analysis.no_return_unverified`:
+which library an import binds to, and so whether it returns, cannot be shown for a shared library without the
+program that loads it, or for AArch64 without its libraries on this x86-64 host (G24-T3). That diagnostic leaves
+function discovery whole. `measure` marks a binary whose analysis gave any other diagnostic (an unreadable
+`.eh_frame`, `.pdata`, start table or init array, for example) as one whose starts may be missing; no R1 binary
+is marked.
+
+Unstripped builds, totals:
+
+- x86-64: 1,269 of 8,406 functions are Complete (15.1%).
+- AArch64: 839 of 7,450 functions are Complete (11.3%).
+- No function is Unsupported or InvalidIR, and no run failed.
+- Every Partial function of an unstripped build names at least one reason. One Partial function of the stripped
+  static musl build names none.
+
+Stripped builds, against the function symbols of their unstripped twins (`STT_FUNC` and `STT_GNU_IFUNC`):
+
+- 14,816 of 14,887 starts are found.
+- The 71 missed starts:
+  - each glibc x86-64 build misses `register_tm_clones`, which `frame_dummy` reaches by a tail jump (6 builds);
+  - the glibc AArch64 builds miss none;
+  - static musl misses 65 assembly functions that have no unwind entry.
+- 966 further starts found are import stubs (`.plt`, `.plt.sec`, `.plt.got`), which have no symbol.
+- 3 extra starts are found, all in static musl: `_start`, `_init` and `_fini`, whose symbols musl's assembly
+  makes `NOTYPE`, so the `FUNC`-only ground truth does not count them.
+
+| Binary | Functions | Complete | Partial | Unsupported or InvalidIR | Partial, no reason | Starts found (stripped) |
+|---|---|---|---|---|---|---|
+| `libz-x86_64-glibc-O0.so` | 207 | 58 | 149 | 0 | 0 |  |
+| `libz-x86_64-glibc-O0.so.stripped` | 206 | 58 | 148 | 0 | 0 | 157 of 158 (1 missed; 49 stubs, 0 extra) |
+| `libz-x86_64-glibc-O2.so` | 185 | 40 | 145 | 0 | 0 |  |
+| `libz-x86_64-glibc-O2.so.stripped` | 184 | 40 | 144 | 0 | 0 | 135 of 136 (1 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O0.so` | 208 | 36 | 172 | 0 | 0 |  |
+| `libz-aarch64-glibc-O0.so.stripped` | 208 | 36 | 172 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O2.so` | 186 | 27 | 159 | 0 | 0 |  |
+| `libz-aarch64-glibc-O2.so.stripped` | 186 | 27 | 159 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
+| `lua-x86_64-glibc-O0` | 1178 | 174 | 1004 | 0 | 0 |  |
+| `lua-x86_64-glibc-O0.stripped` | 1177 | 174 | 1003 | 0 | 0 | 1086 of 1087 (1 missed; 91 stubs, 0 extra) |
+| `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
+| `lua-x86_64-glibc-O2.stripped` | 793 | 77 | 716 | 0 | 0 | 703 of 704 (1 missed; 90 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0` | 1180 | 110 | 1070 | 0 | 0 |  |
+| `lua-aarch64-glibc-O0.stripped` | 1180 | 110 | 1070 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O2` | 790 | 49 | 741 | 0 | 0 |  |
+| `lua-aarch64-glibc-O2.stripped` | 790 | 49 | 741 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
+| `lua-static-musl-x86_64-musl-O2` | 988 | 125 | 863 | 0 | 0 |  |
+| `lua-static-musl-x86_64-musl-O2.stripped` | 923 | 113 | 810 | 0 | 1 | 920 of 985 (65 missed; 0 stubs, 3 extra) |
+| `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 584 | 2482 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 211 | 1775 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0` | 3097 | 448 | 2649 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 448 | 2649 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2` | 1989 | 169 | 1820 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 169 | 1820 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
+
+The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
+note that is not one every function carries; when the lifter gave none, it is the first instruction that was
+not lifted.
+
+| Partial functions | First reason |
+|---|---|
+| 9793 | outgoing call arguments and return values follow no modelled ABI |
+| 1863 | jump leaves the function; treated as a tail call |
+| 1646 | fs- or gs-relative memory (thread-local storage) is not modelled |
+| 144 | the returned register is not determined by the definitions that reach the return; rax is assumed |
+| 93 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
+| 62 | floating-point results assume the MXCSR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 29 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 20 | conditional branch depends on flags this lifter does not model |
+| 15 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 15 | unsupported instruction 'syscall' |
+| 13 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
+| 12 | both rax and xmm0 are written on a path to this return; which one carries the return value is not determined, so rax is assumed |
+| 8 | unsupported instruction 'ldurb' |
+| 6 | a jump to a known function is lifted as a call with its inferred arguments and result, followed by a return |
+| 6 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 4 | a jump to a C library function is lifted as a call of its model, followed by a return |
+| 2 | bsf and bsr with a zero source leave the destination undefined; that case is not modelled |
+| 2 | integer and floating-point parameters are both present; their order in the source is not recoverable from the registers, so the signature is Partial |
+| 2 | unsupported instruction 'ldurh' |
+| 1 | 'cmovg' reads flags this lifter does not model |
+
 ## Decompiler corpus
 
 Loop structuring (G04-T3, partial): a loop whose body is one block that repeats

@@ -59,6 +59,26 @@ The work directory holds:
 - `out/`: the binaries and their `.stripped` copies;
 - `binaries.json`.
 
+Then decompile and measure every binary (G20-T2). `donkey-r1` is built with the tests
+(`DONKEY_BUILD_R1_TOOL`):
+
+```bash
+cmake -DR1_WORK=/path/to/work -DDONKEY_CLI=build/release-headless/apps/donkey-cli/donkey-cli -DOUT=/path/to/decompiled -P tools/r1/decompile.cmake
+```
+
+```bash
+build/release-headless/donkey-r1 measure /path/to/work /path/to/decompiled r1-result.json r1-table.md
+```
+
+`decompile.cmake` runs one `donkey-cli decompile --json --no-pseudocode` per binary, under a time limit.
+`donkey-r1 measure` counts, for each binary, the functions by status and the reasons of the Partial ones.
+For a stripped binary it also compares the starts found with the function symbols of its unstripped twin:
+matched, missed, import stubs, and extra. A binary has no usable output when the run failed or timed out,
+when the output was cut by `--max-functions`, or when the analysis stopped at a resource limit
+(`analysis.instruction_limit` and the like), since functions may then be missing. Other analysis
+diagnostics are recorded with the binary. Each one except `analysis.no_return_unverified` also marks the binary
+`starts_may_be_missing`, and the table says so. The exit status is 2 when any binary has no usable output.
+
 `binaries.json` records the provenance of each binary that `docs/DESIGN.md` §11.5 asks for:
 
 - the file name, the build, and the source with its version, licence and archive SHA-256;
