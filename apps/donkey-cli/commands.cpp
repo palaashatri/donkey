@@ -2037,12 +2037,23 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
         }
       }
       unsupported += "]";
+      // Each call left without arguments and a result, and what kind of target it has (G21 call
+      // census): the measurement counts which kind keeps how many functions Partial.
+      std::string unresolved = "[";
+      for (std::size_t n = 0; n < lifted.value().unresolved_calls.size(); ++n) {
+        const IrUnresolvedCall& call = lifted.value().unresolved_calls[n];
+        unresolved += (n == 0 ? "" : ", ") + std::string("{\"address\": ") +
+                      quote(hex(call.address)) +
+                      ", \"kind\": " + quote(unresolved_call_kind_name(call.kind)) +
+                      (call.name.empty() ? std::string() : ", \"name\": " + quote(call.name)) + "}";
+      }
+      unresolved += "]";
       out += "    {\"address\": " + quote(hex(function->address)) +
              ", \"name\": " + quote(display_name(function->name)) +
              ", \"status\": " + quote(lifted.value().partial ? "Partial" : "Complete") +
              ", \"blocks\": " + std::to_string(lifted.value().blocks.size()) +
              ", \"structure\": " + structure_json(lifted.value()) + ", \"notes\": " + notes +
-             ", \"unsupported\": " + unsupported;
+             ", \"unsupported\": " + unsupported + ", \"unresolved_calls\": " + unresolved;
       if (request.no_pseudocode) {
         out += "}";
         ++written;

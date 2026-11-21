@@ -125,10 +125,66 @@ std::string string_array(const std::vector<std::string>& items) {
   return out + "]";
 }
 
+std::string counts_json(const std::map<std::string, std::size_t>& counts) {
+  std::string out = "{";
+  for (const auto& [key, count] : counts) {
+    out += (out.size() == 1 ? "" : ", ") + quote(key) + ": " + std::to_string(count);
+  }
+  return out + "}";
+}
+
+/// The call census of a binary, or of the unstripped totals (G21); null for an output from a CLI
+/// that predates it.
+std::string census_json(bool present, const std::map<std::string, std::size_t>& calls,
+                        std::size_t call_only, const std::map<std::string, std::size_t>& kinds,
+                        const std::map<std::string, std::size_t>& imports) {
+  if (!present) {
+    return "null";
+  }
+  return "{\"unresolved_calls\": " + counts_json(calls) +
+         ", \"partial_only_by_calls\": " + std::to_string(call_only) +
+         ", \"by_kinds\": " + counts_json(kinds) + ", \"imports\": " + counts_json(imports) + "}";
+}
+
+std::string census_table(const std::map<std::string, std::size_t>& calls, std::size_t call_only,
+                         const std::map<std::string, std::size_t>& kinds,
+                         const std::map<std::string, std::size_t>& imports);
+
 std::string table_cell(const std::string& text) {
   std::string out;
   for (const char c : text) {
     out += c == '|' ? std::string("\\|") : std::string(1, c);
+  }
+  return out;
+}
+
+/// The call census of the unstripped binaries (G21), as Markdown: unresolved calls by kind of
+/// target, the Partial functions whose only reason is an unresolved call by the kinds they make,
+/// and the 20 imports such functions call most.
+std::string census_table(const std::map<std::string, std::size_t>& calls, std::size_t call_only,
+                         const std::map<std::string, std::size_t>& kinds,
+                         const std::map<std::string, std::size_t>& imports) {
+  std::string out =
+      "\nUnresolved calls by kind of target (unstripped binaries):\n\n"
+      "| Calls | Kind of target |\n|---|---|\n";
+  for (const auto& [count, kind] : ranked(calls)) {
+    out += "| " + std::to_string(count) + " | " + table_cell(kind) + " |\n";
+  }
+  out += "\n" + std::to_string(call_only) +
+         " Partial functions have an unresolved call as their only reason. By the kinds of target "
+         "they call:\n\n| Functions | Kinds of target |\n|---|---|\n";
+  for (const auto& [count, key] : ranked(kinds)) {
+    out += "| " + std::to_string(count) + " | " + table_cell(key) + " |\n";
+  }
+  out +=
+      "\nThe 20 imports those functions call most (a function counted once per import):\n\n"
+      "| Functions | Import |\n|---|---|\n";
+  std::size_t shown = 0;
+  for (const auto& [count, name] : ranked(imports)) {
+    if (shown++ == 20) {
+      break;
+    }
+    out += "| " + std::to_string(count) + " | `" + table_cell(name) + "` |\n";
   }
   return out;
 }
@@ -149,6 +205,14 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
   std::string entries;
   std::string rows;
   std::map<std::string, std::size_t> first_notes;  // over the unstripped binaries
+  // The call census over the unstripped binaries (G21).
+  std::map<std::string, std::size_t> calls_by_kind;
+  std::map<std::string, std::size_t> call_only_by_kinds;
+  std::map<std::string, std::size_t> call_only_imports;
+  std::size_t call_only_partial = 0;
+  // False when some measured unstripped binary came from a CLI without the census: the totals are
+  // then not counts of every binary, so none are published.
+  bool census_complete = true;
   std::size_t errors = 0;
   std::size_t total_functions = 0;
   std::size_t total_complete = 0;
@@ -205,6 +269,17 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       for (const auto& [note, count] : measured.first_notes) {
         first_notes[note] += count;
       }
+      census_complete = census_complete && measured.has_call_census;
+      for (const auto& [kind, count] : measured.calls_by_kind) {
+        calls_by_kind[kind] += count;
+      }
+      for (const auto& [kinds, count] : measured.call_only_by_kinds) {
+        call_only_by_kinds[kinds] += count;
+      }
+      for (const auto& [name, count] : measured.call_only_imports) {
+        call_only_imports[name] += count;
+      }
+      call_only_partial += measured.call_only_partial;
       total_functions += measured.functions;
       total_complete += measured.complete;
       total_unexplained += measured.unexplained.size();
@@ -233,6 +308,9 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
         ", \"analysis_partial\": " + (measured.analysis_partial ? "true" : "false") +
         ", \"analysis_notes\": " + string_array(measured.analysis_notes) +
         ", \"starts_may_be_missing\": " + (measured.starts_may_be_missing ? "true" : "false") +
+        ", \"call_census\": " +
+        census_json(measured.has_call_census, measured.calls_by_kind, measured.call_only_partial,
+                    measured.call_only_by_kinds, measured.call_only_imports) +
         ", \"starts\": " + starts_json + ", \"unexplained_partial\": " + unexplained +
         ", \"first_notes\": " + notes_json(measured.first_notes) +
         ", \"all_notes\": " + notes_json(measured.all_notes) + "}";
@@ -269,7 +347,9 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       "\n  ],\n  \"unstripped\": {\"functions\": " + std::to_string(total_functions) +
       ", \"complete\": " + std::to_string(total_complete) +
       ", \"unexplained_partial\": " + std::to_string(total_unexplained) +
-      ", \"first_notes\": " + notes_json(first_notes) +
+      ", \"first_notes\": " + notes_json(first_notes) + ", \"call_census\": " +
+      census_json(census_complete, calls_by_kind, call_only_partial, call_only_by_kinds,
+                  call_only_imports) +
       "},\n  \"errors\": " + std::to_string(errors) + "\n}\n";
   const std::string table =
       "| Binary | Functions | Complete | Partial | Unsupported or InvalidIR | Partial, no reason | "
@@ -277,7 +357,11 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
       rows +
       "\nThe 20 most frequent first notes of Partial functions (unstripped binaries):\n\n"
       "| Partial functions | First specific note |\n|---|---|\n" +
-      top;
+      top +
+      (census_complete
+           ? census_table(calls_by_kind, call_only_partial, call_only_by_kinds, call_only_imports)
+           : std::string("\nNo call census: some unstripped binary was decompiled by a CLI without "
+                         "one.\n"));
   if (!write_file(result_path, result) || !write_file(table_path, table)) {
     std::fprintf(stderr, "donkey-r1: cannot write the result\n");
     return 1;

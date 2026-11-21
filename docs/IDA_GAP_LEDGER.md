@@ -2114,6 +2114,33 @@ corpus has call-heavy functions verified by execution.
 Label it as one (`signature_inferred`) and never print it as certain. A wrong
 prototype must fail the oracle, not print plausible code.
 
+#### G21 call census on R1 (2026-11-21)
+
+Before more G21 work, the R1 measurement counts why each call stays without arguments and a result.
+`lift_call` and the AArch64 lifter record every such call on the lifted function
+(`IrFunction::unresolved_calls`, with the kind of its target), `decompile --json` lists them, and
+`donkey-r1 measure` counts them over R1. The table is in `docs/SUPPORT_MATRIX.md` ("Call census").
+
+On the unstripped R1 builds at `c655bdf`, 3,044 Partial functions have an unresolved call as their only
+specific reason:
+
+- 2,471 are AArch64: 1,603 call only same-image functions, 781 also call imports, 87 call only imports.
+  No AArch64 call is resolved, whatever its callee.
+- 491 are x86-64 functions whose only blocker is a same-image callee that did not resolve.
+- 36 call only through a register, 20 through a register and a same-image callee.
+- 15 call only an unresolved import, and 11 an import and a same-image callee.
+
+Order this sets for G21:
+
+1. AArch64 calls: T1 and T2 for AAPCS64. The call summaries of `src/ir/lift.cpp`, with x0-x7 arguments, an
+   x0 result, the AAPCS64 clobber set, and the same oracle. This is the largest group.
+2. The C library models of T7 for AArch64. `memset`, `memcpy` and `strlen` are the imports these functions
+   call most. `__stack_chk_fail` comes before them all (472 functions). It is already a no-return import
+   (G24-T3, `src/analysis/no_return.cpp`), so its block ends, but the call still keeps its caller Partial.
+   A call that does not return has no result and nothing after it, so it needs no model: that is G21-T5.
+3. The x86-64 same-image cascade (491): each such callee's own first reason, which the census of the callee
+   gives, decides it.
+
 #### G21-T0 task-level plan (written 2026-11-14, before any G21 code)
 
 Checked against: `src/ir/lift.cpp` (`lift_call`, the Call handling that marks the function Partial

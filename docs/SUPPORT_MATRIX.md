@@ -305,6 +305,80 @@ not lifted.
 | 2 | unsupported instruction 'ldurh' |
 | 1 | 'cmovg' reads flags this lifter does not model |
 
+### Call census (G21)
+
+`decompile --json` lists each call it left without arguments and a result, with the kind of its target, and
+`donkey-r1 measure` counts them (`R1.CountsUnresolvedCalls`, `cli.decompile_json_lists_unresolved_calls`,
+`cli.decompile_json_lists_aarch64_calls`, `cli.decompile_json_lists_aarch64_tail_calls`,
+`Ir.UnresolvedTailCallsAreInTheCallCensus`). A tail call (a jump to another function, conditional or not)
+is a call site too; the jump of an import stub through its own slot is not. The kinds:
+
+- `import`: a direct call of an import stub with no C library model or library prototype (a stub of a
+  function the image defines itself, such as libc's `free@plt`, is `same_image`);
+- `import_slot`: a call through an import's GOT or IAT slot;
+- `same_image`: a direct call of a function of the image whose call summary did not resolve (it is Partial,
+  reads a stack argument, is on a cycle, or is deeper than eight levels);
+- `indirect`: a call through a register or memory that is no import slot;
+- `unknown_target`: a direct call of an address that is no function;
+- on AArch64, where no call is resolved yet, `aarch64_import` for a call of an import stub and
+  `aarch64_other` for any other call.
+
+Measured with this census on `main` at `c655bdf`:
+
+Unresolved calls by kind of target (unstripped binaries):
+
+| Calls | Kind of target |
+|---|---|
+| 36409 | aarch64_other |
+| 31622 | same_image |
+| 4567 | aarch64_import |
+| 3237 | import |
+| 1765 | indirect |
+| 4 | import_slot |
+| 1 | unknown_target |
+
+3044 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
+
+| Functions | Kinds of target |
+|---|---|
+| 1603 | aarch64_other |
+| 781 | aarch64_import+aarch64_other |
+| 491 | same_image |
+| 87 | aarch64_import |
+| 36 | indirect |
+| 20 | indirect+same_image |
+| 15 | import |
+| 11 | import+same_image |
+
+The 20 imports those functions call most (a function counted once per import):
+
+| Functions | Import |
+|---|---|
+| 472 | `__stack_chk_fail` |
+| 161 | `memset` |
+| 160 | `memcpy` |
+| 71 | `strlen` |
+| 40 | `memcmp` |
+| 36 | `strcmp` |
+| 35 | `__assert_fail` |
+| 35 | `__errno_location` |
+| 23 | `__ctype_b_loc` |
+| 21 | `memmove` |
+| 19 | `free` |
+| 14 | `malloc` |
+| 13 | `fopen64` |
+| 11 | `fclose` |
+| 10 | `fflush` |
+| 10 | `strchr` |
+| 9 | `strerror` |
+| 8 | `fread` |
+| 8 | `getenv` |
+| 7 | `fprintf` |
+
+Most functions that only a call keeps Partial are AArch64 functions (2,471 of 3,044): AArch64 call resolution
+comes first in G21. Among x86-64 functions, a same-image callee that is itself Partial is the common blocker
+(491); an unresolved import alone keeps 15 Partial.
+
 ## Decompiler corpus
 
 Loop structuring (G04-T3, partial): a loop whose body is one block that repeats
