@@ -41,6 +41,8 @@ Build everything:
 cmake -DR1_WORK=/path/to/work -P tools/r1/build.cmake
 ```
 
+`R1_WORK` may be relative; it is taken from the directory cmake runs in.
+
 To fetch only, or build from sources already fetched:
 
 ```bash
@@ -119,7 +121,8 @@ must have `--no-pseudocode` (G20-T2). Every commit with a baseline has it.
 - the toolchain and the architecture;
 - the level and the variant (unstripped or stripped), with the unstripped twin of a stripped copy;
 - the compiler's and the `strip` tool's `--version` line with their package versions;
-- the flags;
+- the flags, in the order the compiler was given them, with the source tree written as `<src>` (its absolute
+  path depends on the work directory, and `-ffile-prefix-map` removes it from the binary);
 - the binary's SHA-256.
 
 ## What the script refuses
@@ -131,10 +134,12 @@ must have `--no-pseudocode` (G20-T2). Every commit with a baseline has it.
 - An archive larger than 64 MiB.
 - An archive member with an absolute path, a drive letter, a backslash or a `..` component, and a member
   outside the source's root directory. Every member is listed and checked before anything is unpacked.
+- An archive member that is not a regular file or a directory, such as a symbolic or hard link: a later
+  member could be written through it to a place outside the source tree. The pinned archives hold no links.
 - A manifest outside its schema:
   - an unknown or missing key in any object;
   - a hash that is not 64 hex digits;
-  - an unsafe root or build name;
+  - an unsafe source, root or build name (one plain path component, never `.` or `..`);
   - an unknown source, kind, level or toolchain;
   - a file path that is absolute or contains `..`.
 

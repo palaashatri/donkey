@@ -3,8 +3,10 @@
 #include "donkey/analysis/no_return.h"
 #include "donkey/binary/eh_frame.h"
 #include "donkey/binary/function_starts.h"
+#include "donkey/binary/init_fini.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
+#include "donkey/binary/unwind_info.h"
 
 #include <algorithm>
 #include <iterator>
@@ -30,6 +32,22 @@ bool executable_contains(const BinaryImage& image, std::uint64_t address) {
   const Section* section = image.section_for_va(address);
   if (section != nullptr) {
     return section->executable;
+  }
+  // `section_for_va` passes over sections at address 0, which in ELF are the non-allocated ones
+  // (.symtab, .strtab, debug data), never code. In a Mach-O relocatable object (MH_OBJECT) the
+  // sections keep the addresses they were written with, so `__text` starts at 0 and is code.
+  for (const Section& candidate : image.sections) {
+    if (candidate.address == 0 && candidate.executable && address < candidate.virtual_size) {
+      return true;
+    }
+  }
+  // An image with sections names its code: an address in an executable segment but in no section
+  // is a header or padding (the Mach-O header at the start of __TEXT, which the exported
+  // `__mh_execute_header` names; the ELF header of an executable first segment), not code. Only an
+  // image without sections (an ELF with its section headers removed, a raw image) falls back to
+  // its segments.
+  if (!image.sections.empty()) {
+    return false;
   }
   const Segment* segment = image.segment_for_va(address);
   return segment != nullptr && segment->executable;
@@ -763,6 +781,43 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.partial = true;
     result.diagnostics.push_back(listed.diagnostic());
   }
+  // Mach-O compact unwind (G23-T3): each `__unwind_info` entry starts a function, unless its
+  // encoding marks it as a range inside one (UNWIND_IS_NOT_FUNCTION_START). The linker folds
+  // adjacent functions with one encoding into one entry, so the entries are a subset of the
+  // starts. A section that cannot be read leaves starts out, so the result is Partial.
+  if (auto compact = read_unwind_info_of_image(image, file); compact) {
+    for (const std::uint64_t start : unwind_function_starts(compact.value())) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        unwind_starts.insert(start);
+      }
+    }
+  } else {
+    result.partial = true;
+    result.diagnostics.push_back(compact.diagnostic());
+  }
+  // ELF initialisation and termination functions (G24): called by the loader or the C runtime,
+  // so no call in the image reaches them (`_init`, `_fini`, `frame_dummy`, ...). An entry that
+  // cannot be read may leave one out, so the result is then Partial.
+  std::set<std::uint64_t> init_fini_starts;
+  {
+    const InitFiniStarts init_fini = read_init_fini_of_image(image, file);
+    for (const std::uint64_t start : init_fini.starts) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        init_fini_starts.insert(start);
+      }
+    }
+    if (init_fini.unreadable > 0) {
+      result.partial = true;
+      result.diagnostics.push_back(Diagnostic::make(
+          Status::Partial, "analysis.init_fini_incomplete",
+          std::to_string(init_fini.unreadable) +
+              " initialisation or termination entries could not be read; the functions they "
+              "name may be missing",
+          std::nullopt));
+    }
+  }
   // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
   if (auto pdata = read_pdata_of_image(image, file); pdata) {
     for (const PdataFunction& frame : pdata.value().functions) {
@@ -836,6 +891,7 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     seed.from_symbol = named.count(address) != 0;
     seed.from_unwind = unwind_starts.count(address) != 0;
     seed.from_function_starts = table_starts.count(address) != 0;
+    seed.from_init_fini = init_fini_starts.count(address) != 0;
     if (const auto symbol = naming_symbol.find(address); symbol != naming_symbol.end()) {
       seed.name = symbol->second->name;
       seed.exported = symbol->second->exported;
