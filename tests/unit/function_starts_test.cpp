@@ -295,3 +295,24 @@ TEST(Analysis, TheMachOHeaderIsNotAFunction) {
     }
   }
 }
+
+// A Mach-O relocatable object keeps its sections at the addresses written, so `__text` starts at
+// address 0 and the functions in it are code. (The header rule above is for linked images, whose
+// header lies in __TEXT but in no section.)
+TEST(Analysis, AMachOObjectKeepsItsFunctions) {
+  auto loaded =
+      donkey::load_binary(std::string(DONKEY_FIXTURE_DIR) + "/objects/macho-object-x86_64.o");
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  const auto& sections = loaded.value().image.sections;
+  const auto text = std::find_if(sections.begin(), sections.end(), [](const donkey::Section& s) {
+    return s.name == "__TEXT,__text";
+  });
+  ASSERT_NE(text, sections.end());
+  EXPECT_EQ(text->address, 0U);
+  auto analysis = donkey::analyze(loaded.value().image, loaded.value().data);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  const auto& functions = analysis.value().functions;
+  EXPECT_TRUE(std::any_of(functions.begin(), functions.end(), [](const donkey::Function& f) {
+    return f.name == "_use" && f.address != 0;
+  }));
+}

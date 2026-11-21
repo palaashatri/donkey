@@ -2641,7 +2641,9 @@ of `__TEXT` a "function" with no blocks. Across every binary fixture in `tests/f
 `python3.12`, `ls` and `libc.so.6`, the set of functions found changes only on the four Mach-O images
 (`function_starts/starts_x86_64`, `starts_arm64`, `dsym/dbg` and its dSYM), which each lose that header.
 An image without sections (an ELF with its section headers removed, a raw image) still falls back to its segments.
-The test is `Analysis.TheMachOHeaderIsNotAFunction`.
+A Mach-O relocatable object (`MH_OBJECT`) keeps its sections at the addresses written, so its `__text` starts at
+address 0: an executable section at address 0 is still code (ELF's address-0 sections are the non-allocated ones,
+never executable). The tests are `Analysis.TheMachOHeaderIsNotAFunction` and `Analysis.AMachOObjectKeepsItsFunctions`.
 
 #### G24-T0 task-level plan (written 2026-11-15, before any G24-T3 code)
 
