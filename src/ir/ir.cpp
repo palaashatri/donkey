@@ -406,6 +406,8 @@ class Renderer {
             target + "(" + arguments + ");";
         if (statement.signature_inferred && !statement.call_arguments.empty()) {
           line += " /* arguments inferred from callee */";
+        } else if (!statement.signature_source.empty()) {
+          line += " /* prototype from " + statement.signature_source + " */";
         }
         return line;
       }
@@ -1255,7 +1257,7 @@ Result<bool> verify_ir(const IrFunction& function) {
           }
           // Arguments come from a known signature only (G21-T2): an unknown one has none.
           if (!statement.call_arguments.empty() && !statement.signature_inferred &&
-              statement.call_model.empty()) {
+              statement.call_model.empty() && statement.signature_source.empty()) {
             return fail("ir.call_signature", "call arguments need a signature");
           }
           if (!statement.call_model.empty()) {

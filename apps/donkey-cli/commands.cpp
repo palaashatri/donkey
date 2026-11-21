@@ -1726,6 +1726,23 @@ std::string structure_json(const IrFunction& function) {
          ", \"oracle_detail\": " + quote(verdict.oracle_detail) + "}";
 }
 
+/// A library prototype as the lifter takes it (G22-T4), or nothing when a parameter or the result
+/// is not an integer, enum or pointer (donkey::register_prototype).
+std::optional<donkey::CallPrototype> call_prototype_of(const donkey::TypeTable& table,
+                                                       const donkey::TypeDefinition& function,
+                                                       const std::string& source) {
+  auto form = donkey::register_prototype(table, function);
+  if (!form) {
+    return std::nullopt;
+  }
+  donkey::CallPrototype out;
+  out.parameter_widths = std::move(form->parameter_widths);
+  out.return_width = form->return_width;
+  out.variadic = form->variadic;
+  out.source = source;
+  return out;
+}
+
 int command_decompile(const std::vector<std::string_view>& arguments) {
   AnalysisRequest request;
   for (std::size_t i = 0; i < arguments.size(); ++i) {
@@ -1816,6 +1833,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // names, so a user name wins.
   std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
   std::map<std::uint64_t, std::string> library_prototype_notes;
+  std::map<std::uint64_t, donkey::CallPrototype> call_prototypes;
   // The strings the project defines, as the literals the pseudocode prints (G12-T2).
   PseudocodeOptions pseudo_options;
   if (!request.project_path.empty()) {
@@ -1851,8 +1869,8 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       return fail(rows.diagnostic());
     }
     pseudo_options.string_literals = string_literals(rows.value(), loaded.image, loaded.data);
-    // Library prototypes (G22-T3) are noted on the stub they apply to, with the libraries that
-    // brought them. Calls do not take their arguments from them yet (G22-T4).
+    // Library prototypes (G22-T3) are noted on the stub they apply to, with the library that
+    // brought each, and calls through the stub take their arguments from them (G22-T4).
     auto applications = project.value().type_applications(*image_id);
     if (!applications) {
       return fail(applications.diagnostic());
@@ -1881,6 +1899,11 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
           (library == library_names.end() ? std::string("library prototype")
                                           : "library prototype (" + library->second + ")") +
           ": " + donkey::c_declaration(table.value(), application.type_id, type->name);
+      if (type->kind == donkey::TypeKind::Function && library != library_names.end()) {
+        if (auto prototype = call_prototype_of(table.value(), *type, library->second)) {
+          call_prototypes[application.address] = std::move(*prototype);
+        }
+      }
     }
   }
 
@@ -1894,6 +1917,9 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // whichever function calls it first.
   LiftOptions lift_options;
   lift_options.call_summaries = std::make_shared<CallSummaryCache>();
+  lift_options.call_prototypes =
+      std::make_shared<const std::map<std::uint64_t, donkey::CallPrototype>>(
+          std::move(call_prototypes));
   auto lift_named = [&](const Function& function) {
     auto lifted = lift_function(loaded.image, analysis.value(), function, lift_options);
     if (lifted && debug) {

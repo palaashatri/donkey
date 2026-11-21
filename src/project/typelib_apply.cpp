@@ -598,6 +598,89 @@ Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes_now(
 
 }  // namespace
 
+namespace {
+
+/// The type `id` names once its typedefs are followed, or null when one is missing or the chain
+/// comes back to a typedef already seen (a cycle the table's validation refuses anyway).
+const TypeDefinition* through_typedefs(const TypeTable& table, TypeId id) {
+  std::set<std::uint64_t> seen;
+  for (;;) {
+    const TypeDefinition* type = table.find(id);
+    if (type == nullptr || type->kind != TypeKind::Typedef) {
+      return type;
+    }
+    if (!seen.insert(id.value()).second) {
+      return nullptr;
+    }
+    id = type->target;
+  }
+}
+
+/// The width of a scalar passed in an integer register: an integer, an enum or a pointer, through
+/// typedefs; 0 for anything else.
+std::uint8_t integer_register_width(const TypeTable& table, TypeId id) {
+  const TypeDefinition* type = through_typedefs(table, id);
+  if (type == nullptr) {
+    return 0;
+  }
+  switch (type->kind) {
+    case TypeKind::Integer:
+    case TypeKind::Enum:
+    case TypeKind::Pointer:
+      return type->size >= 1 && type->size <= 8 ? static_cast<std::uint8_t>(type->size) : 0;
+    default:
+      return 0;
+  }
+}
+
+}  // namespace
+
+std::optional<RegisterPrototype> register_prototype(const TypeTable& table,
+                                                    const TypeDefinition& function) {
+  if (function.kind != TypeKind::Function) {
+    return std::nullopt;
+  }
+  RegisterPrototype out;
+  out.variadic = function.variadic;
+  for (const TypeField& parameter : function.fields) {
+    const std::uint8_t width = integer_register_width(table, parameter.type);
+    if (width == 0) {
+      return std::nullopt;
+    }
+    out.parameter_widths.push_back(width);
+  }
+  // A void result is no target, a Void type, or a typedef chain that ends in either
+  // (`typedef void V; V f(int);`).
+  TypeId result = function.target;
+  std::set<std::uint64_t> seen;
+  bool is_void = false;
+  for (;;) {
+    if (!result.valid()) {
+      is_void = true;
+      break;
+    }
+    const TypeDefinition* type = table.find(result);
+    if (type == nullptr || !seen.insert(result.value()).second) {
+      return std::nullopt;
+    }
+    if (type->kind == TypeKind::Void) {
+      is_void = true;
+      break;
+    }
+    if (type->kind != TypeKind::Typedef) {
+      break;
+    }
+    result = type->target;
+  }
+  if (!is_void) {
+    out.return_width = integer_register_width(table, function.target);
+    if (out.return_width == 0) {
+      return std::nullopt;
+    }
+  }
+  return out;
+}
+
 Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
     Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
     const ImageAbi& image) {

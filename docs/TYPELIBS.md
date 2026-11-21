@@ -9,7 +9,8 @@ project's import stubs is described under "Applying a library (G22-T3)".
 `tests/unit/typelib_test.cpp`, fuzzed by `fuzz/fuzz_typelib.cpp`). One library is bundled:
 `typelibs/musl-1.2.4-x86_64-linux.dtl`, generated from the musl 1.2.4 headers (G22-T2, see
 "Generating a library" below). Its prototypes are applied to the import stubs of programs whose
-imports bind to musl (G22-T3); calls do not take their arguments from them yet (G22-T4).
+imports bind to musl (G22-T3), and on x86-64 System V a call through such a stub prints the
+prototype's integer and pointer arguments and result; its caller stays Partial (G22-T4).
 `donkey-cli typelib show` reads one and summarises it.
 
 ## Generating a library

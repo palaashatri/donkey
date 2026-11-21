@@ -78,6 +78,13 @@ CallSummaryCache::~CallSummaryCache() = default;
 
 namespace {
 
+/// `0x1149`: an address as the notes print it.
+std::string hex_address(std::uint64_t value) {
+  char buffer[24];
+  std::snprintf(buffer, sizeof(buffer), "0x%llx", static_cast<unsigned long long>(value));
+  return std::string(buffer);
+}
+
 // Whether a callee's code may read an argument passed on the stack (the seventh and later integer
 // arguments, at entry rsp + 8 and up). The check runs a dataflow over the callee's IR (the lift
 // without passes): every register is tracked as an offset from the entry rsp when it holds a stack
@@ -827,6 +834,14 @@ struct Lifter {
 
   void mark_partial(std::string text) {
     out.notes.push_back(std::move(text));
+    out.partial = true;
+  }
+
+  /// mark_partial for a reason that every call of a kind gives: the note is added once.
+  void mark_partial_once(const std::string& text) {
+    if (std::find(out.notes.begin(), out.notes.end(), text) == out.notes.end()) {
+      out.notes.push_back(text);
+    }
     out.partial = true;
   }
 
@@ -2282,6 +2297,90 @@ struct Lifter {
     statement.call_model = std::string(model.name);
   }
 
+  /// The library prototype of a direct call's target (G22-T4): x86-64 System V only (ELF and
+  /// Mach-O; a Windows x64 call passes its arguments in other registers).
+  const CallPrototype* library_prototype(const Instruction& instruction) const {
+    if (image.architecture != Architecture::X86_64 || image.format == BinaryFormat::Pe ||
+        !instruction.direct_target.has_value() || !options.call_prototypes ||
+        options.call_prototypes->empty()) {
+      return nullptr;
+    }
+    const auto found = options.call_prototypes->find(instruction.direct_target.value());
+    // A prototype names the library it came from: the verifier accepts arguments only from a
+    // signature it can name, so one without a source is not used.
+    if (found == options.call_prototypes->end() || found->second.source.empty() ||
+        found->second.parameter_widths.size() > kSystemVArguments.size()) {
+      return nullptr;
+    }
+    for (const std::uint8_t width : found->second.parameter_widths) {
+      if (width == 0 || width > 8) {
+        return nullptr;
+      }
+    }
+    return found->second.return_width > 8 ? nullptr : &found->second;
+  }
+
+  static constexpr std::array<const char*, 6> kSystemVArguments = {"rdi", "rsi", "rdx",
+                                                                   "rcx", "r8",  "r9"};
+
+  /// Gives a call the arguments and result of a library prototype: the System V argument
+  /// registers in order, each as wide as its parameter, and rax for a result. An argument register
+  /// past the prototype's parameters that this block writes and does not read before the call is
+  /// reported as a possible mismatch: the write may be dead code, so it is not taken as an
+  /// argument, and the prototype is applied as written.
+  void apply_library_prototype(const IrBlock& block, IrStatement& statement,
+                               const CallPrototype& prototype) {
+    for (std::size_t index = 0; index < prototype.parameter_widths.size(); ++index) {
+      statement.call_arguments.push_back(
+          IrOperand::register_ref(kSystemVArguments[index], prototype.parameter_widths[index]));
+    }
+    if (prototype.return_width > 0) {
+      statement.dest = IrOperand::register_ref("rax", 8);
+    }
+    statement.signature_source = prototype.source;
+    std::set<std::string> extra;
+    for (std::size_t index = prototype.parameter_widths.size(); index < kSystemVArguments.size();
+         ++index) {
+      extra.insert(kSystemVArguments[index]);
+    }
+    if (prototype.variadic) {
+      return;  // a variadic callee may read any of them
+    }
+    std::set<std::string> read_later;
+    std::set<std::string> written_later;
+    for (std::size_t at = block.statements.size(); at-- > 0;) {
+      const IrStatement& earlier = block.statements[at];
+      if (earlier.op == IrOp::Call) {
+        break;  // a value set before an earlier call is that call's business
+      }
+      if (earlier.dest.kind == IrOperandKind::Register && !earlier.dest.reg.empty()) {
+        const std::string family = internal::register_family(earlier.dest.reg);
+        if (extra.contains(family) && !read_later.contains(family) &&
+            !written_later.contains(family)) {
+          note("possible argument mismatch: " + family + " is written at " +
+               hex_address(earlier.source_address) + " and not read before the call at " +
+               hex_address(statement.source_address) + ", whose prototype has " +
+               std::to_string(prototype.parameter_widths.size()) + " parameter(s)");
+        }
+        written_later.insert(family);
+      }
+      const auto add_read = [&](const IrOperand& operand) {
+        if (operand.kind == IrOperandKind::Register && !operand.reg.empty()) {
+          read_later.insert(internal::register_family(operand.reg));
+        } else if (operand.kind == IrOperandKind::Memory) {
+          if (!operand.reg.empty()) read_later.insert(internal::register_family(operand.reg));
+          if (!operand.index.empty()) read_later.insert(internal::register_family(operand.index));
+        }
+      };
+      if (earlier.dest.kind == IrOperandKind::Memory) {
+        add_read(earlier.dest);
+      }
+      add_read(earlier.a);
+      add_read(earlier.b);
+      add_read(earlier.c);
+    }
+  }
+
   void lift_call(IrBlock& block, const Instruction& instruction) {
     IrStatement statement;
     statement.op = IrOp::Call;
@@ -2303,6 +2402,18 @@ struct Lifter {
     if (const auto callee = known_callee(instruction)) {
       resolve_call_statement(statement, *callee);
       push(block, std::move(statement));
+      return;
+    }
+    if (const CallPrototype* prototype = library_prototype(instruction)) {
+      apply_library_prototype(block, statement, *prototype);
+      push(block, std::move(statement));
+      // The callee is an import, with no body to run: the oracle cannot execute the call, so the
+      // caller is not Complete (G22-T4). The arguments and the result are the prototype's.
+      mark_partial_once(
+          "a call to an imported function is not executed, so its caller is not verified");
+      if (prototype->variadic) {
+        mark_partial_once("a variadic call shows its fixed arguments only");
+      }
       return;
     }
     push(block, std::move(statement));
@@ -2404,7 +2515,8 @@ std::optional<ReturnDefinition> definition_in_block(const IrBlock& block, std::s
     // A resolved call (G21) that returns a value defines the integer return register: its result.
     // Any other call, and an unsupported statement, may define either register: unknown.
     if (statement.op == IrOp::Call &&
-        (statement.signature_inferred || !statement.call_model.empty()) &&
+        (statement.signature_inferred || !statement.call_model.empty() ||
+         !statement.signature_source.empty()) &&
         statement.dest.kind == IrOperandKind::Register &&
         internal::register_family(statement.dest.reg) == regs.integer_family) {
       ReturnDefinition out;

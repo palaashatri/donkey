@@ -869,3 +869,37 @@ TEST(TypeLibApply, CollisionComparisonIsBounded) {
   }
   EXPECT_LT(elapsed, std::chrono::seconds(5));
 }
+
+// The register form a call takes (G22-T4): integers, enums and pointers through typedefs, and a
+// result typedef'd to void is void; a float or a struct parameter or result has no form.
+TEST(TypeLibApply, RegisterPrototypeFollowsTypedefs) {
+  donkey::TypeTable table;
+  auto declared = donkey::parse_c_declarations(
+      "typedef void V;\ntypedef int I;\nV quit(I, char *);\nI count(long);\n"
+      "double half(double);\nstruct s { int a; };\nint take(struct s);\n",
+      table);
+  ASSERT_TRUE(declared.has_value()) << declared.diagnostic().message;
+  for (const auto& type : declared.value()) {
+    table.put(type);
+  }
+  // list() returns a copy, so the functions are taken by value.
+  const auto function = [&](const std::string& name) -> donkey::TypeDefinition {
+    for (const auto& type : table.list()) {
+      if (type.kind == donkey::TypeKind::Function && type.name == name) {
+        return type;
+      }
+    }
+    ADD_FAILURE() << name;
+    return {};
+  };
+  const auto quit = donkey::register_prototype(table, function("quit"));
+  ASSERT_TRUE(quit.has_value());
+  EXPECT_EQ(quit->parameter_widths, (std::vector<std::uint8_t>{4, 8}));
+  EXPECT_EQ(quit->return_width, 0);
+  const auto count = donkey::register_prototype(table, function("count"));
+  ASSERT_TRUE(count.has_value());
+  EXPECT_EQ(count->parameter_widths, (std::vector<std::uint8_t>{8}));
+  EXPECT_EQ(count->return_width, 4);
+  EXPECT_FALSE(donkey::register_prototype(table, function("half")).has_value());
+  EXPECT_FALSE(donkey::register_prototype(table, function("take")).has_value());
+}

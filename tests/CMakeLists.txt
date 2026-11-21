@@ -177,6 +177,7 @@ add_executable(donkey_unit_tests
   unit/typelib_test.cpp
   unit/typelib_make_test.cpp
   unit/typelib_apply_test.cpp
+  unit/library_call_test.cpp
   unit/graph_layout_test.cpp
   unit/ir_test.cpp
   unit/local_names_test.cpp
@@ -1445,3 +1446,17 @@ add_test(NAME cli.project_type_add_refuses_bit_fields_without_one_abi
                  -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 set_tests_properties(cli.project_type_add_refuses_bit_fields_without_one_abi PROPERTIES
   FIXTURES_REQUIRED typelib_glibc_loaded)
+
+
+# G22-T4: a call through an import stub with a library prototype prints its arguments and result,
+# labelled with the library (`1186: call 1020 <puts@plt>` in the musl program, whose imports bind
+# to musl's loader; the musl library applies to no glibc program).
+add_test(NAME cli.decompile_prints_library_call_arguments
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM}
+                 --project ${DONKEY_CLI_TYPELIB_DB} --function 0x117e)
+set_tests_properties(cli.decompile_prints_library_call_arguments PROPERTIES
+  FIXTURES_REQUIRED typelib_db_applied
+  # It opens the shared project database, so it runs alone with the cli.project_ tests.
+  RESOURCE_LOCK donkey_cli_project_db
+  PASS_REGULAR_EXPRESSION "rax = puts\\(rdi\\); /\\* prototype from musl-libc 1.2.4 \\*/"
+  FAIL_REGULAR_EXPRESSION "\\[complete\\]")

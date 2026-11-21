@@ -219,6 +219,10 @@ struct IrStatement {
   /// (donkey/ir/libc_models.h). The arguments then come from the function's C prototype (not an
   /// inference), the result is `dest`, and the call may change every caller-saved register.
   std::string call_model;
+  /// Only for a Call whose arguments come from a library prototype (G22-T4): the library that
+  /// declared it (`musl-libc 1.2.4`). The callee is an import with no body here, so the call is
+  /// not executed and its caller is not Complete; `signature_inferred` stays false.
+  std::string signature_source;
 };
 
 struct IrBlock {
