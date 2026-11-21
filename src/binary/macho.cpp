@@ -17,6 +17,7 @@ constexpr std::uint32_t kLcSymtab = 0x2;
 constexpr std::uint32_t kLcUnixThread = 0x5;
 constexpr std::uint32_t kLcMain = 0x80000028;
 constexpr std::uint32_t kLcUuid = 0x1b;
+constexpr std::uint32_t kLcFunctionStarts = 0x26;
 constexpr std::uint64_t kMaxLoadCommands = 4096;
 constexpr std::uint64_t kMaxSections = 65536;
 constexpr std::uint64_t kMaxSymbols = 1'000'000;
@@ -290,6 +291,28 @@ Result<void> parse_thin(ByteReader reader, BinaryImage& image, std::uint64_t bas
           thread_entry_va = eip.value();
         }
       }
+    } else if (command.value() == kLcFunctionStarts) {
+      // struct linkedit_data_command { cmd, cmdsize, dataoff, datasize } (G23-T3).
+      if (size.value() < 16) {
+        return macho_error(Status::InvalidInput, "macho.short_function_starts_command",
+                           "LC_FUNCTION_STARTS is too small", command_offset);
+      }
+      if (image.function_starts_size != 0) {
+        return macho_error(Status::InvalidInput, "macho.bad_function_starts",
+                           "a second LC_FUNCTION_STARTS", command_offset);
+      }
+      auto data_offset = reader.u32(command_offset + 8, image.endian);
+      auto data_size = reader.u32(command_offset + 12, image.endian);
+      if (!data_offset || !data_size) {
+        return macho_error(Status::InternalError, "macho.function_starts_read",
+                           "failed to read a validated LC_FUNCTION_STARTS", command_offset);
+      }
+      if (!checked::in_range(data_offset.value(), data_size.value(), reader.size())) {
+        return macho_error(Status::InvalidInput, "macho.bad_function_starts",
+                           "the LC_FUNCTION_STARTS table lies outside the file", command_offset);
+      }
+      image.function_starts_offset = base + data_offset.value();
+      image.function_starts_size = data_size.value();
     } else if (command.value() == kLcSymtab) {
       if (size.value() < 24) {
         return macho_error(Status::InvalidInput, "macho.short_symtab_command",

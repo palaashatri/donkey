@@ -166,6 +166,7 @@ add_executable(donkey_unit_tests
   unit/cfg_test.cpp
   unit/eh_frame_test.cpp
   unit/pdata_test.cpp
+  unit/function_starts_test.cpp
   unit/debug_info_test.cpp
   unit/debug_test.cpp
   unit/decode_test.cpp
@@ -1407,6 +1408,13 @@ add_test(NAME cli.analyze_reports_unverified_no_return
                  --sysroot ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/loadscope/sysroot-x86_64)
 set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
   PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")
+
+# G23-T3: a stripped Mach-O keeps its LC_FUNCTION_STARTS table; the functions it lists are found
+# and marked (tests/fixtures/function_starts, PROVENANCE.md there).
+add_test(NAME cli.functions_marks_function_starts
+         COMMAND donkey-cli functions ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/function_starts/starts_x86_64 --json)
+set_tests_properties(cli.functions_marks_function_starts PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"address\": \"0x1000003b0\"[^}]*\"from_function_starts\": true")
 
 # A floor under every test's timeout (DONKEY_TEST_TIMEOUT_FLOOR, 0 by default). It raises a limit,
 # never lowers one, and leaves every test and assertion in place. The tests gtest discovers at test

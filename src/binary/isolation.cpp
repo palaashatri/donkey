@@ -197,6 +197,8 @@ std::vector<std::byte> serialize_result(const Result<LoadedBinary>& result) {
   writer.write_string(img.sha256);
   writer.write_string(img.format_detail);
   writer.write_u8(img.partial ? 1 : 0);
+  writer.write_u64(img.function_starts_offset);
+  writer.write_u64(img.function_starts_size);
 
   // Segments
   writer.write_u32(static_cast<std::uint32_t>(img.segments.size()));
@@ -310,6 +312,8 @@ Result<LoadedBinary> deserialize_result(std::span<const std::byte> bytes) {
   img.sha256 = reader.read_string();
   img.format_detail = reader.read_string();
   img.partial = (reader.read_u8() == 1);
+  img.function_starts_offset = reader.read_u64();
+  img.function_starts_size = reader.read_u64();
 
   const std::uint32_t seg_count = reader.read_u32();
   img.segments.reserve(seg_count);
