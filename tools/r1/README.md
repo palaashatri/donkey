@@ -29,8 +29,9 @@ The builds use the distribution's default flags (PIE, `-fstack-protector-strong`
 plus `-g` and `-ffile-prefix-map`. With the same compiler, the same inputs give the same bytes in any
 directory. That was checked by building twice in two directories and comparing all 26 SHA-256 values.
 
-On Ubuntu 24.04 the build needs the `gcc`, `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu` and
-`musl-tools` packages.
+On Ubuntu 24.04 the build needs the `gcc`, `gcc-aarch64-linux-gnu`, `binutils-aarch64-linux-gnu`,
+`libc6-dev-arm64-cross` and `musl-tools` packages. `gcc-aarch64-linux-gnu` only recommends
+`libc6-dev-arm64-cross` (the AArch64 glibc headers), so an install with `--no-install-recommends` must name it.
 
 ## Use
 

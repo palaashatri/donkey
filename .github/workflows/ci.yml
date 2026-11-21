@@ -113,7 +113,7 @@ jobs:
           python -m pip install --upgrade cmake ninja
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu musl-tools
+            gcc-aarch64-linux-gnu binutils-aarch64-linux-gnu libc6-dev-arm64-cross musl-tools
       - name: Build donkey-cli and donkey-r1 (Release)
         run: |
           cmake -S . -B build/r1 -G Ninja -DCMAKE_BUILD_TYPE=Release \
