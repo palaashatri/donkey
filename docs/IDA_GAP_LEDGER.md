@@ -178,7 +178,7 @@ P0 is the most important, P3 the least.
 | G17 | UI breadth | Many views, search kinds, command palette | Core views and text search in lists; a command palette (Ctrl/Cmd+Shift+P) that runs the menu commands and shows each view (G17-T1, `ui.script_command_palette`); a Search window with byte, immediate and regular-expression searches run off the render thread (G17-T2, `search.*`, `ui.script_search`); a Symbols window (G17-T3, `ui.script_symbols`); a cross-reference graph window of the call neighbourhood (G17-T4, `ui.script_xref_graph`) | P3 | IN PROGRESS (T1 to T4 DONE; synchronised views and the theme editor TODO) |
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
-| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T2 partial: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the R1 corpus of G20-T1, the ratchet (T3), and the T4 execution of R1) |
+| G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T1 DONE: `tools/r1` fetches, checks and builds the 26 R1 binaries reproducibly; T2 DONE: `donkey-r1 measure` counts every R1 function (x86-64 1,268 of 8,405 Complete, AArch64 839 of 7,450; 0 Unsupported or InvalidIR; every Partial names a reason) and the stripped starts (14,778 of 14,887); earlier, a fixed sample: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. Not done: the ratchet and its CI job (T3), and the T4 execution of R1) |
 | G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O), a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer and reads no stack argument prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV clobber model, with the callee write set for a resolved call; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels; AArch64 calls stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries and the Mach-O `LC_FUNCTION_STARTS` table are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, Mach-O `__unwind_info` and ARM64 unwind data are not read | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 PARTIAL: `LC_FUNCTION_STARTS` read and fuzzed (fuzz_function_starts), `__unwind_info` TODO; T4, T5 TODO) |
@@ -1960,6 +1960,89 @@ for every binary: the source, licence, compiler and version, flags, level, archi
   property of the binary, not noise, and stay in the count.
 - The same source at the same level with the same compiler must give the same bytes. `binaries.json` records each
   SHA-256, so that two CI runs can be compared.
+
+**T1 report (2026-11-21).** `tools/r1/r1.json` (the manifest) and `tools/r1/build.cmake` (fetch, check,
+unpack and build, in CMake script mode) were done as planned.
+
+On Ubuntu 24.04 x86-64, the script builds the 26 binaries in 2 minutes and writes the provenance of each to
+`binaries.json`:
+
+- the source with its version, licence and archive SHA-256;
+- the toolchain, architecture, level and variant;
+- the compiler's and the `strip` tool's `--version` line with their package versions;
+- the flags;
+- the binary's SHA-256.
+
+A second build in another directory gave the same 26 SHA-256 values, so `-ffile-prefix-map` makes the
+builds reproducible.
+
+Three departures from the plan, each for a reason:
+
+1. The hash is checked by the script after the download (`file(SHA256)`), not with `EXPECTED_HASH`. On a
+   mismatch, CMake's own check stops the script with its own error and leaves the downloaded file on disk.
+   The script instead deletes it, does not retry, and names both hashes.
+2. The archive members are listed with `cmake -E tar tf`. `file(ARCHIVE_EXTRACT ... LIST_ONLY)` prints the
+   list but does not return it. Every member must lie under the source's root, and an absolute path, a drive
+   letter, a backslash or a `..` component is refused before anything is unpacked.
+3. The test archives are made at test time with `cmake -E tar`, which keeps a `pkg-1/../escape.txt` member
+   as written, so no archive is committed. The manifest schema is checked by `build.cmake`, the only program
+   that reads `r1.json`, so its tests live in the same CMake check (`r1.build_script_refusals`): an unknown
+   key, a missing key, a short hash and an unsafe root. `R1.SymbolsMatchReadelf` moves to T2, where
+   `donkey-r1` first reads symbols.
+
+The refusal check covers a wrong hash (the file is not kept), a `..` member, a member outside the root, the
+four schema faults, and a good archive that is fetched and unpacked. It uses `file://` archives, so CTest
+needs no network.
+
+Not done in T1, and planned for T2 and T3: the decompile run, `donkey-r1`, and the CI job.
+
+**T2 report (2026-11-21).** `donkey-r1` (`tools/r1/r1_tool.cpp` and `r1_measure.{h,cpp}`, a C++20
+developer tool built with the tests and never installed) and `tools/r1/decompile.cmake` were done as planned.
+The tool also needed two additions to `decompile --json`:
+
+- a `"notes"` array, holding the lifter's notes in order;
+- an `"unsupported"` array, holding the text of each distinct Unsupported statement.
+
+Both are additive, so `kJsonSchemaVersion` stays 1. The `--no-pseudocode` flag leaves out the text and the
+source map, which make up about 50 MB of SQLite's output. The status is still computed by formatting the
+pseudocode, so InvalidIR is still found.
+
+The measurement found four things:
+
+1. **34 Partial functions gave no reason as a note.** Each of them has an instruction that is not lifted
+   (`rol rdx, cl` in Lua's `rotl`, `syscall` in musl's wrappers, AArch64 `ldurb`). The only trace of it was
+   a `/* unsupported: ... */` statement. The measurement now takes such an instruction as the reason when
+   no specific note is given, and 0 Partial functions are left without a reason.
+2. **The order of reasons matters.** Putting unsupported instructions before notes made "unsupported
+   instruction 'mov'" (1,544 functions) hide the thread-local storage note. The `%fs:0x28` load of the stack
+   protector is an Unsupported `mov`. A specific note is therefore the first reason, and an unsupported
+   instruction is the first reason only without one.
+3. **Every found start of a stripped glibc build that is not a symbol is an import stub.** Those starts lie
+   in `.plt`, `.plt.sec` or `.plt.got`, 966 in all. They are counted as stubs, apart from the 2 extra starts,
+   which are both in static musl.
+4. **The 109 missed starts.**
+   - In each glibc build they are the C runtime's `_init`, `_fini`, `frame_dummy`, `register_tm_clones` and
+     `__do_global_dtors_aux`. These are named by `DT_INIT`, `DT_FINI`, `DT_INIT_ARRAY` and `DT_FINI_ARRAY`,
+     which the function discovery does not read: a G24 task.
+   - In static musl they are 67 assembly functions with no unwind entry.
+
+The results, the per-binary table and the 20 most frequent first reasons are in `docs/SUPPORT_MATRIX.md`
+("Real programs").
+
+Tests:
+
+- `R1.ReadsBinaries`
+- `R1.RefusesUnsafeOrIncompleteBinaries`
+- `R1.CountsADecompileOutput`
+- `R1.AcceptsOutputWithoutNotes`
+- `R1.RefusesUnusableDecompileOutput`
+- `R1.NormalisesNotes`
+- `R1.ComparesStarts`
+- `R1.SymbolsMatchReadelf`: on a library with an IFUNC symbol, every `FUNC` and `IFUNC` start and size
+  equals `readelf -sW`.
+- `cli.decompile_json_lists_notes`
+- `cli.decompile_no_pseudocode`
+- `cli.decompile_no_pseudocode_needs_json`
 
 ### G21 Call sites and calling conventions (P0)
 

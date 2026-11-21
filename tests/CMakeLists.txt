@@ -191,6 +191,19 @@ add_executable(donkey_unit_tests
   unit/session_test.cpp
 )
 target_link_libraries(donkey_unit_tests PRIVATE donkey::session donkey::ir donkey::debug donkey::patch donkey::plugin GTest::gtest_main)
+# G20-T2: the R1 measurement library, and a shared library with an IFUNC symbol (ELF hosts with GCC
+# or Clang) whose symbols the R1 ground truth is compared with readelf on.
+if(TARGET donkey_r1)
+  target_sources(donkey_unit_tests PRIVATE unit/r1_test.cpp)
+  target_link_libraries(donkey_unit_tests PRIVATE donkey_r1)
+  if(CMAKE_SYSTEM_NAME MATCHES "Linux|FreeBSD" AND CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    add_library(donkey_r1_ifunc SHARED r1/ifunc_lib.c)
+    target_compile_options(donkey_r1_ifunc PRIVATE -O1 -g)
+    target_compile_definitions(donkey_unit_tests PRIVATE
+      DONKEY_R1_IFUNC_PATH="$<TARGET_FILE:donkey_r1_ifunc>")
+    add_dependencies(donkey_unit_tests donkey_r1_ifunc)
+  endif()
+endif()
 # Internal lifter declarations (src/ir/lift_internal.h) are unit-tested directly.
 target_include_directories(donkey_unit_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src/ir)
 target_compile_definitions(donkey_unit_tests PRIVATE
@@ -1409,6 +1422,13 @@ add_test(NAME cli.analyze_reports_unverified_no_return
 set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
   PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")
 
+# G20-T1: the R1 fetch and build script refuses a wrong hash, unsafe archive members and a manifest
+# outside its schema, and unpacks a good archive (local file:// archives; no network).
+add_test(NAME r1.build_script_refusals
+         COMMAND ${CMAKE_COMMAND} -DR1_SCRIPT=${PROJECT_SOURCE_DIR}/tools/r1/build.cmake
+                 -DWORK=${CMAKE_CURRENT_BINARY_DIR}/r1_refusals
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/r1_build_refusals.cmake)
+
 # G23-T3: a stripped Mach-O keeps its LC_FUNCTION_STARTS table; the functions it lists are found
 # and marked (tests/fixtures/function_starts, PROVENANCE.md there).
 add_test(NAME cli.functions_marks_function_starts
@@ -1451,6 +1471,22 @@ set_tests_properties(cli.project_type_add_refuses_bit_fields_without_one_abi PRO
 # G22-T4: a call through an import stub with a library prototype prints its arguments and result,
 # labelled with the library (`1186: call 1020 <puts@plt>` in the musl program, whose imports bind
 # to musl's loader; the musl library applies to no glibc program).
+# G20-T2: decompile --json lists each function's notes, and --no-pseudocode leaves out the text and
+# the source map, keeping the status, the structure and the notes.
+add_test(NAME cli.decompile_json_lists_notes
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --function 0x117e)
+set_tests_properties(cli.decompile_json_lists_notes PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"notes\": \\[\"[^\"]+\"[^]]*\\], \"unsupported\": \\[[^]]*\\], \"pseudocode\": \"")
+add_test(NAME cli.decompile_no_pseudocode
+         COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM} --json --no-pseudocode --function 0x117e)
+set_tests_properties(cli.decompile_no_pseudocode PROPERTIES
+  PASS_REGULAR_EXPRESSION "\"status\": \"Partial\".*\"notes\": \\[\"[^]]*\\], \"unsupported\": \\[[^]]*\\]}"
+  FAIL_REGULAR_EXPRESSION "pseudocode\"|source_map")
+add_test(NAME cli.decompile_no_pseudocode_needs_json
+         COMMAND ${CMAKE_COMMAND}
+                 "-DREFUSED_COMMAND=$<TARGET_FILE:donkey-cli>;decompile;${DONKEY_MUSL_PROGRAM};--no-pseudocode"
+                 "-DEXPECT=--no-pseudocode needs --json"
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/expect_refusal.cmake)
 add_test(NAME cli.decompile_prints_library_call_arguments
          COMMAND donkey-cli decompile ${DONKEY_MUSL_PROGRAM}
                  --project ${DONKEY_CLI_TYPELIB_DB} --function 0x117e)

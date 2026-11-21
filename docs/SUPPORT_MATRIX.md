@@ -175,6 +175,90 @@ files, and refuses a file whose SHA-256 has changed.
 | MIPS32 (little- and big-endian) | yes; matches llvm-objdump on both byte orders of the test image (23 instructions each). The CFG keeps each branch's, call's and return's delay slot in its block, and the fall-through starts after it (`DecodeIsa.MipsDelaySlotsStayWithTheirBranchesInTheGraph`). Branch-likely forms (`beql` and kin) run their slot only when taken, which is not modelled: the graph is Partial with `analysis.mips_branch_likely`. microMIPS and MIPS16 images (their e_flags) are refused as Unknown with `elf.mips_isa_extension`; they are not read as MIPS32. 64-bit MIPS is decoded in its 64-bit mode and matches llvm-objdump on the test image (27 instructions, the padding excluded) | yes for the test image, with no unmodelled branch form; not checked against another disassembler's CFG | Unsupported (`lift.unsupported_architecture`) | no | no |
 | PowerPC32 (big- and little-endian) | yes; matches llvm-objdump on both byte orders of the test image (25 instructions each). VLE (variable-length) code is not detected and is read as 32-bit PowerPC. 64-bit PowerPC is decoded in its 64-bit mode and matches llvm-objdump on the test image (31 instructions) | not measured | Unsupported (`lift.unsupported_architecture`) | no | no |
 
+## Real programs (R1, G20)
+
+R1 is the reference corpus of real programs (`tools/r1/README.md`): zlib 1.3.1, Lua 5.4.7 and SQLite 3.46.1,
+built by `tools/r1/build.cmake` on Ubuntu 24.04 with GCC 13.3 and the distribution defaults. There are 13
+builds, at -O0 and -O2, for x86-64 and AArch64, plus a static `lua` linked with musl 1.2.4; each is also kept
+as a stripped copy. Every function was decompiled, not a sample, with `tools/r1/decompile.cmake`
+(`donkey-cli decompile --json --no-pseudocode`), and counted with `donkey-r1 measure` (G20-T2). The decompiler
+was that of `main` at `2270daa`; the change that adds the measurement adds JSON fields only.
+
+These are counted results, not verified ones: a Complete function here has not been executed. The execution
+comparison on R1 is G20-T4.
+
+Unstripped builds, totals:
+
+- x86-64: 1,268 of 8,405 functions are Complete (15.1%).
+- AArch64: 839 of 7,450 functions are Complete (11.3%).
+- No function is Unsupported or InvalidIR, and no run failed.
+- Every Partial function names at least one reason.
+
+Stripped builds, against the function symbols of their unstripped twins (`STT_FUNC` and `STT_GNU_IFUNC`):
+
+- 14,778 of 14,887 starts are found.
+- The 109 missed starts are the C runtime's `_init`, `_fini`, `frame_dummy`, `register_tm_clones` and
+  `__do_global_dtors_aux` in each glibc build, and 67 assembly functions of static musl that have no
+  unwind entry.
+- 966 further starts found are import stubs (`.plt`, `.plt.sec`, `.plt.got`), which have no symbol.
+- 2 extra starts are found, both in static musl.
+
+| Binary | Functions | Complete | Partial | Unsupported or InvalidIR | Partial, no reason | Starts found (stripped) |
+|---|---|---|---|---|---|---|
+| `libz-x86_64-glibc-O0.so` | 207 | 58 | 149 | 0 | 0 |  |
+| `libz-x86_64-glibc-O0.so.stripped` | 202 | 58 | 144 | 0 | 0 | 153 of 158 (5 missed; 49 stubs, 0 extra) |
+| `libz-x86_64-glibc-O2.so` | 185 | 40 | 145 | 0 | 0 |  |
+| `libz-x86_64-glibc-O2.so.stripped` | 180 | 40 | 140 | 0 | 0 | 131 of 136 (5 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O0.so` | 208 | 36 | 172 | 0 | 0 |  |
+| `libz-aarch64-glibc-O0.so.stripped` | 206 | 36 | 170 | 0 | 0 | 157 of 159 (2 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O2.so` | 186 | 27 | 159 | 0 | 0 |  |
+| `libz-aarch64-glibc-O2.so.stripped` | 184 | 27 | 157 | 0 | 0 | 135 of 137 (2 missed; 49 stubs, 0 extra) |
+| `lua-x86_64-glibc-O0` | 1178 | 174 | 1004 | 0 | 0 |  |
+| `lua-x86_64-glibc-O0.stripped` | 1173 | 174 | 999 | 0 | 0 | 1082 of 1087 (5 missed; 91 stubs, 0 extra) |
+| `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
+| `lua-x86_64-glibc-O2.stripped` | 789 | 77 | 712 | 0 | 0 | 699 of 704 (5 missed; 90 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0` | 1180 | 110 | 1070 | 0 | 0 |  |
+| `lua-aarch64-glibc-O0.stripped` | 1178 | 110 | 1068 | 0 | 0 | 1086 of 1088 (2 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O2` | 790 | 49 | 741 | 0 | 0 |  |
+| `lua-aarch64-glibc-O2.stripped` | 788 | 49 | 739 | 0 | 0 | 697 of 699 (2 missed; 91 stubs, 0 extra) |
+| `lua-static-musl-x86_64-musl-O2` | 987 | 124 | 863 | 0 | 0 |  |
+| `lua-static-musl-x86_64-musl-O2.stripped` | 920 | 112 | 808 | 0 | 1 | 918 of 985 (67 missed; 0 stubs, 2 extra) |
+| `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O0.stripped` | 3062 | 584 | 2478 | 0 | 0 | 2970 of 2975 (5 missed; 92 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O2.stripped` | 1982 | 211 | 1771 | 0 | 0 | 1889 of 1894 (5 missed; 93 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0` | 3097 | 448 | 2649 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3095 | 448 | 2647 | 0 | 0 | 2985 of 2987 (2 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2` | 1989 | 169 | 1820 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1987 | 169 | 1818 | 0 | 0 | 1876 of 1878 (2 missed; 111 stubs, 0 extra) |
+
+The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
+note that is not one every function carries; when the lifter gave none, it is the first instruction that was
+not lifted.
+
+| Partial functions | First reason |
+|---|---|
+| 9793 | outgoing call arguments and return values follow no modelled ABI |
+| 1863 | jump leaves the function; treated as a tail call |
+| 1646 | fs- or gs-relative memory (thread-local storage) is not modelled |
+| 144 | the returned register is not determined by the definitions that reach the return; rax is assumed |
+| 93 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
+| 62 | floating-point results assume the MXCSR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 29 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 20 | conditional branch depends on flags this lifter does not model |
+| 15 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 15 | unsupported instruction 'syscall' |
+| 13 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
+| 12 | both rax and xmm0 are written on a path to this return; which one carries the return value is not determined, so rax is assumed |
+| 8 | unsupported instruction 'ldurb' |
+| 6 | a jump to a known function is lifted as a call with its inferred arguments and result, followed by a return |
+| 6 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 4 | a jump to a C library function is lifted as a call of its model, followed by a return |
+| 2 | bsf and bsr with a zero source leave the destination undefined; that case is not modelled |
+| 2 | integer and floating-point parameters are both present; their order in the source is not recoverable from the registers, so the signature is Partial |
+| 2 | unsupported instruction 'ldurh' |
+| 1 | 'cmovg' reads flags this lifter does not model |
+
 ## Decompiler corpus
 
 Loop structuring (G04-T3, partial): a loop whose body is one block that repeats
