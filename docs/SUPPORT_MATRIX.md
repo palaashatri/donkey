@@ -220,7 +220,10 @@ comparison on R1 is G20-T4.
 No run stopped at an analysis limit (`measure` refuses such an output, which may miss functions). The analysis
 of every `libz.so` build and of every AArch64 build is Partial for one reason, `analysis.no_return_unverified`:
 which library an import binds to, and so whether it returns, cannot be shown for a shared library without the
-program that loads it, or for AArch64 without its libraries on this x86-64 host (G24-T3).
+program that loads it, or for AArch64 without its libraries on this x86-64 host (G24-T3). That diagnostic leaves
+function discovery whole. `measure` marks a binary whose analysis gave any other diagnostic (an unreadable
+`.eh_frame`, `.pdata`, start table or init array, for example) as one whose starts may be missing; no R1 binary
+is marked.
 
 Unstripped builds, totals:
 

@@ -158,6 +158,25 @@ TEST(R1, RefusesAnAnalysisStoppedAtALimit) {
   EXPECT_EQ(measured.value().analysis_notes,
             (std::vector<std::string>{"analysis.eh_frame_incomplete"}));
   EXPECT_EQ(measured.value().complete, 1U);
+  // An unreadable start table may leave functions out: counted, and marked.
+  EXPECT_TRUE(measured.value().starts_may_be_missing);
+}
+
+// Only the diagnostic known to leave discovery whole is unmarked; an unknown one is marked.
+TEST(R1, MarksAnalysesThatMayMissStarts) {
+  using donkey::r1::leaves_starts_complete;
+  EXPECT_TRUE(leaves_starts_complete("analysis.no_return_unverified"));
+  for (const char* code : {"analysis.eh_frame_incomplete", "analysis.pdata_incomplete",
+                           "analysis.init_fini_incomplete", "analysis.section_out_of_bounds",
+                           "analysis.decode_stopped", "unwind_info.bad_page",
+                           "function_starts.bad_offset", "analysis.something_new"}) {
+    EXPECT_FALSE(leaves_starts_complete(code)) << code;
+  }
+  auto measured = donkey::r1::measure_decompile(
+      "b", R"({"analysis_partial": true, "analysis_diagnostics": ["analysis.no_return_unverified"],
+               "functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
+  ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
+  EXPECT_FALSE(measured.value().starts_may_be_missing);
 }
 
 TEST(R1, NormalisesNotes) {

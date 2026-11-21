@@ -2039,7 +2039,9 @@ The CLI also states the analysis's own state (`"analysis_partial"` and `"analysi
 `measure` refuses an output whose analysis stopped at a resource limit (`analysis.instruction_limit`,
 `analysis.block_limit`, `analysis.traversal_limit`), since functions may be missing from it. No R1 run hit
 one. The analysis of every `libz.so` build and every AArch64 build is Partial for
-`analysis.no_return_unverified` (G24-T3), which is recorded.
+`analysis.no_return_unverified` (G24-T3), which is recorded. That is the one diagnostic known to leave
+function discovery whole. A binary with any other diagnostic, including an unknown one, is marked
+`starts_may_be_missing`; no R1 binary is.
 
 The results, the per-binary table and the 20 most frequent first reasons are in `docs/SUPPORT_MATRIX.md`
 ("Real programs").
@@ -2049,6 +2051,7 @@ Tests:
 - `R1.ReadsBinaries`
 - `R1.RefusesUnsafeOrIncompleteBinaries`
 - `R1.RefusesAnAnalysisStoppedAtALimit`
+- `R1.MarksAnalysesThatMayMissStarts`
 - `cli.decompile_json_reports_an_analysis_limit`
 - `R1.CountsADecompileOutput`
 - `R1.AcceptsOutputWithoutNotes`

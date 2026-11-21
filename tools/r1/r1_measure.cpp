@@ -112,6 +112,12 @@ bool is_resource_limit(std::string_view code) {
          code == "analysis.traversal_limit";
 }
 
+bool leaves_starts_complete(std::string_view code) {
+  // The one analysis diagnostic known to leave function discovery whole: whether an import
+  // returns is not shown (G24-T3), so calls to it keep their fall-through.
+  return code == "analysis.no_return_unverified";
+}
+
 bool is_generic_note(std::string_view note) {
   // The subset note of each architecture, the signature note, and the note that parameter names
   // came from debug information: every function carries them, Complete or not.
@@ -209,6 +215,9 @@ Result<Measure> measure_decompile(std::string_view file, std::string_view json) 
                                                 "); raise --max-instructions");
       }
       out.analysis_notes.push_back(code.text);
+      if (!leaves_starts_complete(code.text)) {
+        out.starts_may_be_missing = true;
+      }
     }
   }
   for (const JsonValue& function : functions->items) {

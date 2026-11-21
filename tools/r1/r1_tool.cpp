@@ -219,9 +219,20 @@ int measure(const fs::path& work, const fs::path& decompiled, const fs::path& re
         ", \"has_notes\": " + (measured.has_notes ? "true" : "false") +
         ", \"analysis_partial\": " + (measured.analysis_partial ? "true" : "false") +
         ", \"analysis_notes\": " + string_array(measured.analysis_notes) +
+        ", \"starts_may_be_missing\": " + (measured.starts_may_be_missing ? "true" : "false") +
         ", \"starts\": " + starts_json + ", \"unexplained_partial\": " + unexplained +
         ", \"first_notes\": " + notes_json(measured.first_notes) +
         ", \"all_notes\": " + notes_json(measured.all_notes) + "}";
+    if (!measured.error && measured.starts_may_be_missing) {
+      std::string codes;
+      for (const std::string& code : measured.analysis_notes) {
+        if (!donkey::r1::leaves_starts_complete(code)) {
+          codes += (codes.empty() ? "" : ", ") + code;
+        }
+      }
+      starts_cell += (starts_cell.empty() ? "" : "; ") + std::string("starts may be missing: ") +
+                     table_cell(codes);
+    }
     rows += "| `" + binary.file + "` | " +
             (measured.error
                  ? "error: " + table_cell(measured.error_reason) + " | | | | | |"
