@@ -5,6 +5,7 @@
 #include "donkey/binary/function_starts.h"
 #include "donkey/binary/pdata.h"
 #include "donkey/binary/plt.h"
+#include "donkey/binary/unwind_info.h"
 
 #include <algorithm>
 #include <iterator>
@@ -762,6 +763,21 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
   } else {
     result.partial = true;
     result.diagnostics.push_back(listed.diagnostic());
+  }
+  // Mach-O compact unwind (G23-T3): each `__unwind_info` entry starts a function, unless its
+  // encoding marks it as a range inside one (UNWIND_IS_NOT_FUNCTION_START). The linker folds
+  // adjacent functions with one encoding into one entry, so the entries are a subset of the
+  // starts. A section that cannot be read leaves starts out, so the result is Partial.
+  if (auto compact = read_unwind_info_of_image(image, file); compact) {
+    for (const std::uint64_t start : unwind_function_starts(compact.value())) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        unwind_starts.insert(start);
+      }
+    }
+  } else {
+    result.partial = true;
+    result.diagnostics.push_back(compact.diagnostic());
   }
   // PE x64 exception directory (G23-T2): each RUNTIME_FUNCTION names a function's range.
   if (auto pdata = read_pdata_of_image(image, file); pdata) {
