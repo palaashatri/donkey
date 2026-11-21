@@ -537,9 +537,22 @@ TEST(TypeLib, AppliesAWin64LibraryToPeImportThunks) {
   ASSERT_NE(puts, nullptr);
   ASSERT_TRUE(puts->prototype.valid()) << puts->reason;
   EXPECT_EQ(donkey::c_declaration(table.value(), puts->prototype, "puts"), "int puts(char *s)");
+  const auto* abort_entry = entry_named(applied.value(), "abort");
+  ASSERT_NE(abort_entry, nullptr);
+  ASSERT_TRUE(abort_entry->prototype.valid()) << abort_entry->reason;
   auto stored = opened->project.type_applications(opened->image_id);
   ASSERT_TRUE(stored.has_value());
-  EXPECT_EQ(stored.value().size(), 2U);  // puts and abort
+  ASSERT_EQ(stored.value().size(), 2U);  // puts and abort
+  // Each stored application is a library prototype, at its thunk, of the type the step applied.
+  for (const donkey::TypeApplication& application : stored.value()) {
+    EXPECT_EQ(application.kind, donkey::TypeApplicationKind::FunctionPrototype);
+    EXPECT_EQ(application.source, donkey::TypeProvenance::Library);
+    const auto* entry = application.address == puts->address          ? puts
+                        : application.address == abort_entry->address ? abort_entry
+                                                                      : nullptr;
+    ASSERT_NE(entry, nullptr) << application.address;
+    EXPECT_EQ(application.type_id, entry->prototype);
+  }
 
   TempProject other;
   auto sysv = donkey::read_type_library(
