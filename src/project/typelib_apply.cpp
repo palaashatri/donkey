@@ -57,10 +57,12 @@ class ShapeComparer {
 
  private:
   static constexpr std::size_t kBudget = 100'000;
-  /// How deep one comparison recurses (a chain of pointers, typedefs and members). Each level is
-  /// two small frames, well under 1 KiB even in an ASan Debug build, so 256 levels stay far inside
-  /// the smallest default thread stack Donkey runs on (512 KiB, macOS secondary threads); past it
-  /// the two are not shown to be the same.
+  /// How deep one comparison recurses (a chain of pointers, typedefs and members); past it the two
+  /// are not shown to be the same. Each level is one `same` and one `same_definition` frame:
+  /// measured with GCC 13 `-fstack-usage` on x86-64, 176 bytes at -O3, 240 at -O0 and 544 at -O0
+  /// with ASan. 256 levels are then at most 45 KiB in a release build and 139 KiB under ASan,
+  /// inside the smallest default stack of a thread Donkey runs on (512 KiB, macOS secondary
+  /// threads).
   static constexpr std::size_t kMaxDepth = 256;
 
   bool same(TypeId a, TypeId b) {
