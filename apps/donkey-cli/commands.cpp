@@ -725,6 +725,7 @@ int command_analysis(const AnalysisRequest& request, const std::string& mode) {
                ", \"from_symbol\": " + (function.from_symbol ? "true" : "false") +
                ", \"from_unwind\": " + (function.from_unwind ? "true" : "false") +
                ", \"from_function_starts\": " + (function.from_function_starts ? "true" : "false") +
+               ", \"from_init_fini\": " + (function.from_init_fini ? "true" : "false") +
                ", \"import\": " +
                (function.import_name.empty() ? std::string("null") : quote(function.import_name)) +
                ", \"thunk\": " + (function.thunk ? "true" : "false") +

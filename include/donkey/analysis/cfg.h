@@ -28,6 +28,9 @@ struct Function {
   bool from_unwind = false;
   /// The start is in the Mach-O LC_FUNCTION_STARTS table (G23-T3): the linker lists it.
   bool from_function_starts = false;
+  /// The start is an ELF initialisation or termination function (G24): DT_INIT, DT_FINI, an entry
+  /// of an init, fini or preinit array, or the start of `.init` or `.fini`.
+  bool from_init_fini = false;
   bool estimated = true;
   /// The function is an import stub (G24-T4): a PLT entry (`.plt`, `.plt.sec`, `.plt.got`) whose
   /// relocation names the import it jumps to. `name` is then `<import>@plt`, and this field holds

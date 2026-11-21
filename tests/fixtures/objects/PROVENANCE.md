@@ -62,3 +62,10 @@ source was written for this repository. The objects hold three COMMON symbols (`
   initial-exec object's slots are checked against the variant I offsets 0x10, 0x14 and 0x18
   (tls_counter, tls_byte, tls_pair); `ld` relaxes that model to movz/movk instead, and the
   slot form used here is equally valid.
+
+## Mach-O relocatable object (G24)
+
+`macho-object-x86_64.o` is built from `macho-object.c` in this directory, a source written for this
+repository, with Clang 18.1.3 (`clang --target=x86_64-apple-macos11 -O1 -c macho-object.c`). It is an
+`MH_OBJECT`, whose `__TEXT,__text` section keeps address 0. The test is
+`Analysis.AMachOObjectKeepsItsFunctions` in `tests/unit/function_starts_test.cpp`.
