@@ -1411,6 +1411,13 @@ add_test(NAME cli.analyze_reports_unverified_no_return
 set_tests_properties(cli.analyze_reports_unverified_no_return PROPERTIES
   PASS_REGULAR_EXPRESSION "analysis.no_return_unverified")
 
+# G20-T1: the R1 fetch and build script refuses a wrong hash, unsafe archive members and a manifest
+# outside its schema, and unpacks a good archive (local file:// archives; no network).
+add_test(NAME r1.build_script_refusals
+         COMMAND ${CMAKE_COMMAND} -DR1_SCRIPT=${PROJECT_SOURCE_DIR}/tools/r1/build.cmake
+                 -DWORK=${CMAKE_CURRENT_BINARY_DIR}/r1_refusals
+                 -P ${PROJECT_SOURCE_DIR}/cmake/checks/r1_build_refusals.cmake)
+
 # G23-T3: a stripped Mach-O keeps its LC_FUNCTION_STARTS table; the functions it lists are found
 # and marked (tests/fixtures/function_starts, PROVENANCE.md there).
 # G23-T3: a stripped Mach-O linked without LC_FUNCTION_STARTS gets the starts of its compact
