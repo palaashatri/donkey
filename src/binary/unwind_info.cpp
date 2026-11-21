@@ -129,6 +129,21 @@ Result<UnwindInfo> read_unwind_info(std::span<const std::byte> section, std::uin
       return unwind_error("unwind_info.outside_section",
                           "the entries of an __unwind_info page lie outside the section", page);
     }
+    // The arrays follow the page header (8 bytes for a regular page, 12 for a compressed one) and
+    // do not overlap each other: entries read from the header or from the encodings are not
+    // entries.
+    const std::uint64_t header_size = kind == kRegularPage ? 8 : 12;
+    if ((entry_count != 0 && entries_offset < header_size) ||
+        (encodings_count != 0 && encodings_offset < header_size)) {
+      return unwind_error("unwind_info.bad_page",
+                          "an __unwind_info page's array overlaps the page header", page);
+    }
+    if (entry_count != 0 && encodings_count != 0 &&
+        entries_offset < encodings_offset + encodings_count * 4 &&
+        encodings_offset < entries_offset + entry_count * entry_size) {
+      return unwind_error("unwind_info.bad_page",
+                          "an __unwind_info page's entries overlap its encodings", page);
+    }
     for (std::uint64_t e = 0; e < entry_count; ++e) {
       const std::uint64_t at = page + entries_offset + e * entry_size;
       const std::uint32_t word = field(at);
@@ -172,6 +187,16 @@ Result<UnwindInfo> read_unwind_info(std::span<const std::byte> section, std::uin
     }
   }
   return out;
+}
+
+std::vector<std::uint64_t> unwind_function_starts(const UnwindInfo& info) {
+  std::vector<std::uint64_t> starts;
+  for (const UnwindInfoEntry& entry : info.entries) {
+    if ((entry.encoding & kUnwindIsNotFunctionStart) == 0) {
+      starts.push_back(entry.start);
+    }
+  }
+  return starts;
 }
 
 Result<UnwindInfo> read_unwind_info_of_image(const BinaryImage& image,

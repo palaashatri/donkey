@@ -764,14 +764,15 @@ Result<AnalysisResult> analyze(const BinaryImage& image, std::span<const std::by
     result.partial = true;
     result.diagnostics.push_back(listed.diagnostic());
   }
-  // Mach-O compact unwind (G23-T3): each `__unwind_info` entry starts a function. The linker folds
+  // Mach-O compact unwind (G23-T3): each `__unwind_info` entry starts a function, unless its
+  // encoding marks it as a range inside one (UNWIND_IS_NOT_FUNCTION_START). The linker folds
   // adjacent functions with one encoding into one entry, so the entries are a subset of the
   // starts. A section that cannot be read leaves starts out, so the result is Partial.
   if (auto compact = read_unwind_info_of_image(image, file); compact) {
-    for (const UnwindInfoEntry& entry : compact.value().entries) {
-      if (executable_contains(image, entry.start)) {
-        seeds.insert(entry.start);
-        unwind_starts.insert(entry.start);
+    for (const std::uint64_t start : unwind_function_starts(compact.value())) {
+      if (executable_contains(image, start)) {
+        seeds.insert(start);
+        unwind_starts.insert(start);
       }
     }
   } else {

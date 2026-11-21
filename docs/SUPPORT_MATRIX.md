@@ -28,7 +28,9 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   analysis. Fuzzed (`fuzz_unwind_info`, 60 s, 12.7 million runs, clean;
   `tests/fuzz/corpus/unwind_info`). The linker folds adjacent functions with one encoding into one
   entry, so compact unwind names a subset of the starts. The encodings are kept and not
-  interpreted, and the LSDA and personality arrays are bounds-checked and not read.
+  interpreted; an entry with UNWIND_IS_NOT_FUNCTION_START (a range inside a function) is not a
+  start. The personality array is bounds-checked and not read; the index's LSDA offsets are not
+  read or checked.
 - Control flow: a function ends where its code jumps to, or falls through into, another function's
   start (not a call to the next instruction); jumps to named PLT import stubs are tail calls
   (`Cfg.*`), recorded as `TailCall` edges (`Cfg.JumpToAnotherFunctionIsATailCall`; a jump into

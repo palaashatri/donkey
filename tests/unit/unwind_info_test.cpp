@@ -332,3 +332,41 @@ TEST(UnwindInfo, AgreesWithFunctionStarts) {
     }
   }
 }
+
+// UNWIND_IS_NOT_FUNCTION_START marks a range inside a function: the entry is kept, and its address
+// is not a start. On a regular page the flag is in the entry; on a compressed page it comes from
+// the common encoding the entry names. The unflagged neighbour stays a start.
+TEST(UnwindInfo, AnEntryInsideAFunctionIsNotAStart) {
+  auto regular = section(false);
+  put32(regular, 76, 0x81000000U);  // the entry at 0x180
+  auto read = donkey::read_unwind_info(regular, kBase, donkey::Endian::Little);
+  ASSERT_TRUE(read.has_value()) << read.diagnostic().message;
+  EXPECT_EQ(read.value().entries.size(), 2U);
+  EXPECT_EQ(donkey::unwind_function_starts(read.value()),
+            (std::vector<std::uint64_t>{kBase + 0x100}));
+
+  auto compressed = section(true);
+  put32(compressed, 28, 0x81000000U);  // common encoding 0, named by the entry at 0x100
+  read = donkey::read_unwind_info(compressed, kBase, donkey::Endian::Little);
+  ASSERT_TRUE(read.has_value()) << read.diagnostic().message;
+  EXPECT_EQ(read.value().entries.size(), 2U);
+  EXPECT_EQ(donkey::unwind_function_starts(read.value()),
+            (std::vector<std::uint64_t>{kBase + 0x140}));
+}
+
+// A page's arrays follow its header and do not overlap each other.
+TEST(UnwindInfo, RefusesArraysOverlappingTheHeaderOrEachOther) {
+  auto data = section(false);
+  put16(data, 60, 0);  // regular entries read from the page header
+  EXPECT_EQ(code_of(data), "unwind_info.bad_page");
+  data = section(true);
+  put16(data, 60, 8);  // compressed entries start inside the 12-byte header
+  EXPECT_EQ(code_of(data), "unwind_info.bad_page");
+  data = section(true);
+  put16(data, 64, 4);  // compressed encodings start inside the header
+  EXPECT_EQ(code_of(data), "unwind_info.bad_page");
+  data = section(true);
+  put16(data, 60, 16);  // the entries (72..80) run into the encodings (76..80)
+  EXPECT_EQ(code_of(data), "unwind_info.bad_page");
+  EXPECT_EQ(code_of(section(true)), "accepted");
+}

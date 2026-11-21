@@ -2611,7 +2611,7 @@ section with a stable code, and the analysis is then Partial with that diagnosti
 - `unwind_info.unsorted`: entries out of order;
 - `unwind_info.too_many`: more than 2^20 entries.
 
-Each entry's start becomes a seed with the `from_unwind` provenance, as `.eh_frame` and `.pdata` starts do. The
+Each entry's start becomes a seed with the `from_unwind` provenance, except an entry whose encoding has `UNWIND_IS_NOT_FUNCTION_START`, which marks a range inside a function, as `.eh_frame` and `.pdata` starts do. The
 encodings are kept and not interpreted.
 
 Measured on new fixtures (`tests/fixtures/unwind_info`, x86-64 and arm64, clang 18 and `ld64.lld` 18, linked with

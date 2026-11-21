@@ -3,8 +3,10 @@
 // Mach-O compact unwind, `__TEXT,__unwind_info` version 1 (G23-T3). The section maps function
 // offsets (from the image base, the start of __TEXT) to 32-bit unwind encodings through a
 // first-level index and second-level pages, regular (kind 2) or compressed (kind 3). The linker
-// folds a run of adjacent functions that share an encoding into one entry, so every entry names a
-// function start, but not every function start has an entry. Reads bytes only; nothing is run.
+// folds a run of adjacent functions that share an encoding into one entry, so not every function
+// start has an entry. An entry names a function start unless its encoding has
+// UNWIND_IS_NOT_FUNCTION_START, which marks a range inside a function (`unwind_function_starts`).
+// The LSDA offsets of the index are not read or checked. Reads bytes only; nothing is run.
 
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +20,8 @@
 namespace donkey {
 
 inline constexpr std::size_t kUnwindInfoMaxEntries = std::size_t{1} << 20;
+/// UNWIND_IS_NOT_FUNCTION_START: the entry continues a function; its address is not a start.
+inline constexpr std::uint32_t kUnwindIsNotFunctionStart = 0x80000000U;
 
 struct UnwindInfoEntry {
   /// The function's address: the image base plus the entry's function offset.
@@ -39,13 +43,19 @@ struct UnwindInfo {
 /// - `unwind_info.bad_header`: too short for the header, or a version other than 1;
 /// - `unwind_info.outside_section`: an array, page or entry that does not lie inside the section;
 /// - `unwind_info.bad_index`: index offsets that decrease, or an index with no final sentinel;
-/// - `unwind_info.bad_page`: a page kind other than 2 or 3, or an entry outside its index range;
+/// - `unwind_info.bad_page`: a page kind other than 2 or 3, an entry outside its index range, an
+///   entry or encoding array that overlaps the page header, or entry and encoding arrays that
+///   overlap each other;
 /// - `unwind_info.bad_encoding_index`: a compressed entry whose encoding index names no encoding;
 /// - `unwind_info.unsorted`: entries whose addresses do not increase;
 /// - `unwind_info.too_many`: more than `max_entries` entries.
 [[nodiscard]] Result<UnwindInfo> read_unwind_info(std::span<const std::byte> section,
                                                   std::uint64_t image_base, Endian endian,
                                                   std::size_t max_entries = kUnwindInfoMaxEntries);
+
+/// The function starts that `info` names: every entry's address except those whose encoding has
+/// `kUnwindIsNotFunctionStart`, in ascending order.
+[[nodiscard]] std::vector<std::uint64_t> unwind_function_starts(const UnwindInfo& info);
 
 /// The entries of a Mach-O image's `__TEXT,__unwind_info` section, or none when it has no such
 /// section. An image with the section and no __TEXT segment is refused (`unwind_info.no_text`), as
