@@ -33,6 +33,22 @@ bool executable_contains(const BinaryImage& image, std::uint64_t address) {
   if (section != nullptr) {
     return section->executable;
   }
+  // `section_for_va` passes over sections at address 0, which in ELF are the non-allocated ones
+  // (.symtab, .strtab, debug data), never code. In a Mach-O relocatable object (MH_OBJECT) the
+  // sections keep the addresses they were written with, so `__text` starts at 0 and is code.
+  for (const Section& candidate : image.sections) {
+    if (candidate.address == 0 && candidate.executable && address < candidate.virtual_size) {
+      return true;
+    }
+  }
+  // An image with sections names its code: an address in an executable segment but in no section
+  // is a header or padding (the Mach-O header at the start of __TEXT, which the exported
+  // `__mh_execute_header` names; the ELF header of an executable first segment), not code. Only an
+  // image without sections (an ELF with its section headers removed, a raw image) falls back to
+  // its segments.
+  if (!image.sections.empty()) {
+    return false;
+  }
   const Segment* segment = image.segment_for_va(address);
   return segment != nullptr && segment->executable;
 }

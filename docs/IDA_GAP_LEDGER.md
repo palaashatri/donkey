@@ -2878,6 +2878,16 @@ precision of function starts both at least 98%.
 **Pitfalls.** Recall bought with false functions is worse than a gap. Measure
 precision in the same run.
 
+**Precision fix (2026-11-21).** In an image with sections, an address inside an executable segment but in no section
+is no longer treated as code. On Mach-O, the exported `__mh_execute_header` symbol had made the header at the start
+of `__TEXT` a "function" with no blocks. Across every binary fixture in `tests/fixtures`, and on `bash`,
+`python3.12`, `ls` and `libc.so.6`, the set of functions found changes only on the four Mach-O images
+(`function_starts/starts_x86_64`, `starts_arm64`, `dsym/dbg` and its dSYM), which each lose that header.
+An image without sections (an ELF with its section headers removed, a raw image) still falls back to its segments.
+A Mach-O relocatable object (`MH_OBJECT`) keeps its sections at the addresses written, so its `__text` starts at
+address 0: an executable section at address 0 is still code (ELF's address-0 sections are the non-allocated ones,
+never executable). The tests are `Analysis.TheMachOHeaderIsNotAFunction` and `Analysis.AMachOObjectKeepsItsFunctions`.
+
 **Initialisation and termination functions (2026-11-21).** G20-T2's R1 measurement found 109 missed starts in the
 stripped builds. In every glibc build they were the C runtime's `_init`, `_fini`, `frame_dummy`,
 `register_tm_clones` and `__do_global_dtors_aux`, functions the loader or the runtime calls and no call in the
