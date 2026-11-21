@@ -1725,57 +1725,20 @@ std::string structure_json(const IrFunction& function) {
          ", \"oracle_detail\": " + quote(verdict.oracle_detail) + "}";
 }
 
-/// The width of a scalar a call passes in an integer register (G22-T4): an integer, an enum or a
-/// pointer, through typedefs. 0 for anything else (a float, a struct, an array, void), which has
-/// no integer-register form here.
-std::uint8_t integer_register_width(const donkey::TypeTable& table, donkey::TypeId id) {
-  for (int depth = 0; depth < 32; ++depth) {
-    const donkey::TypeDefinition* type = table.find(id);
-    if (type == nullptr) {
-      return 0;
-    }
-    switch (type->kind) {
-      case donkey::TypeKind::Typedef:
-        id = type->target;
-        continue;
-      case donkey::TypeKind::Integer:
-      case donkey::TypeKind::Enum:
-      case donkey::TypeKind::Pointer:
-        return type->size >= 1 && type->size <= 8 ? static_cast<std::uint8_t>(type->size) : 0;
-      default:
-        return 0;
-    }
-  }
-  return 0;
-}
-
 /// A library prototype as the lifter takes it (G22-T4), or nothing when a parameter or the result
-/// is not an integer, enum or pointer.
+/// is not an integer, enum or pointer (donkey::register_prototype).
 std::optional<donkey::CallPrototype> call_prototype_of(const donkey::TypeTable& table,
                                                        const donkey::TypeDefinition& function,
                                                        const std::string& source) {
+  auto form = donkey::register_prototype(table, function);
+  if (!form) {
+    return std::nullopt;
+  }
   donkey::CallPrototype out;
-  out.variadic = function.variadic;
+  out.parameter_widths = std::move(form->parameter_widths);
+  out.return_width = form->return_width;
+  out.variadic = form->variadic;
   out.source = source;
-  for (const donkey::TypeField& parameter : function.fields) {
-    const std::uint8_t width = integer_register_width(table, parameter.type);
-    if (width == 0) {
-      return std::nullopt;
-    }
-    out.parameter_widths.push_back(width);
-  }
-  if (function.target.valid()) {
-    const donkey::TypeDefinition* result = table.find(function.target);
-    if (result == nullptr) {
-      return std::nullopt;
-    }
-    if (result->kind != donkey::TypeKind::Void) {
-      out.return_width = integer_register_width(table, function.target);
-      if (out.return_width == 0) {
-        return std::nullopt;
-      }
-    }
-  }
   return out;
 }
 
@@ -1953,7 +1916,9 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // whichever function calls it first.
   LiftOptions lift_options;
   lift_options.call_summaries = std::make_shared<CallSummaryCache>();
-  lift_options.call_prototypes = call_prototypes;
+  lift_options.call_prototypes =
+      std::make_shared<const std::map<std::uint64_t, donkey::CallPrototype>>(
+          std::move(call_prototypes));
   auto lift_named = [&](const Function& function) {
     auto lifted = lift_function(loaded.image, analysis.value(), function, lift_options);
     if (lifted && debug) {

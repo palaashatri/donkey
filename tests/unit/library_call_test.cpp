@@ -83,7 +83,8 @@ IrFunction lift_with(const std::vector<std::byte>& code,
   }
   donkey::LiftOptions options;
   options.resolve_calls = false;
-  options.call_prototypes = std::move(prototypes);
+  options.call_prototypes =
+      std::make_shared<const std::map<std::uint64_t, donkey::CallPrototype>>(std::move(prototypes));
   auto lifted = donkey::lift_function(image, analyzed.value(), *found, options);
   EXPECT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   return lifted ? lifted.value() : none;
@@ -133,7 +134,8 @@ TEST(Ir, LibraryPrototypeSuppliesTheArgumentsOfAnImportCall) {
                                    [](const donkey::Function& f) { return f.address == 0x117e; });
   ASSERT_NE(caller, functions.end());
   donkey::LiftOptions options;
-  options.call_prototypes[0x1070] = prototype({8}, 4);
+  options.call_prototypes = std::make_shared<const std::map<std::uint64_t, donkey::CallPrototype>>(
+      std::map<std::uint64_t, donkey::CallPrototype>{{0x1070, prototype({8}, 4)}});
   auto lifted = donkey::lift_function(loaded.value().image, analysis.value(), *caller, options);
   ASSERT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
   const IrStatement* call = the_call(lifted.value());
@@ -224,6 +226,19 @@ TEST(Ir, APrototypeWithANonIntegerParameterIsNotUsed) {
 
 // The verifier accepts arguments from a library prototype, and still refuses arguments with no
 // signature at all.
+// A prototype that names no library is not used: the call keeps its unresolved form, which the
+// verifier accepts, instead of arguments with no signature.
+TEST(Ir, APrototypeWithoutASourceIsNotUsed) {
+  donkey::CallPrototype unsourced = prototype({8}, 4);
+  unsourced.source.clear();
+  const IrFunction function = lift_with(kDeadRdx, {{0x1010, unsourced}});
+  const IrStatement* call = the_call(function);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->call_arguments.empty());
+  EXPECT_TRUE(call->signature_source.empty());
+  EXPECT_TRUE(donkey::verify_ir(function).has_value());
+}
+
 TEST(Ir, VerifierAcceptsLibraryArgumentsAndRefusesUnsourcedOnes) {
   IrFunction function;
   function.address = 0x1000;

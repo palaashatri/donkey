@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -132,6 +133,21 @@ struct ImportPrototype {
 /// is never matched.
 [[nodiscard]] std::vector<ImportPrototype> match_import_prototypes(
     const std::vector<ImportSite>& sites, const TypeLibraryMerge& merge);
+
+/// A function prototype in the integer registers a call passes it in (G22-T4): each fixed parameter
+/// and the result as an integer, enum or pointer, through typedefs, with its width in bytes (1 to
+/// 8; a result of 0 is void, also a typedef of void).
+struct RegisterPrototype {
+  std::vector<std::uint8_t> parameter_widths;
+  std::uint8_t return_width = 0;
+  bool variadic = false;
+};
+
+/// The register form of a function type of `table`, or nothing when a parameter or the result has
+/// no integer-register form (a float, a struct, an array, a type `table` does not hold, or a
+/// typedef chain that comes back to itself).
+[[nodiscard]] std::optional<RegisterPrototype> register_prototype(const TypeTable& table,
+                                                                  const TypeDefinition& function);
 
 /// What `apply_library_prototypes` did at one import site.
 struct LibraryPrototypeApplication {

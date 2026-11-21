@@ -62,7 +62,8 @@ struct LiftOptions {
   std::shared_ptr<CallSummaryCache> call_summaries;
   /// Library prototypes by call target (an import stub's address), G22-T4. A direct call to one of
   /// them, on x86-64 System V, carries the prototype's arguments and result; it stays Partial.
-  std::map<std::uint64_t, CallPrototype> call_prototypes;
+  /// Shared, not copied, by the copies of these options the lift and its call summaries make.
+  std::shared_ptr<const std::map<std::uint64_t, CallPrototype>> call_prototypes;
 };
 
 /// Lift one function's basic blocks into IR. The lifters model a documented

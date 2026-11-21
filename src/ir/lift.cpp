@@ -2301,11 +2301,14 @@ struct Lifter {
   /// Mach-O; a Windows x64 call passes its arguments in other registers).
   const CallPrototype* library_prototype(const Instruction& instruction) const {
     if (image.architecture != Architecture::X86_64 || image.format == BinaryFormat::Pe ||
-        !instruction.direct_target.has_value() || options.call_prototypes.empty()) {
+        !instruction.direct_target.has_value() || !options.call_prototypes ||
+        options.call_prototypes->empty()) {
       return nullptr;
     }
-    const auto found = options.call_prototypes.find(instruction.direct_target.value());
-    if (found == options.call_prototypes.end() ||
+    const auto found = options.call_prototypes->find(instruction.direct_target.value());
+    // A prototype names the library it came from: the verifier accepts arguments only from a
+    // signature it can name, so one without a source is not used.
+    if (found == options.call_prototypes->end() || found->second.source.empty() ||
         found->second.parameter_widths.size() > kSystemVArguments.size()) {
       return nullptr;
     }
