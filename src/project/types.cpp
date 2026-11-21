@@ -102,6 +102,27 @@ bool sum_overflows(std::uint64_t a, std::uint64_t b) {
   return a > std::numeric_limits<std::uint64_t>::max() - b;
 }
 
+/// Whether `id` names an integer or enum type, through typedefs: the only types a bit-field holds.
+bool integer_container(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
+  for (int depth = 0; depth <= kMaxNesting; ++depth) {
+    const auto found = types.find(id);
+    if (found == types.end()) {
+      return false;
+    }
+    switch (found->second.kind) {
+      case TypeKind::Integer:
+      case TypeKind::Enum:
+        return true;
+      case TypeKind::Typedef:
+        id = found->second.target;
+        continue;
+      default:
+        return false;
+    }
+  }
+  return false;
+}
+
 Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId id, int depth) {
   if (!id.valid()) {
     return Layout{};
@@ -176,6 +197,11 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
                           name + " is a function; a function has no size by value");
     case TypeKind::Struct:
     case TypeKind::Union: {
+      if (!definition.complete) {
+        // Only declared (`struct opaque;`): a pointer to it is fine, an object of it is not.
+        return fail<Layout>("type.incomplete",
+                            name + " is only declared, so it has no size or layout");
+      }
       const bool is_union = definition.kind == TypeKind::Union;
       if (definition.fields.empty() && definition.alignment == 0 &&
           (definition.size == 0 || definition.size == 1)) {
@@ -214,6 +240,10 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
             return fail<Layout>(
                 "type.named_padding",
                 name + " has a padding bit-field with the name '" + field.name + "'");
+          }
+          if (!integer_container(types, field.type)) {
+            return fail<Layout>("type.bad_bit_field",
+                                name + " has an unnamed bit-field whose type is not an integer");
           }
           auto container = layout_of(types, field.type, depth + 1);
           if (!container) {
@@ -270,6 +300,10 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
         const Layout& layout = member.value();
         std::uint64_t member_end = 0;
         if (field.bit_size != 0) {
+          if (!integer_container(types, field.type)) {
+            return fail<Layout>("type.bad_bit_field", name + " has a bit-field '" + field.name +
+                                                          "' whose type is not an integer");
+          }
           const std::uint64_t container_bits = layout.size * 8;
           if (field.bit_size > 64 || field.bit_offset > 7 ||
               static_cast<std::uint64_t>(field.bit_offset) + field.bit_size > container_bits) {
@@ -332,6 +366,24 @@ Result<Layout> layout_of(const std::map<TypeId, TypeDefinition>& types, TypeId i
 
 /// True for a function type, or a typedef that names one. Such a type has no size,
 /// so it is checked where it is used by value and not as a type in its own right.
+/// Whether `id` names, through typedefs, a struct or union that is only declared.
+bool names_incomplete_record(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
+  for (int hop = 0; hop < kMaxNesting && id.valid(); ++hop) {
+    const auto found = types.find(id);
+    if (found == types.end()) {
+      return false;
+    }
+    if (found->second.kind == TypeKind::Struct || found->second.kind == TypeKind::Union) {
+      return !found->second.complete;
+    }
+    if (found->second.kind != TypeKind::Typedef) {
+      return false;
+    }
+    id = found->second.target;
+  }
+  return false;
+}
+
 bool names_a_function(const std::map<TypeId, TypeDefinition>& types, TypeId id) {
   for (int hop = 0; hop < kMaxNesting && id.valid(); ++hop) {
     const auto found = types.find(id);
@@ -465,6 +517,90 @@ bool TypeTable::remove(TypeId id) {
   return types_.erase(id) != 0;
 }
 
+namespace {
+
+/// `budget` is shared by the whole declaration: each type printed spends one, so a callback whose
+/// parameters are callbacks cannot grow the text exponentially. When it runs out, `...` stands for
+/// the rest.
+/// Types one printed declaration may spell out (c_declaration_at's budget).
+constexpr std::size_t kMaxDeclarationTypes = 4096;
+
+std::string c_declaration_at(const TypeTable& table, TypeId id, const std::string& declarator,
+                             unsigned depth, std::size_t& budget) {
+  const auto with = [&](std::string base) {
+    return declarator.empty() ? base : base + " " + declarator;
+  };
+  if (!id.valid()) {
+    return with("void");
+  }
+  if (depth >= 32 || budget == 0) {
+    return with("...");
+  }
+  --budget;
+  const TypeDefinition* type = table.find(id);
+  if (type == nullptr) {
+    return with("?");
+  }
+  const auto tagged = [&](const char* keyword) {
+    if (type->typedef_named && !type->name.empty()) {
+      return with(type->name);  // `typedef struct { ... } item;` is `item`, not `struct item`
+    }
+    return with(std::string(keyword) + " " + (type->name.empty() ? "<anonymous>" : type->name));
+  };
+  switch (type->kind) {
+    case TypeKind::Void:
+    case TypeKind::Integer:
+    case TypeKind::Float:
+    case TypeKind::Typedef:
+      return with(type->name.empty() ? std::string("?") : type->name);
+    case TypeKind::Struct:
+      return tagged("struct");
+    case TypeKind::Union:
+      return tagged("union");
+    case TypeKind::Enum:
+      return tagged("enum");
+    case TypeKind::Pointer: {
+      const TypeDefinition* target = table.find(type->target);
+      const bool wraps = target != nullptr &&
+                         (target->kind == TypeKind::Array || target->kind == TypeKind::Function);
+      const std::string inner = "*" + declarator;
+      return c_declaration_at(table, type->target, wraps ? "(" + inner + ")" : inner, depth + 1,
+                              budget);
+    }
+    case TypeKind::Array:
+      return c_declaration_at(
+          table, type->target,
+          declarator + "[" + (type->count_known ? std::to_string(type->count) : std::string()) +
+              "]",
+          depth + 1, budget);
+    case TypeKind::Function: {
+      std::string parameters;
+      for (const TypeField& field : type->fields) {
+        if (!parameters.empty()) {
+          parameters += ", ";
+        }
+        parameters += c_declaration_at(table, field.type, field.name, depth + 1, budget);
+      }
+      if (type->variadic) {
+        parameters += parameters.empty() ? "..." : ", ...";
+      }
+      if (parameters.empty()) {
+        parameters = "void";
+      }
+      return c_declaration_at(table, type->target, declarator + "(" + parameters + ")", depth + 1,
+                              budget);
+    }
+  }
+  return with("?");
+}
+
+}  // namespace
+
+std::string c_declaration(const TypeTable& table, TypeId id, const std::string& declarator) {
+  std::size_t budget = kMaxDeclarationTypes;
+  return c_declaration_at(table, id, declarator, 0, budget);
+}
+
 const TypeDefinition* TypeTable::find(TypeId id) const {
   const auto found = types_.find(id);
   return found == types_.end() ? nullptr : &found->second;
@@ -496,6 +632,14 @@ Result<void> TypeTable::validate() const {
       return fail<void>("type.missing", name + " refers to type #" +
                                             std::to_string(definition.target.value()) +
                                             ", which is not in the table");
+    }
+    if (!definition.complete &&
+        ((definition.kind != TypeKind::Struct && definition.kind != TypeKind::Union) ||
+         !definition.fields.empty() || definition.size != 0)) {
+      return fail<void>("type.bad_incomplete",
+                        name +
+                            " is marked as only declared, but is not a struct or union "
+                            "without members and size");
     }
     if (!definition.fields.empty() && definition.kind != TypeKind::Struct &&
         definition.kind != TypeKind::Union && definition.kind != TypeKind::Function) {
@@ -549,9 +693,10 @@ Result<void> TypeTable::validate() const {
   }
 
   for (const auto& [id, definition] : types_) {
-    // A function has no size, and an array of unknown bound has none of its own: each is checked
-    // where a complete type uses it by value.
-    if (names_a_function(types_, id) || unbounded_array(types_, id) != nullptr) {
+    // A function has no size, an array of unknown bound has none of its own, and neither has a
+    // record that is only declared: each is checked where a complete type uses it by value.
+    if (names_a_function(types_, id) || unbounded_array(types_, id) != nullptr ||
+        names_incomplete_record(types_, id)) {
       continue;
     }
     auto layout = layout_of(types_, id, 0);

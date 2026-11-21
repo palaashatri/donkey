@@ -76,6 +76,7 @@ constexpr std::uint64_t kDtSymbolic = 16;
 constexpr std::uint64_t kDtFlags = 30;
 constexpr std::uint64_t kDfSymbolic = 0x2;
 constexpr std::uint32_t kPtDynamic = 2;
+constexpr std::uint32_t kPtInterp = 3;
 constexpr std::size_t kMaxProgramHeaders = 65'535;
 
 /// The file range of the PT_DYNAMIC program header, the table the loader reads. `found` stays false
@@ -86,6 +87,10 @@ struct DynamicRange {
   bool readable = true;
   std::uint64_t offset = 0;
   std::uint64_t size = 0;
+  /// The first PT_INTERP header's file range (`interpreter` false when there is none).
+  bool interpreter = false;
+  std::uint64_t interpreter_offset = 0;
+  std::uint64_t interpreter_size = 0;
 };
 
 DynamicRange program_dynamic(const BinaryImage& image, const ByteReader& reader) {
@@ -130,30 +135,43 @@ DynamicRange program_dynamic(const BinaryImage& image, const ByteReader& reader)
       out.readable = false;
       return out;
     }
-    if (type.value() != kPtDynamic) {
+    if (type.value() != kPtDynamic && type.value() != kPtInterp) {
       continue;
     }
-    if (wide) {
-      const auto offset = reader.u64(at + 8, endian);
-      const auto size = reader.u64(at + 32, endian);
-      if (!offset || !size) {
-        out.readable = false;
-        return out;
-      }
-      out.offset = offset.value();
-      out.size = size.value();
-    } else {
-      const auto offset = reader.u32(at + 4, endian);
-      const auto size = reader.u32(at + 16, endian);
-      if (!offset || !size) {
-        out.readable = false;
-        return out;
-      }
-      out.offset = offset.value();
-      out.size = size.value();
+    const bool dynamic = type.value() == kPtDynamic;
+    if (dynamic ? out.found : out.interpreter) {
+      continue;  // the loader takes the first of each
     }
-    out.found = true;
-    return out;
+    std::uint64_t offset = 0;
+    std::uint64_t size = 0;
+    if (wide) {
+      const auto o = reader.u64(at + 8, endian);
+      const auto z = reader.u64(at + 32, endian);
+      if (!o || !z) {
+        out.readable = false;
+        return out;
+      }
+      offset = o.value();
+      size = z.value();
+    } else {
+      const auto o = reader.u32(at + 4, endian);
+      const auto z = reader.u32(at + 16, endian);
+      if (!o || !z) {
+        out.readable = false;
+        return out;
+      }
+      offset = o.value();
+      size = z.value();
+    }
+    if (dynamic) {
+      out.offset = offset;
+      out.size = size;
+      out.found = true;
+    } else {
+      out.interpreter_offset = offset;
+      out.interpreter_size = size;
+      out.interpreter = true;
+    }
   }
   return out;
 }
@@ -175,6 +193,17 @@ ElfLibraryNames read_library_names(const BinaryImage& image, std::span<const std
   if (!program.readable) {
     names.complete = false;
     return names;
+  }
+  if (program.interpreter) {
+    // PT_INTERP holds the loader's path, NUL-terminated within the segment.
+    const auto read =
+        reader.c_string(program.interpreter_offset,
+                        std::min<std::uint64_t>(kMaxNameLength, program.interpreter_size));
+    if (program.interpreter_size != 0 && read) {
+      names.interpreter = std::string(read.value());
+    } else {
+      names.complete = false;  // a loader the kernel would start and this reader cannot name
+    }
   }
   bool from_program = false;
   const Section* strings_section = nullptr;

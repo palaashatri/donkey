@@ -35,8 +35,12 @@ struct CDeclarationOptions {
   /// Whether plain `char` is signed: true on x86-64 and Apple arm64, false on
   /// Linux AArch64.
   bool char_is_signed = true;
-  /// The bit-field rules; the default is System V x86-64's.
-  CBitFieldLayout bit_fields = CBitFieldLayout::SystemV;
+  /// The bit-field rules. The default, Unmodelled, refuses bit-fields: a caller that knows the
+  /// target's ABI chooses System V or AAPCS64.
+  CBitFieldLayout bit_fields = CBitFieldLayout::Unmodelled;
+  /// Bytes of `long double`: 16 on System V x86-64 and AAPCS64, 8 on Win64 and Apple arm64. 0, the
+  /// default, means the target is not known, and `long double` is refused (`cdecl.long_double`).
+  std::uint64_t long_double_size = 0;
 };
 
 /// Largest input the parser accepts, in bytes.

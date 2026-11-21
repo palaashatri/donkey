@@ -1,6 +1,7 @@
 #include "commands.h"
 
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cinttypes>
 #include <cstddef>
@@ -11,11 +12,21 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <random>
 #include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <cerrno>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 
 #include "donkey/analysis/analysis.h"
 #include "donkey/analysis/link_calls.h"
@@ -44,6 +55,7 @@
 #include "donkey/project/project.h"
 #include "donkey/project/string_literals.h"
 #include "donkey/project/typelib.h"
+#include "donkey/project/typelib_apply.h"
 #include "donkey/project/typelib_gen.h"
 #include "donkey/project/types.h"
 #include "json.h"
@@ -892,6 +904,10 @@ void print_usage(std::FILE* out) {
       "  donkey-cli project local-names <database> <image-id> [--json]\n"
       "  donkey-cli project backup <database> <backup> [--force] [--json]\n"
       "  donkey-cli project restore <database> <backup> [--json]\n"
+      "  donkey-cli project type library add <database> <library.dtl> [--json]\n"
+      "  donkey-cli project type library list <database> [--json]\n"
+      "  donkey-cli project type library apply <database> <image-id> [--json]\n"
+      "  donkey-cli project type applications <database> <image-id> [--json]\n"
       "  donkey-cli debug launch <binary> [--arg A]... [--break SYMBOL|ADDR]... [--break-if "
       "SYMBOL|ADDR CONDITION]... [--watch "
       "SYMBOL|ADDR[:LEN][:rw]]... [--watch-if SYMBOL|ADDR[:LEN][:rw] CONDITION]... [--run]"
@@ -1799,6 +1815,7 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
   // The local names the project saved for this binary (G12-T3). They are applied after the debug
   // names, so a user name wins.
   std::map<std::uint64_t, std::vector<UserLocalName>> user_names;
+  std::map<std::uint64_t, std::string> library_prototype_notes;
   // The strings the project defines, as the literals the pseudocode prints (G12-T2).
   PseudocodeOptions pseudo_options;
   if (!request.project_path.empty()) {
@@ -1834,6 +1851,37 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       return fail(rows.diagnostic());
     }
     pseudo_options.string_literals = string_literals(rows.value(), loaded.image, loaded.data);
+    // Library prototypes (G22-T3) are noted on the stub they apply to, with the libraries that
+    // brought them. Calls do not take their arguments from them yet (G22-T4).
+    auto applications = project.value().type_applications(*image_id);
+    if (!applications) {
+      return fail(applications.diagnostic());
+    }
+    auto table = project.value().types();
+    if (!table) {
+      return fail(table.diagnostic());
+    }
+    auto libraries = project.value().type_libraries();
+    if (!libraries) {
+      return fail(libraries.diagnostic());
+    }
+    // Each prototype names the library that brought it (its type's `library`).
+    std::map<std::int64_t, std::string> library_names;
+    for (const donkey::TypeLibraryRecord& library : libraries.value()) {
+      library_names[library.id] = library.library + " " + library.library_version;
+    }
+    for (const donkey::TypeApplication& application : applications.value()) {
+      const donkey::TypeDefinition* type = table.value().find(application.type_id);
+      if (application.kind != donkey::TypeApplicationKind::FunctionPrototype ||
+          application.source != donkey::TypeProvenance::Library || type == nullptr) {
+        continue;
+      }
+      const auto library = library_names.find(type->library);
+      library_prototype_notes[application.address] =
+          (library == library_names.end() ? std::string("library prototype")
+                                          : "library prototype (" + library->second + ")") +
+          ": " + donkey::c_declaration(table.value(), application.type_id, type->name);
+    }
   }
 
   // The DWARF of the binary, when it has any, names the parameters and the frame slots of
@@ -1855,6 +1903,10 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
       }
     }
     if (lifted) {
+      if (const auto note = library_prototype_notes.find(function.address);
+          note != library_prototype_notes.end()) {
+        lifted.value().notes.push_back(note->second);
+      }
       if (const auto found = user_names.find(function.address); found != user_names.end()) {
         auto applied = apply_user_local_names(lifted.value(), found->second);
         if (!applied) {
@@ -1970,11 +2022,236 @@ int command_decompile(const std::vector<std::string_view>& arguments) {
 
 namespace {
 
-/// `project type add|list|apply`: the C types a project holds, and which address each
+/// The image `image_id` of an open project, loaded from its recorded path and checked against its
+/// recorded hash. A changed file is refused (`project.image_changed`).
+Result<donkey::LoadedBinary> load_project_image(const Project& project, std::int64_t image_id,
+                                                ProjectImage* record) {
+  auto images = project.images();
+  if (!images) {
+    return images.diagnostic();
+  }
+  for (const ProjectImage& image : images.value()) {
+    if (image.id != image_id) {
+      continue;
+    }
+    // The architecture the project recorded is asked for: a universal Mach-O otherwise loads its
+    // default slice, which the whole-file hash does not tell apart.
+    LoadOptions options;
+    if (const auto architecture = parse_architecture(image.architecture)) {
+      options.preferred_architecture = *architecture;
+    }
+    auto loaded = donkey::load_binary(image.path, options);
+    if (!loaded) {
+      return loaded.diagnostic();
+    }
+    if (loaded.value().image.sha256 != image.sha256) {
+      return Diagnostic::make(Status::InvalidInput, "project.image_changed",
+                              image.path + " no longer matches the hash the project recorded");
+    }
+    const std::string architecture = architecture_name(loaded.value().image.architecture);
+    if (architecture != image.architecture) {
+      return Diagnostic::make(Status::InvalidInput, "project.image_changed",
+                              image.path + " loads as " + architecture +
+                                  ", and the project recorded " + image.architecture);
+    }
+    if (record != nullptr) {
+      *record = image;
+    }
+    return std::move(loaded.value());
+  }
+  return Diagnostic::make(Status::InvalidInput, "project.image_missing",
+                          "no image with that id in the project");
+}
+
+/// `project type library apply`: the library prototypes of the project, applied to the image's
+/// import stubs and thunks (G22-T3).
+int command_project_type_library_apply(const std::string& database, std::string_view id_text,
+                                       bool json) {
+  std::uint64_t image_id = 0;
+  if (!parse_u64(id_text, image_id) || image_id == 0 ||
+      image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return usage_error("invalid image id");
+  }
+  auto project = Project::open(database);
+  if (!project) {
+    return fail(project.diagnostic());
+  }
+  auto libraries = project.value().type_libraries();
+  if (!libraries) {
+    return fail(libraries.diagnostic());
+  }
+  if (libraries.value().empty()) {
+    return fail(Diagnostic::make(Status::InvalidInput, "project.no_type_library",
+                                 "the project has no type library; load one with "
+                                 "'project type library add' first"));
+  }
+  ProjectImage record;
+  auto loaded = load_project_image(project.value(), static_cast<std::int64_t>(image_id), &record);
+  if (!loaded) {
+    return fail(loaded.diagnostic());
+  }
+  const BinaryImage& image = loaded.value().image;
+  if (image.format != BinaryFormat::Elf && image.format != BinaryFormat::Pe) {
+    // Mach-O stubs are not bound to their imports by the analysis yet: nothing could apply.
+    return fail(Diagnostic::make(Status::Unsupported, "project.type_library_format",
+                                 std::string("applying a type library to a ") +
+                                     format_name(image.format) +
+                                     " image is not supported: its import stubs are not bound to "
+                                     "the libraries that define them"));
+  }
+  const donkey::ImageAbi abi = donkey::image_abi(format_name(image.format),
+                                                 architecture_name(image.architecture), image.bits);
+  auto analysis = analyze(image, loaded.value().data, analysis_options());
+  if (!analysis) {
+    return fail(analysis.diagnostic());
+  }
+  // Where each import binds, by the loader's own search (--sysroot, --library-path, --program).
+  const std::vector<donkey::ImportSite> sites =
+      donkey::import_sites(image, loaded.value().data, analysis.value(), library_search());
+  auto applied = donkey::apply_library_prototypes(project.value(),
+                                                  static_cast<std::int64_t>(image_id), sites, abi);
+  const bool partial = analysis.value().partial;
+  if (!applied) {
+    return fail(applied.diagnostic());
+  }
+  auto table = project.value().types();
+  if (!table) {
+    return fail(table.diagnostic());
+  }
+  std::size_t count = 0;
+  for (const donkey::LibraryPrototypeApplication& entry : applied.value()) {
+    count += entry.prototype.valid() ? 1U : 0U;
+  }
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"database\": " + quote(database) + ",\n";
+    out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+    out += "  \"applied\": " + std::to_string(count) + ",\n";
+    // A partial analysis may have stopped before an import stub: the list may not be every import.
+    out += std::string("  \"analysis_partial\": ") + (partial ? "true" : "false") + ",\n";
+    out += "  \"imports\": [";
+    for (std::size_t i = 0; i < applied.value().size(); ++i) {
+      const donkey::LibraryPrototypeApplication& entry = applied.value()[i];
+      out += i == 0 ? "\n" : ",\n";
+      out +=
+          "    {\"import\": " + quote(entry.import) + ", \"address\": " + quote(hex(entry.address));
+      if (!entry.library.empty()) {
+        out += ", \"library\": " + quote(entry.library);
+      }
+      if (entry.prototype.valid()) {
+        out += ", \"prototype\": " +
+               quote(donkey::c_declaration(table.value(), entry.prototype,
+                                           donkey::import_match_name(entry.import))) +
+               ", \"source\": \"library\"}";
+      } else {
+        out += ", \"not_applied\": " + quote(entry.reason) + "}";
+      }
+    }
+    out += applied.value().empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("Applied %zu library prototypes to %zu imports of image %llu\n", count,
+                applied.value().size(), static_cast<unsigned long long>(image_id));
+    for (const donkey::LibraryPrototypeApplication& entry : applied.value()) {
+      if (entry.prototype.valid()) {
+        std::printf("  %s  %s;\n", hex(entry.address).c_str(),
+                    donkey::c_declaration(table.value(), entry.prototype,
+                                          donkey::import_match_name(entry.import))
+                        .c_str());
+      } else {
+        std::printf("  %s  %s: %s\n", hex(entry.address).c_str(), entry.import.c_str(),
+                    entry.reason.c_str());
+      }
+    }
+    if (partial) {
+      std::printf(
+          "note: the image was only partly analysed, so some import stubs may be missing\n");
+    }
+  }
+  return kExitOk;
+}
+
+/// `project type applications`: the types applied to one image, with who applied each.
+int command_project_type_applications(const std::string& database, std::string_view id_text,
+                                      bool json) {
+  std::uint64_t image_id = 0;
+  if (!parse_u64(id_text, image_id) || image_id == 0 ||
+      image_id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+    return usage_error("invalid image id");
+  }
+  auto project = Project::open(database);
+  if (!project) {
+    return fail(project.diagnostic());
+  }
+  auto table = project.value().types();
+  if (!table) {
+    return fail(table.diagnostic());
+  }
+  // An image the project does not have is an error, not an image without applications.
+  auto images = project.value().images();
+  if (!images) {
+    return fail(images.diagnostic());
+  }
+  if (std::none_of(images.value().begin(), images.value().end(), [&](const ProjectImage& image) {
+        return image.id == static_cast<std::int64_t>(image_id);
+      })) {
+    return fail(
+        Diagnostic::make(Status::InvalidInput, "project.image_missing",
+                         "no image with id " + std::to_string(image_id) + " in the project"));
+  }
+  auto applications = project.value().type_applications(static_cast<std::int64_t>(image_id));
+  if (!applications) {
+    return fail(applications.diagnostic());
+  }
+  const auto declared = [&](const donkey::TypeApplication& application) {
+    const donkey::TypeDefinition* type = table.value().find(application.type_id);
+    const std::string name =
+        type != nullptr && type->kind == donkey::TypeKind::Function ? type->name : std::string();
+    return donkey::c_declaration(table.value(), application.type_id, name);
+  };
+  if (json) {
+    std::string out;
+    out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+    out += "  \"tool\": \"donkey-cli\",\n";
+    out += "  \"tool_version\": " + quote(version()) + ",\n";
+    out += "  \"database\": " + quote(database) + ",\n";
+    out += "  \"image_id\": " + std::to_string(image_id) + ",\n";
+    out += "  \"applications\": [";
+    for (std::size_t i = 0; i < applications.value().size(); ++i) {
+      const donkey::TypeApplication& application = applications.value()[i];
+      out += i == 0 ? "\n" : ",\n";
+      out += "    {\"address\": " + quote(hex(application.address)) + ", \"kind\": " +
+             quote(application.kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype"
+                                                                                      : "data") +
+             ", \"type_id\": " + std::to_string(application.type_id.value()) +
+             ", \"type\": " + quote(declared(application)) +
+             ", \"source\": " + quote(donkey::type_provenance_name(application.source)) + "}";
+    }
+    out += applications.value().empty() ? "]\n" : "\n  ]\n";
+    out += "}\n";
+    std::fwrite(out.data(), 1, out.size(), stdout);
+  } else {
+    std::printf("%zu type applications\n", applications.value().size());
+    for (const donkey::TypeApplication& application : applications.value()) {
+      std::printf(
+          "  %s  %-9s %-8s %s\n", hex(application.address).c_str(),
+          application.kind == donkey::TypeApplicationKind::FunctionPrototype ? "prototype" : "data",
+          donkey::type_provenance_name(application.source), declared(application).c_str());
+    }
+  }
+  return kExitOk;
+}
+
+/// `project type add|list|apply|library`: the C types a project holds, and which address each
 /// applies to (G05-T4). The declarations are read from a C header of the supported subset.
 int command_project_type(const std::vector<std::string_view>& positional, bool json) {
   if (positional.empty()) {
-    return usage_error("project type needs a subcommand: add, list or apply");
+    return usage_error(
+        "project type needs a subcommand: add, list, apply, applications or library");
   }
   const std::string_view action = positional[0];
   const std::vector<std::string_view> rest(positional.begin() + 1, positional.end());
@@ -2000,19 +2277,48 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     if (!project) {
       return fail(project.diagnostic());
     }
-    auto known = project.value().types();
-    if (!known) {
-      return fail(known.diagnostic());
+    // Layouts that depend on the target (bit-fields, long double) follow the project's images when
+    // they all follow one ABI; otherwise they are not known, and the parser refuses them.
+    auto images = project.value().images();
+    if (!images) {
+      return fail(images.diagnostic());
     }
-    auto declared = donkey::parse_c_declarations(text, known.value());
-    if (!declared) {
-      return fail(declared.diagnostic());
+    donkey::CDeclarationOptions parse_options;
+    std::optional<donkey::ImageAbi> project_abi;
+    bool one_abi = !images.value().empty();
+    for (const ProjectImage& image : images.value()) {
+      const donkey::ImageAbi abi = donkey::image_abi(image.format, image.architecture, image.bits);
+      if (abi.abi.empty() ||
+          (project_abi && (project_abi->abi != abi.abi || project_abi->platform != abi.platform))) {
+        one_abi = false;
+        break;
+      }
+      project_abi = abi;
     }
-    donkey::TypeTable table = known.value();
-    for (const donkey::TypeDefinition& definition : declared.value()) {
-      table.put(definition);
+    if (one_abi && project_abi) {
+      // ELF names no platform; Linux and FreeBSD share these layouts. Plain char is unsigned only
+      // on AArch64 outside Apple's platforms.
+      const std::string platform = project_abi->platform.empty() ? "linux" : project_abi->platform;
+      parse_options = donkey::declaration_options(
+          project_abi->abi, platform,
+          project_abi->architecture != "aarch64" || platform == "macos");
     }
-    auto saved = project.value().replace_types(table);
+    // Parsed against the types as they are under the write lock, and stored in the same
+    // transaction, so a library loaded meanwhile is neither lost nor overwritten.
+    std::size_t added = 0;
+    auto saved = project.value().update_types(
+        [&](const donkey::TypeTable& known) -> Result<donkey::TypeTable> {
+          auto declared = donkey::parse_c_declarations(text, known, parse_options);
+          if (!declared) {
+            return declared.diagnostic();
+          }
+          donkey::TypeTable table = known;
+          for (const donkey::TypeDefinition& definition : declared.value()) {
+            table.put(definition);
+          }
+          added = declared.value().size();
+          return table;
+        });
     if (!saved) {
       return fail(saved.diagnostic());
     }
@@ -2023,10 +2329,10 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
       out += "  \"tool_version\": " + quote(version()) + ",\n";
       out += "  \"database\": " + quote(database) + ",\n";
       out += "  \"declarations\": " + quote(path) + ",\n";
-      out += "  \"added\": " + std::to_string(declared.value().size()) + "\n}\n";
+      out += "  \"added\": " + std::to_string(added) + "\n}\n";
       std::fwrite(out.data(), 1, out.size(), stdout);
     } else {
-      std::printf("Added %zu types from %s\n", declared.value().size(), path.c_str());
+      std::printf("Added %zu types from %s\n", added, path.c_str());
     }
     return kExitOk;
   }
@@ -2140,7 +2446,146 @@ int command_project_type(const std::vector<std::string_view>& positional, bool j
     return kExitOk;
   }
 
-  return usage_error("project type needs a subcommand: add, list or apply");
+  if (action == "applications") {
+    if (rest.size() != 2) {
+      return usage_error("project type applications needs a database and an image id");
+    }
+    return command_project_type_applications(std::string(rest[0]), rest[1], json);
+  }
+
+  if (action == "library") {
+    // project type library add <db> <library.dtl> | list <db> | apply <db> <image-id>
+    if (rest.size() == 3 && rest[0] == "apply") {
+      return command_project_type_library_apply(std::string(rest[1]), rest[2], json);
+    }
+    if (rest.size() == 2 && rest[0] == "list") {
+      const std::string database(rest[1]);
+      auto project = Project::open(database);
+      if (!project) {
+        return fail(project.diagnostic());
+      }
+      auto loaded = project.value().type_libraries();
+      if (!loaded) {
+        return fail(loaded.diagnostic());
+      }
+      if (json) {
+        std::string out;
+        out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+        out += "  \"tool\": \"donkey-cli\",\n";
+        out += "  \"tool_version\": " + quote(version()) + ",\n";
+        out += "  \"database\": " + quote(database) + ",\n";
+        out += "  \"libraries\": [";
+        for (std::size_t i = 0; i < loaded.value().size(); ++i) {
+          const donkey::TypeLibraryRecord& record = loaded.value()[i];
+          out += i == 0 ? "\n" : ",\n";
+          out += "    {\"library\": " + quote(record.library) +
+                 ", \"library_version\": " + quote(record.library_version) +
+                 ", \"architecture\": " + quote(record.architecture) +
+                 ", \"platform\": " + quote(record.platform) + ", \"abi\": " + quote(record.abi) +
+                 ", \"data_model\": " + quote(record.data_model) + ", \"provides\": [" +
+                 [&] {
+                   std::string list;
+                   for (const std::string& file : record.provides) {
+                     list += (list.empty() ? "" : ", ") + quote(file);
+                   }
+                   return list;
+                 }() +
+                 "], \"body_sha256\": " + quote(record.body_sha256) +
+                 ", \"added_types\": " + std::to_string(record.added_types) +
+                 ", \"collisions\": " + std::to_string(record.collisions) + "}";
+        }
+        out += loaded.value().empty() ? "]\n" : "\n  ]\n";
+        out += "}\n";
+        std::fwrite(out.data(), 1, out.size(), stdout);
+      } else {
+        std::printf("%zu type libraries\n", loaded.value().size());
+        for (const donkey::TypeLibraryRecord& record : loaded.value()) {
+          std::printf("  %s %s (%s): %llu types added, %llu collisions\n", record.library.c_str(),
+                      record.library_version.c_str(), record.architecture.c_str(),
+                      static_cast<unsigned long long>(record.added_types),
+                      static_cast<unsigned long long>(record.collisions));
+        }
+      }
+      return kExitOk;
+    }
+    if (rest.size() != 3 || rest[0] != "add") {
+      return usage_error(
+          "project type library needs 'add <database> <library.dtl>', 'list <database>' or "
+          "'apply <database> <image-id>'");
+    }
+    const std::string database(rest[1]);
+    const std::string path(rest[2]);
+    auto library = donkey::load_type_library(path);
+    if (!library) {
+      return fail(library.diagnostic());
+    }
+    auto project = Project::open(database);
+    if (!project) {
+      return fail(project.diagnostic());
+    }
+    donkey::TypeLibraryRecord record;
+    record.library = library.value().library;
+    record.library_version = library.value().library_version;
+    record.architecture = library.value().architecture;
+    record.platform = library.value().platform;
+    record.abi = library.value().abi;
+    record.data_model = library.value().data_model;
+    record.provides = library.value().provides;
+    record.body_sha256 = library.value().body_sha256;
+    // The merge reads the stored types inside the load's write transaction, so a load running at
+    // the same time cannot merge from the same types; the types and the record land together.
+    std::optional<donkey::TypeLibraryMerge> merge;
+    auto recorded = project.value().load_type_library(
+        record,
+        [&](const donkey::TypeTable& stored,
+            std::int64_t library_id) -> Result<donkey::TypeLibraryLoad> {
+          auto merged = donkey::merge_type_library(stored, library.value(), library_id);
+          if (!merged) {
+            return merged.diagnostic();
+          }
+          merge = std::move(merged.value());
+          return donkey::TypeLibraryLoad{merge->table, merge->added, merge->collisions.size()};
+        });
+    if (!recorded) {
+      return fail(recorded.diagnostic());
+    }
+    record.added_types = merge->added;
+    record.collisions = merge->collisions.size();
+    const donkey::TypeLibraryMerge& merged = *merge;
+    std::size_t differing = 0;
+    for (const donkey::TypeLibraryCollision& collision : merged.collisions) {
+      differing += collision.differs ? 1 : 0;
+    }
+    if (json) {
+      std::string out;
+      out += "{\n  \"schema_version\": " + std::to_string(kJsonSchemaVersion) + ",\n";
+      out += "  \"tool\": \"donkey-cli\",\n";
+      out += "  \"tool_version\": " + quote(version()) + ",\n";
+      out += "  \"database\": " + quote(database) + ",\n";
+      out += "  \"library\": " + quote(record.library) + ",\n";
+      out += "  \"library_version\": " + quote(record.library_version) + ",\n";
+      out += "  \"added_types\": " + std::to_string(record.added_types) + ",\n";
+      out += "  \"collisions\": [";
+      const auto& collisions = merged.collisions;
+      for (std::size_t i = 0; i < collisions.size(); ++i) {
+        out += i == 0 ? "\n" : ",\n";
+        out += "    {\"name\": " + quote(collisions[i].name) +
+               ", \"kept\": " + std::to_string(collisions[i].existing.value()) +
+               ", \"differs\": " + (collisions[i].differs ? "true" : "false") + "}";
+      }
+      out += collisions.empty() ? "]\n" : "\n  ]\n";
+      out += "}\n";
+      std::fwrite(out.data(), 1, out.size(), stdout);
+    } else {
+      std::printf("Loaded %s %s: %llu types added, %zu names kept from the project (%zu differ)\n",
+                  record.library.c_str(), record.library_version.c_str(),
+                  static_cast<unsigned long long>(record.added_types), merged.collisions.size(),
+                  differing);
+    }
+    return kExitOk;
+  }
+
+  return usage_error("project type needs a subcommand: add, list, apply, applications or library");
 }
 
 }  // namespace
@@ -2257,6 +2702,53 @@ int command_sig(const std::vector<std::string_view>& arguments) {
   return kExitOk;
 }
 
+/// Writes `text` to a file beside `destination` that this call creates itself (exclusively, with a
+/// random name) and returns its path, or an empty string when it cannot. The file is removed on
+/// failure.
+static std::string write_new_file_beside(const std::string& destination, const std::string& text) {
+  std::random_device random;
+  for (int attempt = 0; attempt < 16; ++attempt) {
+    char suffix[24];
+    std::snprintf(suffix, sizeof(suffix), ".%08x.tmp", static_cast<unsigned>(random()));
+    const std::string path = destination + suffix;
+#ifdef _WIN32
+    const int fd =
+        _open(path.c_str(), _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+#else
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0644);
+#endif
+    if (fd < 0) {
+      if (errno == EEXIST) {
+        continue;  // another run's file: try another name
+      }
+      return {};
+    }
+    bool ok = true;
+    for (std::size_t at = 0; ok && at < text.size();) {
+      const std::size_t chunk = std::min<std::size_t>(text.size() - at, 1U << 20);
+#ifdef _WIN32
+      const int wrote = _write(fd, text.data() + at, static_cast<unsigned>(chunk));
+#else
+      const ssize_t wrote = ::write(fd, text.data() + at, chunk);
+#endif
+      ok = wrote > 0;
+      at += ok ? static_cast<std::size_t>(wrote) : 0;
+    }
+#ifdef _WIN32
+    ok = _close(fd) == 0 && ok;
+#else
+    ok = ::close(fd) == 0 && ok;
+#endif
+    if (!ok) {
+      std::error_code ignored;
+      std::filesystem::remove(path, ignored);
+      return {};
+    }
+    return path;
+  }
+  return {};
+}
+
 int command_typelib(const std::vector<std::string_view>& arguments) {
   if (arguments.empty() || (arguments[0] != "make" && arguments[0] != "show")) {
     return usage_error("typelib needs a subcommand: make or show");
@@ -2333,6 +2825,8 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
       options.preprocessor = value;
     } else if (arg == "--created") {
       options.created = value;
+    } else if (arg == "--provides") {
+      options.provides.push_back(value);
     } else if (arg == "--source-file") {
       const std::size_t space = value.rfind(' ');
       if (space == std::string::npos) {
@@ -2353,17 +2847,23 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   if (input.empty() || out.empty()) {
     return usage_error("typelib make needs a preprocessed C file and --out FILE");
   }
-  constexpr std::uintmax_t kMaxInputBytes = std::uintmax_t{16} << 20;
-  std::error_code size_error;
-  const std::uintmax_t size = std::filesystem::file_size(input, size_error);
-  if (size_error || size > kMaxInputBytes) {
-    return usage_error("cannot read the preprocessed C file (missing, or over 16 MiB)");
-  }
+  constexpr std::size_t kMaxInputBytes = std::size_t{16} << 20;
   std::ifstream file(input, std::ios::binary);
-  std::string text(static_cast<std::size_t>(size), '\0');
-  file.read(text.data(), static_cast<std::streamsize>(text.size()));
-  // A short read (the file shrank, or a read error) would make a library of a prefix: refused.
-  if (!file || static_cast<std::uintmax_t>(file.gcount()) != size) {
+  if (!file) {
+    return usage_error("cannot read the preprocessed C file");
+  }
+  // Read to the end, one byte past the bound: a file that grows while it is read is still read in
+  // full or refused, never cut to a prefix.
+  std::string text;
+  std::array<char, 65536> chunk{};
+  while (file) {
+    file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    text.append(chunk.data(), static_cast<std::size_t>(file.gcount()));
+    if (text.size() > kMaxInputBytes) {
+      return usage_error("the preprocessed C file is over 16 MiB");
+    }
+  }
+  if (!file.eof()) {
     return fail(Diagnostic{Status::InvalidInput, "typelib_make.read",
                            "cannot read the whole preprocessed C file", std::nullopt});
   }
@@ -2371,13 +2871,20 @@ int command_typelib(const std::vector<std::string_view>& arguments) {
   if (!made) {
     return fail(made.diagnostic());
   }
-  std::ofstream written(out, std::ios::binary | std::ios::trunc);
-  written << made.value().text;
-  // Closing flushes the buffer: a failed write shows here, before success is reported.
-  written.close();
-  if (!written) {
+  // Written to a new file beside the destination, which this run alone creates, and renamed over
+  // it: a failed write leaves the old library as it was, and two runs never share the file.
+  const std::string temporary = write_new_file_beside(out, made.value().text);
+  if (temporary.empty()) {
     return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
                            "cannot write the library file", std::nullopt});
+  }
+  std::error_code renamed;
+  std::filesystem::rename(temporary, out, renamed);
+  if (renamed) {
+    std::error_code ignored;
+    std::filesystem::remove(temporary, ignored);
+    return fail(Diagnostic{Status::InvalidInput, "typelib_make.write",
+                           "cannot replace the library file: " + renamed.message(), std::nullopt});
   }
   std::printf("wrote %s: %zu declarations kept, %zu skipped\n", out.c_str(), made.value().kept,
               made.value().skipped.size());

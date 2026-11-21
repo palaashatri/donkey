@@ -90,6 +90,8 @@ struct Symbol {
   SymbolBinding binding = SymbolBinding::Unknown;
   bool imported = false;
   bool exported = false;
+  /// PE: an import by ordinal, not by name (its `name` is then `ordinal_N`).
+  bool by_ordinal = false;
 };
 
 /// A parsed immutable view of one binary file. Offsets in this type follow the

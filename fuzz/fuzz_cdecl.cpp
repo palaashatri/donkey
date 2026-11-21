@@ -25,6 +25,9 @@ extern "C" int LLVMFuzzerTestOneInput(const std::uint8_t* data, std::size_t size
     options.bit_fields = rules == 1   ? donkey::CBitFieldLayout::Aapcs64
                          : rules >= 2 ? donkey::CBitFieldLayout::Unmodelled
                                       : donkey::CBitFieldLayout::SystemV;
+    // Bits 5 and 6 pick the size of long double: 16, 8, or not known (refused).
+    const unsigned long_double = (data[0] >> 5U) & 3U;
+    options.long_double_size = long_double == 0 ? 16 : long_double == 1 ? 8 : 0;
     text = std::string_view(reinterpret_cast<const char*>(data + 1), size - 1);
   }
 

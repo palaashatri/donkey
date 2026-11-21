@@ -19,6 +19,8 @@ preprocessor: gcc 13.3.0 -E -P -nostdinc -isystem /usr/include/x86_64-linux-musl
 created: 2026-11-18
 body_sha256: 7c0c83994e0a531a0101e1ccfa95e3f86285a9f438245eb873bdcbd4188b4a18
 declarations: 3323
+provides: ld-musl-x86_64.so.1
+provides: libc.musl-x86_64.so.1
 source_file: aio.h fdb50a494eb52d43b674f8debe75d72224bc022d52dfbc53fc519895305ab1ee
 source_file: alloca.h 8768404d7cf4af5fb135b1a2ca91765bd2be311ac072e0ec8b68f5cb3e6e0f3e
 source_file: ar.h a32ed9d5a0e19c2d40781a05e4a0ef094d24b69a5752dc3849b92e4502481bd4

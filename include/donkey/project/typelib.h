@@ -9,6 +9,10 @@
 //   donkey-typelib 1            the format line. Another version number is refused.
 //   <key>: <value>              one line per single key, in any order (the list is below).
 //   <record>                    repeated records, after every single key, in this order:
+//   provides: <file>               a library file whose definitions the declarations describe:
+//                                  its SONAME, or its file name when it has none (no '/' or
+//                                  space; each once). A prototype applies only to an import
+//                                  shown to bind to one of them (G22-T3).
 //   source_file: <path> <sha256>   a relative path (no leading '/', no '.' or '..' segment,
 //   macro: NAME=value               no backslash or ':') and the file's SHA-256. A path may
 //   skipped: <name>: <reason>       appear once. Keeps the order of the lines.
@@ -111,6 +115,7 @@ struct TypeLibrary {
   std::string body_sha256;
   std::uint64_t declarations = 0;
 
+  std::vector<std::string> provides;
   std::vector<TypeLibrarySourceFile> source_files;
   std::vector<TypeLibraryMacro> macros;
   std::vector<TypeLibrarySkipped> skipped;
@@ -119,6 +124,23 @@ struct TypeLibrary {
   /// The declared types, ids from `known.next_id()` upwards, in declaration order.
   std::vector<TypeDefinition> types;
 };
+
+/// The bit-field rules of a library's ABI and platform: System V x86-64 (`sysv`) and AAPCS64
+/// (`aapcs64` on `linux` or `freebsd`) are modelled. Win64, and Apple arm64 (`aapcs64` on
+/// `macos`, which departs from AAPCS64), are not, so a library for them refuses bit-fields.
+[[nodiscard]] CBitFieldLayout bit_field_layout(std::string_view abi,
+                                               std::string_view platform) noexcept;
+
+/// The bytes of `long double` for a library's ABI and platform: 16 for System V x86-64 and AAPCS64
+/// on Linux and FreeBSD, 8 for Win64 and Apple arm64 (`aapcs64` on `macos`); 0 for anything else.
+[[nodiscard]] std::uint64_t long_double_size(std::string_view abi,
+                                             std::string_view platform) noexcept;
+
+/// The declaration parser's options for a library's ABI and platform: pointer and long sizes from
+/// the data model, the bit-field rules and the size of `long double`.
+[[nodiscard]] CDeclarationOptions declaration_options(std::string_view abi,
+                                                      std::string_view platform,
+                                                      bool char_is_signed) noexcept;
 
 /// Reads a type library from `text`, with no file access. The C text is parsed once, on its own,
 /// with the built-in names only, so `known` cannot change what it means. `known` is the table the
@@ -155,12 +177,6 @@ struct TypeLibrary {
 ///   typelib.too_many_lines         more than kMaxTypeLibraryHeaderLines header lines
 ///   typelib.line_too_long          a header line over kMaxTypeLibraryHeaderLineBytes
 ///   typelib.too_many_declarations  a declarations count over kMaxTypeLibraryDeclarations
-/// The bit-field rules of a library's ABI and platform: System V x86-64 (`sysv`) and AAPCS64
-/// (`aapcs64` on `linux` or `freebsd`) are modelled. Win64, and Apple arm64 (`aapcs64` on
-/// `macos`, which departs from AAPCS64), are not, so a library for them refuses bit-fields.
-[[nodiscard]] CBitFieldLayout bit_field_layout(std::string_view abi,
-                                               std::string_view platform) noexcept;
-
 [[nodiscard]] Result<TypeLibrary> read_type_library(std::string_view text,
                                                     const TypeTable& known = {});
 
