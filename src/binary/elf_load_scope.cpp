@@ -1061,6 +1061,9 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
         std::string text;
         text.reserve(file.bytes.size());
         for (const std::byte b : file.bytes) {
+          if (b == std::byte{0}) {
+            break;  // musl reads the file as a C string: nothing after a NUL is searched
+          }
           text += static_cast<char>(b);
         }
         defaults = split_musl_search_path(text);
@@ -1115,6 +1118,15 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       return out;
     }
     Probe found = probe(file_where.host, image);
+    if (musl && found.state == Probe::State::Skipped) {
+      // musl's search stops at the first file it opens (path_open), and does not search again
+      // when that file is not a library it can map (load_library): glibc would look further.
+      out.state = Probe::State::Unknown;
+      out.reason = file_where.host.generic_string() +
+                   " is the first file musl's loader opens, and it is not a library of the "
+                   "image's machine";
+      return out;
+    }
     out.state = found.state;
     out.reason = std::move(found.reason);
     out.library = std::move(found.library);

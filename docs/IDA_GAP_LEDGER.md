@@ -2386,7 +2386,9 @@ where the import is shown to bind to a file the library describes:
   token other than $ORIGIN is ignored whole; a relative entry (of a search list, the path file or a needed name with
   a `/`) is Unknown; a needed name's tokens are not expanded (`ElfLoadScope.MuslSplitsARunpathOnLineEnds`,
   `MuslIgnoresARunpathWithAnotherToken`, `MuslPathFileRelativeEntryIsNotKnown`,
-  `MuslReadsThePathFileBesideItsOwnDirectory`; two new fixtures).
+  `MuslReadsThePathFileBesideItsOwnDirectory`; two new fixtures). Later in the round: the search stops at the
+  first file musl opens, so a file of the name that is not a library is Unknown (`MuslStopsAtTheFirstFileItOpens`),
+  and the path file ends at a NUL (`MuslPathFileEndsAtANul`).
 - Storage: `Project::write_transaction`; `set_type_application` checks and writes in one, and
   `apply_library_prototypes` reads the table and writes every prototype in one, so a candidate is checked against
   the table its id is written into. A type library field with a NUL is refused. The migration race test uses a

@@ -1883,6 +1883,40 @@ TEST(ElfLoadScope, MuslReadsThePathFileBesideItsOwnDirectory) {
       << library_path(scope, "libextra.so.1");
 }
 
+// musl's loader reads its path file as a C string: a directory after a NUL is not searched.
+TEST(ElfLoadScope, MuslPathFileEndsAtANul) {
+  const Scratch root;
+  root.place("musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1", "lib/ld-musl-x86_64.so.1");
+  root.place("musl/sysroot-x86_64/usr/local/lib/libextra.so.1", "opt/hook/libextra.so.1");
+  root.write("etc/ld-musl-x86_64.path", std::string("/missing\0:/opt/hook\n", 20));
+  auto loaded = donkey::load_binary(fixture("loadscope", "musl/extra_consumer"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  donkey::ElfLibrarySearch search;
+  search.sysroot = root.path().string();
+  const auto scope = donkey::ElfLoadScope::build(loaded.value().image, loaded.value().data, search);
+  EXPECT_EQ(library_path(scope, "libextra.so.1"), "");
+  EXPECT_NE(scope.lookup("puts", "", false).outcome, donkey::ElfBinding::Outcome::Bound);
+}
+
+// musl's search stops at the first file it opens: a file of that name that is not a library makes
+// the search not known, where glibc would look in the next directory.
+TEST(ElfLoadScope, MuslStopsAtTheFirstFileItOpens) {
+  const Scratch root;
+  root.place("musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1", "lib/ld-musl-x86_64.so.1");
+  root.write("opt/a/libextra.so.1", std::string("x"));
+  root.place("musl/sysroot-x86_64/usr/local/lib/libextra.so.1", "opt/b/libextra.so.1");
+  root.write("etc/ld-musl-x86_64.path", std::string("/opt/a:/opt/b\n"));
+  auto loaded = donkey::load_binary(fixture("loadscope", "musl/extra_consumer"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  donkey::ElfLibrarySearch search;
+  search.sysroot = root.path().string();
+  const auto scope = donkey::ElfLoadScope::build(loaded.value().image, loaded.value().data, search);
+  EXPECT_EQ(library_path(scope, "libextra.so.1"), "");
+  const donkey::ElfBinding puts = scope.lookup("puts", "", false);
+  EXPECT_EQ(puts.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(puts.reason.find("first file musl's loader opens"), std::string::npos) << puts.reason;
+}
+
 // A library with a version table under musl's loader: what musl accepts there is not modelled, so
 // a name it defines is not known, while a name it does not define looks further.
 TEST(ElfLoadScope, MuslDoesNotBindIntoAVersionedLibrary) {
