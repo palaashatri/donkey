@@ -106,7 +106,42 @@ string(REPLACE "\"root\": \"pkg-1\"" "\"root\": \"../up\"" up "${src}")
 manifest(up "${up}")
 expect_refused("unsafe root" up "unsafe root '\\.\\./up'")
 
-# 5. The good archive is fetched, checked and unpacked.
+# 5. A source name that is not one plain component: its directory under src/ is removed and unpacked
+# into.
+# The build names it too, so without the check the script would reach src/../../victim, which is
+# ${WORK}/victim, and remove it.
+file(MAKE_DIRECTORY "${WORK}/victim")
+file(WRITE "${WORK}/victim/keep.txt" "keep\n")
+string(REPLACE "\"name\": \"pkg\"" "\"name\": \"../../victim\"" victim "${src}")
+string(REPLACE "\"source\": \"pkg\"" "\"source\": \"../../victim\"" victim_build "${build}")
+file(WRITE "${WORK}/victim.json"
+     "{\"schema\": 1, ${toolchains}, \"sources\": [${victim}], ${victim_build}}\n")
+expect_refused("unsafe source name" victim "unsafe source name '\\.\\./\\.\\./victim'")
+if(NOT EXISTS "${WORK}/victim/keep.txt")
+  message(FATAL_ERROR "unsafe source name: a directory outside the work directory was removed")
+endif()
+
+# 6. A symbolic link member, which a later member could be written through. Skipped where links
+# cannot be made (Windows without the privilege).
+file(MAKE_DIRECTORY "${WORK}/payload-link/pkg-1")
+file(WRITE "${WORK}/payload-link/pkg-1/a.c" "int a(void) { return 1; }\n")
+execute_process(COMMAND ${CMAKE_COMMAND} -E create_symlink ../.. "${WORK}/payload-link/pkg-1/up"
+                RESULT_VARIABLE linked OUTPUT_QUIET ERROR_QUIET)
+if(linked EQUAL 0 AND IS_SYMLINK "${WORK}/payload-link/pkg-1/up")
+  execute_process(COMMAND ${CMAKE_COMMAND} -E tar cf ../link.tar pkg-1/a.c pkg-1/up
+                  WORKING_DIRECTORY "${WORK}/payload-link" COMMAND_ERROR_IS_FATAL ANY)
+  file(SHA256 "${WORK}/link.tar" link_sha)
+  source_of(link link.tar ${link_sha})
+  manifest(link "${link}")
+  expect_refused("symbolic link member" link "member that is not a file or a directory")
+  if(EXISTS "${WORK}/run-link/src/pkg/pkg-1/up")
+    message(FATAL_ERROR "symbolic link member: the link was unpacked")
+  endif()
+else()
+  message(STATUS "symbolic link member: skipped, this host cannot create a symbolic link")
+endif()
+
+# 7. The good archive is fetched, checked and unpacked.
 manifest(good "${src}")
 file(REMOVE_RECURSE "${WORK}/run-good")
 execute_process(COMMAND ${CMAKE_COMMAND} -DR1_WORK=${WORK}/run-good -DR1_MANIFEST=${WORK}/good.json
