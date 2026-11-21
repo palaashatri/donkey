@@ -882,15 +882,15 @@ TEST(TypeLibApply, RegisterPrototypeFollowsTypedefs) {
   for (const auto& type : declared.value()) {
     table.put(type);
   }
-  const auto function = [&](const std::string& name) -> const donkey::TypeDefinition& {
+  // list() returns a copy, so the functions are taken by value.
+  const auto function = [&](const std::string& name) -> donkey::TypeDefinition {
     for (const auto& type : table.list()) {
       if (type.kind == donkey::TypeKind::Function && type.name == name) {
         return type;
       }
     }
     ADD_FAILURE() << name;
-    static const donkey::TypeDefinition none;
-    return none;
+    return {};
   };
   const auto quit = donkey::register_prototype(table, function("quit"));
   ASSERT_TRUE(quit.has_value());
