@@ -1,6 +1,7 @@
 #include "donkey/binary/init_fini.h"
 
 #include <algorithm>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -54,10 +55,21 @@ struct Reader {
     return value ? std::optional<std::uint64_t>(value.value()) : std::nullopt;
   }
 
+  /// The pointer at `address`, or nothing unless every one of its bytes is file data, mapped
+  /// contiguously (a pointer across a gap between two mappings would read unrelated bytes).
   std::optional<std::uint64_t> word_at(std::uint64_t address) const {
+    if (address > std::numeric_limits<std::uint64_t>::max() - (pointer - 1U)) {
+      return std::nullopt;
+    }
     auto offset = image.va_to_file_offset(address);
     if (!offset) {
       return std::nullopt;
+    }
+    for (unsigned byte = 1; byte < pointer; ++byte) {
+      auto mapped = image.va_to_file_offset(address + byte);
+      if (!mapped || mapped.value() != offset.value() + byte) {
+        return std::nullopt;
+      }
     }
     return word_at_file(offset.value());
   }
@@ -65,14 +77,20 @@ struct Reader {
 
 /// The relocations of the dynamic relocation tables that matter for the arrays: for each place,
 /// the value a RELATIVE relocation gives it (RELA: the addend; REL: the file's bytes), or nothing
-/// when another relocation type (a symbolic one) covers it.
+/// when another relocation type (a symbolic one) covers it. A REL RELATIVE relocation whose place
+/// cannot be read is in `failed`, not `places`: its value is unknown, which is not the same as
+/// belonging to another image.
 struct Relocations {
   std::map<std::uint64_t, std::optional<std::uint64_t>> places;
+  std::set<std::uint64_t> failed;
   bool truncated = false;
 };
 
 Relocations read_relocations(const Reader& reader) {
   Relocations out;
+  // Every record counts against the limit, whatever its type and whether or not its place repeats,
+  // across all the tables: several tables may cover the same bytes.
+  std::uint64_t processed = 0;
   const std::uint64_t relative = relative_type(reader.image.architecture);
   const bool wide = reader.pointer == 8;
   for (const Section& section : reader.image.sections) {
@@ -81,13 +99,17 @@ Relocations read_relocations(const Reader& reader) {
     if ((!rela && !rel) || !section.has_file_data) {
       continue;
     }
+    if (out.truncated) {
+      break;
+    }
     const std::uint64_t entry_size = (wide ? 8U : 4U) * (rela ? 3U : 2U);
     const std::uint64_t count = section.file_size / entry_size;
     for (std::uint64_t i = 0; i < count; ++i) {
-      if (out.places.size() >= kMaxRelocations) {
+      if (processed >= kMaxRelocations) {
         out.truncated = true;
         break;
       }
+      ++processed;
       const std::uint64_t at = section.file_offset + i * entry_size;
       const auto place = reader.word_at_file(at);
       const auto info = reader.word_at_file(at + reader.pointer);
@@ -103,11 +125,17 @@ Relocations read_relocations(const Reader& reader) {
             out.truncated = true;
             break;
           }
+          out.failed.erase(*place);
           out.places[*place] = *addend;
+        } else if (const auto value = reader.word_at(*place); value) {
+          out.failed.erase(*place);
+          out.places[*place] = *value;
         } else {
-          out.places[*place] = reader.word_at(*place);
+          out.places.erase(*place);
+          out.failed.insert(*place);
         }
       } else if (type != 0) {
+        out.failed.erase(*place);
         out.places[*place] = std::nullopt;  // symbolic: the value comes from another image
       }
     }
@@ -137,6 +165,10 @@ void read_array(const Reader& reader, const Relocations& relocations, Range rang
   for (std::uint64_t i = 0; i < count; ++i) {
     const std::uint64_t place = range.address + i * reader.pointer;
     std::optional<std::uint64_t> value;
+    if (relocations.failed.count(place) != 0) {
+      ++unreadable;  // a RELATIVE relocation whose place could not be read
+      continue;
+    }
     if (const auto it = relocations.places.find(place); it != relocations.places.end()) {
       if (!it->second) {
         continue;  // a symbolic relocation: not a start in this image

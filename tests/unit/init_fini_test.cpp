@@ -93,6 +93,76 @@ TEST(InitFini, AnotherFormatHasNone) {
   EXPECT_EQ(read.unreadable, 0U);
 }
 
+// The analysis seeds what the reader finds. The constructor at 0x1010 is named only by
+// `.init_array`: no symbol, no call, no entry point and no unwind record reach it, so without the
+// seed it would not be a function.
+TEST(Analysis, AnUnnamedConstructorIsSeededFromInitArray) {
+  std::vector<std::byte> data(0x120, std::byte{0x90});  // nop
+  data[0x10] = std::byte{0xc3};                         // 0x1010: ret
+  put64(data, 0x100, 0x1010);                           // .init_array[0]
+  donkey::BinaryImage image;
+  image.format = donkey::BinaryFormat::Elf;
+  image.architecture = donkey::Architecture::X86_64;
+  image.bits = 64;
+  image.file_size = data.size();
+  donkey::Section text = section(".text", 0x1000, 0x0, 0x20, true);
+  text.readable = true;
+  image.sections.push_back(text);
+  image.sections.push_back(section(".init_array", 0x2000, 0x100, 8));
+
+  auto analysis = donkey::analyze(image, data);
+  ASSERT_TRUE(analysis.has_value()) << analysis.diagnostic().message;
+  const auto& functions = analysis.value().functions;
+  const auto found = std::find_if(functions.begin(), functions.end(),
+                                  [](const donkey::Function& f) { return f.address == 0x1010; });
+  ASSERT_NE(found, functions.end());
+  EXPECT_TRUE(found->from_init_fini);
+  EXPECT_FALSE(found->from_symbol);
+  EXPECT_FALSE(analysis.value().partial);
+}
+
+// A pointer whose bytes are not one contiguous run of file data is not read: `.init_array` covers
+// 0x2000-0x2007 but only 0x2000-0x2003 has file data behind it, so the entry is unreadable rather
+// than four bytes of the array and four of whatever follows in the file. A REL R_386_RELATIVE
+// relocation whose place has no file data is unreadable too, not a symbolic relocation.
+TEST(InitFini, PartlyMappedEntriesAndFailedRelativeReadsAreUnreadable) {
+  {
+    std::vector<std::byte> data(0x200);
+    put64(data, 0x100, 0x1111);
+    donkey::BinaryImage image;
+    image.format = donkey::BinaryFormat::Elf;
+    image.architecture = donkey::Architecture::X86_64;
+    image.bits = 64;
+    donkey::Section array = section(".init_array", 0x2000, 0x100, 4);
+    array.virtual_size = 8;
+    image.sections.push_back(array);
+    const auto read = donkey::read_init_fini_of_image(image, data);
+    EXPECT_TRUE(read.starts.empty());
+    EXPECT_EQ(read.unreadable, 1U);
+  }
+  {
+    std::vector<std::byte> data(0x200);
+    // .rel.dyn (32-bit): place 0x3000 (no file data), R_386_RELATIVE.
+    data[0x100] = std::byte{0x00};
+    data[0x101] = std::byte{0x30};
+    data[0x104] = std::byte{8};
+    // .dynamic: DT_INIT_ARRAY 0x3000, DT_INIT_ARRAYSZ 4, DT_NULL.
+    data[0x180] = std::byte{25};
+    data[0x185] = std::byte{0x30};
+    data[0x188] = std::byte{27};
+    data[0x18c] = std::byte{4};
+    donkey::BinaryImage image;
+    image.format = donkey::BinaryFormat::Elf;
+    image.architecture = donkey::Architecture::X86;
+    image.bits = 32;
+    image.sections.push_back(section(".rel.dyn", 0x4000, 0x100, 8));
+    image.sections.push_back(section(".dynamic", 0x4100, 0x180, 24));
+    const auto read = donkey::read_init_fini_of_image(image, data);
+    EXPECT_TRUE(read.starts.empty());
+    EXPECT_EQ(read.unreadable, 1U);
+  }
+}
+
 // The corpus library is built by the test build. On an ELF host, its C runtime functions are found
 // and marked, each one a function symbol of the library.
 TEST(Analysis, ElfInitAndFiniFunctionsAreSeeded) {
