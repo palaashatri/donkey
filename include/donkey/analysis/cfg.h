@@ -35,6 +35,9 @@ struct Function {
   /// interposable function the image defines itself (libc's `free@plt`), that function's name.
   /// The pseudocode prints a call to the stub by it. Only `import_name` marks an import.
   std::string stub_target;
+  /// For a stub that jumps through an import's slot (a PE IAT slot, or an ELF GOT slot named by a
+  /// relocation), that slot's address; 0 for a PLT stub found by its relocation.
+  std::uint64_t import_slot = 0;
   /// The function is a thunk (G24-T4): its only instruction is an unconditional direct jump to
   /// another function's start. `name` is then `j_` and the target's name, unless a symbol names it.
   bool thunk = false;

@@ -253,6 +253,55 @@ std::string normalised(std::string_view text) {
   return out;
 }
 
+/// Whether a declaration declares only a tag (`struct stat { ... };`, `struct stat;`): its name is
+/// in the tag name space, apart from a function or object of the same name.
+bool declares_only_tag(const std::string& declaration) {
+  std::string text = declaration;
+  while (!text.empty() &&
+         (text.back() == ';' || text.back() == ' ' || text.back() == '\n' || text.back() == '\t')) {
+    text.pop_back();
+  }
+  std::size_t at = 0;
+  while (at < text.size() && !is_ident_start(text[at])) {
+    ++at;
+  }
+  std::size_t end = at;
+  while (end < text.size() && is_ident_char(text[end])) {
+    ++end;
+  }
+  const std::string head = text.substr(at, end - at);
+  if (head != "struct" && head != "union" && head != "enum") {
+    return false;
+  }
+  if (const std::size_t open = text.find('{'); open != std::string::npos) {
+    // Nothing but the body follows the tag: no declarator after the closing brace.
+    int depth = 0;
+    for (std::size_t i = open; i < text.size(); ++i) {
+      if (text[i] == '{') {
+        ++depth;
+      } else if (text[i] == '}' && --depth == 0) {
+        return i + 1 == text.size();
+      }
+    }
+    return false;
+  }
+  // `struct NAME` and nothing else.
+  std::size_t words = 0;
+  for (std::size_t i = 0; i < text.size();) {
+    if (is_ident_start(text[i])) {
+      ++words;
+      while (i < text.size() && is_ident_char(text[i])) {
+        ++i;
+      }
+    } else if (text[i] == ' ' || text[i] == '\t' || text[i] == '\n') {
+      ++i;
+    } else {
+      return false;
+    }
+  }
+  return words == 2;
+}
+
 /// The name a skipped declaration is listed under: a tag, a function's name, or a typedef's name.
 std::string name_of(const std::string& declaration) {
   std::vector<std::pair<std::string, int>> words;  // identifier and its paren depth
@@ -520,7 +569,8 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
   std::size_t kept_names = 0;  // names the kept text lists
   const std::vector<std::string> declarations = split_c_declarations(preprocessed);
   // A name an assembler label renames anywhere has another symbol name everywhere: every
-  // declaration of it is skipped, before or after the labelled one.
+  // declaration of it is skipped, before or after the labelled one. Only ordinary names are
+  // relabelled: a tag of the same name (`struct stat` beside `stat()`) is another name.
   std::set<std::string> relabelled;
   for (const std::string& declaration : declarations) {
     if (declaration.find("__asm__") != std::string::npos) {
@@ -533,7 +583,7 @@ Result<TypeLibraryMakeResult> make_type_library(std::string_view preprocessed,
       made.skipped.push_back({name, "a function definition (only declarations are kept)"});
       continue;
     }
-    if (declaration.find("__asm__") == std::string::npos &&
+    if (declaration.find("__asm__") == std::string::npos && !declares_only_tag(declaration) &&
         relabelled.contains(name_of(declaration))) {
       made.skipped.push_back(
           {name,

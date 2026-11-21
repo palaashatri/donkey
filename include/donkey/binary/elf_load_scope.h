@@ -42,7 +42,12 @@
 // `libdl.`, `libutil.`, `libxnet.` followed by anything) is the loader itself, found at the
 // interpreter's path under the sysroot; other names are searched in `paths`, then the DT_RUNPATH
 // (else DT_RPATH) of the requester and of each object that loaded it, then the directories of
-// /etc/ld-musl-<arch>.path, or /lib, /usr/local/lib and /usr/lib when there is no such file. musl
+// etc/ld-musl-<arch>.path beside the loader's own directory (/etc for /lib/ld-musl-x86_64.so.1,
+// /opt/musl/etc for /opt/musl/lib/ld-musl-x86_64.so.1), or /lib, /usr/local/lib and /usr/lib when
+// there is no such file. Search lists split on `:` and line ends, empty entries skipped; $ORIGIN
+// and ${ORIGIN} expand anywhere, and a list with any other `$` is ignored whole; a relative
+// directory, or a needed name with a `/` that is relative, is opened from the target's working
+// directory and is Unknown. A needed name's tokens are not expanded. musl
 // reads no ld.so.cache, ld.so.preload or hardware-capability directory, and matches a needed name
 // to loaded names and files, not to sonames. Its symbol versions are not modelled: a versioned
 // reference, or a library with a version table before the definition, is Unknown. A library's

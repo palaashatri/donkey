@@ -220,6 +220,47 @@ std::vector<std::string> split_search_path(const std::string& text) {
   return out;
 }
 
+/// A search list as musl's loader splits it (path_open in its dynlink.c): on `:` and line ends,
+/// empty entries skipped.
+std::vector<std::string> split_musl_search_path(const std::string& text) {
+  std::vector<std::string> out;
+  std::string current;
+  for (const char c : text) {
+    if (c == ':' || c == '\n') {
+      if (!current.empty()) {
+        out.push_back(current);
+      }
+      current.clear();
+    } else {
+      current += c;
+    }
+  }
+  if (!current.empty()) {
+    out.push_back(current);
+  }
+  return out;
+}
+
+/// musl's path file: `etc/ld-musl-<arch>.path` beside the directory of the loader's own path (the
+/// interpreter `/opt/musl/lib/ld-musl-x86_64.so.1` reads `/opt/musl/etc/ld-musl-x86_64.path`), or
+/// under `/` for a loader in a top-level directory or named by a relative path (load_library in its
+/// dynlink.c).
+std::string musl_path_file(const std::string& interpreter, const std::string& arch) {
+  std::string prefix;
+  if (!interpreter.empty() && interpreter.front() == '/') {
+    std::size_t last = 0;
+    std::size_t before = 0;
+    for (std::size_t at = 0; at < interpreter.size(); ++at) {
+      if (interpreter[at] == '/') {
+        before = last;
+        last = at;
+      }
+    }
+    prefix = interpreter.substr(0, before);
+  }
+  return prefix + "/etc/ld-musl-" + arch + ".path";
+}
+
 /// A path as the loader of the target sees it (`host` false: absolute, under the sysroot) or a path
 /// of this machine (`host` true).
 struct LoaderPath {
@@ -999,14 +1040,15 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
     }
   }
   std::vector<std::string> defaults;
-  // musl reads its search path from /etc/ld-musl-<arch>.path (directories separated by `:` or a
-  // line end), and searches /lib, /usr/local/lib and /usr/lib when there is no such file.
+  // musl reads its search path from etc/ld-musl-<arch>.path beside its own directory (directories
+  // separated by `:` or a line end), and searches /lib, /usr/local/lib and /usr/lib when there is
+  // no such file.
   std::optional<std::string> musl_path_problem;
   if (search.system_directories && musl) {
     const std::string arch = musl_arch(image.architecture);
     const Resolved where =
         arch.empty() ? Resolved{}
-                     : resolve(LoaderPath{false, "/etc/ld-musl-" + arch + ".path"}, sysroot);
+                     : resolve(LoaderPath{false, musl_path_file(musl_interpreter, arch)}, sysroot);
     if (arch.empty()) {
       musl_path_problem = "musl's search path for this architecture is not modelled";
     } else if (where.state == Resolved::State::Unknown) {
@@ -1016,21 +1058,12 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       if (file.state != FileBytes::State::Read) {
         musl_path_problem = where.host.generic_string() + " could not be read";
       } else {
-        std::string entry;
+        std::string text;
+        text.reserve(file.bytes.size());
         for (const std::byte b : file.bytes) {
-          const char c = static_cast<char>(b);
-          if (c == ':' || c == '\n') {
-            if (!entry.empty()) {
-              defaults.push_back(entry);
-            }
-            entry.clear();
-          } else {
-            entry += c;
-          }
+          text += static_cast<char>(b);
         }
-        if (!entry.empty()) {
-          defaults.push_back(entry);
-        }
+        defaults = split_musl_search_path(text);
       }
     } else {
       defaults = {"/lib", "/usr/local/lib", "/usr/lib"};
@@ -1116,10 +1149,19 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       out.musl_loader = true;
       return out;
     }
-    if (raw_name.find('/') != std::string::npos || raw_name.find('$') != std::string::npos) {
-      // A path (after its tokens expand) is opened as it is, without a search.
+    if (raw_name.find('/') != std::string::npos ||
+        (!musl && raw_name.find('$') != std::string::npos)) {
+      // A path (after its tokens expand) is opened as it is, without a search. musl's loader
+      // expands no token in a needed name: it opens the text itself.
       std::string why;
-      const auto expanded = expand_tokens(raw_name, origin_of[requester], why);
+      std::optional<LoaderPath> expanded;
+      if (!musl) {
+        expanded = expand_tokens(raw_name, origin_of[requester], why);
+      } else if (raw_name.front() == '/') {
+        expanded = LoaderPath{false, raw_name};
+      } else {
+        why = "'" + raw_name + "' is relative to the loader's working directory";
+      }
       if (!expanded) {
         out.state = Probe::State::Unknown;
         out.reason = why;
@@ -1150,6 +1192,54 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       const ElfLibraryNames& of = names_of[object];
       return of.has_runpath ? of.runpath : of.rpath;
     };
+    // musl's DT_RUNPATH or DT_RPATH of `object` (fixup_rpath, then path_open, in its dynlink.c):
+    // each $ORIGIN or ${ORIGIN} is replaced by the object's directory, and a list with any other
+    // `$` is ignored whole. The list is then split on `:` and line ends; a relative entry is opened
+    // from the target's working directory, which is not known here.
+    const auto add_musl_entries = [&](const std::string& list, std::size_t object) {
+      const LoaderPath& origin = origin_of[object];
+      for (std::size_t at = list.find('$'); at != std::string::npos; at = list.find('$', at + 1)) {
+        if (list.compare(at, 7, "$ORIGIN") != 0 && list.compare(at, 9, "${ORIGIN}") != 0) {
+          return;  // musl ignores the whole list
+        }
+      }
+      for (const std::string& entry : split_musl_search_path(list)) {
+        SearchStep step;
+        std::string path;
+        bool expanded = false;
+        bool origin_inside = false;
+        for (std::size_t at = 0; at < entry.size();) {
+          const std::size_t length = entry.compare(at, 7, "$ORIGIN") == 0     ? 7
+                                     : entry.compare(at, 9, "${ORIGIN}") == 0 ? 9
+                                                                              : 0;
+          if (length != 0) {
+            origin_inside = origin_inside || at != 0;
+            expanded = true;
+            path += origin.path;
+            at += length;
+          } else {
+            path += entry[at];
+            ++at;
+          }
+        }
+        if (expanded && origin.path.find_first_of(":\n") != std::string::npos) {
+          step.kind = SearchStep::Kind::Unknowable;
+          step.reason = "'" + entry + "' expands $ORIGIN to " + origin.path +
+                        ", which musl's loader would split at its separator";
+        } else if (expanded && origin.host && origin_inside) {
+          step.kind = SearchStep::Kind::Unknowable;
+          step.reason = "'" + entry + "' uses $ORIGIN after the start of the path";
+        } else if (expanded && origin.host) {
+          step.directory = LoaderPath{true, path};
+        } else if (path.empty() || path.front() != '/') {
+          step.kind = SearchStep::Kind::Unknowable;
+          step.reason = "'" + entry + "' is relative to the loader's working directory";
+        } else {
+          step.directory = LoaderPath{false, path};
+        }
+        steps.push_back(std::move(step));
+      }
+    };
     const auto add_entries = [&](const std::string& list, std::size_t object) {
       for (const std::string& entry : split_search_path(list)) {
         SearchStep step;
@@ -1174,7 +1264,7 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
         steps.push_back(std::move(step));
       }
       for (std::size_t object = requester; object != kNoLoader; object = loader_of[object]) {
-        add_entries(add_entries_musl(object), object);
+        add_musl_entries(add_entries_musl(object), object);
       }
       if (inherited != nullptr) {
         SearchStep step;
@@ -1190,7 +1280,13 @@ ElfLoadScope ElfLoadScope::build_root(const BinaryImage& image, std::span<const 
       }
       for (const std::string& directory : defaults) {
         SearchStep step;
-        step.directory = LoaderPath{false, directory};
+        if (directory.front() == '/') {
+          step.directory = LoaderPath{false, directory};
+        } else {
+          step.kind = SearchStep::Kind::Unknowable;
+          step.reason = "'" + directory + "' in musl's path file is relative to the loader's " +
+                        "working directory";
+        }
         steps.push_back(std::move(step));
       }
     } else if (!asking.has_runpath) {

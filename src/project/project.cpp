@@ -494,6 +494,18 @@ class WriteTransaction {
   bool open_ = true;
 };
 
+std::function<void(int)>& migration_lock_hook_slot() {
+  static std::function<void(int)> hook;
+  return hook;
+}
+
+/// Test-only (set_migration_lock_hook_for_testing): runs before a migration step asks for the lock.
+void migration_lock_hook(int version) {
+  if (const auto& hook = migration_lock_hook_slot(); hook) {
+    hook(version);
+  }
+}
+
 /// The schema version as committed now, or -1 when it cannot be read.
 int schema_version_now(sqlite3* db) {
   sqlite3_stmt* statement = nullptr;
@@ -608,6 +620,7 @@ Result<Project> Project::open(const std::string& path) {
                                      std::to_string(kProjectSchemaVersion));
     }
     if (schema == 0) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -643,6 +656,7 @@ Result<Project> Project::open(const std::string& path) {
         schema = 3;
       }
     } else if (schema == 1) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -676,6 +690,7 @@ Result<Project> Project::open(const std::string& path) {
         schema = 3;
       }
     } else if (schema == 2) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -723,6 +738,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 3) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -754,6 +770,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 4) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -785,6 +802,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 5) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -816,6 +834,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 6) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -847,6 +866,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 7) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet. Without the transaction a step could commit part of its change in
@@ -878,6 +898,7 @@ Result<Project> Project::open(const std::string& path) {
       }
     }
     if (schema == 8) {
+      migration_lock_hook(schema);
       const int rc_begin = sqlite3_exec(db, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr);
       if (rc_begin != SQLITE_OK) {
         // Nothing has run yet: without the transaction the repair could be skipped while a later
@@ -1744,6 +1765,12 @@ Result<void> Project::set_type_application(std::int64_t image_id, TypeApplicatio
   if (!is_open()) {
     return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
   }
+  if (sqlite3_get_autocommit(impl_->db) != 0) {
+    // The checks below (the type, the source already stored) and the write are one transaction,
+    // so another connection cannot change what was checked before the write.
+    return write_transaction(
+        [&] { return set_type_application(image_id, kind, address, type_id, source, kept); });
+  }
   if (!fits_storage(address)) {
     return make_void_error(Status::InvalidInput, "project.value_out_of_range",
                            "address does not fit the storage integer range", address);
@@ -2151,6 +2178,10 @@ bool fsync_path(const std::string& path, bool directory) {
 
 }  // namespace
 
+void Project::set_migration_lock_hook_for_testing(std::function<void(int version)> hook) {
+  migration_lock_hook_slot() = std::move(hook);
+}
+
 void Project::set_replace_fault_hook_for_testing(ReplaceFaultHook hook) {
   replace_fault_hook() = std::move(hook);
 }
@@ -2461,9 +2492,20 @@ Result<std::int64_t> Project::load_type_library(
                                     "no project database is open");
   }
   for (const std::string& provider : record.provides) {
-    if (provider.empty() || provider.find('\n') != std::string::npos) {
+    if (provider.empty() ||
+        provider.find_first_of(std::string_view("\n\0", 2)) != std::string::npos) {
+      return make_error<std::int64_t>(
+          Status::InvalidInput, "project.type_library_failed",
+          "a provided library name is empty or has a line break or NUL");
+    }
+  }
+  // Text is stored up to its first NUL, so a field with one would be stored as another value.
+  for (const std::string* field :
+       {&record.library, &record.library_version, &record.architecture, &record.platform,
+        &record.abi, &record.data_model, &record.body_sha256}) {
+    if (field->find('\0') != std::string::npos) {
       return make_error<std::int64_t>(Status::InvalidInput, "project.type_library_failed",
-                                      "a provided library name is empty or has a line break");
+                                      "a type library field has a NUL byte");
     }
   }
   sqlite3* db = impl_->db;
@@ -2541,6 +2583,31 @@ Result<std::int64_t> Project::load_type_library(
     return storage("project.transaction_failed", "commit a type library load");
   }
   return id;
+}
+
+Result<void> Project::write_transaction(const std::function<Result<void>()>& work) {
+  if (!is_open()) {
+    return make_void_error(Status::InvalidInput, "project.not_open", "no project database is open");
+  }
+  sqlite3* db = impl_->db;
+  if (sqlite3_get_autocommit(db) == 0) {
+    return work();  // inside this connection's open transaction
+  }
+  if (!execute(db, "BEGIN IMMEDIATE")) {
+    return make_void_error(
+        Status::InternalError, "project.transaction_failed",
+        storage_error(db, "project.transaction_failed", "begin a write transaction").message);
+  }
+  WriteTransaction transaction(db);
+  if (auto done = work(); !done) {
+    return done;
+  }
+  if (!transaction.commit()) {
+    return make_void_error(
+        Status::InternalError, "project.transaction_failed",
+        storage_error(db, "project.transaction_failed", "commit a write transaction").message);
+  }
+  return Result<void>();
 }
 
 Result<void> Project::update_types(

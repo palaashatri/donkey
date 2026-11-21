@@ -400,3 +400,18 @@ TEST(TypeLibMake, EveryDeclarationOfALabelledNameIsSkipped) {
     EXPECT_EQ(made.value().skipped[1].name, "f");
   }
 }
+
+// A tag with the name of a relabelled function is another name (glibc's `struct stat` beside
+// `stat() __asm__("stat64")`): the struct and its layout are kept.
+TEST(TypeLibMake, ATagNamedLikeALabelledFunctionIsKept) {
+  const auto made = donkey::make_type_library(
+      "struct stat { long size; };\n"
+      "int stat(const char *, struct stat *) __asm__(\"stat64\");\n",
+      test_options());
+  ASSERT_TRUE(made.has_value()) << made.diagnostic().message;
+  ASSERT_EQ(made.value().skipped.size(), 1U);
+  EXPECT_EQ(made.value().skipped[0].name, "stat");
+  EXPECT_NE(made.value().skipped[0].reason.find("__asm__"), std::string::npos)
+      << made.value().skipped[0].reason;
+  EXPECT_NE(made.value().text.find("struct stat {"), std::string::npos) << made.value().text;
+}

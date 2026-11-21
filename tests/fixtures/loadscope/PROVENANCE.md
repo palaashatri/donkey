@@ -176,3 +176,28 @@ the path file cannot be read. `musl/extra_consumer` and `musl/libplugin.so.1` li
 | `musl/sysroot-x86_64/usr/local/lib/libextra.so.1` | `44a16985bf7aa9f634b22b61a6b6d1e2584192865398a73ec5670735e8fca33b` |
 | `musl/extra_consumer` | `528e120188429dd4b556ed8a3678e806b3821c3ca7e773246e6cd5633121cc63` |
 | `musl/libplugin.so.1` | `ce0ac0233ef6c52a488455683451faac177ba7049d20b693f70b833919a1d967` |
+
+## musl search lists (G22-T3 review)
+
+Two programs whose DT_RUNPATH musl's loader reads in its own way: one split on a line end, one with
+a `$LIB` token (musl then ignores the whole list). `musl/sysroot-x86_64/opt/hook/libextra.so.1` is a
+copy of `musl/sysroot-x86_64/usr/local/lib/libextra.so.1`. Built with the same `musl-tools`
+1.2.4-2 package as above, from this directory:
+
+    mkdir -p musl/sysroot-x86_64/opt/hook
+    cp musl/sysroot-x86_64/usr/local/lib/libextra.so.1 musl/sysroot-x86_64/opt/hook/
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -Wl,--enable-new-dtags \
+        -Wl,-rpath,"$(printf '/opt/none\n/opt/hook')" -o musl/runpath_newline src/extra_consumer.c \
+        musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+    musl-gcc -O1 -fno-inline -s -Wl,--build-id=none -Wl,--no-as-needed -Wl,--enable-new-dtags \
+        -Wl,-rpath,'/opt/hook:$LIB' -o musl/runpath_lib_token src/extra_consumer.c \
+        musl/sysroot-x86_64/usr/local/lib/libextra.so.1
+
+Both link musl's startup objects (MIT). The tests that need a relative path-file entry or a loader in
+another directory write their sysroot at run time from these files.
+
+| File | SHA-256 |
+|---|---|
+| `musl/runpath_newline` | `62e1f82263d0835c9dc73e25ea3d6781965b0e6f1c0b4f67c754988f596b7881` |
+| `musl/runpath_lib_token` | `81c7d94f85a55d97e081166cb33e7a53c8c80894638d245a456ba75a4b79a4da` |
+| `musl/sysroot-x86_64/opt/hook/libextra.so.1` | `44a16985bf7aa9f634b22b61a6b6d1e2584192865398a73ec5670735e8fca33b` |

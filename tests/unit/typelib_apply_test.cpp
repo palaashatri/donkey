@@ -822,6 +822,30 @@ TEST(TypeLibApply, ATypeBuiltOnADifferentCollisionIsNotAdded) {
 
 // Comparing two collisions that share subtrees visits each pair once: a chain of records whose two
 // members both point at the previous record is compared in linear time, not exponential.
+// The comparison of a long chain (each record points to the one before it) stops at a fixed
+// depth instead of recursing as deep as the chain: past it, the two are not shown to be the same.
+TEST(TypeLibApply, CollisionComparisonDepthIsBounded) {
+  std::string text = "struct t0 { int v; };\n";
+  for (int level = 1; level <= 400; ++level) {
+    text += "struct t" + std::to_string(level) + " { struct t" + std::to_string(level - 1) +
+            " *p; };\n";
+  }
+  donkey::TypeTable user;
+  auto declared = donkey::parse_c_declarations(text, user);
+  ASSERT_TRUE(declared.has_value()) << declared.diagnostic().message;
+  for (const auto& type : declared.value()) {
+    user.put(type);
+  }
+  auto merge = donkey::merge_type_library(user, library_of(text, user));
+  ASSERT_TRUE(merge.has_value()) << merge.diagnostic().message;
+  std::map<std::string, bool> differs;
+  for (const auto& collision : merge.value().collisions) {
+    differs[collision.name] = collision.differs;
+  }
+  EXPECT_FALSE(differs.at("t10"));
+  EXPECT_TRUE(differs.at("t400"));
+}
+
 TEST(TypeLibApply, CollisionComparisonIsBounded) {
   std::string text = "struct r0 { int v; };\n";
   for (int level = 1; level <= 40; ++level) {

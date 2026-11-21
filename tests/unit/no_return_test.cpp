@@ -1821,6 +1821,68 @@ TEST(ElfLoadScope, MuslSearchesItsPathFileOrItsDefaultDirectories) {
   EXPECT_NE(puts.reason.find("could not be read"), std::string::npos) << puts.reason;
 }
 
+// musl splits a DT_RUNPATH on line ends as well as `:` (path_open in its dynlink.c), so
+// "/opt/none\n/opt/hook" names /opt/hook, which is searched before the default directories.
+TEST(ElfLoadScope, MuslSplitsARunpathOnLineEnds) {
+  const auto scope = musl_scope("musl/runpath_newline", "musl/sysroot-x86_64");
+  EXPECT_NE(library_path(scope, "libextra.so.1").find("/opt/hook/libextra.so.1"), std::string::npos)
+      << library_path(scope, "libextra.so.1");
+}
+
+// A search list with a `$` token other than $ORIGIN is ignored whole by musl (fixup_rpath), so
+// "/opt/hook:$LIB" searches neither directory, and libextra.so.1 comes from /usr/local/lib.
+TEST(ElfLoadScope, MuslIgnoresARunpathWithAnotherToken) {
+  const auto scope = musl_scope("musl/runpath_lib_token", "musl/sysroot-x86_64");
+  EXPECT_NE(library_path(scope, "libextra.so.1").find("/usr/local/lib/libextra.so.1"),
+            std::string::npos)
+      << library_path(scope, "libextra.so.1");
+}
+
+// A relative directory in musl's path file is opened from the target's working directory, which
+// is not known: the search, and every lookup behind it, is not known either.
+TEST(ElfLoadScope, MuslPathFileRelativeEntryIsNotKnown) {
+  const Scratch root;
+  root.place("musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1", "lib/ld-musl-x86_64.so.1");
+  root.place("musl/sysroot-x86_64/usr/local/lib/libextra.so.1", "opt/c/libextra.so.1");
+  root.write("etc/ld-musl-x86_64.path", std::string("vendor:/opt/c\n"));
+  auto loaded = donkey::load_binary(fixture("loadscope", "musl/extra_consumer"));
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  donkey::ElfLibrarySearch search;
+  search.sysroot = root.path().string();
+  const auto scope = donkey::ElfLoadScope::build(loaded.value().image, loaded.value().data, search);
+  const donkey::ElfBinding puts = scope.lookup("puts", "", false);
+  EXPECT_EQ(puts.outcome, donkey::ElfBinding::Outcome::Unknown);
+  EXPECT_NE(puts.reason.find("working directory"), std::string::npos) << puts.reason;
+}
+
+// musl finds its path file beside its own directory: a loader at /o/m/ld-musl-x86_64.so.1 reads
+// /o/etc/ld-musl-x86_64.path, not /etc/ld-musl-x86_64.path.
+TEST(ElfLoadScope, MuslReadsThePathFileBesideItsOwnDirectory) {
+  const Scratch root;
+  const std::string original = fixture("loadscope", "musl/extra_consumer");
+  std::string bytes(static_cast<std::size_t>(fs::file_size(original)), '\0');
+  std::ifstream in(original, std::ios::binary);
+  in.read(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+  ASSERT_TRUE(in.good());
+  const std::string from = "/lib/ld-musl-x86_64.so.1";
+  const std::string to = "/o/m/ld-musl-x86_64.so.1";  // the same length
+  const std::size_t at = bytes.find(from);
+  ASSERT_NE(at, std::string::npos);
+  bytes.replace(at, from.size(), to);
+  const fs::path program = root.write("program", bytes);
+  root.place("musl/sysroot-x86_64/lib/ld-musl-x86_64.so.1", "sysroot/o/m/ld-musl-x86_64.so.1");
+  root.place("musl/sysroot-x86_64/usr/local/lib/libextra.so.1", "sysroot/opt/c/libextra.so.1");
+  root.write("sysroot/o/etc/ld-musl-x86_64.path", std::string("/opt/c\n"));
+  root.write("sysroot/etc/ld-musl-x86_64.path", std::string("/opt/elsewhere\n"));
+  auto loaded = donkey::load_binary(program.string());
+  ASSERT_TRUE(loaded.has_value()) << loaded.diagnostic().message;
+  donkey::ElfLibrarySearch search;
+  search.sysroot = (root.path() / "sysroot").string();
+  const auto scope = donkey::ElfLoadScope::build(loaded.value().image, loaded.value().data, search);
+  EXPECT_NE(library_path(scope, "libextra.so.1").find("/opt/c/libextra.so.1"), std::string::npos)
+      << library_path(scope, "libextra.so.1");
+}
+
 // A library with a version table under musl's loader: what musl accepts there is not modelled, so
 // a name it defines is not known, while a name it does not define looks further.
 TEST(ElfLoadScope, MuslDoesNotBindIntoAVersionedLibrary) {

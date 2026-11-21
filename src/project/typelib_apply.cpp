@@ -51,11 +51,17 @@ class ShapeComparer {
   bool equal(const TypeDefinition& a, const TypeDefinition& b) {
     visited_.clear();
     budget_ = kBudget;
+    depth_ = 0;
     return same_definition(a, b);
   }
 
  private:
   static constexpr std::size_t kBudget = 100'000;
+  /// How deep one comparison recurses (a chain of pointers, typedefs and members). Each level is
+  /// two small frames, well under 1 KiB even in an ASan Debug build, so 256 levels stay far inside
+  /// the smallest default thread stack Donkey runs on (512 KiB, macOS secondary threads); past it
+  /// the two are not shown to be the same.
+  static constexpr std::size_t kMaxDepth = 256;
 
   bool same(TypeId a, TypeId b) {
     if (!a.valid() || !b.valid()) {
@@ -64,17 +70,17 @@ class ShapeComparer {
     if (!visited_.insert({a.value(), b.value()}).second) {
       return true;
     }
-    if (budget_ == 0) {
+    if (budget_ == 0 || depth_ >= kMaxDepth) {
       return false;  // too much to compare: not shown to be the same
     }
     --budget_;
+    ++depth_;
     const TypeDefinition* left = existing_.find(a);
     const auto right_entry = library_.find(b.value());
     const TypeDefinition* right = right_entry == library_.end() ? nullptr : right_entry->second;
-    if (left == nullptr || right == nullptr) {
-      return false;
-    }
-    return same_definition(*left, *right);
+    const bool equal = left != nullptr && right != nullptr && same_definition(*left, *right);
+    --depth_;
+    return equal;
   }
 
   bool same_definition(const TypeDefinition& a, const TypeDefinition& b) {
@@ -117,6 +123,7 @@ class ShapeComparer {
   const std::map<std::uint64_t, const TypeDefinition*>& library_;
   std::set<std::pair<std::uint64_t, std::uint64_t>> visited_;
   std::size_t budget_ = kBudget;
+  std::size_t depth_ = 0;
 };
 
 std::string lower(std::string_view text) {
@@ -370,27 +377,34 @@ std::vector<ImportSite> import_sites(const BinaryImage& image, std::span<const s
       }
     }
   } else if (image.format == BinaryFormat::Pe) {
-    // Each PE import names its DLL; a name imported from two DLLs has no one provider.
-    std::map<std::string, std::set<std::string>> dlls;
-    std::set<std::string> by_ordinal;
+    // A PE thunk jumps through one IAT slot, and the import directory entry of that slot names
+    // its DLL and says whether it is imported by ordinal (not the display name: a function may
+    // well be named `ordinal_5`).
+    std::map<std::uint64_t, const Symbol*> by_slot;
     for (const Symbol& symbol : image.symbols) {
       if (symbol.imported) {
-        dlls[symbol.name].insert(symbol.module);
-        if (symbol.by_ordinal) {
-          by_ordinal.insert(symbol.name);
-        }
+        by_slot.emplace(symbol.address, &symbol);
+      }
+    }
+    std::map<std::uint64_t, std::uint64_t> slot_of;
+    for (const Function& function : analysis.functions) {
+      if (!function.import_name.empty()) {
+        slot_of.emplace(function.address, function.import_slot);
       }
     }
     for (ImportSite& site : sites) {
       site.versions.emplace_back();
-      site.by_ordinal = by_ordinal.contains(site.name);
-      const auto found = dlls.find(site.name);
-      if (found == dlls.end() || found->second.empty()) {
-        site.unbound = site.name + " is not in the import directory";
-      } else if (found->second.size() != 1) {
-        site.unbound = site.name + " is imported from more than one DLL";
+      const auto slot = slot_of.find(site.address);
+      const auto symbol = slot == slot_of.end() ? by_slot.end() : by_slot.find(slot->second);
+      if (symbol == by_slot.end() || symbol->second->name != site.name) {
+        site.unbound = site.name +
+                       ": the IAT slot its thunk jumps through is not in the import "
+                       "directory";
+      } else if (symbol->second->module.empty()) {
+        site.unbound = site.name + ": the import directory names no DLL for it";
       } else {
-        site.providers.push_back(*found->second.begin());
+        site.by_ordinal = symbol->second->by_ordinal;
+        site.providers.push_back(symbol->second->module);
       }
     }
   } else {
@@ -459,7 +473,10 @@ TypeLibraryMerge library_prototypes(const TypeTable& table) {
   return out;
 }
 
-Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
+namespace {
+
+/// apply_library_prototypes inside its write transaction.
+Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes_now(
     Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
     const ImageAbi& image) {
   auto table = project.types();
@@ -552,8 +569,8 @@ Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
       if (source != prototype_source.end() && source->second != TypeProvenance::Library) {
         entry.reason = std::string("kept: ") + type_provenance_name(source->second);
       } else {
-        // Another connection may add a prototype between the read above and this write: the
-        // store then keeps it, and says so.
+        // The store keeps a prototype of another source, and says so (the read above and this
+        // write are one transaction, so it would be one this call made itself).
         std::optional<TypeProvenance> kept;
         auto applied =
             project.set_type_application(image_id, TypeApplicationKind::FunctionPrototype,
@@ -569,6 +586,29 @@ Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
       }
     }
     out.push_back(std::move(entry));
+  }
+  return out;
+}
+
+}  // namespace
+
+Result<std::vector<LibraryPrototypeApplication>> apply_library_prototypes(
+    Project& project, std::int64_t image_id, const std::vector<ImportSite>& sites,
+    const ImageAbi& image) {
+  // The type table, the applications and the libraries are read, and the prototypes written, in
+  // one write transaction: a candidate is checked against the table its id is written into.
+  std::vector<LibraryPrototypeApplication> out;
+  auto done = project.write_transaction([&]() -> Result<void> {
+    auto applied = apply_library_prototypes_now(project, image_id, sites, image);
+    if (!applied) {
+      return make_void_error(applied.diagnostic().status, applied.diagnostic().code,
+                             applied.diagnostic().message);
+    }
+    out = std::move(applied.value());
+    return Result<void>();
+  });
+  if (!done) {
+    return done.diagnostic();
   }
   return out;
 }

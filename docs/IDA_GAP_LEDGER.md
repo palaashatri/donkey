@@ -2380,6 +2380,27 @@ where the import is shown to bind to a file the library describes:
 - Not done here: a per-user library directory (the caller passes the path), the desktop app, and typed call
   arguments (T4, after G21).
 
+**T3 review, third round (2026-11-21, CodeRabbit on de2f6d4, 14 findings).**
+- musl search, checked against musl 1.2.4's `ldso/dynlink.c` (`load_library`, `fixup_rpath`, `path_open`): the path
+  file is found beside the loader's own directory; RUNPATH and RPATH split on line ends too; a list with a `$`
+  token other than $ORIGIN is ignored whole; a relative entry (of a search list, the path file or a needed name with
+  a `/`) is Unknown; a needed name's tokens are not expanded (`ElfLoadScope.MuslSplitsARunpathOnLineEnds`,
+  `MuslIgnoresARunpathWithAnotherToken`, `MuslPathFileRelativeEntryIsNotKnown`,
+  `MuslReadsThePathFileBesideItsOwnDirectory`; two new fixtures).
+- Storage: `Project::write_transaction`; `set_type_application` checks and writes in one, and
+  `apply_library_prototypes` reads the table and writes every prototype in one, so a candidate is checked against
+  the table its id is written into. A type library field with a NUL is refused. The migration race test uses a
+  hook at the lock request instead of a sleep.
+- PE: a thunk's DLL and ordinal flag come from the IAT slot it jumps through (`Function::import_slot`), not its name.
+- Merge: collision comparison stops at a depth of 256 (`CollisionComparisonDepthIsBounded`). Generator: a tag
+  named like an assembler-labelled function is kept (`ATagNamedLikeALabelledFunctionIsKept`).
+  `expect_refusal.cmake` rejects a crash or timeout.
+- Kept as it is: a v8 struct or union with no size and no members becomes incomplete in v9. v8 stored a
+  forward declaration and a completed empty record (a GNU extension; ISO C has no empty struct) the same way, so
+  the migration cannot tell them apart; incomplete only refuses to measure it, while complete would give a forward
+  declaration a size of 0. Such a record stays incomplete: a later `project type add` of its body is refused as a
+  redefinition, since completing a stored forward declaration in a later parse is not supported yet.
+
 **T4 — typed arguments at calls (needs G21-T2 and the G21 ABI tables).**
 
 - *What G21 must give.* `call_arguments` in ABI order and the result `dest`, for a direct call

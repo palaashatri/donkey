@@ -2861,6 +2861,37 @@ TEST(Types, RecordsALoadedTypeLibraryOnce) {
   EXPECT_EQ(listed.value()[0].provides, std::vector<std::string>{"ld-musl-x86_64.so.1"});
 }
 
+// Text is stored up to its first NUL, so a record field with one is refused rather than stored as
+// another value (a provider list would lose every name after it).
+TEST(Types, ATypeLibraryFieldWithANulIsRefused) {
+  TempPath path("types-library-nul");
+  auto project = Project::create(path.str());
+  ASSERT_TRUE(project.has_value()) << project.diagnostic().message;
+  const auto counts = [](const donkey::TypeTable& types,
+                         std::int64_t) -> donkey::Result<donkey::TypeLibraryLoad> {
+    return donkey::TypeLibraryLoad{types, 0, 0};
+  };
+  donkey::TypeLibraryRecord record;
+  record.library = "lib";
+  record.library_version = "1";
+  record.architecture = "x86_64";
+  record.abi = "sysv";
+  record.data_model = "LP64";
+  record.body_sha256 = std::string(64, 'a');
+  record.provides = {std::string("libc.so\0x", 9), "libm.so"};
+  auto refused = project.value().load_type_library(record, counts);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "project.type_library_failed");
+  record.provides = {"libc.so"};
+  record.library = std::string("lib\0x", 5);
+  refused = project.value().load_type_library(record, counts);
+  ASSERT_FALSE(refused.has_value());
+  EXPECT_EQ(refused.diagnostic().code, "project.type_library_failed");
+  auto listed = project.value().type_libraries();
+  ASSERT_TRUE(listed.has_value());
+  EXPECT_TRUE(listed.value().empty());
+}
+
 // A tag only declared has no size, also in a later parse: `sizeof`, an array of it and a member
 // of it are refused, while a pointer to it is fine.
 TEST(Types, ATagOnlyDeclaredStaysIncompleteAcrossParses) {
@@ -3137,30 +3168,43 @@ TEST(Project, AMigrationAnotherConnectionFinishedIsNotRunAgain) {
   ASSERT_EQ(sqlite3_exec(other, (std::string(kDowngradeV9ToV8) + "PRAGMA user_version=8;").c_str(),
                          nullptr, nullptr, nullptr),
             SQLITE_OK);
-  // The other connection holds the write lock, as if it were migrating.
-  ASSERT_EQ(sqlite3_exec(other, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr), SQLITE_OK);
+  // Once the opening connection has read version 8 and is about to ask for the migration lock,
+  // the other connection runs version 9 itself, the way the v8 step does, and commits it. The
+  // opener then holds the lock on a file that is already at v9: without its reread under the lock
+  // it would run the step again and fail.
+  int raced = SQLITE_ERROR;
+  bool hooked = false;
+  Project::set_migration_lock_hook_for_testing([&](int version) {
+    if (version != 8 || hooked) {
+      return;
+    }
+    hooked = true;
+    raced =
+        sqlite3_exec(other,
+                     "BEGIN IMMEDIATE; "
+                     "ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0 "
+                     "CHECK (source BETWEEN 0 AND 4); "
+                     "CREATE TABLE type_libraries (id INTEGER PRIMARY KEY, library TEXT NOT "
+                     "NULL, library_version TEXT NOT NULL, architecture TEXT NOT NULL, "
+                     "body_sha256 TEXT NOT NULL, added_types INTEGER NOT NULL, collisions "
+                     "INTEGER NOT NULL, platform TEXT NOT NULL, abi TEXT NOT NULL, data_model "
+                     "TEXT NOT NULL, provides TEXT NOT NULL, UNIQUE (library, "
+                     "library_version, architecture)); "
+                     "ALTER TABLE types ADD COLUMN complete INTEGER NOT NULL DEFAULT 1; "
+                     "ALTER TABLE types ADD COLUMN typedef_named INTEGER NOT NULL DEFAULT 0; "
+                     "ALTER TABLE types ADD COLUMN library INTEGER NOT NULL DEFAULT 0; "
+                     "PRAGMA user_version=9; COMMIT",
+                     nullptr, nullptr, nullptr);
+    if (raced != SQLITE_OK) {
+      sqlite3_exec(other, "ROLLBACK", nullptr, nullptr, nullptr);
+    }
+  });
   std::optional<donkey::Result<Project>> opened;
-  std::thread waiter([&] { opened.emplace(Project::open(path.str())); });
-  std::this_thread::sleep_for(std::chrono::milliseconds(300));
-  // ... and finishes version 9 itself, the way the v8 step does, before it lets go.
-  ASSERT_EQ(
-      sqlite3_exec(other,
-                   "ALTER TABLE type_applications ADD COLUMN source INTEGER NOT NULL DEFAULT 0 "
-                   "CHECK (source BETWEEN 0 AND 4); "
-                   "CREATE TABLE type_libraries (id INTEGER PRIMARY KEY, library TEXT NOT "
-                   "NULL, library_version TEXT NOT NULL, architecture TEXT NOT NULL, "
-                   "body_sha256 TEXT NOT NULL, added_types INTEGER NOT NULL, collisions "
-                   "INTEGER NOT NULL, platform TEXT NOT NULL, abi TEXT NOT NULL, data_model "
-                   "TEXT NOT NULL, provides TEXT NOT NULL, UNIQUE (library, "
-                   "library_version, architecture)); "
-                   "ALTER TABLE types ADD COLUMN complete INTEGER NOT NULL DEFAULT 1; "
-                   "ALTER TABLE types ADD COLUMN typedef_named INTEGER NOT NULL DEFAULT 0; "
-                   "ALTER TABLE types ADD COLUMN library INTEGER NOT NULL DEFAULT 0; "
-                   "PRAGMA user_version=9; COMMIT",
-                   nullptr, nullptr, nullptr),
-      SQLITE_OK);
-  waiter.join();
+  opened.emplace(Project::open(path.str()));
+  Project::set_migration_lock_hook_for_testing({});
   sqlite3_close(other);
+  ASSERT_EQ(raced, SQLITE_OK);
+  ASSERT_TRUE(hooked);
   ASSERT_TRUE(opened.has_value());
   ASSERT_TRUE(opened->has_value()) << opened->diagnostic().message;
   EXPECT_EQ(opened->value().schema_version(), donkey::kProjectSchemaVersion);

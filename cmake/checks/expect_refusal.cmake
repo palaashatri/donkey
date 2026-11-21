@@ -14,6 +14,11 @@ execute_process(COMMAND ${REFUSED_COMMAND}
                 ERROR_VARIABLE error
                 TIMEOUT 300)
 set(all "${output}${error}")
+# A crash or a timeout gives a message ("Segmentation fault", "Process terminated due to timeout"),
+# not a number: that is not a refusal either.
+if(NOT result MATCHES "^[0-9]+$")
+  message(FATAL_ERROR "expected a refusal, but the command did not exit normally (${result}):\n${all}")
+endif()
 if(result EQUAL 0)
   message(FATAL_ERROR "expected a refusal (a nonzero exit status), got 0:\n${all}")
 endif()

@@ -216,6 +216,12 @@ class Project {
   /// its applications with it.
   [[nodiscard]] Result<void> replace_types(const TypeTable& table);
 
+  /// Runs `work` in one write transaction (BEGIN IMMEDIATE, so the write lock is held from the
+  /// first read): what it reads is what its writes see, whatever another connection does. It
+  /// commits when `work` succeeds and rolls back otherwise. Inside a transaction already open on
+  /// this connection, it runs `work` in that one.
+  [[nodiscard]] Result<void> write_transaction(const std::function<Result<void>()>& work);
+
   /// Reads the type store, gives it to `update`, and stores what it returns, all in one write
   /// transaction: an addition made from the types as they are now, not from an earlier read that a
   /// concurrent library load may have changed. A refusal from `update` changes nothing.
@@ -273,6 +279,10 @@ class Project {
   /// returns true the replacement stops there with no cleanup, as if the
   /// process had died. Pass an empty function to remove it.
   static void set_replace_fault_hook_for_testing(ReplaceFaultHook hook);
+
+  /// Test-only: called with the schema version a migration step read, just before it asks for the
+  /// write lock, so a test can change the file at that moment. Pass an empty function to remove it.
+  static void set_migration_lock_hook_for_testing(std::function<void(int version)> hook);
 
   using RestoreCommitHook =
       std::function<Result<void>(const std::string& temp_path, const std::string& target_path)>;
