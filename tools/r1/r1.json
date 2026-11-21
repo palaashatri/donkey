@@ -1,0 +1,76 @@
+{
+  "schema": 1,
+  "toolchains": {
+    "x86_64-glibc": {"cc": "gcc", "strip": "strip", "strip_package": "binutils", "package": "gcc-13"},
+    "aarch64-glibc": {"cc": "aarch64-linux-gnu-gcc", "strip": "aarch64-linux-gnu-strip", "strip_package": "binutils-aarch64-linux-gnu", "package": "gcc-13-aarch64-linux-gnu"},
+    "x86_64-musl": {"cc": "musl-gcc", "strip": "strip", "strip_package": "binutils", "package": "musl-tools"}
+  },
+  "sources": [
+    {
+      "name": "zlib",
+      "version": "1.3.1",
+      "licence": "Zlib",
+      "url": "https://zlib.net/fossils/zlib-1.3.1.tar.gz",
+      "sha256": "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23",
+      "root": "zlib-1.3.1"
+    },
+    {
+      "name": "lua",
+      "version": "5.4.7",
+      "licence": "MIT",
+      "url": "https://www.lua.org/ftp/lua-5.4.7.tar.gz",
+      "sha256": "9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30",
+      "root": "lua-5.4.7"
+    },
+    {
+      "name": "sqlite",
+      "version": "3.46.1",
+      "licence": "blessing (public domain)",
+      "url": "https://www.sqlite.org/2024/sqlite-amalgamation-3460100.zip",
+      "sha256": "77823cb110929c2bcb0f5d48e4833b5c59a8a6e40cdea3936b99e199dbbe5784",
+      "root": "sqlite-amalgamation-3460100"
+    }
+  ],
+  "builds": [
+    {
+      "name": "libz",
+      "source": "zlib",
+      "kind": "shared",
+      "files": ["adler32.c", "crc32.c", "deflate.c", "infback.c", "inffast.c", "inflate.c", "inftrees.c", "trees.c", "zutil.c", "compress.c", "uncompr.c", "gzclose.c", "gzlib.c", "gzread.c", "gzwrite.c"],
+      "flags": ["-D_LARGEFILE64_SOURCE=1", "-DHAVE_HIDDEN"],
+      "libs": [],
+      "levels": ["O0", "O2"],
+      "toolchains": ["x86_64-glibc", "aarch64-glibc"]
+    },
+    {
+      "name": "lua",
+      "source": "lua",
+      "kind": "executable",
+      "files": ["src/lapi.c", "src/lcode.c", "src/lctype.c", "src/ldebug.c", "src/ldo.c", "src/ldump.c", "src/lfunc.c", "src/lgc.c", "src/llex.c", "src/lmem.c", "src/lobject.c", "src/lopcodes.c", "src/lparser.c", "src/lstate.c", "src/lstring.c", "src/ltable.c", "src/ltm.c", "src/lundump.c", "src/lvm.c", "src/lzio.c", "src/lauxlib.c", "src/lbaselib.c", "src/lcorolib.c", "src/ldblib.c", "src/liolib.c", "src/lmathlib.c", "src/loadlib.c", "src/loslib.c", "src/lstrlib.c", "src/ltablib.c", "src/lutf8lib.c", "src/linit.c", "src/lua.c"],
+      "flags": ["-DLUA_USE_LINUX"],
+      "libs": ["-lm", "-ldl"],
+      "levels": ["O0", "O2"],
+      "toolchains": ["x86_64-glibc", "aarch64-glibc"]
+    },
+    {
+      "name": "lua-static-musl",
+      "source": "lua",
+      "kind": "static-executable",
+      "files": ["src/lapi.c", "src/lcode.c", "src/lctype.c", "src/ldebug.c", "src/ldo.c", "src/ldump.c", "src/lfunc.c", "src/lgc.c", "src/llex.c", "src/lmem.c", "src/lobject.c", "src/lopcodes.c", "src/lparser.c", "src/lstate.c", "src/lstring.c", "src/ltable.c", "src/ltm.c", "src/lundump.c", "src/lvm.c", "src/lzio.c", "src/lauxlib.c", "src/lbaselib.c", "src/lcorolib.c", "src/ldblib.c", "src/liolib.c", "src/lmathlib.c", "src/loadlib.c", "src/loslib.c", "src/lstrlib.c", "src/ltablib.c", "src/lutf8lib.c", "src/linit.c", "src/lua.c"],
+      "flags": ["-DLUA_USE_POSIX"],
+      "libs": ["-lm"],
+      "levels": ["O2"],
+      "toolchains": ["x86_64-musl"]
+    },
+    {
+      "name": "sqlite3",
+      "source": "sqlite",
+      "kind": "executable",
+      "files": ["sqlite3.c", "shell.c"],
+      "flags": [],
+      "libs": ["-lm", "-ldl", "-lpthread"],
+      "levels": ["O0", "O2"],
+      "toolchains": ["x86_64-glibc", "aarch64-glibc"]
+    }
+  ]
+}
