@@ -8150,3 +8150,30 @@ TEST(Ir, ANarrowLoadOfASlotStoredAgainIsTheNewValue) {
   });
   EXPECT_TRUE(call_resolves(program, 0x1000));
 }
+
+TEST(Ir, BytesACalleeLeftBelowTheStackPointerAreNotTheCallersArguments) {
+  // x86-64: 0x1000 is push rbx; mov rbx, rdi; call 0x1020; mov rax, [rsp-16]; pop rbx; ret. The
+  // leaf at 0x1020 pushes rbx (holding rdi) where the load reads, so the result is rdi natively,
+  // but a nested leaf in the interpreter saves its own rbx. A call to 0x1000 must not resolve.
+  const CallProgram program = x86_program({
+      {0x00,
+       {0x53, 0x48, 0x89, 0xfb, 0xe8, 0x17, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x44, 0x24, 0xf0, 0x5b,
+        0xc3}},
+      {0x20, {0x53, 0x31, 0xc0, 0x5b, 0xc3}},        // push rbx; xor eax, eax; pop rbx; ret
+      {0x40, {0xe8, 0xbb, 0xff, 0xff, 0xff, 0xc3}},  // call 0x1000; ret
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1000));  // the leaf itself resolves
+  EXPECT_FALSE(call_resolves(program, 0x1040));
+}
+
+TEST(Ir, BytesBelowTheStackPointerAfterACallAreOnlyACalleesConcern) {
+  // AArch64: 0x1000 is stp x29, x30, [sp, #-16]!; bl 0x1020; sub x9, sp, #16; ldr x0, [x9];
+  // ldp x29, x30, [sp], #16; ret. It reads what the leaf left below sp. That only matters when a
+  // call to it is resolved; its own lift is checked for its return, not for the caller's bytes.
+  const auto data = aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xd10043e9, 0xf9400120, 0xa8c17bfd,
+                                   0xd65f03c0, 0xd503201f, 0xd503201f, 0x52800060, 0xd65f03c0});
+  const CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000, 0x1020});
+  const IrFunction function = lift_at(program, 0x1000);
+  EXPECT_FALSE(has_note_containing(function, "depends on the entry value"));
+  EXPECT_FALSE(function.partial) << (function.notes.empty() ? "" : function.notes.back());
+}

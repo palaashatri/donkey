@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <optional>
 #include <set>
@@ -71,9 +73,12 @@ struct FrameState {
   std::map<std::string, FrameValue> registers;  // absent: the family's own entry value
   std::map<std::int64_t, Slot> slots;
   bool foreign_memory = false;
+  /// After a call: stack bytes below this offset that no slot describes hold what the callee left
+  /// there (its own saves of registers, for one), which the interpreter does not reproduce.
+  std::optional<std::int64_t> written_below;
   bool operator==(const FrameState& other) const {
     return registers == other.registers && slots == other.slots &&
-           foreign_memory == other.foreign_memory;
+           foreign_memory == other.foreign_memory && written_below == other.written_below;
   }
 };
 
@@ -396,6 +401,11 @@ class FrameCheck {
       }
     }
     out.foreign_memory = a.foreign_memory || b.foreign_memory || dropped_foreign;
+    if (a.written_below || b.written_below) {
+      out.written_below =
+          std::max(a.written_below.value_or(std::numeric_limits<std::int64_t>::min()),
+                   b.written_below.value_or(std::numeric_limits<std::int64_t>::min()));
+    }
     return out;
   }
 
@@ -485,7 +495,10 @@ class FrameCheck {
 
   /// Whether some stack memory may hold foreign bytes: a slot does, or memory no slot describes.
   [[nodiscard]] bool stack_may_hold_foreign(const FrameState& state) const {
-    if (state.foreign_memory) {
+    if (contract_ != FrameContract::Callee) {
+      return false;  // only a callee's values are checked for the caller's bytes
+    }
+    if (state.foreign_memory || state.written_below.has_value()) {
       return true;
     }
     for (const auto& [offset, slot] : state.slots) {
@@ -507,7 +520,10 @@ class FrameCheck {
         return static_cast<ByteMask>((foreign_of(slot.value) >> shift) & low_bytes(width));
       }
     }
-    if (state.foreign_memory) {
+    if (contract_ != FrameContract::Callee) {
+      return 0;  // only a callee's values are checked for the caller's bytes
+    }
+    if (state.foreign_memory || (state.written_below && first < *state.written_below)) {
       return low_bytes(width);
     }
     for (const auto& [offset, slot] : state.slots) {
@@ -639,6 +655,8 @@ class FrameCheck {
             sp.offset > 0) {
           return "a call pushes its return address over the entry return address";
         }
+        state.written_below = std::max(
+            state.written_below.value_or(std::numeric_limits<std::int64_t>::min()), sp.offset);
         for (auto it = state.slots.begin(); it != state.slots.end();) {
           if (it->first < sp.offset) {
             state.foreign_memory = state.foreign_memory || foreign_of(it->second.value) != 0;
@@ -651,9 +669,8 @@ class FrameCheck {
         if (contract_ == FrameContract::Callee && abi_.link_register.empty()) {
           return "a call is made with a stack pointer of unknown offset";
         }
-        for (const auto& [offset, slot] : state.slots) {
-          state.foreign_memory = state.foreign_memory || foreign_of(slot.value) != 0;
-        }
+        // Where the callee wrote is not known: any stack byte no later store describes may be its.
+        state.foreign_memory = true;
         state.slots.clear();
       }
       // A call keeps the callee-saved registers and the stack pointer (the callee's own summary or
