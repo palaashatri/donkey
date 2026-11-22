@@ -8024,3 +8024,129 @@ TEST(Ir, AnAArch64RetThroughAnotherRegisterIsPartial) {
   const CallProgram plain_program = analyse_call_program(Architecture::AArch64, plain, {0x1000});
   EXPECT_FALSE(lift_at(plain_program, 0x1000).partial);
 }
+
+namespace {
+
+/// A second AArch64 program, assembled with GNU as (offsets from 0x1000):
+///   0x000 caller:      stp x29, x30, [sp, #-16]!; bl storer; ldp x29, x30, [sp], #16; ret
+///   0x020 storer:      str w0, [x0]; mov w0, #1; ret
+///   0x040 carrier:     cmp x0, #0; adcs x9, x19, xzr; cset w0, cs; ret
+///   0x060 callcarrier: stp x29, x30, [sp, #-16]!; bl carrier; ldp x29, x30, [sp], #16; ret
+///   0x080 deadsave:    stp x29, x30, [sp, #-16]!; add sp, sp, #16; bl leaf; sub sp, sp, #16;
+///                      ldp x29, x30, [sp], #16; ret
+///   0x0a0 leaf:        mov w0, #3; ret
+CallProgram aarch64_second_program() {
+  return analyse_call_program(
+      Architecture::AArch64,
+      aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xb9000000, 0x52800020, 0xd65f03c0, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xf100001f, 0xba1f0269,
+                     0x1a9f37e0, 0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+                     0xa9bf7bfd, 0x97fffff7, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xa9bf7bfd, 0x910043ff, 0x94000006, 0xd10043ff,
+                     0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f, 0x52800060, 0xd65f03c0}),
+      {0x1000, 0x1020, 0x1040, 0x1060, 0x1080, 0x10a0});
+}
+
+/// x86-64 functions at the given offsets from 0x1000, with a symbol at each.
+CallProgram x86_program(
+    const std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>>& functions) {
+  std::size_t size = 0;
+  for (const auto& [offset, bytes] : functions) {
+    size = std::max<std::size_t>(size, offset + bytes.size());
+  }
+  std::vector<std::byte> data(size + 0x10, std::byte{0xcc});
+  CallProgram program;
+  for (const auto& [offset, bytes] : functions) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      data[offset + i] = static_cast<std::byte>(bytes[i]);
+    }
+  }
+  program.data = data;
+  program.image = synthetic_image(data.size());
+  for (const auto& [offset, bytes] : functions) {
+    donkey::Symbol symbol;
+    symbol.name = "f_" + std::to_string(offset);
+    symbol.address = 0x1000 + offset;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    program.image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(program.image, program.data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (analyzed.has_value()) {
+    program.analysis = std::move(analyzed.value());
+  }
+  return program;
+}
+
+bool call_resolves(const CallProgram& program, std::uint64_t caller) {
+  const IrFunction function = lift_at(program, caller);
+  const IrStatement* call = first_call(function);
+  return call != nullptr && call->signature_inferred;
+}
+
+}  // namespace
+
+TEST(Ir, AnArgumentUsedAsAnAddressIsPassedWhole) {
+  // storer stores w0 through x0: x0 is read as a 4-byte value and as an 8-byte address. Its
+  // parameter, and the caller's argument, must be all of x0, or the address is truncated.
+  const CallProgram program = aarch64_second_program();
+  const IrFunction storer = lift_at(program, 0x1020);
+  ASSERT_GE(storer.parameters.size(), 1U);
+  EXPECT_EQ(storer.parameters[0].width, 8U);
+  const IrFunction caller = lift_at(program, 0x1000);
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  ASSERT_TRUE(call->signature_inferred);
+  ASSERT_GE(call->call_arguments.size(), 1U);
+  EXPECT_EQ(call->call_arguments[0].width, 8U);
+}
+
+TEST(Ir, AFlagSettingAdditionOfACallersRegisterStaysUnresolved) {
+  // carrier's result is the carry of x19 + 0 + C: it depends on the caller's x19 through NZCV.
+  EXPECT_FALSE(call_resolves(aarch64_second_program(), 0x1060));
+}
+
+TEST(Ir, ACallForgetsTheSlotsBelowTheStackPointer) {
+  // deadsave saves x30, frees its frame, calls leaf (which may use that memory), takes the frame
+  // back and reloads x30 from it: the reload is not the saved value, so its return is unsound.
+  const IrFunction function = lift_at(aarch64_second_program(), 0x1080);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "does not see the entry x30"));
+}
+
+TEST(Ir, AnExtendingLoadOfASavedRegisterIsTheCallersValue) {
+  // x86-64: 0x1010 is push rbx; movzx eax, byte [rsp]; pop rbx; ret: its result is the
+  // caller's bl.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},        // call 0x1010; ret
+      {0x10, {0x53, 0x0f, 0xb6, 0x04, 0x24, 0x5b, 0xc3}},  // the callee
+  });
+  EXPECT_FALSE(call_resolves(program, 0x1000));
+}
+
+TEST(Ir, ACallThatPushesOverTheEntryReturnAddressStaysUnresolved) {
+  // x86-64: 0x1010 is add rsp, 8; call 0x1030; sub rsp, 8; mov eax, 1; ret. The call's push
+  // writes the word its own return address was in, so its ret goes back into itself, not to its
+  // caller. Its own call to 0x1030 resolves; a call to it does not.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},  // call 0x1010; ret
+      {0x10,
+       {0x48, 0x83, 0xc4, 0x08, 0xe8, 0x17, 0x00, 0x00, 0x00, 0x48, 0x83, 0xec, 0x08, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3}},
+      {0x30, {0x31, 0xc0, 0xc3}},  // xor eax, eax; ret
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1010));
+  EXPECT_FALSE(call_resolves(program, 0x1000));
+}
+
+TEST(Ir, ANarrowLoadOfASlotStoredAgainIsTheNewValue) {
+  // x86-64: 0x1010 is push rbx; pop rbx; push rdi; mov eax, [rsp]; pop rdi; ret. The second
+  // push replaces the slot that held the caller's rbx: the load reads rdi's low half, an argument.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},              // call 0x1010; ret
+      {0x10, {0x53, 0x5b, 0x57, 0x8b, 0x04, 0x24, 0x5f, 0xc3}},  // the callee
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1000));
+}

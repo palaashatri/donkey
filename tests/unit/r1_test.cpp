@@ -264,6 +264,12 @@ TEST(R1, NormalisesNotes) {
       "x86-32 subset; register aliases are not canonicalised, cdecl stack arguments are not "
       "recovered and locals are not recovered"));
   EXPECT_FALSE(donkey::r1::is_generic_note("jump leaves the function; treated as a tail call"));
+  // A resolved tail call says how it was lifted, not why the function is Partial.
+  EXPECT_TRUE(donkey::r1::is_generic_note(
+      "a jump to a known function is lifted as a call with its inferred arguments and result, "
+      "followed by a return"));
+  EXPECT_TRUE(donkey::r1::is_generic_note(
+      "a jump to a C library function is lifted as a call of its model, followed by a return"));
 }
 
 TEST(R1, ComparesStarts) {

@@ -764,23 +764,6 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     }
     EXPECT_TRUE(seen) << "c_call_nested is missing from the corpus";
   }
-  // AArch64 calls (G21-T1/T2 for AAPCS64): every call-heavy function, the tail calls of -O2 and -O3
-  // among them, resolves and agrees with the compiled code. Measured under GCC 13.3 on Linux
-  // AArch64 (qemu-aarch64 and native) at every level; before AArch64 call summaries all were
-  // Partial.
-  if (gcc13_linux && host_convention() == donkey::IrCallingConvention::Aapcs64) {
-    std::size_t seen = 0;
-    for (const Outcome& o : outcomes) {
-      if (o.function.rfind("c_call_", 0) != 0) {
-        continue;
-      }
-      ++seen;
-      EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
-      EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
-      EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
-    }
-    EXPECT_GT(seen, 0U) << "the call-heavy functions are missing from the corpus";
-  }
   // Calls of C library functions with executable models (G21-T7): the import binds to the C
   // library in this program's scope, the call carries the function's prototype, and the
   // interpreter runs the model. Measured Complete and verified under GCC 13.3 on Linux x86-64 at
@@ -798,6 +781,31 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
     }
     EXPECT_EQ(checked, 44U);
+  }
+#endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+  {
+    bool gcc13_linux = false;
+#if defined(__linux__)
+    gcc13_linux = std::strstr(DONKEY_CORPUS_COMPILER, "GNU 13") != nullptr;
+#endif
+    // AArch64 calls (G21-T1/T2 for AAPCS64): every call-heavy function, the tail calls of -O2 and
+    // -O3 among them, resolves and agrees with the compiled code. Measured under GCC 13.3 on Linux
+    // AArch64 (qemu-aarch64 and native) at every level; before AArch64 call summaries all were
+    // Partial.
+    if (gcc13_linux && host_convention() == donkey::IrCallingConvention::Aapcs64) {
+      std::size_t seen = 0;
+      for (const Outcome& o : outcomes) {
+        if (o.function.rfind("c_call_", 0) != 0) {
+          continue;
+        }
+        ++seen;
+        EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+      }
+      EXPECT_GT(seen, 0U) << "the call-heavy functions are missing from the corpus";
+    }
   }
 #endif
 }

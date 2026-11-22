@@ -120,10 +120,16 @@ bool leaves_starts_complete(std::string_view code) {
 
 bool is_generic_note(std::string_view note) {
   // The subset note of each architecture, the signature note, and the note that parameter names
-  // came from debug information: every function carries them, Complete or not.
+  // came from debug information: every function carries them, Complete or not. A tail call that
+  // was resolved (to a known function, or to a C library model) says how it was lifted, not why
+  // the function is Partial.
   return ends_with(note, "locals are not recovered") ||
          starts_with(note, "signature inferred from ") ||
-         note == "parameter names come from the debug information";
+         note == "parameter names come from the debug information" ||
+         starts_with(note, "a jump to a known function is lifted as a call") ||
+         starts_with(note, "a conditional jump to a known function is lifted as a branch") ||
+         starts_with(note, "a jump to a C library function is lifted as a call of its model") ||
+         starts_with(note, "a conditional jump to a C library function is lifted as a branch");
 }
 
 std::string normalise_note(std::string_view note) {

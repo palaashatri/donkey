@@ -345,13 +345,25 @@ class FrameCheck {
                          [this](const std::string& family) { return foreign_family(family); });
   }
 
-  /// The foreign bytes a register operand reads, within its width; 0 for any other operand.
+  /// The foreign bytes an operand's value holds, within its width: a register's, or the stack
+  /// bytes a memory operand reads (memory that is not the stack holds no caller register, by the
+  /// check's premise). The address a memory operand is computed from is read_address's concern.
   [[nodiscard]] ByteMask read_mask(const FrameState& state, const IrOperand& operand,
                                    std::uint8_t width) const {
+    const std::uint8_t used = operand.width != 0 ? operand.width : width;
+    if (operand.kind == IrOperandKind::Memory) {
+      const FrameAddress address = address_of(state, operand);
+      if (address.kind == FrameAddress::Kind::Known) {
+        return stack_load_mask(state, address.offset, used);
+      }
+      if (address.kind == FrameAddress::Kind::StackAny) {
+        return stack_may_hold_foreign(state) ? low_bytes(used) : ByteMask{0};
+      }
+      return 0;
+    }
     if (operand.kind != IrOperandKind::Register || operand.reg.empty()) {
       return 0;
     }
-    const std::uint8_t used = operand.width != 0 ? operand.width : width;
     return static_cast<ByteMask>(foreign_of(operand_value(state, operand)) & low_bytes(used));
   }
 
@@ -487,10 +499,17 @@ class FrameCheck {
   /// The foreign bytes a load of [first, first + width) on the stack may read.
   [[nodiscard]] ByteMask stack_load_mask(const FrameState& state, std::int64_t first,
                                          std::uint8_t width) const {
+    const std::int64_t end = first + width;
+    // A slot that covers every byte read describes them exactly, whatever memory around it holds.
+    for (const auto& [offset, slot] : state.slots) {
+      if (offset <= first && end <= offset + slot.width) {
+        const auto shift = static_cast<unsigned>(first - offset);
+        return static_cast<ByteMask>((foreign_of(slot.value) >> shift) & low_bytes(width));
+      }
+    }
     if (state.foreign_memory) {
       return low_bytes(width);
     }
-    const std::int64_t end = first + width;
     for (const auto& [offset, slot] : state.slots) {
       if (offset < end && first < offset + slot.width && foreign_of(slot.value) != 0) {
         return low_bytes(width);
@@ -564,7 +583,9 @@ class FrameCheck {
     if (reads_nothing_of_its_register(statement)) {
       return 0;
     }
-    const ByteMask a = read_mask(state, statement.a, width);
+    // A lea's memory operand is an address, not a read: transfer adds its registers' bytes.
+    const ByteMask a =
+        statement.op == IrOp::Lea ? ByteMask{0} : read_mask(state, statement.a, width);
     const ByteMask b = read_mask(state, statement.b, width);
     const ByteMask c = read_mask(state, statement.c, width);
     switch (statement.op) {
@@ -610,6 +631,31 @@ class FrameCheck {
       if (auto failed = read_call(statement, state)) {
         return failed;
       }
+      // The callee may write any stack memory below this function's stack pointer (and on
+      // x86-64 the call pushes its return address just below it): slots there are forgotten.
+      const FrameValue sp = value_of(state, abi_.stack_pointer);
+      if (sp.kind == FrameValue::Kind::Stack) {
+        if (contract_ == FrameContract::Callee && abi_.link_register.empty() && sp.offset - 8 < 8 &&
+            sp.offset > 0) {
+          return "a call pushes its return address over the entry return address";
+        }
+        for (auto it = state.slots.begin(); it != state.slots.end();) {
+          if (it->first < sp.offset) {
+            state.foreign_memory = state.foreign_memory || foreign_of(it->second.value) != 0;
+            it = state.slots.erase(it);
+          } else {
+            ++it;
+          }
+        }
+      } else {
+        if (contract_ == FrameContract::Callee && abi_.link_register.empty()) {
+          return "a call is made with a stack pointer of unknown offset";
+        }
+        for (const auto& [offset, slot] : state.slots) {
+          state.foreign_memory = state.foreign_memory || foreign_of(slot.value) != 0;
+        }
+        state.slots.clear();
+      }
       // A call keeps the callee-saved registers and the stack pointer (the callee's own summary or
       // the C library's ABI says so; an unresolved call leaves its caller Partial anyway) and
       // changes the caller-saved ones; on AArch64 `bl` writes x30.
@@ -644,6 +690,15 @@ class FrameCheck {
         mask = 0;
       }
       return foreign_use(mask, "a comparison or a branch");
+    }
+    if (statement.op == IrOp::AddCarryFlags) {
+      // adcs and sbcs set NZCV from their operands, and the flags are not followed: what they
+      // read is observed.
+      if (auto failed = foreign_use(static_cast<ByteMask>(read_mask(state, statement.a, width) |
+                                                          read_mask(state, statement.b, width)),
+                                    "a flag-setting addition")) {
+        return failed;
+      }
     }
     if (statement.op == IrOp::DivUnsigned || statement.op == IrOp::DivSigned ||
         statement.op == IrOp::RemUnsigned || statement.op == IrOp::RemSigned) {

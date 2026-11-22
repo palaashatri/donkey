@@ -2132,8 +2132,8 @@ specific reason:
 
 Counted again with the notes an unresolved call causes counted as its own (a tail call's note, and the
 clobber check's read of a register after a call that does not define it; G21-T1/T2 for AAPCS64), the same
-bytes have 4,443 such functions: 2,471 AArch64 and 1,972 x86-64 (1,560 of them call only same-image
-callees).
+bytes have 4,452 such functions: 2,471 AArch64 and 1,981 x86-64 (1,566 of them call only same-image
+callees). With AArch64 calls resolved, 4,310: 2,330 AArch64 and 1,980 x86-64.
 
 Order this sets for G21:
 

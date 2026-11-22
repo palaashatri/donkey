@@ -287,26 +287,26 @@ not lifted.
 
 | Partial functions | First reason |
 |---|---|
-| 9793 | outgoing call arguments and return values follow no modelled ABI |
-| 1863 | jump leaves the function; treated as a tail call |
+| 9526 | outgoing call arguments and return values follow no modelled ABI |
+| 1880 | jump leaves the function; treated as a tail call |
 | 1646 | fs- or gs-relative memory (thread-local storage) is not modelled |
-| 144 | the returned register is not determined by the definitions that reach the return; rax is assumed |
-| 93 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
+| 147 | the returned register is not determined by the definitions that reach the return; rax is assumed |
+| 94 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
 | 62 | floating-point results assume the MXCSR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
-| 29 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 30 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
 | 20 | conditional branch depends on flags this lifter does not model |
-| 15 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 17 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
 | 15 | unsupported instruction 'syscall' |
-| 13 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
+| 14 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
 | 12 | both rax and xmm0 are written on a path to this return; which one carries the return value is not determined, so rax is assumed |
-| 8 | unsupported instruction 'ldurb' |
-| 6 | a jump to a known function is lifted as a call with its inferred arguments and result, followed by a return |
-| 6 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
-| 4 | a jump to a C library function is lifted as a call of its model, followed by a return |
+| 10 | unsupported instruction 'ldurb' |
+| 7 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
 | 2 | bsf and bsr with a zero source leave the destination undefined; that case is not modelled |
 | 2 | integer and floating-point parameters are both present; their order in the source is not recoverable from the registers, so the signature is Partial |
 | 2 | unsupported instruction 'ldurh' |
+| 2 | unsupported instruction 'movdqa' |
 | 1 | 'cmovg' reads flags this lifter does not model |
+| 1 | conditional jump leaves the function; treated as a tail call |
 
 ### Call census (G21)
 
@@ -330,7 +330,7 @@ is a call site too; the jump of an import stub through its own slot is not. The 
 A Partial function counts as Partial only because of calls when every specific reason it gives comes from an
 unresolved call: the call note, a tail call's note, or the clobber check's read of a register after a call that
 does not define it. Measured with AArch64 calls resolved (G21-T1/T2 for AAPCS64) on `main` at `922a18a`. Before
-them, on the same bytes, 4,443 functions were Partial only because of calls, 2,471 of them AArch64.
+them, on the same bytes, 4,452 functions were Partial only because of calls, 2,471 of them AArch64.
 
 Unresolved calls by kind of target (unstripped binaries):
 
@@ -344,17 +344,17 @@ Unresolved calls by kind of target (unstripped binaries):
 | 4 | import_slot |
 | 1 | unknown_target |
 
-4298 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
+4310 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
 
 | Functions | Kinds of target |
 |---|---|
-| 1560 | same_image |
-| 1477 | aarch64_other |
+| 1566 | same_image |
+| 1480 | aarch64_other |
 | 725 | aarch64_import+aarch64_other |
 | 140 | import+same_image |
-| 124 | aarch64_import |
-| 115 | indirect+same_image |
-| 71 | import |
+| 125 | aarch64_import |
+| 116 | indirect+same_image |
+| 72 | import |
 | 59 | indirect |
 | 19 | import+indirect |
 | 8 | import+indirect+same_image |
@@ -376,17 +376,19 @@ The 20 imports those functions call most (a function counted once per import):
 | 24 | `memmove` |
 | 23 | `malloc` |
 | 19 | `strerror` |
+| 18 | `fflush` |
 | 17 | `fopen64` |
-| 16 | `fflush` |
 | 12 | `fclose` |
 | 12 | `fprintf` |
 | 12 | `fread` |
 | 12 | `getenv` |
 | 12 | `realloc` |
 
-Most functions that only a call keeps Partial are AArch64 functions (2,471 of 3,044): AArch64 call resolution
-comes first in G21. Among x86-64 functions, a same-image callee that is itself Partial is the common blocker
-(491); an unresolved import alone keeps 15 Partial.
+With same-image AArch64 calls resolved, 4,310 functions are still Partial only because of calls. 2,330 are
+AArch64: 1,480 call only functions of the image whose summaries do not resolve, because a callee is Partial for a
+reason of its own, and 850 call an import, for which no C library model or no-return handling applies on AArch64
+yet (the next G21 step). 1,980 are x86-64: 1,566 call only a same-image callee that does not resolve, and the
+rest call an unresolved import or through a register.
 
 ## Decompiler corpus
 
