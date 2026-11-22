@@ -6727,7 +6727,8 @@ TEST(Ir, CallerOfAFunctionWhoseLoadOverlapsAStackArgumentIsPartial) {
       0xc3,                          // 0x100c: ret
   }));
   // Returning it is another matter: it is the caller's value, which a nested call in the
-  // interpreter does not have (the frame check, Ir.ACalleeThatReadsItsReturnAddressStaysUnresolved).
+  // interpreter does not have (the frame check,
+  // Ir.ACalleeThatReadsItsReturnAddressStaysUnresolved).
   EXPECT_TRUE(caller_is_partial({
       0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
       0xc3,                          // 0x1005: ret
