@@ -406,7 +406,10 @@ class Renderer {
             target + "(" + arguments + ");";
         if (statement.signature_inferred && !statement.call_arguments.empty()) {
           line += " /* arguments inferred from callee */";
-        } else if (!statement.signature_source.empty()) {
+        } else if (!statement.signature_source.empty() &&
+                   !(statement.signature_source == kNoReturnPrototypeSource &&
+                     statement.call_arguments.empty())) {
+          // A no-return call without arguments (`abort();`) is exactly what it prints.
           line += " /* prototype from " + statement.signature_source + " */";
         }
         return line;
@@ -945,6 +948,12 @@ Result<bool> verify_ir(const IrFunction& function) {
       }
       if (statement.op != IrOp::Call && statement.no_return) {
         return fail("ir.no_return_on_non_call", "only a call can be marked as not returning");
+      }
+      // G21-T5: a call given a no-return prototype has no result and ends its path.
+      if (statement.op == IrOp::Call && statement.signature_source == kNoReturnPrototypeSource &&
+          (!statement.no_return || statement.dest.kind != IrOperandKind::None)) {
+        return fail("ir.no_return_prototype",
+                    "a call with a no-return prototype must not return and has no result");
       }
       if (statement.op != IrOp::Return && statement.unreachable) {
         return fail("ir.unreachable_on_non_return", "only a return can be marked unreachable");

@@ -2406,6 +2406,13 @@ struct Lifter {
       push(block, std::move(statement));
       return;
     }
+    // A call of a bound no-return import with a fixed prototype (G21-T5): its arguments, no
+    // result, and nothing after it; the block ends at it.
+    if (const auto* prototype = internal::no_return_prototype(image, analysis, statement.a)) {
+      internal::apply_no_return_prototype(image, statement, *prototype);
+      push(block, std::move(statement));
+      return;
+    }
     if (const auto callee = known_callee(instruction)) {
       resolve_call_statement(statement, *callee);
       push(block, std::move(statement));
@@ -3100,24 +3107,103 @@ const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResu
   return bound == analysis.c_library_imports.end() ? nullptr : find_libc_model(bound->second.name);
 }
 
-void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model) {
-  static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
-  static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
-  static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
-  static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
-  static constexpr std::array<const char*, 3> kAapcs64{"x0", "x1", "x2"};
-  static constexpr std::array<const char*, 3> kAapcs32{"w0", "w1", "w2"};
+namespace {
+
+/// The register that passes argument `index` (0-3) of a C prototype in the image's calling
+/// convention: System V rdi, rsi, rdx, rcx; Win64 rcx, rdx, r8, r9; AAPCS64 x0-x3. An `int` is
+/// the register's low 32 bits.
+IrOperand c_argument_register(const BinaryImage& image, std::size_t index, bool narrow) {
+  static constexpr std::array<const char*, 4> kSysV64{"rdi", "rsi", "rdx", "rcx"};
+  static constexpr std::array<const char*, 4> kSysV32{"edi", "esi", "edx", "ecx"};
+  static constexpr std::array<const char*, 4> kWin64{"rcx", "rdx", "r8", "r9"};
+  static constexpr std::array<const char*, 4> kWin32{"ecx", "edx", "r8d", "r9d"};
+  static constexpr std::array<const char*, 4> kAapcs64{"x0", "x1", "x2", "x3"};
+  static constexpr std::array<const char*, 4> kAapcs32{"w0", "w1", "w2", "w3"};
   const bool aarch64 = image.architecture == Architecture::AArch64;
   const bool win64 = !aarch64 && image.format == BinaryFormat::Pe;
-  for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
-    const bool narrow = model.arguments[i] == LibcArgument::Int;
-    const char* name = aarch64 ? (narrow ? kAapcs32[i] : kAapcs64[i])
-                       : win64 ? (narrow ? kWin32[i] : kWin64[i])
-                               : (narrow ? kSysV32[i] : kSysV64[i]);
-    statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
+  const char* name = aarch64 ? (narrow ? kAapcs32[index] : kAapcs64[index])
+                     : win64 ? (narrow ? kWin32[index] : kWin64[index])
+                             : (narrow ? kSysV32[index] : kSysV64[index]);
+  return IrOperand::register_ref(name, narrow ? 4 : 8);
+}
+
+/// The no-return functions of the C library and the C++ runtime whose C prototype is fixed
+/// (G21-T5), by import name. Variadic ones (err, errx) and ones whose argument is no integer or
+/// pointer (longjmp's jmp_buf is a pointer, but its effect is a return elsewhere) are left out.
+constexpr std::array<NoReturnPrototype, 13> kNoReturnPrototypes{{
+    {"abort", {}, 0},
+    {"__stack_chk_fail", {}, 0},
+    {"__chk_fail", {}, 0},
+    {"__cxa_rethrow", {}, 0},
+    {"__cxa_bad_cast", {}, 0},
+    {"__cxa_bad_typeid", {}, 0},
+    {"_ZSt9terminatev", {}, 0},  // std::terminate()
+    {"exit", {LibcArgument::Int}, 1},
+    {"_exit", {LibcArgument::Int}, 1},
+    {"_Exit", {LibcArgument::Int}, 1},
+    {"quick_exit", {LibcArgument::Int}, 1},
+    {"__fortify_fail", {LibcArgument::Pointer}, 1},
+    // __assert_fail(const char *assertion, const char *file, unsigned int line,
+    //               const char *function)
+    {"__assert_fail",
+     {LibcArgument::Pointer, LibcArgument::Pointer, LibcArgument::Int, LibcArgument::Pointer},
+     4},
+}};
+
+/// The direct target of a call or tail call, or its x86-64 GOT or IAT slot (`call *slot`).
+bool is_import_call_target(const BinaryImage& image, const IrOperand& target) {
+  const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
+  const bool slot = image.architecture == Architecture::X86_64 &&
+                    target.kind == IrOperandKind::Memory && target.reg.empty() &&
+                    target.index.empty() && target.width == 8;
+  return direct || slot;
+}
+
+}  // namespace
+
+void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model) {
+  for (std::size_t i = 0; i < model.arguments.size() && i < 3; ++i) {
+    statement.call_arguments.push_back(
+        c_argument_register(image, i, model.arguments[i] == LibcArgument::Int));
   }
-  statement.dest = IrOperand::register_ref(aarch64 ? "x0" : "rax", 8);
+  statement.dest =
+      IrOperand::register_ref(image.architecture == Architecture::AArch64 ? "x0" : "rax", 8);
   statement.call_model = std::string(model.name);
+}
+
+const NoReturnPrototype* no_return_prototype(const BinaryImage& image,
+                                             const AnalysisResult& analysis,
+                                             const IrOperand& target) {
+  if ((image.architecture != Architecture::X86_64 && image.architecture != Architecture::AArch64) ||
+      !is_import_call_target(image, target)) {
+    return nullptr;
+  }
+  // Only an import that G24-T3 bound to its runtime library in the load scope: its evidence
+  // starts with the import's name. A function of the image propagated from one, or a target the
+  // caller of the analysis gave, has no prototype here.
+  const auto mark = analysis.no_return.find(target.constant);
+  constexpr std::string_view kBound = "known-name:";
+  if (mark == analysis.no_return.end() || mark->second.rfind(kBound, 0) != 0) {
+    return nullptr;
+  }
+  const std::string_view evidence = std::string_view(mark->second).substr(kBound.size());
+  const std::string_view name = evidence.substr(0, evidence.find(' '));
+  for (const NoReturnPrototype& prototype : kNoReturnPrototypes) {
+    if (prototype.name == name) {
+      return &prototype;
+    }
+  }
+  return nullptr;
+}
+
+void apply_no_return_prototype(const BinaryImage& image, IrStatement& statement,
+                               const NoReturnPrototype& prototype) {
+  for (std::size_t i = 0; i < prototype.count; ++i) {
+    statement.call_arguments.push_back(
+        c_argument_register(image, i, prototype.arguments[i] == LibcArgument::Int));
+  }
+  statement.dest = IrOperand{};
+  statement.signature_source = std::string(kNoReturnPrototypeSource);
 }
 
 bool resolve_known_call(const BinaryImage& image, const AnalysisResult& analysis,
@@ -3419,6 +3505,13 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
             lifter.out.notes.push_back(
                 "a jump to a C library function is lifted as a call of its model, followed by a "
                 "return");
+          } else if (const auto* prototype =
+                         lifter.function.import_name.empty()
+                             ? internal::no_return_prototype(image, analysis, call.a)
+                             : nullptr) {
+            // A tail call of a bound no-return import with a fixed prototype (G21-T5).
+            internal::apply_no_return_prototype(image, call, *prototype);
+            lifter.push(out_block, std::move(call));
           } else if (const auto callee = lifter.known_callee(instruction)) {
             // A tail call to a function of the image with a known signature: the callee runs with
             // the caller's argument registers, and its result is what this function returns.
@@ -3651,6 +3744,9 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
             lifter.out.notes.end()) {
           lifter.note(note);
         }
+      } else if (const auto* prototype = internal::no_return_prototype(image, analysis, call.a)) {
+        // A conditional tail call of a bound no-return import with a fixed prototype (G21-T5).
+        internal::apply_no_return_prototype(image, call, *prototype);
       } else if (const auto callee = lifter.known_callee(instruction)) {
         Lifter::resolve_call_statement(call, *callee);
         const std::string note =

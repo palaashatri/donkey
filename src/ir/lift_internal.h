@@ -1,9 +1,11 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <optional>
 #include <set>
 #include <string>
+#include <string_view>
 
 #include "donkey/ir/libc_models.h"
 #include "donkey/ir/lift.h"
@@ -59,6 +61,26 @@ const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResu
 /// calling convention (System V rdi, rsi, rdx; Win64 rcx, rdx, r8; AAPCS64 x0, x1, x2; an int in
 /// the register's low 32 bits), the result in all of rax or x0, and `call_model`.
 void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model);
+
+/// A no-return function of a runtime library with a fixed C prototype (G21-T5).
+struct NoReturnPrototype {
+  std::string_view name;
+  std::array<LibcArgument, 4> arguments;
+  std::uint8_t count = 0;
+};
+
+/// The prototype of the no-return import a call or tail call target is the stub or (x86-64) slot
+/// of, or null: the import must be bound to its runtime library (AnalysisResult::no_return with
+/// `known-name:` evidence, G24-T3) and have a fixed prototype. x86-64 and AArch64 only.
+const NoReturnPrototype* no_return_prototype(const BinaryImage& image,
+                                             const AnalysisResult& analysis,
+                                             const IrOperand& target);
+
+/// Gives a call the arguments of `prototype` in the image's calling convention, no result, and
+/// kNoReturnPrototypeSource as its signature source. The call ends its path: the block must end at
+/// it (end_block_at_no_return_call), which the verifier checks.
+void apply_no_return_prototype(const BinaryImage& image, IrStatement& statement,
+                               const NoReturnPrototype& prototype);
 
 /// G21-T2 for the AArch64 lifter: when `instruction` is a direct call (or tail call) to a function
 /// of the image whose call summary resolves, gives `statement` the callee's arguments, its result

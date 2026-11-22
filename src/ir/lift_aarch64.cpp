@@ -2206,6 +2206,13 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
             lifter.note(
                 "a jump to a C library function is lifted as a call of its model, followed by a "
                 "return");
+          } else if (const NoReturnPrototype* prototype =
+                         function.import_name.empty() && function.stub_target.empty()
+                             ? no_return_prototype(image, analysis, call.a)
+                             : nullptr) {
+            // A tail call of a bound no-return import with a fixed prototype (G21-T5).
+            apply_no_return_prototype(image, call, *prototype);
+            lifter.push(out_block, std::move(call));
           } else if (instruction.direct_target.has_value() &&
                      resolve_known_call(image, analysis, options, instruction, call)) {
             // A tail call to a function of the image whose summary resolves: the callee runs with
@@ -2261,6 +2268,14 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
         // caller-saved register and x30 clobbered.
         if (const LibcModel* model = modelled_libc_call(image, analysis, statement.a)) {
           apply_libc_model(image, statement, *model);
+          lifter.push(out_block, std::move(statement));
+          continue;
+        }
+        // A call of a bound no-return import with a fixed prototype (G21-T5): its arguments, no
+        // result, and nothing after it; the block ends at it.
+        if (const NoReturnPrototype* prototype =
+                no_return_prototype(image, analysis, statement.a)) {
+          apply_no_return_prototype(image, statement, *prototype);
           lifter.push(out_block, std::move(statement));
           continue;
         }

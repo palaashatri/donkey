@@ -225,6 +225,11 @@ struct IrStatement {
   std::string signature_source;
 };
 
+/// The `signature_source` of a call of a no-return import with a fixed C prototype (G21-T5): its
+/// arguments are the prototype's, it has no result, and it must not return (`no_return`).
+inline constexpr std::string_view kNoReturnPrototypeSource =
+    "the runtime library (does not return)";
+
 struct IrBlock {
   std::uint64_t address = 0;
   std::vector<IrStatement> statements;

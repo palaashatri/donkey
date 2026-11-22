@@ -124,6 +124,15 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   result in `x0`, and the call clobbers every caller-saved register and `x30`; under GCC 13.3 on Linux
   AArch64 (`qemu-aarch64`), all 33 `c_lib_*` results (-O0, -O2, -O3) are Complete and verified.
   Not tested on Windows, macOS (Mach-O imports are not bound) or FreeBSD hosts.
+- Calls that do not return (G21-T5): on x86-64 and AArch64, a call or tail call of an import bound to its
+  runtime library as no-return (G24-T3) whose C prototype is fixed (`abort`, `__stack_chk_fail`,
+  `__chk_fail`, `__cxa_rethrow`, `__cxa_bad_cast`, `__cxa_bad_typeid`, `std::terminate`, `exit`, `_exit`,
+  `_Exit`, `quick_exit`, `__fortify_fail`, `__assert_fail`) carries the prototype's arguments and no
+  result, ends its path, and no longer keeps its caller Partial. The paths that return are compared as
+  before; a function with none stays Partial. Unit-tested from bytes on both architectures
+  (`Ir.ACallOfStackChkFailEndsThePathAndLeavesTheCallerComplete`, `Ir.ACallOfExitCarriesItsStatus`,
+  `Ir.ANoReturnCallWithoutAPrototypeStaysPartial`, `Ir.ANoReturnMarkGivenByTheCallerHasNoPrototype`).
+  No corpus function calls one yet, so none is executed through such a call.
 - Structuring (goal 8): a statement-printing bug in the conditional emitter is fixed (defect 5 in
   `docs/AUDIT.md`; the printed-statement guard is `DecompilerCorpus.EveryKeptStatementIsPrinted`).
   Post-dominators, a dominator-tree fallback structurer, bounded copies of return blocks and node
@@ -239,10 +248,12 @@ and pull request. It fails when any of these gets worse than the base commit's b
 
 Unstripped builds, totals:
 
-- x86-64: 1,269 of 8,406 functions are Complete (15.1%).
-- AArch64: 1,130 of 7,450 functions are Complete (15.2%). It was 839 (11.3%) before AArch64 calls to
-  same-image callees resolved (G21-T1/T2 for AAPCS64, measured on `main` at `c655bdf` with that change), and
-  1,086 (14.6%) before the C library models applied on AArch64 (G21-T7 for AAPCS64).
+- x86-64: 1,273 of 8,406 functions are Complete (15.1%). It was 1,269 before calls of no-return imports
+  stopped keeping their callers Partial (G21-T5).
+- AArch64: 1,182 of 7,450 functions are Complete (15.9%). It was 839 (11.3%) before AArch64 calls to
+  same-image callees resolved (G21-T1/T2 for AAPCS64, measured on `main` at `c655bdf` with that change),
+  1,086 (14.6%) before the C library models applied on AArch64 (G21-T7 for AAPCS64), and 1,130 (15.2%)
+  before G21-T5.
 - No function is Unsupported or InvalidIR, and no run failed.
 - Every Partial function of an unstripped build names at least one reason. One Partial function of the stripped
   static musl build names none.
@@ -272,20 +283,20 @@ Stripped builds, against the function symbols of their unstripped twins (`STT_FU
 | `lua-x86_64-glibc-O0.stripped` | 1177 | 174 | 1003 | 0 | 0 | 1086 of 1087 (1 missed; 91 stubs, 0 extra) |
 | `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
 | `lua-x86_64-glibc-O2.stripped` | 793 | 77 | 716 | 0 | 0 | 703 of 704 (1 missed; 90 stubs, 0 extra) |
-| `lua-aarch64-glibc-O0` | 1180 | 184 | 996 | 0 | 0 |  |
-| `lua-aarch64-glibc-O0.stripped` | 1180 | 184 | 996 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
-| `lua-aarch64-glibc-O2` | 790 | 59 | 731 | 0 | 0 |  |
-| `lua-aarch64-glibc-O2.stripped` | 790 | 59 | 731 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0` | 1180 | 191 | 989 | 0 | 0 |  |
+| `lua-aarch64-glibc-O0.stripped` | 1180 | 191 | 989 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O2` | 790 | 60 | 730 | 0 | 0 |  |
+| `lua-aarch64-glibc-O2.stripped` | 790 | 60 | 730 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
 | `lua-static-musl-x86_64-musl-O2` | 988 | 125 | 863 | 0 | 0 |  |
 | `lua-static-musl-x86_64-musl-O2.stripped` | 923 | 113 | 810 | 0 | 1 | 920 of 985 (65 missed; 0 stubs, 3 extra) |
-| `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
-| `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 584 | 2482 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
-| `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
-| `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 211 | 1775 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O0` | 3097 | 613 | 2484 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 613 | 2484 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O2` | 1989 | 185 | 1804 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 185 | 1804 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O0` | 3067 | 587 | 2480 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 587 | 2479 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
+| `sqlite3-x86_64-glibc-O2` | 1987 | 212 | 1775 | 0 | 0 |  |
+| `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 212 | 1774 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0` | 3097 | 649 | 2448 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 649 | 2448 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2` | 1989 | 193 | 1796 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 193 | 1796 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
 
 The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
 note that is not one every function carries; when the lifter gave none, it is the first instruction that was
@@ -293,26 +304,26 @@ not lifted.
 
 | Partial functions | First reason |
 |---|---|
-| 9470 | outgoing call arguments and return values follow no modelled ABI |
+| 9382 | outgoing call arguments and return values follow no modelled ABI |
 | 1883 | jump leaves the function; treated as a tail call |
 | 1646 | fs- or gs-relative memory (thread-local storage) is not modelled |
 | 147 | the returned register is not determined by the definitions that reach the return; rax is assumed |
-| 98 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
+| 103 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
 | 62 | floating-point results assume the MXCSR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
-| 32 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 33 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
 | 20 | conditional branch depends on flags this lifter does not model |
+| 19 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
 | 19 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 15 | no path returns: every path ends in a call that does not return, so nothing is compared |
 | 15 | unsupported instruction 'syscall' |
-| 14 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
 | 12 | both rax and xmm0 are written on a path to this return; which one carries the return value is not determined, so rax is assumed |
 | 11 | unsupported instruction 'ldurb' |
 | 7 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 4 | a return does not see the entry x30, so it may not return to the caller |
 | 2 | bsf and bsr with a zero source leave the destination undefined; that case is not modelled |
 | 2 | integer and floating-point parameters are both present; their order in the source is not recoverable from the registers, so the signature is Partial |
 | 2 | unsupported instruction 'ldurh' |
 | 2 | unsupported instruction 'movdqa' |
-| 1 | 'cmovg' reads flags this lifter does not model |
-| 1 | conditional jump leaves the function; treated as a tail call |
 
 ### Call census (G21)
 
@@ -342,25 +353,25 @@ Unresolved calls by kind of target (unstripped binaries):
 
 | Calls | Kind of target |
 |---|---|
-| 31802 | aarch64_other |
-| 31624 | same_image |
-| 3352 | aarch64_import |
-| 3237 | import |
+| 31616 | same_image |
+| 31614 | aarch64_other |
+| 1787 | aarch64_import |
 | 1765 | indirect |
+| 1686 | import |
 | 4 | import_slot |
 | 1 | unknown_target |
 
-4780 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
+4727 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
 
 | Functions | Kinds of target |
 |---|---|
-| 1684 | aarch64_other |
-| 1566 | same_image |
-| 990 | aarch64_import+aarch64_other |
-| 140 | import+same_image |
-| 126 | aarch64_import |
+| 2394 | aarch64_other |
+| 1584 | same_image |
+| 276 | aarch64_import+aarch64_other |
+| 122 | import+same_image |
 | 116 | indirect+same_image |
-| 72 | import |
+| 81 | aarch64_import |
+| 68 | import |
 | 59 | indirect |
 | 19 | import+indirect |
 | 8 | import+indirect+same_image |
@@ -369,9 +380,7 @@ The 20 imports those functions call most (a function counted once per import):
 
 | Functions | Import |
 |---|---|
-| 864 | `__stack_chk_fail` |
 | 74 | `strcmp` |
-| 67 | `__assert_fail` |
 | 67 | `memcmp` |
 | 64 | `__errno_location` |
 | 52 | `__ctype_b_loc` |
@@ -389,14 +398,17 @@ The 20 imports those functions call most (a function counted once per import):
 | 15 | `realloc` |
 | 12 | `fprintf` |
 | 12 | `strncmp` |
+| 11 | `__fprintf_chk` |
+| 11 | `lseek64` |
 
 With the AArch64 sysroot, the no-return imports of the AArch64 builds bind (G24-T3): their blocks end at the
 call, which turns 483 more functions into ones Partial only because of calls (4,793), and Complete is unchanged.
-The C library models on AArch64 then make 44 more functions Complete and leave 4,780. 2,800 are AArch64: 1,684
+The C library models on AArch64 then make 44 more functions Complete and leave 4,780. Calls of no-return
+imports with a fixed prototype (`__stack_chk_fail`, `abort`, `exit`, `__assert_fail` and the like, G21-T5) no
+longer keep their callers Partial: 56 more functions are Complete, and 4,727 are left. 2,751 are AArch64: 2,394
 call only functions of the image whose summaries do not resolve, because a callee is Partial for a reason of its
-own, and 1,116 call an import. 1,980 are x86-64: 1,566 call only a same-image callee that does not resolve, and
-the rest call an unresolved import or through a register. `__stack_chk_fail` is called by 864 of them: a call
-that does not return still keeps its caller Partial (G21-T5 is next).
+own, and 357 call an import. 1,976 are x86-64: 1,584 call only a same-image callee that does not resolve, and
+the rest call an unresolved import or through a register.
 
 ## Decompiler corpus
 

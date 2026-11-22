@@ -8240,3 +8240,123 @@ TEST(Ir, AnAArch64CallOfAModelledCLibraryFunctionPassesAapcs64Registers) {
   EXPECT_FALSE(tail.partial) << (tail.notes.empty() ? "" : tail.notes.back());
   EXPECT_TRUE(has_note_containing(tail, "call of its model"));
 }
+
+namespace {
+
+/// `program` analysed again with `stub` as a no-return target, whose mark then carries the
+/// evidence of an import G24-T3 bound to its runtime library under `name`.
+void bind_no_return_import(CallProgram& program, std::uint64_t stub, const std::string& name) {
+  donkey::AnalysisOptions options;
+  options.no_return_targets.insert(stub);
+  auto analyzed = donkey::analyze(program.image, program.data, options);
+  ASSERT_TRUE(analyzed.has_value());
+  program.analysis = std::move(analyzed.value());
+  ASSERT_TRUE(program.analysis.no_return.contains(stub));
+  program.analysis.no_return[stub] = "known-name:" + name + " version:GLIBC_2.17 bound:libc.so.6";
+}
+
+const IrStatement* no_return_call(const IrFunction& function) {
+  for (const donkey::IrBlock& block : function.blocks) {
+    for (const IrStatement& statement : block.statements) {
+      if (statement.op == donkey::IrOp::Call && statement.no_return) {
+        return &statement;
+      }
+    }
+  }
+  return nullptr;
+}
+
+// AArch64: 0x1000 is stp x29, x30, [sp, #-16]!; cbz x0, 0x1014; mov w0, #7;
+// ldp x29, x30, [sp], #16; ret; 0x1014: bl 0x1020. 0x1020 stands for an import stub.
+CallProgram aarch64_no_return_program() {
+  return analyse_call_program(
+      Architecture::AArch64,
+      aarch64_bytes({0xa9bf7bfd, 0xb4000080, 0x528000e0, 0xa8c17bfd, 0xd65f03c0, 0x94000003,
+                     0xd503201f, 0xd503201f, 0xd65f03c0}),
+      {0x1000, 0x1020});
+}
+
+// x86-64: 0x1000 is test rdi, rdi; je 0x100b; mov eax, 7; ret; 0x100b: call 0x1020.
+CallProgram x86_no_return_program() {
+  return x86_program({
+      {0x00,
+       {0x48, 0x85, 0xff, 0x74, 0x06, 0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3, 0xe8, 0x10, 0x00, 0x00,
+        0x00}},
+      {0x20, {0xc3}},
+  });
+}
+
+}  // namespace
+
+TEST(Ir, ACallOfStackChkFailEndsThePathAndLeavesTheCallerComplete) {
+  for (CallProgram program : {aarch64_no_return_program(), x86_no_return_program()}) {
+    SCOPED_TRACE(program.image.architecture == Architecture::AArch64 ? "AArch64" : "x86-64");
+    // Unbound, the call keeps its caller Partial.
+    EXPECT_TRUE(lift_at(program, 0x1000).partial);
+    bind_no_return_import(program, 0x1020, "__stack_chk_fail");
+    const IrFunction function = lift_at(program, 0x1000);
+    EXPECT_FALSE(function.partial) << (function.notes.empty() ? "" : function.notes.back());
+    EXPECT_TRUE(function.unresolved_calls.empty());
+    const IrStatement* call = no_return_call(function);
+    ASSERT_NE(call, nullptr);
+    EXPECT_TRUE(call->call_arguments.empty());
+    EXPECT_EQ(call->dest.kind, donkey::IrOperandKind::None);
+    EXPECT_EQ(call->signature_source, donkey::kNoReturnPrototypeSource);
+  }
+}
+
+TEST(Ir, ACallOfExitCarriesItsStatus) {
+  for (CallProgram program : {aarch64_no_return_program(), x86_no_return_program()}) {
+    const bool aarch64 = program.image.architecture == Architecture::AArch64;
+    SCOPED_TRACE(aarch64 ? "AArch64" : "x86-64");
+    bind_no_return_import(program, 0x1020, "exit");
+    const IrFunction function = lift_at(program, 0x1000);
+    EXPECT_FALSE(function.partial) << (function.notes.empty() ? "" : function.notes.back());
+    const IrStatement* call = no_return_call(function);
+    ASSERT_NE(call, nullptr);
+    ASSERT_EQ(call->call_arguments.size(), 1U);
+    EXPECT_EQ(call->call_arguments[0].reg, aarch64 ? "w0" : "edi");
+    EXPECT_EQ(call->call_arguments[0].width, 4);
+  }
+}
+
+TEST(Ir, ANoReturnCallWithoutAPrototypeStaysPartial) {
+  for (CallProgram program : {aarch64_no_return_program(), x86_no_return_program()}) {
+    SCOPED_TRACE(program.image.architecture == Architecture::AArch64 ? "AArch64" : "x86-64");
+    // longjmp never returns to its caller, but it is not in the table: its call keeps no
+    // arguments, so it stays unresolved.
+    bind_no_return_import(program, 0x1020, "longjmp");
+    const IrFunction function = lift_at(program, 0x1000);
+    EXPECT_TRUE(function.partial);
+    EXPECT_FALSE(function.unresolved_calls.empty());
+    const IrStatement* call = no_return_call(function);
+    ASSERT_NE(call, nullptr);
+    EXPECT_TRUE(call->signature_source.empty());
+  }
+}
+
+TEST(Ir, ANoReturnMarkGivenByTheCallerHasNoPrototype) {
+  CallProgram program = x86_no_return_program();
+  donkey::AnalysisOptions options;
+  options.no_return_targets.insert(0x1020);
+  auto analyzed = donkey::analyze(program.image, program.data, options);
+  ASSERT_TRUE(analyzed.has_value());
+  program.analysis = std::move(analyzed.value());
+  // Not a binding G24-T3 showed, even for a name in the table: the caller stays Partial.
+  EXPECT_TRUE(lift_at(program, 0x1000).partial);
+}
+
+TEST(Ir, AFunctionThatOnlyReachesNoReturnCallsStaysPartial) {
+  // AArch64: 0x1000 is bl 0x1020. With __stack_chk_fail bound there, its one path ends at the
+  // call: nothing returns, so nothing could be compared.
+  CallProgram program = analyse_call_program(
+      Architecture::AArch64,
+      aarch64_bytes({0x94000008, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xd65f03c0}),
+      {0x1000, 0x1020});
+  bind_no_return_import(program, 0x1020, "__stack_chk_fail");
+  const IrFunction function = lift_at(program, 0x1000);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "no path returns"));
+  EXPECT_TRUE(function.unresolved_calls.empty());
+}
