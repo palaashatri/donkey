@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T1 DONE: `tools/r1` fetches, checks and builds the 26 R1 binaries reproducibly; T2 DONE: `donkey-r1 measure` counts every R1 function (at `3530b46`: x86-64 1,269 of 8,406 Complete, AArch64 839 of 7,450; 0 Unsupported or InvalidIR; every Partial function of an unstripped build names a reason, one of the stripped static musl build does not) and the stripped starts (14,816 of 14,887); earlier, a fixed sample: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. T3: `tools/r1/baseline.json`, `donkey-r1 check` and `baseline`, and the `r1` CI job, which fails when a ratcheted count gets worse than the base commit's baseline and builds the base CLI to measure the same bytes when they changed (`R1Ratchet.*`); done when the job is green on `main`. Not done: the T4 execution of R1, and the T4 CTest step of the `r1` job) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O) and AArch64, a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer, reads no stack argument and passes the frame check (its own code restores the stack pointer, the callee-saved registers and, on AArch64, x30, and computes with no caller register but its arguments) prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV and AAPCS64 clobber models, with the callee write set for a resolved call (and x30, which `bl` writes); the frame check of each callee; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels, on x86-64 System V and AArch64 (AArch64 on R1: 839 to 1,086 of 7,450 Complete; every `c_call_*` corpus function verified at -O0, -O2 and -O3 under GCC 13.3 on AArch64); AArch64 calls of imports stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified. Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O) and AArch64, a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer, reads no stack argument and passes the frame check (its own code restores the stack pointer, the callee-saved registers and, on AArch64, x30, and computes with no caller register but its arguments) prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7; x86-64 and AArch64) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV and AAPCS64 clobber models, with the callee write set for a resolved call (and x30, which `bl` writes); the frame check of each callee; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels, on x86-64 System V and AArch64 (AArch64 on R1: 839 to 1,086 of 7,450 Complete; every `c_call_*` corpus function verified at -O0, -O2 and -O3 under GCC 13.3 on AArch64); AArch64 calls of other imports stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified; on AArch64 too (T7 for AAPCS64: R1 AArch64 1,086 to 1,130 of 7,450 Complete; all 33 `c_lib_*` results verified under `qemu-aarch64`). Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries the Mach-O `LC_FUNCTION_STARTS` table and the Mach-O compact unwind entries (`__unwind_info`) are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, compact unwind encodings and ARM64 unwind data are not interpreted | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 DONE: `LC_FUNCTION_STARTS` and `__unwind_info` read and fuzzed (fuzz_function_starts, fuzz_unwind_info); T4, T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table and compact unwind entries, and the ELF initialisation and termination functions (`DT_INIT`, `DT_FINI`, the init, fini and preinit arrays, `.init` and `.fini`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three and, for ELF, its initialisation and termination functions; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
@@ -2133,7 +2133,9 @@ specific reason:
 Counted again with the notes an unresolved call causes counted as its own (a tail call's note, and the
 clobber check's read of a register after a call that does not define it; G21-T1/T2 for AAPCS64), the same
 bytes have 4,452 such functions: 2,471 AArch64 and 1,981 x86-64 (1,566 of them call only same-image
-callees). With AArch64 calls resolved, 4,310: 2,330 AArch64 and 1,980 x86-64.
+callees). With AArch64 calls resolved, 4,310: 2,330 AArch64 and 1,980 x86-64. With the AArch64 builds given
+their sysroot (their no-return imports then bind) and the C library models on AArch64, 4,780: 2,800 AArch64 and
+1,980 x86-64 (G21-T7 for AAPCS64, below).
 
 Order this sets for G21:
 
@@ -2314,6 +2316,54 @@ runners.
   corpus test now asserts it.
 - The check reads `xor r, r`, `sub r, r` and `sbb r, r` as reading nothing of `r`. Without the `sbb` case,
   two x86-64 callees of R1 at -O2 were refused, one in Lua and one in static musl Lua.
+
+#### G21-T7 for AAPCS64: C library models on AArch64 (written and done 2026-11-22)
+
+**Measured first.** On R1 with AArch64 calls resolved, `memcpy`, `memset` and `strlen` are, after
+`__stack_chk_fail`, the imports that the most functions Partial only because of calls call. On AArch64 none of
+the ten models applied: `modelled_call` accepted x86-64 images only. R1 decompiled the AArch64 builds without
+their libraries, so none of their imports was bound to the C library in the first place
+(`analysis.no_return_unverified` on every AArch64 build).
+
+**What changes.**
+
+1. *Lifter.* `internal::modelled_libc_call` and `internal::apply_libc_model` (`src/ir/lift.cpp`) take the
+   model of a call or tail call target for both lifters. On AArch64 the target is a direct `bl` or `b` to an
+   import stub the analysis binds to the C library (AArch64 has no call through a GOT slot; a `blr` through a
+   register stays unresolved). The arguments are `x0`-`x2` (an `int` in `w0`-`w2`), the result all of `x0`.
+   An import stub's own `br x17` is not a call of the model.
+2. *Clobber check and call summaries.* A modelled call clobbers the AAPCS64 caller-saved set and `x30`
+   (unchanged: an unresolved call clobbers all of them). A callee's summary counts the AAPCS64 set for a
+   modelled call it makes, where it counted System V's.
+3. *R1.* `tools/r1/r1.json` names a sysroot for the AArch64 toolchain (`/usr/aarch64-linux-gnu`, Ubuntu's
+   `libc6-arm64-cross`, the glibc the builds link against), and `tools/r1/decompile.cmake` passes it as
+   `--sysroot`. A toolchain whose sysroot is missing stops the run, so no measurement silently loses its
+   bindings.
+
+The interpreter, the verifier, the frame check and the models are unchanged: each model reads and writes the
+bytes ISO C says, whatever the architecture. A callee that passes a stack address to any call has no summary
+(`reads_incoming_stack_argument`), so a model never reads a callee's saved registers through a pointer
+(`Ir.ACallArgumentThatPointsAtASavedRegisterPassesTheCallersValue`).
+
+**Tests.** `Ir.AnAArch64CallOfAModelledCLibraryFunctionPassesAapcs64Registers` (a `bl` and a `b` to a bound
+stub: the registers, the result and no Partial note; without the binding the call stays Partial);
+`DecompilerCorpus.CompleteResultsAgreeWithTheCompiledCode` on AArch64 requires all 33 `c_lib_*` results
+Complete and verified. With the models turned off for AArch64, it fails for every one of them.
+
+**Result.** Under `qemu-aarch64` (GCC 13.3), the corpus goes from 65/62/57 to 76/73/68 Complete and verified of
+77 at -O0, -O2 and -O3. On R1, unstripped:
+
+| Step | AArch64 Complete | Partial only because of calls |
+|---|---|---|
+| AArch64 calls resolved (G21-T1/T2 for AAPCS64) | 1,086 of 7,450 | 4,310 |
+| with the AArch64 sysroot | 1,086 | 4,793 |
+| with the C library models on AArch64 | 1,130 (15.2%) | 4,780 |
+
+The sysroot alone changes no Complete count. Its no-return imports now end their blocks, so 483 functions whose
+other reason was the unbound no-return call count as Partial only because of calls. Of the 44 new Complete
+functions, 37 are in the -O0 builds (Lua 7, SQLite 30) and 7 at -O2 (Lua 1, SQLite 6). x86-64 is unchanged. The
+stripped copies gain the same. `__stack_chk_fail` is now called by 864 of the functions Partial only because of
+calls: a call that does not return still keeps its caller Partial, which is G21-T5.
 
 #### G21-T7 C library calls with executable models (written and done 2026-11-18)
 

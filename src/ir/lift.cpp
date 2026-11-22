@@ -673,9 +673,11 @@ CallSummaryCache::Impl::Entry compute_summary(CallSummaryCache::Impl& cache,
         summary.writes.push_back(internal::register_family(statement.dest.reg));
       }
       if (statement.op == IrOp::Call && !statement.call_model.empty()) {
-        // A modelled C library call (G21-T7) may change every caller-saved register.
-        summary.writes.insert(summary.writes.end(), caller_saved_families().begin(),
-                              caller_saved_families().end());
+        // A modelled C library call (G21-T7) may change every caller-saved register (on AArch64
+        // with x30, which its bl writes).
+        const std::set<std::string>& clobbered =
+            aarch64 ? aapcs64_caller_saved() : caller_saved_families();
+        summary.writes.insert(summary.writes.end(), clobbered.begin(), clobbered.end());
         continue;
       }
       if (statement.op != IrOp::Call || !statement.signature_inferred) {
@@ -2292,40 +2294,14 @@ struct Lifter {
     apply_known_callee(statement, callee, "rax");
   }
 
-  /// The model of the C function a call target runs (G21-T7): the target is an import stub or a
-  /// GOT or IAT slot (`call *slot`) of an import the analysis shows binds to the C library, and the
-  /// function has a model. x86-64 only: the System V or Win64 argument registers.
+  /// The model of the C function a call target runs (G21-T7); see internal::modelled_libc_call.
   [[nodiscard]] const LibcModel* modelled_call(const IrOperand& target) const {
-    if (image.architecture != Architecture::X86_64) {
-      return nullptr;
-    }
-    const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
-    const bool slot = target.kind == IrOperandKind::Memory && target.reg.empty() &&
-                      target.index.empty() && target.width == pointer_width;
-    if (!direct && !slot) {
-      return nullptr;
-    }
-    const auto bound = analysis.c_library_imports.find(target.constant);
-    return bound == analysis.c_library_imports.end() ? nullptr
-                                                     : find_libc_model(bound->second.name);
+    return internal::modelled_libc_call(image, analysis, target);
   }
 
-  /// Gives a call statement the C prototype of `model`: each argument in its register of the
-  /// image's calling convention (an int in the register's low 32 bits), the result in all of rax.
+  /// Gives a call statement the C prototype of `model`; see internal::apply_libc_model.
   void resolve_model_call(IrStatement& statement, const LibcModel& model) const {
-    static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
-    static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
-    static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
-    static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
-    const bool win64 = image.format == BinaryFormat::Pe;
-    for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
-      const bool narrow = model.arguments[i] == LibcArgument::Int;
-      const char* name =
-          win64 ? (narrow ? kWin32[i] : kWin64[i]) : (narrow ? kSysV32[i] : kSysV64[i]);
-      statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
-    }
-    statement.dest = IrOperand::register_ref("rax", 8);
-    statement.call_model = std::string(model.name);
+    internal::apply_libc_model(image, statement, model);
   }
 
   /// The library prototype of a direct call's target (G22-T4): x86-64 System V only (ELF and
@@ -3105,6 +3081,44 @@ bool end_block_at_no_return_call(const AnalysisResult& analysis, IrBlock& block,
 
 void check_call_clobbers(IrFunction& function, Architecture architecture) {
   check_call_clobbers_impl(function, architecture);
+}
+
+const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResult& analysis,
+                                    const IrOperand& target) {
+  const bool x86_64 = image.architecture == Architecture::X86_64;
+  if (!x86_64 && image.architecture != Architecture::AArch64) {
+    return nullptr;
+  }
+  const bool direct = target.kind == IrOperandKind::Constant && target.constant != 0;
+  // x86-64 also calls through a GOT or IAT slot (`call *slot`); AArch64 has no such call.
+  const bool slot = x86_64 && target.kind == IrOperandKind::Memory && target.reg.empty() &&
+                    target.index.empty() && target.width == 8;
+  if (!direct && !slot) {
+    return nullptr;
+  }
+  const auto bound = analysis.c_library_imports.find(target.constant);
+  return bound == analysis.c_library_imports.end() ? nullptr
+                                                   : find_libc_model(bound->second.name);
+}
+
+void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model) {
+  static constexpr std::array<const char*, 3> kSysV64{"rdi", "rsi", "rdx"};
+  static constexpr std::array<const char*, 3> kSysV32{"edi", "esi", "edx"};
+  static constexpr std::array<const char*, 3> kWin64{"rcx", "rdx", "r8"};
+  static constexpr std::array<const char*, 3> kWin32{"ecx", "edx", "r8d"};
+  static constexpr std::array<const char*, 3> kAapcs64{"x0", "x1", "x2"};
+  static constexpr std::array<const char*, 3> kAapcs32{"w0", "w1", "w2"};
+  const bool aarch64 = image.architecture == Architecture::AArch64;
+  const bool win64 = !aarch64 && image.format == BinaryFormat::Pe;
+  for (std::size_t i = 0; i < model.arguments.size() && i < kSysV64.size(); ++i) {
+    const bool narrow = model.arguments[i] == LibcArgument::Int;
+    const char* name = aarch64 ? (narrow ? kAapcs32[i] : kAapcs64[i])
+                       : win64 ? (narrow ? kWin32[i] : kWin64[i])
+                               : (narrow ? kSysV32[i] : kSysV64[i]);
+    statement.call_arguments.push_back(IrOperand::register_ref(name, narrow ? 4 : 8));
+  }
+  statement.dest = IrOperand::register_ref(aarch64 ? "x0" : "rax", 8);
+  statement.call_model = std::string(model.name);
 }
 
 bool resolve_known_call(const BinaryImage& image, const AnalysisResult& analysis,

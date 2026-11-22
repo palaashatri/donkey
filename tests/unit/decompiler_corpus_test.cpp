@@ -806,6 +806,22 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
       }
       EXPECT_GT(seen, 0U) << "the call-heavy functions are missing from the corpus";
     }
+    // Calls of C library functions with executable models on AArch64 (G21-T7 for AAPCS64): the
+    // arguments in x0-x2 (an int in w0-w2), the result in x0. Measured under GCC 13.3 on Linux
+    // AArch64 (qemu-aarch64) at -O0, -O2 and -O3: all 33 (11 functions, 3 levels).
+    if (gcc13_linux && host_convention() == donkey::IrCallingConvention::Aapcs64) {
+      std::size_t checked = 0;
+      for (const Outcome& o : outcomes) {
+        if (o.function.rfind("c_lib_", 0) != 0) {
+          continue;
+        }
+        ++checked;
+        EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+      }
+      EXPECT_EQ(checked, 33U);
+    }
   }
 #endif
 }

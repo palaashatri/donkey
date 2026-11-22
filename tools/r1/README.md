@@ -72,6 +72,10 @@ build/release-headless/donkey-r1 measure /path/to/work /path/to/decompiled r1-re
 ```
 
 `decompile.cmake` runs one `donkey-cli decompile --json --no-pseudocode` per binary, under a time limit.
+A toolchain with a `sysroot` in `r1.json` has its binaries decompiled with `--sysroot`, so that their
+imports bind in the libraries they were linked against, as that system's loader would bind them (G24-T3).
+The AArch64 toolchain names `/usr/aarch64-linux-gnu` (Ubuntu's `libc6-arm64-cross`); the run stops when
+that directory is missing.
 `donkey-r1 measure` counts, for each binary, the functions by status and the reasons of the Partial ones.
 For a stripped binary it also compares the starts found with the function symbols of its unstripped twin:
 matched, missed, import stubs, and extra. A binary has no usable output when the run failed or timed out,

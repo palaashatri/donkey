@@ -2195,10 +2195,21 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           call.a = instruction.direct_target.has_value()
                        ? IrOperand::constant_value(instruction.direct_target.value(), kPointerWidth)
                        : IrOperand::constant_value(0, kPointerWidth);
-          // A tail call to a function of the image whose summary resolves: the callee runs with
-          // this function's argument registers and its result is what this function returns.
-          if (instruction.direct_target.has_value() &&
-              resolve_known_call(image, analysis, options, instruction, call)) {
+          // A tail call to a modelled C library import (G21-T7). Not in an import stub: its own
+          // jump through its slot is the import itself, not a call of it.
+          const LibcModel* model = function.import_name.empty() && function.stub_target.empty()
+                                       ? modelled_libc_call(image, analysis, call.a)
+                                       : nullptr;
+          if (model != nullptr) {
+            apply_libc_model(image, call, *model);
+            lifter.push(out_block, std::move(call));
+            lifter.note(
+                "a jump to a C library function is lifted as a call of its model, followed by a "
+                "return");
+          } else if (instruction.direct_target.has_value() &&
+                     resolve_known_call(image, analysis, options, instruction, call)) {
+            // A tail call to a function of the image whose summary resolves: the callee runs with
+            // this function's argument registers and its result is what this function returns.
             lifter.push(out_block, std::move(call));
             lifter.note(
                 "a jump to a known function is lifted as a call with its inferred arguments and "
@@ -2246,6 +2257,13 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           statement.a = IrOperand::constant_value(0, kPointerWidth);
         }
         lifter.flags_exact = false;  // the callee may change NZCV
+        // A call of a C library import with a model (G21-T7): x0-x2 in, x0 out, and every
+        // caller-saved register and x30 clobbered.
+        if (const LibcModel* model = modelled_libc_call(image, analysis, statement.a)) {
+          apply_libc_model(image, statement, *model);
+          lifter.push(out_block, std::move(statement));
+          continue;
+        }
         // A call to a function of the image whose summary resolves (G21-T2 for AAPCS64): the
         // callee's arguments in x0-x7, its result in x0, and the clobber check after the passes.
         if (resolve_known_call(image, analysis, options, instruction, statement)) {
