@@ -179,7 +179,7 @@ P0 is the most important, P3 the least.
 | G18 | Signed releases | Signed installers | Ad-hoc signed .app, unsigned .exe | P1 | BLOCKED [owner decision]: needs the owner's Apple Developer ID and Windows code-signing certificate. Excluded from this goal |
 | G19 | Accessibility | Platform accessibility APIs | None: Dear ImGui exposes no accessibility tree | P3 | BLOCKED on owner decisions (AccessKit waiver, first platform, minimum bar); design only, see docs/ACCESSIBILITY.md |
 | G20 | Decompiler coverage on real programs | Decompiles nearly every function (Ghidra too) | Executed and compared on the differential corpus. One whole-program measurement: a fixed sample of 1,986 functions from seven system binaries (`docs/AUDIT.md`), counted, not executed. The R1 corpus of real programs that G20-T1 defines does not exist yet | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-21, with a spike over the proposed R1 at `3263c84`; T1 DONE: `tools/r1` fetches, checks and builds the 26 R1 binaries reproducibly; T2 DONE: `donkey-r1 measure` counts every R1 function (at `3530b46`: x86-64 1,269 of 8,406 Complete, AArch64 839 of 7,450; 0 Unsupported or InvalidIR; every Partial function of an unstripped build names a reason, one of the stripped static musl build does not) and the stripped starts (14,816 of 14,887); earlier, a fixed sample: whole-program measurement over a fixed sample of 1,986 system-binary functions in docs/AUDIT.md, with tools/audit/sample_list.py. T3: `tools/r1/baseline.json`, `donkey-r1 check` and `baseline`, and the `r1` CI job, which fails when a ratcheted count gets worse than the base commit's baseline and builds the base CLI to measure the same bytes when they changed (`R1Ratchet.*`); done when the job is green on `main`. Not done: the T4 execution of R1, and the T4 CTest step of the `r1` job) |
-| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O) and AArch64, a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer, reads no stack argument and passes the frame check (its own code restores the stack pointer, the callee-saved registers and, on AArch64, x30, and computes with no caller register but its arguments) prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7; x86-64 and AArch64) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV and AAPCS64 clobber models, with the callee write set for a resolved call (and x30, which `bl` writes); the frame check of each callee; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels, on x86-64 System V and AArch64 (AArch64 on R1: 839 to 1,086 of 7,450 Complete; every `c_call_*` corpus function verified at -O0, -O2 and -O3 under GCC 13.3 on AArch64); AArch64 calls of other imports stay Partial; signature_inferred is always labelled. T3 to T6 TODO. T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified; on AArch64 too (T7 for AAPCS64: R1 AArch64 1,086 to 1,130 of 7,450 Complete; all 33 `c_lib_*` results verified under `qemu-aarch64`). Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
+| G21 | Call sites and calling conventions | `r = f(a, b)` with typed arguments | On x86-64 System V (ELF, Mach-O) and AArch64, a direct call to a same-image callee that lifts Complete (its own calls resolved the same way, up to 8 levels; recursion stays unresolved), returns an integer, reads no stack argument and passes the frame check (its own code restores the stack pointer, the callee-saved registers and, on AArch64, x30, and computes with no caller register but its arguments) prints as `r = f(a, b)`, and its caller can be Complete (the clobber check holds). A call of a C library import with an executable model (ten functions, G21-T7; x86-64 and AArch64) carries the function's prototype, and the interpreter runs the model. A direct call through an import stub that a library prototype applies to prints that prototype's integer and pointer arguments and result, labelled with its library, and its caller is Partial (G22-T4). Every other call prints as `sub_x();` with no arguments or result, and its caller is Partial | P0 | IN PROGRESS (T0 DONE; T1 PARTIAL: x86-64 SysV and AAPCS64 clobber models, with the callee write set for a resolved call (and x30, which `bl` writes); the frame check of each callee; a zeroing `xor r, r` or `sub r, r` reads no value of `r` (neither a clobbered one nor a parameter); the oracle runs the callee IR, not the real callee. T2 PARTIAL: integer arguments and result from the callee's inferred signature for same-image direct calls to Complete callees, whose own calls resolve bottom-up through a per-image call-summary cache, up to 8 levels, on x86-64 System V and AArch64 (AArch64 on R1: 839 to 1,086 of 7,450 Complete; every `c_call_*` corpus function verified at -O0, -O2 and -O3 under GCC 13.3 on AArch64); AArch64 calls of other imports stay Partial; signature_inferred is always labelled. T3, T4 and T6 TODO. T5 DONE: a call of a no-return import with a fixed prototype (13 names) carries its arguments, ends its path and keeps no caller Partial (R1: 2,399 to 2,455 Complete). T7 DONE: calls of C library imports with executable models (strlen, strnlen, memchr, strchr, strrchr, strspn, strcspn, memcpy, memmove, memset), checked against the host C library; all 44 `c_lib_*` corpus results verified; on AArch64 too (T7 for AAPCS64: R1 AArch64 1,086 to 1,130 of 7,450 Complete; all 33 `c_lib_*` results verified under `qemu-aarch64`). Seven call-heavy corpus functions verified at -O0, -O2 and -O3, one of them a call chain two levels deep) |
 | G22 | Type libraries | Type libraries (Ghidra: data type archives) for the major platforms | One bundled library, musl 1.2.4 for x86-64 Linux (1,563 declarations), made by `donkey-cli typelib make` (G22-T2) in the library file format, with its bounded reader (G22-T1, `docs/TYPELIBS.md`). A library loads into a project, and `project type library apply` gives an import stub the library's prototype as a `library` application when the import is shown to bind to a file the library provides (musl's loader for the musl library) and the library fits the image's ABI, shown by the CLI and noted on the stub in `decompile --project` (G22-T3). A direct call through such a stub prints the prototype's integer and pointer arguments and result on x86-64 System V, labelled with the library, and its caller stays Partial, since the import is not executed (T4). The type store, the C declaration parser and the CLI's type applications are G05 | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 DONE: format, reader, fuzz target and install rule; T2 DONE: generator and the musl 1.2.4 library; T3 DONE for ELF x86-64 and PE import stubs whose imports bind to a file the library provides: 727 of 2,428 stubs of six Alpine 3.18 (musl 1.2.4) programs get a prototype, none of the glibc audit binaries'; T4 PARTIAL: x86-64 System V calls through those stubs, integer and pointer arguments; 14,656 calls in 3,795 of 13,407 functions of six Alpine 3.18 (musl 1.2.4) programs print them) |
 | G23 | Unwind tables and exception handling | Reads `.eh_frame`, `.pdata`, LSDA and MSVC exception data | `.eh_frame` FDE ranges (ELF), PE x64 `.pdata` RUNTIME_FUNCTION entries the Mach-O `LC_FUNCTION_STARTS` table and the Mach-O compact unwind entries (`__unwind_info`) are read and seed function starts; a table that cannot be read in full makes the analysis Partial. CFI programs, LSDA, `.xdata`, compact unwind encodings and ARM64 unwind data are not interpreted | P1 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-17; T1 DONE for ELF .eh_frame, fuzzed (fuzz_eh_frame); T2 PARTIAL: PE x64 .pdata RUNTIME_FUNCTION entries, chained entries skipped (not tested with a fixture); .xdata and ARM64 TODO; T3 DONE: `LC_FUNCTION_STARTS` and `__unwind_info` read and fuzzed (fuzz_function_starts, fuzz_unwind_info); T4, T5 TODO) |
 | G24 | Analysis of stripped binaries | Function discovery from several sources, no-return, thunks, stack analysis | Function seeds are the entry point, exported symbols, call targets and unwind-table entries (`.eh_frame`, PE x64 `.pdata`), the Mach-O `LC_FUNCTION_STARTS` table and compact unwind entries, and the ELF initialisation and termination functions (`DT_INIT`, `DT_FINI`, the init, fini and preinit arrays, `.init` and `.fini`); a walk stops at a jump or fall-through into another function's start and at an import stub. Import stubs (ELF `.plt`, `.plt.sec`, `.plt.got`; MinGW `jmp *slot` thunks) are named by their import, and one-jump thunks are found and named `j_<target>` (T4). A binary without unwind tables or a Mach-O `LC_FUNCTION_STARTS` table gets no seeds beyond the first three and, for ELF, its initialisation and termination functions; calls to no-return functions end their block, found by name, symbol version and propagation (T3); prologue discovery is not done | P0 | IN PROGRESS (T0 DONE: task-level plan written 2026-11-15; T1 measured in docs/AUDIT.md; T2 PARTIAL: unwind seeds (ELF and PE x64); seeds stop at jumps and fall-through into another function start, and at import stubs; T3 DONE: no-return calls bound by symbol version, DT_NEEDED or PE DLL, with propagation; a shared library's calls bound in the scope of the program that loads it (`--program`), else unmarked; T4 DONE for ELF (x86-64, AArch64) and PE: stubs, GOT and IAT calls and thunks named; T5 to T7 TODO) |
@@ -2135,7 +2135,8 @@ clobber check's read of a register after a call that does not define it; G21-T1/
 bytes have 4,452 such functions: 2,471 AArch64 and 1,981 x86-64 (1,566 of them call only same-image
 callees). With AArch64 calls resolved, 4,310: 2,330 AArch64 and 1,980 x86-64. With the AArch64 builds given
 their sysroot (their no-return imports then bind) and the C library models on AArch64, 4,780: 2,800 AArch64 and
-1,980 x86-64 (G21-T7 for AAPCS64, below).
+1,980 x86-64 (G21-T7 for AAPCS64, below). With no-return calls resolved (G21-T5, below), 4,727: 2,751 AArch64 and
+1,976 x86-64.
 
 Order this sets for G21:
 
@@ -2316,6 +2317,67 @@ runners.
   corpus test now asserts it.
 - The check reads `xor r, r`, `sub r, r` and `sbb r, r` as reading nothing of `r`. Without the `sbb` case,
   two x86-64 callees of R1 at -O2 were refused, one in Lua and one in static musl Lua.
+
+#### G21-T5 Calls that do not return (written and done 2026-11-22)
+
+**Measured first.** On R1 (unstripped, with the AArch64 sysroot and the C library models on AArch64), 149
+Partial functions have only no-return imports among their unresolved calls: 75 AArch64, 74 x86-64. 125 of them
+call only `__stack_chk_fail`, 20 only `__assert_fail`, 3 only `exit`, 1 only `abort`. 126 of the 149 call only
+functions with no argument. `__stack_chk_fail` is called by 864 of the 4,780 functions that are Partial only
+because of calls. Those that call other unresolved functions as well gain only when those resolve too, or when
+their callees become Complete through this task.
+
+**Why a no-return call needs no model.** Nothing after the call runs, so its result and the registers and
+memory it changes never reach a return of the caller. The block already ends at the call (G24-T3). The
+interpreter stops the path there (`ir.eval_no_return`), so the path is never compared. Only the call's
+arguments remain, and they matter only to the printed call. A call printed without the arguments it is
+passed would be wrong output.
+
+**What changes.**
+
+1. *Prototypes.* A fixed table of the no-return imports with known C prototypes:
+   - no arguments: `abort`, `__stack_chk_fail`, `__chk_fail`, `__cxa_rethrow`, `__cxa_bad_cast`,
+     `__cxa_bad_typeid`, `std::terminate` (`_ZSt9terminatev`);
+   - `int`: `exit`, `_exit`, `_Exit`, `quick_exit`;
+   - `__assert_fail(const char *, const char *, unsigned int, const char *)`;
+   - `__fortify_fail(const char *)`.
+
+   Variadic `err` and `errx`, `longjmp` (a `jmp_buf`), `__cxa_throw` and `_Unwind_Resume` stay as they are.
+   So does a function of the image propagated from a no-return import, whose arguments are not known.
+2. *Lifters* (x86-64 `lift_call` and tail calls, AArch64 `bl` and `b`). A call of an import stub or slot that
+   the analysis marks no-return (`AnalysisResult::no_return`, the G24-T3 load-scope binding) is checked
+   against the table by the import's name.
+   - With a prototype, the call carries the prototype's argument registers (System V, Win64 or AAPCS64, an
+     `int` in the low 32 bits) and no result.
+   - `signature_source` names the table (`no-return prototype`).
+   - It is not an unresolved call: it is left out of the census and adds no Partial note.
+   - Every other call is unchanged.
+3. *Verifier.* A call with `signature_source` and `no_return` may carry arguments and no result.
+4. *Census.* `donkey-r1 measure` counts such calls nowhere. They are resolved.
+5. *Printing.* A call with arguments notes where its prototype comes from. `abort();` prints as it is.
+
+**Soundness.** Complete still means that every path that returns was run and compared. A path through a
+no-return call ends at the call and is not compared. The function's other paths are compared as before. A
+function whose every path ends at such a call already gets the note "no path returns", which keeps it Partial.
+The binding is G24-T3's: the import must be shown to bind to the runtime library in the load scope, and a
+program that defines `exit` itself does not get the mark.
+
+**Tests (names to add).**
+- `Ir.ACallOfStackChkFailEndsThePathAndLeavesTheCallerComplete`: x86-64 and AArch64, from bytes, with the
+  no-return binding injected. The function is Complete and the call has no arguments.
+- `Ir.ACallOfExitCarriesItsStatus`: `exit` gets `edi` or `w0`.
+- `Ir.ANoReturnCallWithoutAPrototypeStaysPartial`: `longjmp`.
+- `Ir.AFunctionThatOnlyReachesNoReturnCallsStaysPartial`.
+
+**Done when.** The tests pass, R1 is measured before and after with the gain in the PR, and the ratchet passes.
+
+**Result.** R1, unstripped: Complete rises from 2,399 to 2,455 of 15,856. AArch64 goes from 1,130 to 1,182, and
+x86-64 from 1,269 to 1,273: most x86-64 callers of `__stack_chk_fail` read the canary through `fs` and stay
+Partial for that reason. There is no InvalidIR, so every call given a prototype ended its block. The functions
+Partial only because of calls go from 4,780 to 4,727. No other note changed in count: "no path returns" stays
+at 147, and functions whose only other note was the call now show the next one first. No corpus function calls
+one of these imports, so none is executed through such a call yet. The tests are from bytes, on both
+architectures.
 
 #### G21-T7 for AAPCS64: C library models on AArch64 (written and done 2026-11-22)
 
