@@ -5,6 +5,7 @@
 #include <set>
 #include <string>
 
+#include "donkey/ir/libc_models.h"
 #include "donkey/ir/lift.h"
 
 namespace donkey::internal {
@@ -46,6 +47,18 @@ enum class FrameContract : std::uint8_t { Own, Callee };
 [[nodiscard]] std::optional<std::string> check_frame(const IrFunction& function,
                                                      Architecture architecture,
                                                      FrameContract contract);
+
+/// The model of the C library function a call or tail call target runs (G21-T7), or null: the
+/// target is the stub of an import the analysis binds to the C library (`AnalysisResult::
+/// c_library_imports`), or on x86-64 its GOT or IAT slot (`call *slot`), and the function has a
+/// model. x86-64 and AArch64 only.
+const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResult& analysis,
+                                    const IrOperand& target);
+
+/// Gives a call statement the C prototype of `model`: each argument in its register of the image's
+/// calling convention (System V rdi, rsi, rdx; Win64 rcx, rdx, r8; AAPCS64 x0, x1, x2; an int in
+/// the register's low 32 bits), the result in all of rax or x0, and `call_model`.
+void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model);
 
 /// G21-T2 for the AArch64 lifter: when `instruction` is a direct call (or tail call) to a function
 /// of the image whose call summary resolves, gives `statement` the callee's arguments, its result

@@ -48,10 +48,10 @@ function(r1_length out)
   set(${out} "${value}" PARENT_SCOPE)
 endfunction()
 
-# r1_keys(<label> <allowed keys...> PATH <json path...>): refuse a key that is not allowed, and a
-# required key (all the allowed ones here) that is missing.
+# r1_keys(<label> KEYS <required keys...> [OPTIONAL <keys...>] PATH <json path...>): refuse a key
+# that is neither required nor optional, and a required key that is missing.
 function(r1_keys label)
-  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "KEYS;PATH")
+  cmake_parse_arguments(PARSE_ARGV 1 arg "" "" "KEYS;OPTIONAL;PATH")
   string(JSON type ERROR_VARIABLE error TYPE "${manifest}" ${arg_PATH})
   if(error OR NOT type STREQUAL "OBJECT")
     message(FATAL_ERROR "r1: manifest: ${label} is not an object")
@@ -62,7 +62,7 @@ function(r1_keys label)
     math(EXPR last "${count} - 1")
     foreach(i RANGE ${last})
       string(JSON key MEMBER "${manifest}" ${arg_PATH} ${i})
-      if(NOT key IN_LIST arg_KEYS)
+      if(NOT key IN_LIST arg_KEYS AND NOT key IN_LIST arg_OPTIONAL)
         message(FATAL_ERROR "r1: manifest: unknown key '${key}' in ${label}")
       endif()
       list(APPEND present "${key}")
@@ -109,7 +109,14 @@ math(EXPR toolchain_last "${toolchain_count} - 1")
 set(toolchains "")
 foreach(i RANGE ${toolchain_last})
   string(JSON name MEMBER "${manifest}" toolchains ${i})
-  r1_keys("toolchain ${name}" KEYS cc strip strip_package package PATH toolchains ${name})
+  # `sysroot`: the libraries the toolchain's programs run on, which decompile.cmake passes to the
+  # analysis as --sysroot.
+  r1_keys("toolchain ${name}" KEYS cc strip strip_package package OPTIONAL sysroot
+          PATH toolchains ${name})
+  string(JSON sysroot_type ERROR_VARIABLE no_sysroot TYPE "${manifest}" toolchains ${name} sysroot)
+  if(NOT no_sysroot AND NOT sysroot_type STREQUAL "STRING")
+    message(FATAL_ERROR "r1: manifest: the sysroot of toolchain ${name} is not a string")
+  endif()
   list(APPEND toolchains "${name}")
 endforeach()
 

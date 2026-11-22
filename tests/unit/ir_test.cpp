@@ -8177,3 +8177,66 @@ TEST(Ir, BytesBelowTheStackPointerAfterACallAreOnlyACalleesConcern) {
   EXPECT_FALSE(has_note_containing(function, "depends on the entry value"));
   EXPECT_FALSE(function.partial) << (function.notes.empty() ? "" : function.notes.back());
 }
+
+TEST(Ir, ACallArgumentThatPointsAtASavedRegisterPassesTheCallersValue) {
+  // x86-64: 0x1000 is push rbx; mov rdi, rsp; call 0x1020; pop rbx; ret, and 0x1020 is
+  // mov rax, [rdi]; ret. The result is the caller's rbx, read through the pointer: the interpreter
+  // does not pass it to a nested call of 0x1000, so a call to 0x1000 must not resolve (a callee
+  // whose call is passed a stack address has no summary).
+  const CallProgram program = x86_program({
+      {0x00, {0x53, 0x48, 0x89, 0xe7, 0xe8, 0x17, 0x00, 0x00, 0x00, 0x5b, 0xc3}},
+      {0x20, {0x48, 0x8b, 0x07, 0xc3}},              // mov rax, [rdi]; ret
+      {0x40, {0xe8, 0xbb, 0xff, 0xff, 0xff, 0xc3}},  // call 0x1000; ret
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1000));  // the leaf itself resolves
+  EXPECT_FALSE(call_resolves(program, 0x1040));
+}
+
+TEST(Ir, AnAArch64CallOfAModelledCLibraryFunctionPassesAapcs64Registers) {
+  // 0x1000: stp x29, x30, [sp, #-16]!; bl 0x1020; ldp x29, x30, [sp], #16; ret. 0x1030: b 0x1020.
+  // 0x1020 stands for an import stub the analysis binds to the C library (G21-T7 on AArch64).
+  const auto data = aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f,
+                                   0xd503201f, 0xd503201f, 0xd503201f, 0xd65f03c0, 0xd503201f,
+                                   0xd503201f, 0xd503201f, 0x17fffffc});
+  CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000, 0x1020, 0x1030});
+  const auto model_call = [](const IrFunction& function) -> const IrStatement* {
+    for (const donkey::IrBlock& block : function.blocks) {
+      for (const IrStatement& statement : block.statements) {
+        if (statement.op == donkey::IrOp::Call && !statement.call_model.empty()) {
+          return &statement;
+        }
+      }
+    }
+    return nullptr;
+  };
+  // Without the binding the call follows no modelled ABI.
+  EXPECT_EQ(model_call(lift_at(program, 0x1000)), nullptr);
+  EXPECT_TRUE(lift_at(program, 0x1000).partial);
+
+  program.analysis.c_library_imports[0x1020] = donkey::BoundImport{"strlen", "c-library:strlen"};
+  const IrFunction caller = lift_at(program, 0x1000);
+  const IrStatement* call = model_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_EQ(call->call_model, "strlen");
+  EXPECT_FALSE(call->signature_inferred);
+  ASSERT_EQ(call->call_arguments.size(), 1U);
+  EXPECT_EQ(call->call_arguments[0].reg, "x0");
+  EXPECT_EQ(call->call_arguments[0].width, 8);
+  EXPECT_EQ(call->dest.reg, "x0");
+  EXPECT_EQ(call->dest.width, 8);
+  EXPECT_FALSE(caller.partial) << (caller.notes.empty() ? "" : caller.notes.back());
+
+  // memset's int argument is the low 32 bits of x1; the tail call returns the model's result.
+  program.analysis.c_library_imports[0x1020] = donkey::BoundImport{"memset", "c-library:memset"};
+  const IrFunction tail = lift_at(program, 0x1030);
+  const IrStatement* jump = model_call(tail);
+  ASSERT_NE(jump, nullptr);
+  EXPECT_EQ(jump->call_model, "memset");
+  ASSERT_EQ(jump->call_arguments.size(), 3U);
+  EXPECT_EQ(jump->call_arguments[0].reg, "x0");
+  EXPECT_EQ(jump->call_arguments[1].reg, "w1");
+  EXPECT_EQ(jump->call_arguments[1].width, 4);
+  EXPECT_EQ(jump->call_arguments[2].reg, "x2");
+  EXPECT_FALSE(tail.partial) << (tail.notes.empty() ? "" : tail.notes.back());
+  EXPECT_TRUE(has_note_containing(tail, "call of its model"));
+}

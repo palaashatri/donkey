@@ -2,7 +2,7 @@
   "schema": 1,
   "toolchains": {
     "x86_64-glibc": {"cc": "gcc", "strip": "strip", "strip_package": "binutils", "package": "gcc-13"},
-    "aarch64-glibc": {"cc": "aarch64-linux-gnu-gcc", "strip": "aarch64-linux-gnu-strip", "strip_package": "binutils-aarch64-linux-gnu", "package": "gcc-13-aarch64-linux-gnu"},
+    "aarch64-glibc": {"cc": "aarch64-linux-gnu-gcc", "strip": "aarch64-linux-gnu-strip", "strip_package": "binutils-aarch64-linux-gnu", "package": "gcc-13-aarch64-linux-gnu", "sysroot": "/usr/aarch64-linux-gnu"},
     "x86_64-musl": {"cc": "musl-gcc", "strip": "strip", "strip_package": "binutils", "package": "musl-tools"}
   },
   "sources": [

@@ -106,6 +106,13 @@ string(REPLACE "\"root\": \"pkg-1\"" "\"root\": \"../up\"" up "${src}")
 manifest(up "${up}")
 expect_refused("unsafe root" up "unsafe root '\\.\\./up'")
 
+# 4b. A toolchain sysroot that is not a string.
+string(REPLACE "\"package\": \"gcc\"" "\"package\": \"gcc\", \"sysroot\": 1" bad_sysroot
+       "${toolchains}")
+file(WRITE "${WORK}/sysroot.json"
+     "{\"schema\": 1, ${bad_sysroot}, \"sources\": [${src}], ${build}}\n")
+expect_refused("sysroot not a string" sysroot "the sysroot of toolchain t is not a string")
+
 # 5. A source name that is not one plain component: its directory under src/ is removed and unpacked
 # into.
 # The build names it too, so without the check the script would reach src/../../victim, which is
