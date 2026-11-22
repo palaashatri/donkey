@@ -56,8 +56,8 @@ const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResu
                                     const IrOperand& target);
 
 /// Gives a call statement the C prototype of `model`: each argument in its register of the image's
-/// calling convention (System V rdi, rsi, rdx; Win64 rcx, rdx, r8; AAPCS64 x0, x1, x2; an int in the
-/// register's low 32 bits), the result in all of rax or x0, and `call_model`.
+/// calling convention (System V rdi, rsi, rdx; Win64 rcx, rdx, r8; AAPCS64 x0, x1, x2; an int in
+/// the register's low 32 bits), the result in all of rax or x0, and `call_model`.
 void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model);
 
 /// G21-T2 for the AArch64 lifter: when `instruction` is a direct call (or tail call) to a function

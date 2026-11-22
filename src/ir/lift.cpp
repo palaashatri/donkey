@@ -3097,8 +3097,7 @@ const LibcModel* modelled_libc_call(const BinaryImage& image, const AnalysisResu
     return nullptr;
   }
   const auto bound = analysis.c_library_imports.find(target.constant);
-  return bound == analysis.c_library_imports.end() ? nullptr
-                                                   : find_libc_model(bound->second.name);
+  return bound == analysis.c_library_imports.end() ? nullptr : find_libc_model(bound->second.name);
 }
 
 void apply_libc_model(const BinaryImage& image, IrStatement& statement, const LibcModel& model) {

@@ -2,7 +2,7 @@
 # time limit, for `donkey-r1 measure` to count. Run in script mode:
 #
 #   cmake -DR1_WORK=<dir> -DDONKEY_CLI=<donkey-cli> -DOUT=<dir> [-DTIMEOUT=<seconds>] \
-#         -P tools/r1/decompile.cmake
+#         [-DR1_MANIFEST=<r1.json>] -P tools/r1/decompile.cmake
 #
 # Writes OUT/<binary>.json for each binary of R1_WORK/binaries.json. A run that fails or times out
 # leaves no output file, which donkey-r1 then reports as that binary's error; this script itself
@@ -26,7 +26,11 @@ if(error OR count EQUAL 0)
 endif()
 # A toolchain whose programs run on another system's libraries names them as a sysroot in r1.json:
 # the analysis binds the imports there (G24-T3), as that system's loader would.
-file(READ "${CMAKE_CURRENT_LIST_DIR}/r1.json" manifest)
+# -DR1_MANIFEST=<file> names the manifest as for build.cmake.
+if(NOT DEFINED R1_MANIFEST)
+  set(R1_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/r1.json")
+endif()
+file(READ "${R1_MANIFEST}" manifest)
 file(MAKE_DIRECTORY "${OUT}")
 math(EXPR last "${count} - 1")
 set(failed 0)

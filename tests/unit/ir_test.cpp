@@ -8195,10 +8195,9 @@ TEST(Ir, ACallArgumentThatPointsAtASavedRegisterPassesTheCallersValue) {
 TEST(Ir, AnAArch64CallOfAModelledCLibraryFunctionPassesAapcs64Registers) {
   // 0x1000: stp x29, x30, [sp, #-16]!; bl 0x1020; ldp x29, x30, [sp], #16; ret. 0x1030: b 0x1020.
   // 0x1020 stands for an import stub the analysis binds to the C library (G21-T7 on AArch64).
-  const auto data =
-      aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
-                     0xd503201f, 0xd503201f, 0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f,
-                     0x17fffffc});
+  const auto data = aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f,
+                                   0xd503201f, 0xd503201f, 0xd503201f, 0xd65f03c0, 0xd503201f,
+                                   0xd503201f, 0xd503201f, 0x17fffffc});
   CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000, 0x1020, 0x1030});
   const auto model_call = [](const IrFunction& function) -> const IrStatement* {
     for (const donkey::IrBlock& block : function.blocks) {
