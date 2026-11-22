@@ -33,6 +33,7 @@
 #include "donkey/ir/lift.h"
 #include "ir_internal.h"
 #include "lift_internal.h"
+#include "registers.h"
 #include "test_io.h"
 
 namespace {
@@ -6716,8 +6717,19 @@ TEST(Ir, CallerOfAFunctionWhoseLoadOverlapsAStackArgumentIsPartial) {
       0x48, 0x8b, 0x44, 0x24, 0x07,  // 0x1006: mov rax, [rsp + 7]
       0xc3,                          // 0x100b: ret
   }));
-  // The return address itself (entry rsp + 0, eight bytes) is not an argument.
+  // The return address itself (entry rsp + 0, eight bytes) is not an argument: a load of it that
+  // nothing uses leaves the call resolved.
   EXPECT_FALSE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x0c, 0x24,        // 0x1006: mov rcx, [rsp]
+      0x31, 0xc0,                    // 0x100a: xor eax, eax
+      0xc3,                          // 0x100c: ret
+  }));
+  // Returning it is another matter: it is the caller's value, which a nested call in the
+  // interpreter does not have (the frame check,
+  // Ir.ACalleeThatReadsItsReturnAddressStaysUnresolved).
+  EXPECT_TRUE(caller_is_partial({
       0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
       0xc3,                          // 0x1005: ret
       0x48, 0x8b, 0x04, 0x24,        // 0x1006: mov rax, [rsp]
@@ -7598,6 +7610,313 @@ TEST(Ir, DominatorTreeOfAHugeGraphIsLinear) {
   EXPECT_EQ(tree.immediate(kCount / 2), kCount / 2 - 1);
 }
 
+// ---- AArch64 calls and the frame check (G21-T1/T2 for AAPCS64) ----
+
+namespace {
+
+/// One AArch64 program of small functions, assembled with GNU as from this source (the offsets are
+/// from 0x1000):
+///   0x000 caller1:     stp x29, x30, [sp, #-16]!; mov x29, sp; bl callee1; add x0, x0, #1;
+///                      ldp x29, x30, [sp], #16; ret
+///   0x020 callee1:     sub x0, x0, x1; ret
+///   0x040 tail:        add x0, x0, #2; b callee1
+///   0x060 readlr:      stp x29, x30, [sp, #-16]!; bl callee1; mov x0, x30;
+///                      ldp x29, x30, [sp], #16; ret
+///   0x080 clobber19:   mov x19, x0; add x0, x0, #1; ret
+///   0x0a0 unbalanced:  sub sp, sp, #16; add x0, x0, #1; ret
+///   0x0c0 otherlr:     mov x30, x1; ret
+///   0x0e0 stackcallee: str x0, [sp, #-16]!; ldr x0, [sp], #16; sub x0, x0, x1; ret
+///   0x100 callclobber, 0x120 callunbal, 0x140 callstack: stp x29, x30, [sp, #-16]!;
+///                      bl clobber19 / unbalanced / stackcallee; ldp x29, x30, [sp], #16; ret
+/// Each function is padded with nop to 32 bytes.
+std::vector<std::byte> aarch64_call_program() {
+  return aarch64_bytes(
+      {0xa9bf7bfd, 0x910003fd, 0x94000006, 0x91000400, 0xa8c17bfd, 0xd65f03c0, 0xd503201f,
+       0xd503201f, 0xcb010000, 0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+       0xd503201f, 0xd503201f, 0x91000800, 0x17fffff7, 0xd503201f, 0xd503201f, 0xd503201f,
+       0xd503201f, 0xd503201f, 0xd503201f, 0xa9bf7bfd, 0x97ffffef, 0xaa1e03e0, 0xa8c17bfd,
+       0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xaa0003f3, 0x91000400, 0xd65f03c0,
+       0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd10043ff, 0x91000400,
+       0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xaa0103fe,
+       0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+       0xf81f0fe0, 0xf84107e0, 0xcb010000, 0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f,
+       0xd503201f, 0xa9bf7bfd, 0x97ffffdf, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
+       0xd503201f, 0xd503201f, 0xa9bf7bfd, 0x97ffffdf, 0xa8c17bfd, 0xd65f03c0, 0xd503201f,
+       0xd503201f, 0xd503201f, 0xd503201f, 0xa9bf7bfd, 0x97ffffe7, 0xa8c17bfd, 0xd65f03c0});
+}
+
+struct CallProgram {
+  BinaryImage image;
+  std::vector<std::byte> data;
+  donkey::AnalysisResult analysis;
+};
+
+/// The program with a symbol at each function start, analysed.
+CallProgram analyse_call_program(Architecture architecture, std::vector<std::byte> data,
+                                 std::initializer_list<std::uint64_t> starts) {
+  CallProgram program;
+  program.data = std::move(data);
+  program.image = synthetic_image(program.data.size());
+  program.image.architecture = architecture;
+  for (const std::uint64_t start : starts) {
+    donkey::Symbol symbol;
+    symbol.name = "f_" + std::to_string(start - 0x1000);
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    program.image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(program.image, program.data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (analyzed.has_value()) {
+    program.analysis = std::move(analyzed.value());
+  }
+  return program;
+}
+
+CallProgram aarch64_calls() {
+  return analyse_call_program(
+      Architecture::AArch64, aarch64_call_program(),
+      {0x1000, 0x1020, 0x1040, 0x1060, 0x1080, 0x10a0, 0x10c0, 0x10e0, 0x1100, 0x1120, 0x1140});
+}
+
+IrFunction lift_at(const CallProgram& program, std::uint64_t address) {
+  const donkey::Function* function = function_at(program.analysis, address);
+  EXPECT_NE(function, nullptr) << address;
+  if (function == nullptr) {
+    return {};
+  }
+  auto lifted = donkey::lift_function(program.image, program.analysis, *function);
+  EXPECT_TRUE(lifted.has_value()) << lifted.diagnostic().message;
+  return lifted.has_value() ? lifted.value() : IrFunction{};
+}
+
+/// Runs `function` with the program's functions as callees (each lifted on demand).
+std::optional<std::uint64_t> run_with_callees(const CallProgram& program,
+                                              const IrFunction& function,
+                                              std::vector<std::uint64_t> arguments) {
+  std::map<std::uint64_t, IrFunction> lifted;
+  const std::function<const IrFunction*(std::uint64_t)> resolve =
+      [&](std::uint64_t address) -> const IrFunction* {
+    if (const auto known = lifted.find(address); known != lifted.end()) {
+      return &known->second;
+    }
+    const donkey::Function* callee = function_at(program.analysis, address);
+    if (callee == nullptr) {
+      return nullptr;
+    }
+    auto result = donkey::lift_function(program.image, program.analysis, *callee);
+    return result.has_value() ? &(lifted[address] = std::move(result.value())) : nullptr;
+  };
+  donkey::IrEvalMemory memory;
+  donkey::IrEvalOptions options;
+  options.architecture = program.image.architecture;
+  options.convention = program.image.architecture == Architecture::AArch64
+                           ? donkey::IrCallingConvention::Aapcs64
+                           : donkey::IrCallingConvention::SysV64;
+  options.callees = &resolve;
+  auto result = donkey::evaluate_ir(function, arguments, memory, options);
+  if (!result.has_value()) {
+    ADD_FAILURE() << result.diagnostic().code << ": " << result.diagnostic().message;
+    return std::nullopt;
+  }
+  return result.value().return_value;
+}
+
+bool has_note_containing(const IrFunction& function, std::string_view text) {
+  for (const std::string& note : function.notes) {
+    if (note.find(text) != std::string::npos) {
+      return true;
+    }
+  }
+  return false;
+}
+
+}  // namespace
+
+TEST(Ir, AnAArch64CallToACompleteCalleeCarriesItsArguments) {
+  const CallProgram program = aarch64_calls();
+  const IrFunction caller = lift_at(program, 0x1000);
+  EXPECT_FALSE(caller.partial) << (caller.notes.empty() ? "" : caller.notes.back());
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  ASSERT_EQ(call->call_arguments.size(), 2U);
+  EXPECT_EQ(donkey::internal::register_family(call->call_arguments[0].reg), "x0");
+  EXPECT_EQ(donkey::internal::register_family(call->call_arguments[1].reg), "x1");
+  EXPECT_EQ(call->dest.reg, "x0");
+  ASSERT_TRUE(donkey::verify_ir(caller).has_value());
+  // caller1(10, 3) = (10 - 3) + 1.
+  EXPECT_EQ(run_with_callees(program, caller, {10, 3}), std::optional<std::uint64_t>(8));
+}
+
+TEST(Ir, AnAArch64TailCallToACompleteCalleeReturnsItsResult) {
+  const CallProgram program = aarch64_calls();
+  const IrFunction tail = lift_at(program, 0x1040);
+  EXPECT_FALSE(tail.partial) << (tail.notes.empty() ? "" : tail.notes.back());
+  EXPECT_TRUE(has_note_containing(tail, "a jump to a known function is lifted as a call"));
+  // tail(10, 3) = (10 + 2) - 3.
+  EXPECT_EQ(run_with_callees(program, tail, {10, 3}), std::optional<std::uint64_t>(9));
+}
+
+TEST(Ir, AnAArch64CallClobbersX30) {
+  // The call resolves, but bl wrote x30: reading it after the call is not the caller's value.
+  const CallProgram program = aarch64_calls();
+  const IrFunction reader = lift_at(program, 0x1060);
+  const IrStatement* call = first_call(reader);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  EXPECT_TRUE(reader.partial);
+  EXPECT_TRUE(has_note_containing(reader, "register x30 is read after a call"));
+}
+
+TEST(Ir, ACalleeThatDoesNotRestoreACalleeSavedRegisterStaysUnresolved) {
+  // AArch64: clobber19 writes x19 and returns. It lifts Complete itself (its own return is sound),
+  // but a call to it does not resolve: the caller's x19 would not survive the call.
+  const CallProgram program = aarch64_calls();
+  const IrFunction clobber19 = lift_at(program, 0x1080);
+  EXPECT_FALSE(clobber19.partial) << (clobber19.notes.empty() ? "" : clobber19.notes.back());
+  const IrFunction caller = lift_at(program, 0x1100);
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_FALSE(call->signature_inferred);
+  EXPECT_TRUE(caller.partial);
+
+  // x86-64: f_16 writes rbx and returns; f_32 saves and restores it. A call to f_16 stays
+  // unresolved, a call to f_32 resolves.
+  //   0x1000: call 0x1010; ret        0x1010: mov rbx, rdi; mov eax, edi; ret
+  //   0x1020: push rbx; mov rbx, rdi; mov eax, ebx; pop rbx; ret
+  //   0x1030: call 0x1020; ret
+  std::vector<std::byte> x86(0x40, std::byte{0xcc});
+  const std::uint8_t bytes[][16] = {
+      {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3},
+      {0x48, 0x89, 0xfb, 0x89, 0xf8, 0xc3},
+      {0x53, 0x48, 0x89, 0xfb, 0x89, 0xd8, 0x5b, 0xc3},
+      {0xe8, 0xeb, 0xff, 0xff, 0xff, 0xc3},
+  };
+  const std::size_t sizes[] = {6, 6, 8, 6};
+  for (std::size_t f = 0; f < 4; ++f) {
+    for (std::size_t i = 0; i < sizes[f]; ++i) {
+      x86[f * 0x10 + i] = static_cast<std::byte>(bytes[f][i]);
+    }
+  }
+  const CallProgram x86_program =
+      analyse_call_program(Architecture::X86_64, x86, {0x1000, 0x1010, 0x1020, 0x1030});
+  const IrFunction clobbering = lift_at(x86_program, 0x1000);
+  const IrStatement* clobbering_call = first_call(clobbering);
+  ASSERT_NE(clobbering_call, nullptr);
+  EXPECT_FALSE(clobbering_call->signature_inferred);
+  EXPECT_TRUE(clobbering.partial);
+  const IrFunction preserving = lift_at(x86_program, 0x1030);
+  const IrStatement* preserving_call = first_call(preserving);
+  ASSERT_NE(preserving_call, nullptr);
+  EXPECT_TRUE(preserving_call->signature_inferred);
+  EXPECT_FALSE(preserving.partial) << (preserving.notes.empty() ? "" : preserving.notes.back());
+  EXPECT_EQ(run_with_callees(x86_program, preserving, {41}), std::optional<std::uint64_t>(41));
+}
+
+TEST(Ir, ACalleeThatLeavesTheStackUnbalancedStaysUnresolved) {
+  // unbalanced returns with sp 16 below its entry value: the caller's sp would be wrong.
+  const CallProgram program = aarch64_calls();
+  // It lifts Complete itself: its own return is sound.
+  const IrFunction unbalanced = lift_at(program, 0x10a0);
+  EXPECT_FALSE(unbalanced.partial) << (unbalanced.notes.empty() ? "" : unbalanced.notes.back());
+  const IrFunction caller = lift_at(program, 0x1120);
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_FALSE(call->signature_inferred);
+  EXPECT_TRUE(caller.partial);
+  const auto reason = donkey::internal::check_frame(unbalanced, Architecture::AArch64,
+                                                    donkey::internal::FrameContract::Callee);
+  ASSERT_TRUE(reason.has_value());
+  EXPECT_NE(reason->find("stack pointer"), std::string::npos) << *reason;
+}
+
+TEST(Ir, AnAArch64FunctionThatReturnsWithAnotherX30IsPartial) {
+  // otherlr: mov x30, x1; ret jumps to x1, not to its caller.
+  const CallProgram program = aarch64_calls();
+  const IrFunction function = lift_at(program, 0x10c0);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "does not see the entry x30"));
+}
+
+TEST(IrEval, AnAArch64NestedCallRunsOnTheCallersStack) {
+  // callstack calls stackcallee, which pushes and pops x0 below the sp it is given: the nested
+  // call must start on the caller's sp (bl pushes nothing), inside the stack region.
+  const CallProgram program = aarch64_calls();
+  const IrFunction caller = lift_at(program, 0x1140);
+  EXPECT_FALSE(caller.partial) << (caller.notes.empty() ? "" : caller.notes.back());
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_TRUE(call->signature_inferred);
+  EXPECT_EQ(run_with_callees(program, caller, {50, 8}), std::optional<std::uint64_t>(42));
+}
+
+TEST(Ir, ACalleeThatComputesWithACallersRegisterStaysUnresolved) {
+  // 0x1000: stp x29, x30, [sp, #-16]!; bl 0x1020; ldp x29, x30, [sp], #16; ret
+  // 0x1020: add x0, x0, x19; ret. The callee's result depends on the caller's x19, which the
+  // interpreter does not pass to a callee: the call must not resolve, though the callee itself
+  // lifts Complete with x19 as an input it reads.
+  const auto data = aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f,
+                                   0xd503201f, 0xd503201f, 0xd503201f, 0x8b130000, 0xd65f03c0});
+  const CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000, 0x1020});
+  const IrFunction caller = lift_at(program, 0x1000);
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  EXPECT_FALSE(call->signature_inferred);
+  EXPECT_TRUE(caller.partial);
+  donkey::LiftOptions raw_options;
+  raw_options.run_passes = false;
+  const donkey::Function* callee = function_at(program.analysis, 0x1020);
+  ASSERT_NE(callee, nullptr);
+  auto raw = donkey::lift_function(program.image, program.analysis, *callee, raw_options);
+  ASSERT_TRUE(raw.has_value());
+  const auto reason = donkey::internal::check_frame(raw.value(), Architecture::AArch64,
+                                                    donkey::internal::FrameContract::Callee);
+  ASSERT_TRUE(reason.has_value());
+  EXPECT_NE(reason->find("the result depends on the entry value of a register that is no argument"),
+            std::string::npos)
+      << *reason;
+}
+
+TEST(Ir, TheFrameCheckFollowsTheCallersBytesThroughAMergedWrite) {
+  // x86-64, after sqlite3Atoi64 at -O2: `sete bl` keeps bytes 1-7 of the caller's rbx, and an `or`
+  // keeps bytes 1-3 of them; only the low byte, which is not the caller's, reaches the result
+  // through movzx. The call resolves. Its twin returns all of ebx, bytes 1-3 of which are the
+  // caller's: it does not.
+  //   0x1000: call 0x1010; ret        0x1030: call 0x1020; ret
+  //   0x1010: push rbx; test edi, edi; sete bl; or ebx, edi; movzx eax, bl; pop rbx; ret
+  //   0x1020: push rbx; test edi, edi; sete bl; or ebx, edi; mov eax, ebx;  pop rbx; ret
+  std::vector<std::byte> x86(0x40, std::byte{0xcc});
+  const std::vector<std::vector<std::uint8_t>> bytes = {
+      {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3},
+      {0x53, 0x85, 0xff, 0x0f, 0x94, 0xc3, 0x09, 0xfb, 0x0f, 0xb6, 0xc3, 0x5b, 0xc3},
+      {0x53, 0x85, 0xff, 0x0f, 0x94, 0xc3, 0x09, 0xfb, 0x89, 0xd8, 0x5b, 0xc3},
+      {0xe8, 0xeb, 0xff, 0xff, 0xff, 0xc3},
+  };
+  for (std::size_t f = 0; f < bytes.size(); ++f) {
+    for (std::size_t i = 0; i < bytes[f].size(); ++i) {
+      x86[f * 0x10 + i] = static_cast<std::byte>(bytes[f][i]);
+    }
+  }
+  const CallProgram program =
+      analyse_call_program(Architecture::X86_64, x86, {0x1000, 0x1010, 0x1020, 0x1030});
+  const IrFunction clean = lift_at(program, 0x1000);
+  const IrStatement* clean_call = first_call(clean);
+  ASSERT_NE(clean_call, nullptr);
+  EXPECT_TRUE(clean_call->signature_inferred);
+  EXPECT_FALSE(clean.partial) << (clean.notes.empty() ? "" : clean.notes.back());
+  // (edi == 0) | (edi & 0xff).
+  EXPECT_EQ(run_with_callees(program, clean, {0}), std::optional<std::uint64_t>(1));
+  EXPECT_EQ(run_with_callees(program, clean, {5}), std::optional<std::uint64_t>(5));
+  EXPECT_EQ(run_with_callees(program, clean, {0x100}), std::optional<std::uint64_t>(0));
+  const IrFunction mixed = lift_at(program, 0x1030);
+  const IrStatement* mixed_call = first_call(mixed);
+  ASSERT_NE(mixed_call, nullptr);
+  EXPECT_FALSE(mixed_call->signature_inferred);
+  EXPECT_TRUE(mixed.partial);
+}
+
 TEST(Ir, UnresolvedTailCallsAreInTheCallCensus) {
   // f0 (0x1000): test edi, edi; je f1; test esi, esi; je f1; mov eax, 1; ret.
   // f1 (0x1020): cpuid; ret (not lifted, so no call to it resolves).  f2 (0x1030): jmp f1.
@@ -7670,4 +7989,191 @@ TEST(Ir, UnresolvedTailCallsAreInTheCallCensus) {
   ASSERT_EQ(import_stub.value().unresolved_calls.size(), 1U);
   EXPECT_EQ(import_stub.value().unresolved_calls[0].kind, donkey::IrUnresolvedCall::Kind::Import);
   EXPECT_EQ(import_stub.value().unresolved_calls[0].name, "free");
+}
+
+TEST(Ir, ACalleeThatReadsItsReturnAddressStaysUnresolved) {
+  // x86-64: 0x1010 returns the word at its entry rsp, its caller's return address, which a nested
+  // call in the interpreter does not have. A call to it must not resolve.
+  //   0x1000: call 0x1010; ret        0x1010: mov rax, [rsp]; ret
+  std::vector<std::byte> x86(0x20, std::byte{0xcc});
+  const std::uint8_t caller[] = {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3};
+  const std::uint8_t callee[] = {0x48, 0x8b, 0x04, 0x24, 0xc3};
+  for (std::size_t i = 0; i < sizeof(caller); ++i) {
+    x86[i] = static_cast<std::byte>(caller[i]);
+  }
+  for (std::size_t i = 0; i < sizeof(callee); ++i) {
+    x86[0x10 + i] = static_cast<std::byte>(callee[i]);
+  }
+  const CallProgram program = analyse_call_program(Architecture::X86_64, x86, {0x1000, 0x1010});
+  const IrFunction function = lift_at(program, 0x1000);
+  const IrStatement* call = first_call(function);
+  ASSERT_NE(call, nullptr);
+  EXPECT_FALSE(call->signature_inferred);
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, AnAArch64RetThroughAnotherRegisterIsPartial) {
+  // add x0, x0, #1; ret x1: jumps to x1, not to the caller.
+  const auto data = aarch64_bytes({0x91000400, 0xd65f0020});
+  const CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000});
+  const IrFunction function = lift_at(program, 0x1000);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "jumps to a register other than x30"));
+  // A plain ret stays Complete.
+  const auto plain = aarch64_bytes({0x91000400, 0xd65f03c0});
+  const CallProgram plain_program = analyse_call_program(Architecture::AArch64, plain, {0x1000});
+  EXPECT_FALSE(lift_at(plain_program, 0x1000).partial);
+}
+
+namespace {
+
+/// A second AArch64 program, assembled with GNU as (offsets from 0x1000):
+///   0x000 caller:      stp x29, x30, [sp, #-16]!; bl storer; ldp x29, x30, [sp], #16; ret
+///   0x020 storer:      str w0, [x0]; mov w0, #1; ret
+///   0x040 carrier:     cmp x0, #0; adcs x9, x19, xzr; cset w0, cs; ret
+///   0x060 callcarrier: stp x29, x30, [sp, #-16]!; bl carrier; ldp x29, x30, [sp], #16; ret
+///   0x080 deadsave:    stp x29, x30, [sp, #-16]!; add sp, sp, #16; bl leaf; sub sp, sp, #16;
+///                      ldp x29, x30, [sp], #16; ret
+///   0x0a0 leaf:        mov w0, #3; ret
+CallProgram aarch64_second_program() {
+  return analyse_call_program(
+      Architecture::AArch64,
+      aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xb9000000, 0x52800020, 0xd65f03c0, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f, 0xf100001f, 0xba1f0269,
+                     0x1a9f37e0, 0xd65f03c0, 0xd503201f, 0xd503201f, 0xd503201f, 0xd503201f,
+                     0xa9bf7bfd, 0x97fffff7, 0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f,
+                     0xd503201f, 0xd503201f, 0xa9bf7bfd, 0x910043ff, 0x94000006, 0xd10043ff,
+                     0xa8c17bfd, 0xd65f03c0, 0xd503201f, 0xd503201f, 0x52800060, 0xd65f03c0}),
+      {0x1000, 0x1020, 0x1040, 0x1060, 0x1080, 0x10a0});
+}
+
+/// x86-64 functions at the given offsets from 0x1000, with a symbol at each.
+CallProgram x86_program(
+    const std::vector<std::pair<std::uint64_t, std::vector<std::uint8_t>>>& functions) {
+  std::size_t size = 0;
+  for (const auto& [offset, bytes] : functions) {
+    size = std::max<std::size_t>(size, offset + bytes.size());
+  }
+  std::vector<std::byte> data(size + 0x10, std::byte{0xcc});
+  CallProgram program;
+  for (const auto& [offset, bytes] : functions) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+      data[offset + i] = static_cast<std::byte>(bytes[i]);
+    }
+  }
+  program.data = data;
+  program.image = synthetic_image(data.size());
+  for (const auto& [offset, bytes] : functions) {
+    donkey::Symbol symbol;
+    symbol.name = "f_" + std::to_string(offset);
+    symbol.address = 0x1000 + offset;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    program.image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(program.image, program.data);
+  EXPECT_TRUE(analyzed.has_value());
+  if (analyzed.has_value()) {
+    program.analysis = std::move(analyzed.value());
+  }
+  return program;
+}
+
+bool call_resolves(const CallProgram& program, std::uint64_t caller) {
+  const IrFunction function = lift_at(program, caller);
+  const IrStatement* call = first_call(function);
+  return call != nullptr && call->signature_inferred;
+}
+
+}  // namespace
+
+TEST(Ir, AnArgumentUsedAsAnAddressIsPassedWhole) {
+  // storer stores w0 through x0: x0 is read as a 4-byte value and as an 8-byte address. Its
+  // parameter, and the caller's argument, must be all of x0, or the address is truncated.
+  const CallProgram program = aarch64_second_program();
+  const IrFunction storer = lift_at(program, 0x1020);
+  ASSERT_GE(storer.parameters.size(), 1U);
+  EXPECT_EQ(storer.parameters[0].width, 8U);
+  const IrFunction caller = lift_at(program, 0x1000);
+  const IrStatement* call = first_call(caller);
+  ASSERT_NE(call, nullptr);
+  ASSERT_TRUE(call->signature_inferred);
+  ASSERT_GE(call->call_arguments.size(), 1U);
+  EXPECT_EQ(call->call_arguments[0].width, 8U);
+}
+
+TEST(Ir, AFlagSettingAdditionOfACallersRegisterStaysUnresolved) {
+  // carrier's result is the carry of x19 + 0 + C: it depends on the caller's x19 through NZCV.
+  EXPECT_FALSE(call_resolves(aarch64_second_program(), 0x1060));
+}
+
+TEST(Ir, ACallForgetsTheSlotsBelowTheStackPointer) {
+  // deadsave saves x30, frees its frame, calls leaf (which may use that memory), takes the frame
+  // back and reloads x30 from it: the reload is not the saved value, so its return is unsound.
+  const IrFunction function = lift_at(aarch64_second_program(), 0x1080);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "does not see the entry x30"));
+}
+
+TEST(Ir, AnExtendingLoadOfASavedRegisterIsTheCallersValue) {
+  // x86-64: 0x1010 is push rbx; movzx eax, byte [rsp]; pop rbx; ret: its result is the
+  // caller's bl.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},        // call 0x1010; ret
+      {0x10, {0x53, 0x0f, 0xb6, 0x04, 0x24, 0x5b, 0xc3}},  // the callee
+  });
+  EXPECT_FALSE(call_resolves(program, 0x1000));
+}
+
+TEST(Ir, ACallThatPushesOverTheEntryReturnAddressStaysUnresolved) {
+  // x86-64: 0x1010 is add rsp, 8; call 0x1030; sub rsp, 8; mov eax, 1; ret. The call's push
+  // writes the word its own return address was in, so its ret goes back into itself, not to its
+  // caller. Its own call to 0x1030 resolves; a call to it does not.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},  // call 0x1010; ret
+      {0x10,
+       {0x48, 0x83, 0xc4, 0x08, 0xe8, 0x17, 0x00, 0x00, 0x00, 0x48, 0x83, 0xec, 0x08, 0xb8, 0x01,
+        0x00, 0x00, 0x00, 0xc3}},
+      {0x30, {0x31, 0xc0, 0xc3}},  // xor eax, eax; ret
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1010));
+  EXPECT_FALSE(call_resolves(program, 0x1000));
+}
+
+TEST(Ir, ANarrowLoadOfASlotStoredAgainIsTheNewValue) {
+  // x86-64: 0x1010 is push rbx; pop rbx; push rdi; mov eax, [rsp]; pop rdi; ret. The second
+  // push replaces the slot that held the caller's rbx: the load reads rdi's low half, an argument.
+  const CallProgram program = x86_program({
+      {0x00, {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3}},              // call 0x1010; ret
+      {0x10, {0x53, 0x5b, 0x57, 0x8b, 0x04, 0x24, 0x5f, 0xc3}},  // the callee
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1000));
+}
+
+TEST(Ir, BytesACalleeLeftBelowTheStackPointerAreNotTheCallersArguments) {
+  // x86-64: 0x1000 is push rbx; mov rbx, rdi; call 0x1020; mov rax, [rsp-16]; pop rbx; ret. The
+  // leaf at 0x1020 pushes rbx (holding rdi) where the load reads, so the result is rdi natively,
+  // but a nested leaf in the interpreter saves its own rbx. A call to 0x1000 must not resolve.
+  const CallProgram program = x86_program({
+      {0x00,
+       {0x53, 0x48, 0x89, 0xfb, 0xe8, 0x17, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x44, 0x24, 0xf0, 0x5b,
+        0xc3}},
+      {0x20, {0x53, 0x31, 0xc0, 0x5b, 0xc3}},        // push rbx; xor eax, eax; pop rbx; ret
+      {0x40, {0xe8, 0xbb, 0xff, 0xff, 0xff, 0xc3}},  // call 0x1000; ret
+  });
+  EXPECT_TRUE(call_resolves(program, 0x1000));  // the leaf itself resolves
+  EXPECT_FALSE(call_resolves(program, 0x1040));
+}
+
+TEST(Ir, BytesBelowTheStackPointerAfterACallAreOnlyACalleesConcern) {
+  // AArch64: 0x1000 is stp x29, x30, [sp, #-16]!; bl 0x1020; sub x9, sp, #16; ldr x0, [x9];
+  // ldp x29, x30, [sp], #16; ret. It reads what the leaf left below sp. That only matters when a
+  // call to it is resolved; its own lift is checked for its return, not for the caller's bytes.
+  const auto data = aarch64_bytes({0xa9bf7bfd, 0x94000007, 0xd10043e9, 0xf9400120, 0xa8c17bfd,
+                                   0xd65f03c0, 0xd503201f, 0xd503201f, 0x52800060, 0xd65f03c0});
+  const CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000, 0x1020});
+  const IrFunction function = lift_at(program, 0x1000);
+  EXPECT_FALSE(has_note_containing(function, "depends on the entry value"));
+  EXPECT_FALSE(function.partial) << (function.notes.empty() ? "" : function.notes.back());
 }

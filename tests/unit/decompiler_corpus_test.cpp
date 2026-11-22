@@ -783,6 +783,31 @@ TEST(DecompilerCorpus, CompleteResultsAgreeWithTheCompiledCode) {
     EXPECT_EQ(checked, 44U);
   }
 #endif
+#if defined(__aarch64__) || defined(_M_ARM64)
+  {
+    bool gcc13_linux = false;
+#if defined(__linux__)
+    gcc13_linux = std::strstr(DONKEY_CORPUS_COMPILER, "GNU 13") != nullptr;
+#endif
+    // AArch64 calls (G21-T1/T2 for AAPCS64): every call-heavy function, the tail calls of -O2 and
+    // -O3 among them, resolves and agrees with the compiled code. Measured under GCC 13.3 on Linux
+    // AArch64 (qemu-aarch64 and native) at every level; before AArch64 call summaries all were
+    // Partial.
+    if (gcc13_linux && host_convention() == donkey::IrCallingConvention::Aapcs64) {
+      std::size_t seen = 0;
+      for (const Outcome& o : outcomes) {
+        if (o.function.rfind("c_call_", 0) != 0) {
+          continue;
+        }
+        ++seen;
+        EXPECT_EQ(o.lift, "Complete") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.verdict, "verified") << o.level << " " << o.function << ": " << o.detail;
+        EXPECT_EQ(o.vectors, kVectorCount) << o.level << " " << o.function;
+      }
+      EXPECT_GT(seen, 0U) << "the call-heavy functions are missing from the corpus";
+    }
+  }
+#endif
 }
 
 // A corpus library is a shared library: without the program that loads it, where its imports bind
@@ -1022,8 +1047,9 @@ TEST(DecompilerCorpus, StatementPassesShortenThePseudocode) {
       donkey::IrFunction piped = raw.value();
       donkey::run_ir_passes(piped, pass_options);
       // The call-clobber check runs after the passes in lift_function, so it runs here too.
-      if (loaded.value().image.architecture == donkey::Architecture::X86_64) {
-        donkey::internal::check_call_clobbers(piped);
+      if (loaded.value().image.architecture == donkey::Architecture::X86_64 ||
+          loaded.value().image.architecture == donkey::Architecture::AArch64) {
+        donkey::internal::check_call_clobbers(piped, loaded.value().image.architecture);
       }
 
       // Statement lines: the lines of the body that hold a C statement. Headers, notes,
@@ -1120,8 +1146,9 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
       donkey::IrFunction piped = raw.value();
       donkey::run_ir_passes(piped, pass_options);
       // The call-clobber check runs after the passes in lift_function, so it runs here too.
-      if (loaded.value().image.architecture == donkey::Architecture::X86_64) {
-        donkey::internal::check_call_clobbers(piped);
+      if (loaded.value().image.architecture == donkey::Architecture::X86_64 ||
+          loaded.value().image.architecture == donkey::Architecture::AArch64) {
+        donkey::internal::check_call_clobbers(piped, loaded.value().image.architecture);
       }
 
       std::vector<std::string> passes;
@@ -1156,12 +1183,13 @@ TEST(DecompilerCorpus, EveryPassPreservesSemantics) {
 // call-heavy corpus function with such an addition is checked, and at least one must exist. Calls
 // resolve under System V only, so on a Win64 host the test is skipped.
 TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
-#if !(defined(__x86_64__) || defined(_M_X64))
-  GTEST_SKIP() << "calls are resolved on x86-64 only";
+#if !(defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64))
+  GTEST_SKIP() << "calls are resolved on x86-64 and AArch64 only";
 #endif
-  if (host_convention() != donkey::IrCallingConvention::SysV64) {
-    GTEST_SKIP() << "calls are resolved under the System V convention only (G21-T1): the host's "
-                    "corpus is Win64, where every call with arguments stays unresolved";
+  if (host_convention() != donkey::IrCallingConvention::SysV64 &&
+      host_convention() != donkey::IrCallingConvention::Aapcs64) {
+    GTEST_SKIP() << "calls are resolved under the System V and AAPCS64 conventions only (G21-T1): "
+                    "the host's corpus is Win64, where every call with arguments stays unresolved";
   }
   std::size_t checked = 0;
   for (const Library& library : kLibraries) {
@@ -1187,6 +1215,9 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
           donkey::lift_function(loaded.value().image, analysis.value(), *function, raw_options);
       ASSERT_TRUE(raw.has_value());
       donkey::IrFunction broken = raw.value();
+      // The result register of the architecture: an addition into it after a resolved call.
+      const std::string result_family =
+          loaded.value().image.architecture == donkey::Architecture::AArch64 ? "x0" : "rax";
       bool after_call = false;
       bool changed = false;
       for (donkey::IrBlock& block : broken.blocks) {
@@ -1195,7 +1226,7 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
             after_call = true;
           } else if (after_call && !changed && statement.op == donkey::IrOp::Add &&
                      statement.dest.kind == donkey::IrOperandKind::Register &&
-                     donkey::internal::register_family(statement.dest.reg) == "rax") {
+                     donkey::internal::register_family(statement.dest.reg) == result_family) {
             statement.op = donkey::IrOp::Sub;
             changed = true;
           }
@@ -1212,7 +1243,8 @@ TEST(DecompilerCorpus, EveryPassCheckRejectsAChangedMeaningAfterACall) {
       ++checked;
     }
   }
-  EXPECT_GT(checked, 0U) << "no resolved call followed by an addition into rax in the corpus";
+  EXPECT_GT(checked, 0U) << "no resolved call followed by an addition into the result register in "
+                            "the corpus";
 }
 
 // The checker must not be vacuous: a pass that turns the first addition of

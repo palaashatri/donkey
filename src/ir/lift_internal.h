@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <optional>
+#include <set>
+#include <string>
+
 #include "donkey/ir/lift.h"
 
 namespace donkey::internal {
@@ -18,8 +23,37 @@ void canonicalise_registers(IrFunction& function, Architecture architecture);
 
 /// Checks that no caller-saved register is read after a call without the call defining it (G21-T1),
 /// and marks the function partial when one is (see lift.cpp). The lifter runs it after the passes
-/// on x86-64 functions; the corpus test runs it on its replayed passes, so both see the same IR.
-void check_call_clobbers(IrFunction& function);
+/// on x86-64 and AArch64 functions, with the caller-saved set of the architecture; the corpus test
+/// runs it on its replayed passes, so both see the same IR.
+void check_call_clobbers(IrFunction& function, Architecture architecture = Architecture::X86_64);
+
+/// The registers a call may change under System V x86-64 (rax, rcx, rdx, rsi, rdi, r8-r11 and
+/// xmm0-xmm15, which hold every Win64 caller-saved register too) and under AAPCS64 (x0-x18, x30,
+/// v0-v7 and v16-v31; v8-v15 keep their low 64 bits), as register families.
+std::set<std::string> sysv_caller_saved_families();
+std::set<std::string> aapcs64_caller_saved_families();
+
+/// What `check_frame` asks of a function's returns. `Own`: on AArch64, that `ret` jumps back to the
+/// caller (x30 holds its entry value). `Callee`: also what a caller relies on when a call to the
+/// function resolves: the stack pointer and every callee-saved register hold their entry values,
+/// and on x86-64 no store writes the return address.
+enum class FrameContract : std::uint8_t { Own, Callee };
+
+/// The frame check (G21, see frame_check.cpp): a forward dataflow over `function` (lifted without
+/// passes, registers canonicalised) that follows entry values through registers and stack slots.
+/// Returns the reason when some return does not meet `contract`, or nullopt when every one does.
+/// x86-64 and AArch64 only.
+[[nodiscard]] std::optional<std::string> check_frame(const IrFunction& function,
+                                                     Architecture architecture,
+                                                     FrameContract contract);
+
+/// G21-T2 for the AArch64 lifter: when `instruction` is a direct call (or tail call) to a function
+/// of the image whose call summary resolves, gives `statement` the callee's arguments, its result
+/// in all of the result register, `signature_inferred` and the callee's write set, and returns
+/// true. Otherwise leaves `statement` as it is and returns false.
+bool resolve_known_call(const BinaryImage& image, const AnalysisResult& analysis,
+                        const LiftOptions& options, const Instruction& instruction,
+                        IrStatement& statement);
 
 /// Keeps the blocks reachable from the function's entry, puts a trampoline in front of an entry
 /// that is not block 0, and notes the blocks left out. Returns false when nothing changed. See

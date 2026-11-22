@@ -159,6 +159,7 @@ add_library(donkey_ir STATIC
   src/ir/ir.cpp
   src/ir/lift.cpp
   src/ir/lift_aarch64.cpp
+  src/ir/frame_check.cpp
   src/ir/canonical.cpp
   src/ir/debug_names.cpp
   src/ir/local_names.cpp

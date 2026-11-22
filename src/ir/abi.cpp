@@ -122,8 +122,25 @@ std::optional<std::uint8_t> width_of(const std::vector<Alias>& aliases, const st
   return std::nullopt;
 }
 
-/// The width at which `statement` reads register `name`, or 8 when it does not say.
+/// The width at which `statement` reads register `name`, or 8 when it does not say. A register a
+/// memory operand's address is computed from is read whole, whatever width another operand of the
+/// statement reads it at (`str w0, [x0]` reads all of x0).
 std::uint8_t read_width(const IrStatement& statement, const std::string& name) {
+  const std::string family = internal::register_family(name);
+  for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c, &statement.dest}) {
+    if (operand->kind == IrOperandKind::Memory &&
+        ((!operand->reg.empty() && internal::register_family(operand->reg) == family) ||
+         (!operand->index.empty() && internal::register_family(operand->index) == family))) {
+      return 8;
+    }
+  }
+  for (const IrOperand& argument : statement.call_arguments) {
+    if (argument.kind == IrOperandKind::Memory &&
+        ((!argument.reg.empty() && internal::register_family(argument.reg) == family) ||
+         (!argument.index.empty() && internal::register_family(argument.index) == family))) {
+      return 8;
+    }
+  }
   for (const IrOperand* operand : {&statement.a, &statement.b, &statement.c}) {
     if (operand->kind == IrOperandKind::Register && operand->reg == name && operand->width != 0) {
       return operand->width;

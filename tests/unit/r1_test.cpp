@@ -198,20 +198,34 @@ TEST(R1, CountsUnresolvedCalls) {
         {"address": "0x30", "status": "Partial", "notes": [")" +
       note + R"(", "jump leaves the function; treated as a tail call"],
          "unresolved_calls": [{"address": "0x31", "kind": "indirect"}]},
-        {"address": "0x40", "status": "Complete", "notes": [], "unresolved_calls": []}]})";
+        {"address": "0x40", "status": "Complete", "notes": [], "unresolved_calls": []},
+        {"address": "0x50", "status": "Partial", "notes": [")" +
+      note +
+      R"(", "register x0 is read after a call that does not define it; the value is not the caller's, so the function is not Complete"],
+         "unresolved_calls": [{"address": "0x51", "kind": "aarch64"}]},
+        {"address": "0x60", "status": "Partial", "notes": ["jump leaves the function; treated as a tail call"],
+         "unresolved_calls": [{"address": "0x61", "kind": "same_image"}]},
+        {"address": "0x70", "status": "Partial", "notes": [")" +
+      note + R"(", "statement limit reached"],
+         "unresolved_calls": [{"address": "0x71", "kind": "import", "name": "free"}]}]})";
   auto measured = donkey::r1::measure_decompile("b", text);
   ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
   const auto& m = measured.value();
   EXPECT_TRUE(m.has_call_census);
   EXPECT_EQ(m.calls_by_kind, (std::map<std::string, std::size_t>{{"aarch64_import", 1},
-                                                                 {"aarch64_other", 1},
-                                                                 {"import", 1},
+                                                                 {"aarch64_other", 2},
+                                                                 {"import", 2},
                                                                  {"indirect", 1},
-                                                                 {"same_image", 1}}));
-  EXPECT_EQ(m.call_only_partial, 2U);
+                                                                 {"same_image", 2}}));
+  // A tail call's note and the clobber check's read of a register after an unresolved call are
+  // reasons an unresolved call gives: 0x30, 0x50 and 0x60 count. 0x70 has a reason of its own.
+  EXPECT_EQ(m.call_only_partial, 5U);
   EXPECT_EQ(m.call_only_by_kinds,
             (std::map<std::string, std::size_t>{{"aarch64_import+aarch64_other", 1},
-                                                {"import+same_image", 1}}));
+                                                {"aarch64_other", 1},
+                                                {"import+same_image", 1},
+                                                {"indirect", 1},
+                                                {"same_image", 1}}));
   EXPECT_EQ(m.call_only_imports, (std::map<std::string, std::size_t>{{"memset", 2}}));
   // Output from a CLI before the census has no unresolved_calls arrays.
   auto older = donkey::r1::measure_decompile(
@@ -250,6 +264,12 @@ TEST(R1, NormalisesNotes) {
       "x86-32 subset; register aliases are not canonicalised, cdecl stack arguments are not "
       "recovered and locals are not recovered"));
   EXPECT_FALSE(donkey::r1::is_generic_note("jump leaves the function; treated as a tail call"));
+  // A resolved tail call says how it was lifted, not why the function is Partial.
+  EXPECT_TRUE(donkey::r1::is_generic_note(
+      "a jump to a known function is lifted as a call with its inferred arguments and result, "
+      "followed by a return"));
+  EXPECT_TRUE(donkey::r1::is_generic_note(
+      "a jump to a C library function is lifted as a call of its model, followed by a return"));
 }
 
 TEST(R1, ComparesStarts) {

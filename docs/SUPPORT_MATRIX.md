@@ -135,7 +135,8 @@ What these tests prove, beyond the state of `main` at `1a92abf`.
   structure is checked edge by edge against the IR before it is shown (no candidate was refused on the
   sample). The gotos are the open part: most go to a block that is already printed (shared joins and
   short-circuit conditions; `docs/AUDIT.md`, W1 and W1b).
-- Not done: AArch64 calls (Partial); calls to other images; Windows x64 calls with arguments; .xdata and ARM64
+- Not done: AArch64 calls of imports (Partial; no C library model applies on AArch64 yet); calls to other images;
+  Windows x64 calls with arguments; .xdata and ARM64
   unwind; structured output without gotos for the 913 functions that G04-T5 prints with gotos.
 
 | Platform | Packages | Desktop app | CLI | Native debugger |
@@ -212,7 +213,8 @@ builds, at -O0 and -O2, for x86-64 and AArch64, plus a static `lua` linked with 
 as a stripped copy. Every function was decompiled, not a sample, with `tools/r1/decompile.cmake`
 (`donkey-cli decompile --json --no-pseudocode`), and counted with `donkey-r1 measure` (G20-T2). The decompiler
 was that of `main` at `3530b46` (after the init and fini seeds of G24 and the Mach-O header fix); the change that
-adds the measurement adds JSON fields only.
+adds the measurement adds JSON fields only. The AArch64 counts and the table below are measured again with AArch64
+call resolution (G21-T1/T2 for AAPCS64); the x86-64 counts and the starts did not change.
 
 These are counted results, not verified ones: a Complete function here has not been executed. The execution
 comparison on R1 is G20-T4.
@@ -233,7 +235,8 @@ and pull request. It fails when any of these gets worse than the base commit's b
 Unstripped builds, totals:
 
 - x86-64: 1,269 of 8,406 functions are Complete (15.1%).
-- AArch64: 839 of 7,450 functions are Complete (11.3%).
+- AArch64: 1,086 of 7,450 functions are Complete (14.6%). It was 839 (11.3%) before AArch64 calls to
+  same-image callees resolved (G21-T1/T2 for AAPCS64, measured on `main` at `c655bdf` with that change).
 - No function is Unsupported or InvalidIR, and no run failed.
 - Every Partial function of an unstripped build names at least one reason. One Partial function of the stripped
   static musl build names none.
@@ -255,28 +258,28 @@ Stripped builds, against the function symbols of their unstripped twins (`STT_FU
 | `libz-x86_64-glibc-O0.so.stripped` | 206 | 58 | 148 | 0 | 0 | 157 of 158 (1 missed; 49 stubs, 0 extra) |
 | `libz-x86_64-glibc-O2.so` | 185 | 40 | 145 | 0 | 0 |  |
 | `libz-x86_64-glibc-O2.so.stripped` | 184 | 40 | 144 | 0 | 0 | 135 of 136 (1 missed; 49 stubs, 0 extra) |
-| `libz-aarch64-glibc-O0.so` | 208 | 36 | 172 | 0 | 0 |  |
-| `libz-aarch64-glibc-O0.so.stripped` | 208 | 36 | 172 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
-| `libz-aarch64-glibc-O2.so` | 186 | 27 | 159 | 0 | 0 |  |
-| `libz-aarch64-glibc-O2.so.stripped` | 186 | 27 | 159 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O0.so` | 208 | 58 | 150 | 0 | 0 |  |
+| `libz-aarch64-glibc-O0.so.stripped` | 208 | 58 | 150 | 0 | 0 | 159 of 159 (0 missed; 49 stubs, 0 extra) |
+| `libz-aarch64-glibc-O2.so` | 186 | 31 | 155 | 0 | 0 |  |
+| `libz-aarch64-glibc-O2.so.stripped` | 186 | 31 | 155 | 0 | 0 | 137 of 137 (0 missed; 49 stubs, 0 extra) |
 | `lua-x86_64-glibc-O0` | 1178 | 174 | 1004 | 0 | 0 |  |
 | `lua-x86_64-glibc-O0.stripped` | 1177 | 174 | 1003 | 0 | 0 | 1086 of 1087 (1 missed; 91 stubs, 0 extra) |
 | `lua-x86_64-glibc-O2` | 794 | 77 | 717 | 0 | 0 |  |
 | `lua-x86_64-glibc-O2.stripped` | 793 | 77 | 716 | 0 | 0 | 703 of 704 (1 missed; 90 stubs, 0 extra) |
-| `lua-aarch64-glibc-O0` | 1180 | 110 | 1070 | 0 | 0 |  |
-| `lua-aarch64-glibc-O0.stripped` | 1180 | 110 | 1070 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
-| `lua-aarch64-glibc-O2` | 790 | 49 | 741 | 0 | 0 |  |
-| `lua-aarch64-glibc-O2.stripped` | 790 | 49 | 741 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
+| `lua-aarch64-glibc-O0` | 1180 | 177 | 1003 | 0 | 0 |  |
+| `lua-aarch64-glibc-O0.stripped` | 1180 | 177 | 1003 | 0 | 0 | 1088 of 1088 (0 missed; 92 stubs, 0 extra) |
+| `lua-aarch64-glibc-O2` | 790 | 58 | 732 | 0 | 0 |  |
+| `lua-aarch64-glibc-O2.stripped` | 790 | 58 | 732 | 0 | 0 | 699 of 699 (0 missed; 91 stubs, 0 extra) |
 | `lua-static-musl-x86_64-musl-O2` | 988 | 125 | 863 | 0 | 0 |  |
 | `lua-static-musl-x86_64-musl-O2.stripped` | 923 | 113 | 810 | 0 | 1 | 920 of 985 (65 missed; 0 stubs, 3 extra) |
 | `sqlite3-x86_64-glibc-O0` | 3067 | 584 | 2483 | 0 | 0 |  |
 | `sqlite3-x86_64-glibc-O0.stripped` | 3066 | 584 | 2482 | 0 | 0 | 2974 of 2975 (1 missed; 92 stubs, 0 extra) |
 | `sqlite3-x86_64-glibc-O2` | 1987 | 211 | 1776 | 0 | 0 |  |
 | `sqlite3-x86_64-glibc-O2.stripped` | 1986 | 211 | 1775 | 0 | 0 | 1893 of 1894 (1 missed; 93 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O0` | 3097 | 448 | 2649 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 448 | 2649 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
-| `sqlite3-aarch64-glibc-O2` | 1989 | 169 | 1820 | 0 | 0 |  |
-| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 169 | 1820 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O0` | 3097 | 583 | 2514 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O0.stripped` | 3097 | 583 | 2514 | 0 | 0 | 2987 of 2987 (0 missed; 110 stubs, 0 extra) |
+| `sqlite3-aarch64-glibc-O2` | 1989 | 179 | 1810 | 0 | 0 |  |
+| `sqlite3-aarch64-glibc-O2.stripped` | 1989 | 179 | 1810 | 0 | 0 | 1878 of 1878 (0 missed; 111 stubs, 0 extra) |
 
 The 20 most frequent first reasons of Partial functions, over the unstripped builds. A reason is the first
 note that is not one every function carries; when the lifter gave none, it is the first instruction that was
@@ -284,26 +287,26 @@ not lifted.
 
 | Partial functions | First reason |
 |---|---|
-| 9793 | outgoing call arguments and return values follow no modelled ABI |
-| 1863 | jump leaves the function; treated as a tail call |
+| 9526 | outgoing call arguments and return values follow no modelled ABI |
+| 1880 | jump leaves the function; treated as a tail call |
 | 1646 | fs- or gs-relative memory (thread-local storage) is not modelled |
-| 144 | the returned register is not determined by the definitions that reach the return; rax is assumed |
-| 93 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
+| 147 | the returned register is not determined by the definitions that reach the return; rax is assumed |
+| 94 | the returned register is not determined by the definitions that reach the return; x0 is assumed |
 | 62 | floating-point results assume the MXCSR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
-| 29 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
+| 30 | floating-point results assume the FPCR rounding mode is round to nearest; a caller may set another mode, which is not modelled |
 | 20 | conditional branch depends on flags this lifter does not model |
-| 15 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
+| 17 | conditional branch depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
 | 15 | unsupported instruction 'syscall' |
-| 13 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
+| 14 | both x0 and v0 are written on a path to this return; which one carries the return value is not determined, so x0 is assumed |
 | 12 | both rax and xmm0 are written on a path to this return; which one carries the return value is not determined, so rax is assumed |
-| 8 | unsupported instruction 'ldurb' |
-| 6 | a jump to a known function is lifted as a call with its inferred arguments and result, followed by a return |
-| 6 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
-| 4 | a jump to a C library function is lifted as a call of its model, followed by a return |
+| 10 | unsupported instruction 'ldurb' |
+| 7 | conditional select depends on flags not set by a modelled cmp/tst/subs/ands in the same block |
 | 2 | bsf and bsr with a zero source leave the destination undefined; that case is not modelled |
 | 2 | integer and floating-point parameters are both present; their order in the source is not recoverable from the registers, so the signature is Partial |
 | 2 | unsupported instruction 'ldurh' |
+| 2 | unsupported instruction 'movdqa' |
 | 1 | 'cmovg' reads flags this lifter does not model |
+| 1 | conditional jump leaves the function; treated as a tail call |
 
 ### Call census (G21)
 
@@ -320,64 +323,72 @@ is a call site too; the jump of an import stub through its own slot is not. The 
   reads a stack argument, is on a cycle, or is deeper than eight levels);
 - `indirect`: a call through a register or memory that is no import slot;
 - `unknown_target`: a direct call of an address that is no function;
-- on AArch64, where no call is resolved yet, `aarch64_import` for a call of an import stub and
-  `aarch64_other` for any other call.
+- on AArch64, `aarch64_import` for an unresolved call of an import stub (no C library model applies on
+  AArch64 yet) and `aarch64_other` for any other unresolved call (a same-image callee whose summary did not
+  resolve, for the reasons above, or a call through a register).
 
-Measured with this census on `main` at `c655bdf`:
+A Partial function counts as Partial only because of calls when every specific reason it gives comes from an
+unresolved call: the call note, a tail call's note, or the clobber check's read of a register after a call that
+does not define it. Measured with AArch64 calls resolved (G21-T1/T2 for AAPCS64) on `main` at `922a18a`. Before
+them, on the same bytes, 4,452 functions were Partial only because of calls, 2,471 of them AArch64.
 
 Unresolved calls by kind of target (unstripped binaries):
 
 | Calls | Kind of target |
 |---|---|
-| 36409 | aarch64_other |
-| 31622 | same_image |
+| 31998 | aarch64_other |
+| 31624 | same_image |
 | 4567 | aarch64_import |
 | 3237 | import |
 | 1765 | indirect |
 | 4 | import_slot |
 | 1 | unknown_target |
 
-3044 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
+4310 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
 
 | Functions | Kinds of target |
 |---|---|
-| 1603 | aarch64_other |
-| 781 | aarch64_import+aarch64_other |
-| 491 | same_image |
-| 87 | aarch64_import |
-| 36 | indirect |
-| 20 | indirect+same_image |
-| 15 | import |
-| 11 | import+same_image |
+| 1566 | same_image |
+| 1480 | aarch64_other |
+| 725 | aarch64_import+aarch64_other |
+| 140 | import+same_image |
+| 125 | aarch64_import |
+| 116 | indirect+same_image |
+| 72 | import |
+| 59 | indirect |
+| 19 | import+indirect |
+| 8 | import+indirect+same_image |
 
 The 20 imports those functions call most (a function counted once per import):
 
 | Functions | Import |
 |---|---|
-| 472 | `__stack_chk_fail` |
-| 161 | `memset` |
-| 160 | `memcpy` |
-| 71 | `strlen` |
-| 40 | `memcmp` |
-| 36 | `strcmp` |
-| 35 | `__assert_fail` |
-| 35 | `__errno_location` |
-| 23 | `__ctype_b_loc` |
-| 21 | `memmove` |
-| 19 | `free` |
-| 14 | `malloc` |
-| 13 | `fopen64` |
-| 11 | `fclose` |
-| 10 | `fflush` |
-| 10 | `strchr` |
-| 9 | `strerror` |
-| 8 | `fread` |
-| 8 | `getenv` |
-| 7 | `fprintf` |
+| 448 | `__stack_chk_fail` |
+| 169 | `memcpy` |
+| 167 | `memset` |
+| 69 | `strlen` |
+| 67 | `strcmp` |
+| 63 | `memcmp` |
+| 55 | `__errno_location` |
+| 51 | `__assert_fail` |
+| 43 | `__ctype_b_loc` |
+| 33 | `free` |
+| 24 | `memmove` |
+| 23 | `malloc` |
+| 19 | `strerror` |
+| 18 | `fflush` |
+| 17 | `fopen64` |
+| 12 | `fclose` |
+| 12 | `fprintf` |
+| 12 | `fread` |
+| 12 | `getenv` |
+| 12 | `realloc` |
 
-Most functions that only a call keeps Partial are AArch64 functions (2,471 of 3,044): AArch64 call resolution
-comes first in G21. Among x86-64 functions, a same-image callee that is itself Partial is the common blocker
-(491); an unresolved import alone keeps 15 Partial.
+With same-image AArch64 calls resolved, 4,310 functions are still Partial only because of calls. 2,330 are
+AArch64: 1,480 call only functions of the image whose summaries do not resolve, because a callee is Partial for a
+reason of its own, and 850 call an import, for which no C library model or no-return handling applies on AArch64
+yet (the next G21 step). 1,980 are x86-64: 1,566 call only a same-image callee that does not resolve, and the
+rest call an unresolved import or through a register.
 
 ## Decompiler corpus
 
@@ -460,6 +471,8 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | the same as after G03-T4: SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 58/59 | 58/59 | 52/59 | SIMD and FP only (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` is Complete and verified at O0, O2 and O3 |
+| GCC 13.3, AArch64 Linux | locally, on `main` at `c655bdf` (77 functions: the integer corpus with the call and C library sections), under qemu-aarch64 | 58/77 | 56/77 | 51/77 | every `c_call_*` and `c_lib_*` function (calls are not resolved on AArch64), SIMD (`cnt`, `movi`, `dup`) |
+| GCC 13.3, AArch64 Linux | locally, after G21-T1/T2 for AAPCS64 (77 functions), under qemu-aarch64 | 65/77 | 62/77 | 57/77 | every `c_lib_*` function (no C library model applies on AArch64 yet), SIMD (`cnt`, `movi`, `dup`); every `c_call_*` function is Complete and verified at every level |
 | Clang 18.1, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 56/59 | 52/59 | 52/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`), `umull` (not lifted) |
 | Clang 18.1, AArch64 Linux | locally, after G03-T2 widening multiply (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`) only |
 | Clang 18.1, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | the same as after G02-T2: SIMD and FP register moves (`fmov`, `movi`, `mov v`); `c_switch_sparse` is Complete on both |

@@ -120,10 +120,16 @@ bool leaves_starts_complete(std::string_view code) {
 
 bool is_generic_note(std::string_view note) {
   // The subset note of each architecture, the signature note, and the note that parameter names
-  // came from debug information: every function carries them, Complete or not.
+  // came from debug information: every function carries them, Complete or not. A tail call that
+  // was resolved (to a known function, or to a C library model) says how it was lifted, not why
+  // the function is Partial.
   return ends_with(note, "locals are not recovered") ||
          starts_with(note, "signature inferred from ") ||
-         note == "parameter names come from the debug information";
+         note == "parameter names come from the debug information" ||
+         starts_with(note, "a jump to a known function is lifted as a call") ||
+         starts_with(note, "a conditional jump to a known function is lifted as a branch") ||
+         starts_with(note, "a jump to a C library function is lifted as a call of its model") ||
+         starts_with(note, "a conditional jump to a C library function is lifted as a branch");
 }
 
 std::string normalise_note(std::string_view note) {
@@ -180,8 +186,23 @@ namespace {
 const std::string kUnresolvedCallNote =
     "outgoing call arguments and return values follow no modelled ABI";
 
+/// Whether a note's reason is an unresolved call: the call note, a tail call's, or the clobber
+/// check's read of a register after a call that does not define it (an unresolved call defines
+/// none, so the read is the call's consequence).
+bool is_call_reason(const std::string& note) {
+  static const std::string kClobber =
+      " is read after a call that does not define it; the value is not the caller's, so the "
+      "function is not Complete";
+  return note == kUnresolvedCallNote ||
+         note == "jump leaves the function; treated as a tail call" ||
+         note == "conditional jump leaves the function; treated as a tail call" ||
+         (note.rfind("register ", 0) == 0 && note.size() > kClobber.size() &&
+          note.compare(note.size() - kClobber.size(), kClobber.size(), kClobber) == 0);
+}
+
 /// The call census of one Partial function (G21): its unresolved calls by kind, and, when the
-/// unresolved-call note is its only specific reason, the kinds and imports that keep it Partial.
+/// only specific reasons are unresolved calls (is_call_reason), the kinds and imports that keep it
+/// Partial.
 void count_unresolved_calls(const JsonValue& function, const std::set<std::string>& reasons,
                             Measure& out) {
   const JsonValue* calls = function.find("unresolved_calls");
@@ -207,7 +228,8 @@ void count_unresolved_calls(const JsonValue& function, const std::set<std::strin
       imports.insert(name);
     }
   }
-  if (kinds.empty() || reasons.size() != 1 || !reasons.contains(kUnresolvedCallNote)) {
+  if (kinds.empty() || reasons.empty() ||
+      !std::all_of(reasons.begin(), reasons.end(), is_call_reason)) {
     return;
   }
   ++out.call_only_partial;
