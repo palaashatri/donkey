@@ -6717,8 +6717,18 @@ TEST(Ir, CallerOfAFunctionWhoseLoadOverlapsAStackArgumentIsPartial) {
       0x48, 0x8b, 0x44, 0x24, 0x07,  // 0x1006: mov rax, [rsp + 7]
       0xc3,                          // 0x100b: ret
   }));
-  // The return address itself (entry rsp + 0, eight bytes) is not an argument.
+  // The return address itself (entry rsp + 0, eight bytes) is not an argument: a load of it that
+  // nothing uses leaves the call resolved.
   EXPECT_FALSE(caller_is_partial({
+      0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
+      0xc3,                          // 0x1005: ret
+      0x48, 0x8b, 0x0c, 0x24,        // 0x1006: mov rcx, [rsp]
+      0x31, 0xc0,                    // 0x100a: xor eax, eax
+      0xc3,                          // 0x100c: ret
+  }));
+  // Returning it is another matter: it is the caller's value, which a nested call in the
+  // interpreter does not have (the frame check, Ir.ACalleeThatReadsItsReturnAddressStaysUnresolved).
+  EXPECT_TRUE(caller_is_partial({
       0xe8, 0x01, 0x00, 0x00, 0x00,  // 0x1000: call 0x1006
       0xc3,                          // 0x1005: ret
       0x48, 0x8b, 0x04, 0x24,        // 0x1006: mov rax, [rsp]
@@ -7904,4 +7914,112 @@ TEST(Ir, TheFrameCheckFollowsTheCallersBytesThroughAMergedWrite) {
   ASSERT_NE(mixed_call, nullptr);
   EXPECT_FALSE(mixed_call->signature_inferred);
   EXPECT_TRUE(mixed.partial);
+}
+
+TEST(Ir, UnresolvedTailCallsAreInTheCallCensus) {
+  // f0 (0x1000): test edi, edi; je f1; test esi, esi; je f1; mov eax, 1; ret.
+  // f1 (0x1020): cpuid; ret (not lifted, so no call to it resolves).  f2 (0x1030): jmp f1.
+  // Each branch to f1 is a call site of the census, as is the unconditional tail call of f2.
+  std::vector<std::byte> data(0x40, std::byte{0xcc});
+  const std::uint8_t f0[] = {0x85, 0xff, 0x74, 0x1c, 0x85, 0xf6, 0x74,
+                             0x18, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3};
+  const std::uint8_t f1[] = {0x0f, 0xa2, 0xc3};
+  const std::uint8_t f2[] = {0xeb, 0xee};
+  const auto place = [&](std::size_t at, const std::uint8_t* bytes, std::size_t size) {
+    for (std::size_t i = 0; i < size; ++i) {
+      data[at + i] = static_cast<std::byte>(bytes[i]);
+    }
+  };
+  place(0x00, f0, sizeof(f0));
+  place(0x20, f1, sizeof(f1));
+  place(0x30, f2, sizeof(f2));
+  auto image = synthetic_image(data.size());
+  for (const std::uint64_t start : {0x1000ULL, 0x1020ULL, 0x1030ULL}) {
+    donkey::Symbol symbol;
+    symbol.name = start == 0x1000 ? "f0" : (start == 0x1020 ? "f1" : "f2");
+    symbol.address = start;
+    symbol.kind = donkey::SymbolKind::Function;
+    symbol.exported = true;
+    image.symbols.push_back(symbol);
+  }
+  auto analyzed = donkey::analyze(image, data);
+  ASSERT_TRUE(analyzed.has_value()) << analyzed.diagnostic().message;
+  const donkey::Function* f0_function = function_at(analyzed.value(), 0x1000);
+  const donkey::Function* f2_function = function_at(analyzed.value(), 0x1030);
+  ASSERT_NE(f0_function, nullptr);
+  ASSERT_NE(f2_function, nullptr);
+
+  auto conditional = donkey::lift_function(image, analyzed.value(), *f0_function);
+  ASSERT_TRUE(conditional.has_value()) << conditional.diagnostic().message;
+  ASSERT_EQ(conditional.value().unresolved_calls.size(), 2U);
+  EXPECT_EQ(conditional.value().unresolved_calls[0].address, 0x1002U);
+  EXPECT_EQ(conditional.value().unresolved_calls[1].address, 0x1006U);
+  for (const donkey::IrUnresolvedCall& call : conditional.value().unresolved_calls) {
+    EXPECT_EQ(call.kind, donkey::IrUnresolvedCall::Kind::SameImage);
+    EXPECT_EQ(call.target, 0x1020U);
+  }
+
+  auto tail = donkey::lift_function(image, analyzed.value(), *f2_function);
+  ASSERT_TRUE(tail.has_value()) << tail.diagnostic().message;
+  ASSERT_EQ(tail.value().unresolved_calls.size(), 1U);
+  EXPECT_EQ(tail.value().unresolved_calls[0].address, 0x1030U);
+  EXPECT_EQ(tail.value().unresolved_calls[0].kind, donkey::IrUnresolvedCall::Kind::SameImage);
+
+  // A PLT stub of a function the image defines itself names it in stub_target only: a call
+  // through it runs the image's own code, so it is not an import. An import name is.
+  donkey::AnalysisResult stubbed = analyzed.value();
+  for (donkey::Function& function : stubbed.functions) {
+    if (function.address == 0x1020) {
+      function.stub_target = "free";
+    }
+  }
+  auto local_stub = donkey::lift_function(image, stubbed, *function_at(stubbed, 0x1030));
+  ASSERT_TRUE(local_stub.has_value());
+  ASSERT_EQ(local_stub.value().unresolved_calls.size(), 1U);
+  EXPECT_EQ(local_stub.value().unresolved_calls[0].kind, donkey::IrUnresolvedCall::Kind::SameImage);
+  EXPECT_TRUE(local_stub.value().unresolved_calls[0].name.empty());
+  for (donkey::Function& function : stubbed.functions) {
+    if (function.address == 0x1020) {
+      function.import_name = "free";
+    }
+  }
+  auto import_stub = donkey::lift_function(image, stubbed, *function_at(stubbed, 0x1030));
+  ASSERT_TRUE(import_stub.has_value());
+  ASSERT_EQ(import_stub.value().unresolved_calls.size(), 1U);
+  EXPECT_EQ(import_stub.value().unresolved_calls[0].kind, donkey::IrUnresolvedCall::Kind::Import);
+  EXPECT_EQ(import_stub.value().unresolved_calls[0].name, "free");
+}
+
+TEST(Ir, ACalleeThatReadsItsReturnAddressStaysUnresolved) {
+  // x86-64: 0x1010 returns the word at its entry rsp, its caller's return address, which a nested
+  // call in the interpreter does not have. A call to it must not resolve.
+  //   0x1000: call 0x1010; ret        0x1010: mov rax, [rsp]; ret
+  std::vector<std::byte> x86(0x20, std::byte{0xcc});
+  const std::uint8_t caller[] = {0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3};
+  const std::uint8_t callee[] = {0x48, 0x8b, 0x04, 0x24, 0xc3};
+  for (std::size_t i = 0; i < sizeof(caller); ++i) {
+    x86[i] = static_cast<std::byte>(caller[i]);
+  }
+  for (std::size_t i = 0; i < sizeof(callee); ++i) {
+    x86[0x10 + i] = static_cast<std::byte>(callee[i]);
+  }
+  const CallProgram program = analyse_call_program(Architecture::X86_64, x86, {0x1000, 0x1010});
+  const IrFunction function = lift_at(program, 0x1000);
+  const IrStatement* call = first_call(function);
+  ASSERT_NE(call, nullptr);
+  EXPECT_FALSE(call->signature_inferred);
+  EXPECT_TRUE(function.partial);
+}
+
+TEST(Ir, AnAArch64RetThroughAnotherRegisterIsPartial) {
+  // add x0, x0, #1; ret x1: jumps to x1, not to the caller.
+  const auto data = aarch64_bytes({0x91000400, 0xd65f0020});
+  const CallProgram program = analyse_call_program(Architecture::AArch64, data, {0x1000});
+  const IrFunction function = lift_at(program, 0x1000);
+  EXPECT_TRUE(function.partial);
+  EXPECT_TRUE(has_note_containing(function, "jumps to a register other than x30"));
+  // A plain ret stays Complete.
+  const auto plain = aarch64_bytes({0x91000400, 0xd65f03c0});
+  const CallProgram plain_program = analyse_call_program(Architecture::AArch64, plain, {0x1000});
+  EXPECT_FALSE(lift_at(plain_program, 0x1000).partial);
 }

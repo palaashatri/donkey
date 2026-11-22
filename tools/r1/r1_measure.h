@@ -68,6 +68,17 @@ struct Measure {
   /// One of `analysis_notes` may leave function starts out (see `leaves_starts_complete`): the
   /// counts of this binary may miss functions, and its starts comparison may miss starts.
   bool starts_may_be_missing = false;
+  /// The call census (G21): every call the lifter left without arguments and a result, by kind of
+  /// target ("import", "same_image", "aarch64_import", ...).
+  std::map<std::string, std::size_t> calls_by_kind;
+  /// Partial functions whose only specific reason is the unresolved-call note, and, for those, the
+  /// kinds of their unresolved calls joined with '+' ("import", "import+same_image"), and the
+  /// imports they call (a function counted once per import).
+  std::size_t call_only_partial = 0;
+  std::map<std::string, std::size_t> call_only_by_kinds;
+  std::map<std::string, std::size_t> call_only_imports;
+  /// The output had no `unresolved_calls` arrays (a CLI from before the census).
+  bool has_call_census = true;
 };
 
 /// Counts one decompile output. A missing `notes` array is accepted (`has_notes` is false); a

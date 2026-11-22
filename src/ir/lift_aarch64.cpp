@@ -2026,6 +2026,32 @@ bool lift_jump_table_switch(Lifter& lifter, IrBlock& out_block, const AnalysisRe
 
 }  // namespace
 
+namespace {
+
+/// An AArch64 call or tail call for the census (G21): none is resolved, so the kind is AArch64,
+/// with the name of the import its direct target is a stub of.
+IrUnresolvedCall unresolved_aarch64_call(const AnalysisResult& analysis,
+                                         const Instruction& instruction) {
+  IrUnresolvedCall unresolved;
+  unresolved.address = instruction.address;
+  unresolved.target = instruction.direct_target.value_or(0);
+  unresolved.kind = IrUnresolvedCall::Kind::AArch64;
+  if (!instruction.direct_target.has_value()) {
+    return unresolved;
+  }
+  for (const Function& candidate : analysis.functions) {
+    if (candidate.address == instruction.direct_target.value()) {
+      // Only an import name marks an import: a stub of a function the image defines itself names
+      // it in `stub_target`, and a call through it runs the image's own code.
+      unresolved.name = candidate.import_name;
+      break;
+    }
+  }
+  return unresolved;
+}
+
+}  // namespace
+
 Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& analysis,
                                 const Function& function, const LiftOptions& options) {
   Lifter lifter(image, analysis, function, options);
@@ -2178,6 +2204,11 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
                 "a jump to a known function is lifted as a call with its inferred arguments and "
                 "result, followed by a return");
           } else {
+            // An import stub's own jump through its slot is the import, not a call of the program.
+            if (function.import_name.empty() && function.stub_target.empty()) {
+              lifter.out.unresolved_calls.push_back(
+                  unresolved_aarch64_call(lifter.analysis, instruction));
+            }
             lifter.push(out_block, std::move(call));
             lifter.mark_partial("jump leaves the function; treated as a tail call");
           }
@@ -2221,6 +2252,8 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
           lifter.push(out_block, std::move(statement));
           continue;
         }
+        lifter.out.unresolved_calls.push_back(
+            unresolved_aarch64_call(lifter.analysis, instruction));
         lifter.push(out_block, std::move(statement));
         // The callee's effects on registers, memory and NZCV are not modelled.
         lifter.mark_partial("outgoing call arguments and return values follow no modelled ABI");
@@ -2228,6 +2261,15 @@ Result<IrFunction> lift_aarch64(const BinaryImage& image, const AnalysisResult& 
       }
 
       if (instruction.classification == InstructionClass::Return) {
+        // `ret xN` jumps to xN; only `ret` (x30) returns to the caller, which the IR's Return is.
+        for (const Operand& operand : instruction.structured_operands) {
+          if (operand.kind == OperandKind::Register &&
+              internal::register_family(operand.reg) != "x30" && operand.reg != "lr") {
+            lifter.mark_partial("'ret " + operand.reg +
+                                "' jumps to a register other than x30; it is not a return to the "
+                                "caller");
+          }
+        }
         IrStatement statement;
         statement.op = IrOp::Return;
         statement.source_address = instruction.address;

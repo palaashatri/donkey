@@ -2447,10 +2447,50 @@ struct Lifter {
       }
       return;
     }
+    out.unresolved_calls.push_back(classify_unresolved_call(instruction, statement.a));
     push(block, std::move(statement));
     // The callee's effects on registers and memory are not modelled, so the
     // function cannot be Complete. The call itself stays in the IR.
     mark_partial("outgoing call arguments and return values follow no modelled ABI");
+  }
+
+  /// What kind of target a call has that stays without arguments and a result (G21 call census).
+  [[nodiscard]] IrUnresolvedCall classify_unresolved_call(const Instruction& instruction,
+                                                          const IrOperand& target) const {
+    IrUnresolvedCall call;
+    call.address = instruction.address;
+    if (instruction.direct_target.has_value()) {
+      call.target = instruction.direct_target.value();
+      call.kind = IrUnresolvedCall::Kind::UnknownTarget;
+      for (const Function& candidate : analysis.functions) {
+        if (candidate.address != call.target) {
+          continue;
+        }
+        // Only an import name is evidence of an import: a PLT stub of a function the image
+        // defines itself (libc's `free@plt`) names that function in `stub_target`, and a call
+        // through it runs the image's own code.
+        if (!candidate.import_name.empty()) {
+          call.kind = IrUnresolvedCall::Kind::Import;
+          call.name = candidate.import_name;
+        } else {
+          call.kind = IrUnresolvedCall::Kind::SameImage;
+        }
+        break;
+      }
+      return call;
+    }
+    if (target.kind == IrOperandKind::Memory && target.reg.empty() && target.index.empty() &&
+        target.constant != 0) {
+      if (const auto slot = analysis.import_slots.find(target.constant);
+          slot != analysis.import_slots.end()) {
+        call.kind = IrUnresolvedCall::Kind::ImportSlot;
+        call.target = target.constant;
+        call.name = slot->second;
+        return call;
+      }
+    }
+    call.kind = IrUnresolvedCall::Kind::Indirect;
+    return call;
   }
 };
 
@@ -3375,6 +3415,11 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
                 "a jump to a known function is lifted as a call with its inferred arguments and "
                 "result, followed by a return");
           } else {
+            // An import stub's own jump through its slot is the import, not a call of the program.
+            if (lifter.function.import_name.empty() && lifter.function.stub_target.empty()) {
+              lifter.out.unresolved_calls.push_back(
+                  lifter.classify_unresolved_call(instruction, call.a));
+            }
             lifter.push(out_block, std::move(call));
             lifter.mark_partial("jump leaves the function; treated as a tail call");
           }
@@ -3566,6 +3611,8 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
   // The exit blocks of conditional tail calls, one per target: a call of the target, with its
   // inferred signature when it is a known function of the image, and a return of its result.
   std::map<std::uint64_t, std::uint32_t> tail_exit_by_target;
+  // The targets whose exit call stays unresolved: each branch to one is a call site of the census.
+  std::set<std::uint64_t> unresolved_tail_targets;
   for (const ConditionalTailCall& pending : conditional_tail_calls) {
     if (pending.block >= lifter.out.blocks.size() ||
         pending.statement >= lifter.out.blocks[pending.block].statements.size()) {
@@ -3601,6 +3648,7 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
           lifter.note(note);
         }
       } else {
+        unresolved_tail_targets.insert(target);
         const std::string note = "conditional jump leaves the function; treated as a tail call";
         lifter.out.partial = true;
         if (std::find(lifter.out.notes.begin(), lifter.out.notes.end(), note) ==
@@ -3622,6 +3670,10 @@ Result<IrFunction> lift_body(const BinaryImage& image, const AnalysisResult& ana
           tail_exit_by_target.emplace(target, static_cast<std::uint32_t>(lifter.out.blocks.size()))
               .first;
       lifter.out.blocks.push_back(std::move(exit_block));
+    }
+    if (unresolved_tail_targets.contains(target)) {
+      lifter.out.unresolved_calls.push_back(lifter.classify_unresolved_call(
+          instruction, IrOperand::constant_value(target, lifter.pointer_width)));
     }
     lifter.out.blocks[pending.block].statements[pending.statement].b =
         IrOperand::block_ref(exit->second);

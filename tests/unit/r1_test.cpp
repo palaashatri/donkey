@@ -6,6 +6,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <memory>
 #include <set>
 #include <sstream>
@@ -177,6 +178,77 @@ TEST(R1, MarksAnalysesThatMayMissStarts) {
                "functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
   ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
   EXPECT_FALSE(measured.value().starts_may_be_missing);
+}
+
+// The call census (G21): calls by kind of target, and, for a Partial function whose only reason is
+// the unresolved-call note, the kinds and imports that keep it Partial. A function with another
+// reason too is counted in the calls only.
+TEST(R1, CountsUnresolvedCalls) {
+  const std::string note = "outgoing call arguments and return values follow no modelled ABI";
+  const std::string text =
+      R"({"functions": [
+        {"address": "0x10", "status": "Partial", "notes": [")" +
+      note + R"("],
+         "unresolved_calls": [{"address": "0x11", "kind": "import", "name": "memset"},
+                              {"address": "0x12", "kind": "same_image"}]},
+        {"address": "0x20", "status": "Partial", "notes": [")" +
+      note + R"("],
+         "unresolved_calls": [{"address": "0x21", "kind": "aarch64", "name": "memset"},
+                              {"address": "0x22", "kind": "aarch64"}]},
+        {"address": "0x30", "status": "Partial", "notes": [")" +
+      note + R"(", "jump leaves the function; treated as a tail call"],
+         "unresolved_calls": [{"address": "0x31", "kind": "indirect"}]},
+        {"address": "0x40", "status": "Complete", "notes": [], "unresolved_calls": []},
+        {"address": "0x50", "status": "Partial", "notes": [")" +
+      note +
+      R"(", "register x0 is read after a call that does not define it; the value is not the caller's, so the function is not Complete"],
+         "unresolved_calls": [{"address": "0x51", "kind": "aarch64"}]},
+        {"address": "0x60", "status": "Partial", "notes": ["jump leaves the function; treated as a tail call"],
+         "unresolved_calls": [{"address": "0x61", "kind": "same_image"}]},
+        {"address": "0x70", "status": "Partial", "notes": [")" +
+      note + R"(", "statement limit reached"],
+         "unresolved_calls": [{"address": "0x71", "kind": "import", "name": "free"}]}]})";
+  auto measured = donkey::r1::measure_decompile("b", text);
+  ASSERT_TRUE(measured.has_value()) << measured.diagnostic().message;
+  const auto& m = measured.value();
+  EXPECT_TRUE(m.has_call_census);
+  EXPECT_EQ(m.calls_by_kind, (std::map<std::string, std::size_t>{{"aarch64_import", 1},
+                                                                 {"aarch64_other", 2},
+                                                                 {"import", 2},
+                                                                 {"indirect", 1},
+                                                                 {"same_image", 2}}));
+  // A tail call's note and the clobber check's read of a register after an unresolved call are
+  // reasons an unresolved call gives: 0x30, 0x50 and 0x60 count. 0x70 has a reason of its own.
+  EXPECT_EQ(m.call_only_partial, 5U);
+  EXPECT_EQ(m.call_only_by_kinds,
+            (std::map<std::string, std::size_t>{{"aarch64_import+aarch64_other", 1},
+                                                {"aarch64_other", 1},
+                                                {"import+same_image", 1},
+                                                {"indirect", 1},
+                                                {"same_image", 1}}));
+  EXPECT_EQ(m.call_only_imports, (std::map<std::string, std::size_t>{{"memset", 2}}));
+  // Output from a CLI before the census has no unresolved_calls arrays.
+  auto older = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Partial", "notes": []}]})");
+  ASSERT_TRUE(older.has_value());
+  EXPECT_FALSE(older.value().has_call_census);
+  // The census is missing whatever the status: a Complete function, or a Partial one without
+  // notes, of an older CLI has no list either.
+  auto complete_only = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Complete", "notes": []}]})");
+  ASSERT_TRUE(complete_only.has_value());
+  EXPECT_FALSE(complete_only.value().has_call_census);
+  auto without_notes = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Partial"}]})");
+  ASSERT_TRUE(without_notes.has_value());
+  EXPECT_FALSE(without_notes.value().has_call_census);
+  // An entry that was never lifted carries no list and does not make the census absent.
+  auto unlifted = donkey::r1::measure_decompile(
+      "b", R"({"functions": [{"address": "0x10", "status": "Unsupported"},
+                             {"address": "0x20", "status": "Complete", "notes": [],
+                              "unresolved_calls": []}]})");
+  ASSERT_TRUE(unlifted.has_value());
+  EXPECT_TRUE(unlifted.value().has_call_census);
 }
 
 TEST(R1, NormalisesNotes) {

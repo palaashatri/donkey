@@ -78,7 +78,11 @@ matched, missed, import stubs, and extra. A binary has no usable output when the
 when the output was cut by `--max-functions`, or when the analysis stopped at a resource limit
 (`analysis.instruction_limit` and the like), since functions may then be missing. Other analysis
 diagnostics are recorded with the binary. Each one except `analysis.no_return_unverified` also marks the binary
-`starts_may_be_missing`, and the table says so. The exit status is 2 when any binary has no usable output.
+`starts_may_be_missing`, and the table says so. Each function's `unresolved_calls` (the calls left without
+arguments and a result, with the kind of their target) are counted too: the call census of G21. A Partial
+function counts as Partial only because of calls when every specific reason it gives comes from an unresolved
+call: the call note, a tail call's note, or the clobber check's read of a register after a call that does not
+define it. The exit status is 2 when any binary has no usable output.
 
 ## The ratchet (G20-T3)
 

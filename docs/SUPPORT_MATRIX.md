@@ -308,6 +308,86 @@ not lifted.
 | 2 | unsupported instruction 'ldurh' |
 | 1 | 'cmovg' reads flags this lifter does not model |
 
+### Call census (G21)
+
+`decompile --json` lists each call it left without arguments and a result, with the kind of its target, and
+`donkey-r1 measure` counts them (`R1.CountsUnresolvedCalls`, `cli.decompile_json_lists_unresolved_calls`,
+`cli.decompile_json_lists_aarch64_calls`, `cli.decompile_json_lists_aarch64_tail_calls`,
+`Ir.UnresolvedTailCallsAreInTheCallCensus`). A tail call (a jump to another function, conditional or not)
+is a call site too; the jump of an import stub through its own slot is not. The kinds:
+
+- `import`: a direct call of an import stub with no C library model or library prototype (a stub of a
+  function the image defines itself, such as libc's `free@plt`, is `same_image`);
+- `import_slot`: a call through an import's GOT or IAT slot;
+- `same_image`: a direct call of a function of the image whose call summary did not resolve (it is Partial,
+  reads a stack argument, is on a cycle, or is deeper than eight levels);
+- `indirect`: a call through a register or memory that is no import slot;
+- `unknown_target`: a direct call of an address that is no function;
+- on AArch64, `aarch64_import` for an unresolved call of an import stub (no C library model applies on
+  AArch64 yet) and `aarch64_other` for any other unresolved call (a same-image callee whose summary did not
+  resolve, for the reasons above, or a call through a register).
+
+A Partial function counts as Partial only because of calls when every specific reason it gives comes from an
+unresolved call: the call note, a tail call's note, or the clobber check's read of a register after a call that
+does not define it. Measured with AArch64 calls resolved (G21-T1/T2 for AAPCS64) on `main` at `922a18a`. Before
+them, on the same bytes, 4,443 functions were Partial only because of calls, 2,471 of them AArch64.
+
+Unresolved calls by kind of target (unstripped binaries):
+
+| Calls | Kind of target |
+|---|---|
+| 31998 | aarch64_other |
+| 31624 | same_image |
+| 4567 | aarch64_import |
+| 3237 | import |
+| 1765 | indirect |
+| 4 | import_slot |
+| 1 | unknown_target |
+
+4298 Partial functions have an unresolved call as their only reason. By the kinds of target they call:
+
+| Functions | Kinds of target |
+|---|---|
+| 1560 | same_image |
+| 1477 | aarch64_other |
+| 725 | aarch64_import+aarch64_other |
+| 140 | import+same_image |
+| 124 | aarch64_import |
+| 115 | indirect+same_image |
+| 71 | import |
+| 59 | indirect |
+| 19 | import+indirect |
+| 8 | import+indirect+same_image |
+
+The 20 imports those functions call most (a function counted once per import):
+
+| Functions | Import |
+|---|---|
+| 448 | `__stack_chk_fail` |
+| 169 | `memcpy` |
+| 167 | `memset` |
+| 69 | `strlen` |
+| 67 | `strcmp` |
+| 63 | `memcmp` |
+| 55 | `__errno_location` |
+| 51 | `__assert_fail` |
+| 43 | `__ctype_b_loc` |
+| 33 | `free` |
+| 24 | `memmove` |
+| 23 | `malloc` |
+| 19 | `strerror` |
+| 17 | `fopen64` |
+| 16 | `fflush` |
+| 12 | `fclose` |
+| 12 | `fprintf` |
+| 12 | `fread` |
+| 12 | `getenv` |
+| 12 | `realloc` |
+
+Most functions that only a call keeps Partial are AArch64 functions (2,471 of 3,044): AArch64 call resolution
+comes first in G21. Among x86-64 functions, a same-image callee that is itself Partial is the common blocker
+(491); an unresolved import alone keeps 15 Partial.
+
 ## Decompiler corpus
 
 Loop structuring (G04-T3, partial): a loop whose body is one block that repeats
@@ -389,6 +469,8 @@ listed where the per-function report was read.
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 58/59 | 57/59 | 51/59 | the same as after G03-T4: SIMD (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` Partial at O2 and O3 (agrees; cause not itemised) |
 | GCC 13.3, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 58/59 | 58/59 | 52/59 | SIMD and FP only (`ldr d`, `fmov`, `movi`, `dup`); `c_switch_sparse` is Complete and verified at O0, O2 and O3 |
+| GCC 13.3, AArch64 Linux | locally, on `main` at `c655bdf` (77 functions: the integer corpus with the call and C library sections), under qemu-aarch64 | 58/77 | 56/77 | 51/77 | every `c_call_*` and `c_lib_*` function (calls are not resolved on AArch64), SIMD (`cnt`, `movi`, `dup`) |
+| GCC 13.3, AArch64 Linux | locally, after G21-T1/T2 for AAPCS64 (77 functions), under qemu-aarch64 | 65/77 | 62/77 | 57/77 | every `c_lib_*` function (no C library model applies on AArch64 yet), SIMD (`cnt`, `movi`, `dup`); every `c_call_*` function is Complete and verified at every level |
 | Clang 18.1, AArch64 Linux | locally, after G03-T3 (59 functions), under qemu-aarch64 | 56/59 | 52/59 | 52/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`), `umull` (not lifted) |
 | Clang 18.1, AArch64 Linux | locally, after G03-T2 widening multiply (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | SIMD and FP register moves (`fmov`, `movi`, `mov v`) only |
 | Clang 18.1, AArch64 Linux | locally, after G03-T4 with `adcs`/`sbcs` and cross-block flags (59 functions), under qemu-aarch64 | 56/59 | 53/59 | 53/59 | the same as after G02-T2: SIMD and FP register moves (`fmov`, `movi`, `mov v`); `c_switch_sparse` is Complete on both |

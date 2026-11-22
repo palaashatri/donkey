@@ -2114,6 +2114,38 @@ corpus has call-heavy functions verified by execution.
 Label it as one (`signature_inferred`) and never print it as certain. A wrong
 prototype must fail the oracle, not print plausible code.
 
+#### G21 call census on R1 (2026-11-21)
+
+Before more G21 work, the R1 measurement counts why each call stays without arguments and a result.
+`lift_call` and the AArch64 lifter record every such call on the lifted function
+(`IrFunction::unresolved_calls`, with the kind of its target), `decompile --json` lists them, and
+`donkey-r1 measure` counts them over R1. The table is in `docs/SUPPORT_MATRIX.md` ("Call census").
+
+On the unstripped R1 builds at `c655bdf`, 3,044 Partial functions have an unresolved call as their only
+specific reason:
+
+- 2,471 are AArch64: 1,603 call only same-image functions, 781 also call imports, 87 call only imports.
+  No AArch64 call was resolved then, whatever its callee (G21-T1/T2 for AAPCS64, below, resolves them).
+- 491 are x86-64 functions whose only blocker is a same-image callee that did not resolve.
+- 36 call only through a register, 20 through a register and a same-image callee.
+- 15 call only an unresolved import, and 11 an import and a same-image callee.
+
+Counted again with the notes an unresolved call causes counted as its own (a tail call's note, and the
+clobber check's read of a register after a call that does not define it; G21-T1/T2 for AAPCS64), the same
+bytes have 4,443 such functions: 2,471 AArch64 and 1,972 x86-64 (1,560 of them call only same-image
+callees).
+
+Order this sets for G21:
+
+1. AArch64 calls: T1 and T2 for AAPCS64. The call summaries of `src/ir/lift.cpp`, with x0-x7 arguments, an
+   x0 result, the AAPCS64 clobber set, and the same oracle. This is the largest group.
+2. The C library models of T7 for AArch64. `memset`, `memcpy` and `strlen` are the imports these functions
+   call most. `__stack_chk_fail` comes before them all (472 functions). It is already a no-return import
+   (G24-T3, `src/analysis/no_return.cpp`), so its block ends, but the call still keeps its caller Partial.
+   A call that does not return has no result and nothing after it, so it needs no model: that is G21-T5.
+3. The x86-64 same-image cascade (491): each such callee's own first reason, which the census of the callee
+   gives, decides it.
+
 #### G21-T0 task-level plan (written 2026-11-14, before any G21 code)
 
 Checked against: `src/ir/lift.cpp` (`lift_call`, the Call handling that marks the function Partial
@@ -2268,6 +2300,20 @@ runners.
   Complete, so the call stays unresolved.
 - The upper 64 bits of `v8`-`v15` are caller-saved. A 128-bit read of them after a call is not lifted
   today (SIMD is Unsupported), and must be treated as clobbered once it is.
+
+**Result (2026-11-21).**
+- R1, unstripped: AArch64 rises from 839 to 1,086 of 7,450 Complete. In total that is 2,108 to 2,355 of
+  15,856, against a same-image ceiling of 222 estimated before the code; tail calls to a resolved callee count
+  too. x86-64 is unchanged at 1,269 of 8,406: the frame check refuses no x86-64 callee that resolved before.
+  It is precise by byte. `sqlite3Atoi64` at -O2 keeps bytes 1-3 of its caller's `rbp` through
+  `sete bpl; and ecx, ebp`, but only byte 0 reaches its result, so a refusal of every read of a caller's
+  register would have cost `sqlite3DecOrHexToI64`, which tail-calls it
+  (`Ir.TheFrameCheckFollowsTheCallersBytesThroughAMergedWrite`).
+- The corpus under `qemu-aarch64` (GCC 13.3, 77 functions) goes from 58/56/51 to 65/62/57 Complete and
+  verified at -O0, -O2 and -O3. Every `c_call_*` function is verified at every level, and the
+  corpus test now asserts it.
+- The check reads `xor r, r`, `sub r, r` and `sbb r, r` as reading nothing of `r`. Without the `sbb` case,
+  two x86-64 callees of R1 at -O2 were refused, one in Lua and one in static musl Lua.
 
 #### G21-T7 C library calls with executable models (written and done 2026-11-18)
 

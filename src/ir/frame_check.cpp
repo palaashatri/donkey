@@ -240,6 +240,14 @@ class FrameCheck {
     std::vector<std::optional<FrameState>> in(count);
     FrameState start;
     set_value(start, abi_.stack_pointer, FrameValue::stack(0));
+    if (contract_ == FrameContract::Callee && abi_.link_register.empty()) {
+      // x86-64: the word at entry rsp is the caller's return address, which the interpreter does
+      // not give a callee; a callee that reads it computes with a caller's value.
+      Slot return_address;
+      return_address.width = 8;
+      return_address.value = FrameValue::unknown(false, 0xFF);
+      start.slots.emplace(0, return_address);
+    }
     in[0] = start;
     std::vector<std::size_t> worklist{0};
     while (!worklist.empty()) {
